@@ -26,6 +26,7 @@ const h = vi.hoisted(() => ({
   solveResult: { kind: "ok" as const, token: "P0_eyJhbGciOiJIUzI1NiJ9.MINTED" },
   variantTokenPresent: false,
   challengeRendered: true,
+  solverAvailable: true,
   gateFrames: [] as Array<{ url: () => string; evaluate: ReturnType<typeof vi.fn> }>,
 }));
 
@@ -33,7 +34,7 @@ vi.mock("../captcha.js", async (importOriginal) => ({
   ...(await importOriginal<typeof CaptchaModule>()),
   TwoCaptchaSolver: class {
     isAvailable(): boolean {
-      return true;
+      return h.solverAvailable;
     }
     async solveHcaptcha(): Promise<typeof h.solveResult> {
       h.solveCalls.push("hcaptcha");
@@ -134,6 +135,7 @@ beforeEach(() => {
   h.solveResult = { kind: "ok" as const, token: "P0_eyJhbGciOiJIUzI1NiJ9.MINTED" };
   h.variantTokenPresent = false;
   h.challengeRendered = true;
+  h.solverAvailable = true;
   auditMock.fn.mockClear();
   vi.useFakeTimers();
 });
@@ -227,8 +229,18 @@ describe("attemptOperateCaptchaAutoSolve — bounded spend", () => {
     const session = fakeSession();
     const page = fakePage(false);
     h.challengeRendered = false;
-    await attemptOperateCaptchaAutoSolve(session, page);
+    const outcome = await attemptOperateCaptchaAutoSolve(session, page);
     await flushDetached();
+    expect(outcome).toBe("no_challenge");
+    expect(h.solveCalls).toHaveLength(0);
+  });
+
+  it("reports no_key when the solver has no credential", async () => {
+    const session = fakeSession();
+    const page = fakePage(false);
+    h.solverAvailable = false;
+    const outcome = await attemptOperateCaptchaAutoSolve(session, page);
+    expect(outcome).toBe("no_key");
     expect(h.solveCalls).toHaveLength(0);
   });
 

@@ -72,6 +72,7 @@ import {
   type DriveActResult,
 } from "./drive-act.js";
 import { provisionElementRefs } from "./observe/refs.js";
+import { attemptOperateCaptchaAutoSolve } from "./captcha-solve.js";
 
 export interface DriveCallContext {
   notifyUser?: (message: string, data?: Record<string, unknown>) => Promise<void>;
@@ -112,6 +113,20 @@ export const DRIVE_EMPTY_SNAPSHOT_WAITS = 3;
 export const DRIVE_WIDGET_UNREADY_WAITS = 1;
 export const DRIVE_WIDGET_UNREADY_REASON =
   "submit stayed disabled; a required gate widget did not become ready";
+/** Solver is still working — wait, do not finish stuck. */
+const CAPTCHA_SOLVE_IN_PROGRESS = new Set([
+  "fetch_started",
+  "in_flight",
+  "cooldown",
+  "expiry_backoff",
+  "gate_handoff_started",
+]);
+export function captchaSolveStillWorking(outcome: string): boolean {
+  return CAPTCHA_SOLVE_IN_PROGRESS.has(outcome);
+}
+export function widgetUnreadySolveReason(outcome: string): string {
+  return `${DRIVE_WIDGET_UNREADY_REASON} (${outcome})`;
+}
 export const DRIVE_INBOX_POLL_MS = 45_000;
 export function inboxPollMissReason(search: {
   query: string;
@@ -299,6 +314,10 @@ export interface DriveDependencies {
   awaitVerification: typeof awaitVerification;
   injectCard: InjectCardFn;
   now?: () => number;
+  attemptCaptchaAutoSolve?: (
+    session: Session,
+    page?: Page,
+  ) => Promise<string>;
 }
 
 const defaultInjectCard: InjectCardFn = async (session, args, api, options) => {
@@ -3802,6 +3821,7 @@ async function driveLoop(input: {
   let widgetWaits = 0;
   let inboxSilent = false;
   let paySubmitWaits = 0;
+  let captchaAfterSubmit = false;
 
   const finish = (
     status: DriveStatus,
@@ -3838,7 +3858,17 @@ async function driveLoop(input: {
       question: { question: wall.message, options: {} },
     });
 
+  const solveCaptcha = async (): Promise<string> =>
+    await (dependencies.attemptCaptchaAutoSolve ?? attemptOperateCaptchaAutoSolve)(
+      session,
+      session.browser.page ?? undefined,
+    );
+
   const refreshSnapshot = async (needFrames: boolean) => {
+    if (captchaAfterSubmit) {
+      captchaAfterSubmit = false;
+      await solveCaptcha();
+    }
     const snap = await snapshotDriveSession(session, sessionId, drive, dependencies, needFrames);
     observation = snap.observation;
     rows = snap.rows;
@@ -4245,6 +4275,10 @@ async function driveLoop(input: {
           await waitForNavigationIdle(page, beforePageFingerprint);
         }
       }
+      if (decision.action.kind === "click") {
+        const clicked = findRow(rows, decision.actionKey, observation.url);
+        if (clicked !== undefined && isSubmitLikeRow(clicked)) captchaAfterSubmit = true;
+      }
       const snap = await refreshSnapshot(framesIfNeeded());
       if (snap.timedOut)
         return finish("evaluate_timeout", { reason: "in-page evaluate exceeded budget" });
@@ -4547,7 +4581,24 @@ async function driveLoop(input: {
         steps += 1;
         continue;
       }
-      return finish("stuck", { reason: DRIVE_WIDGET_UNREADY_REASON });
+      const outcome = await solveCaptcha();
+      const solvedSnap = await snapshotOrTimeout(framesIfNeeded());
+      if (solvedSnap !== "ok") return solvedSnap;
+      const afterSolve = disabledSubmitKind(
+        rows,
+        remainingFills.length,
+        drive.filledRefs,
+        inboxSilent,
+      );
+      if (afterSolve !== "widget_unready") continue;
+      if (captchaSolveStillWorking(outcome)) {
+        widgetWaits = 0;
+        const applied = await applyDecision({ kind: "wait", confidence: 1 });
+        if (applied !== "continue") return applied;
+        steps += 1;
+        continue;
+      }
+      return finish("stuck", { reason: widgetUnreadySolveReason(outcome) });
     } else if (
       rows.length > 0 &&
       !inboxSilent &&

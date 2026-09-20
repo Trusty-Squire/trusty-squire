@@ -97,6 +97,42 @@ describeChromium("broker sessions — real tab-family isolation", () => {
     expect(internals(satellite).ownedPages.has(primaryPage)).toBe(false);
   });
 
+  it("two sequential sessions get different pages and leave the leftover tab open", async () => {
+    const leftover = await context.newPage();
+    await leftover.goto(`http://127.0.0.1:${port}/confirm`);
+    const next = await BrowserController.attachSessionPage(primary, { humanize: false });
+    const nextPage = internals(next).page;
+    expect(nextPage).not.toBeNull();
+    expect(nextPage).not.toBe(leftover);
+    expect(nextPage).not.toBe(primaryPage);
+    expect(nextPage).not.toBe(satellitePage);
+    expect(leftover.isClosed()).toBe(false);
+    expect(await leftover.evaluate(() => document.title)).toBe("/confirm");
+    await next.closeOwnPagesOnly();
+    await leftover.close();
+  });
+
+  it("initializePages does not adopt a leftover navigated tab", async () => {
+    const leftover = await context.newPage();
+    await leftover.goto(`http://127.0.0.1:${port}/confirm`);
+    const fresh = new BrowserController({ humanize: false });
+    await (
+      fresh as unknown as {
+        initializePages(
+          context: BrowserContext,
+          hardened: boolean,
+          remote: boolean,
+        ): Promise<void>;
+      }
+    ).initializePages(context, true, false);
+    const owned = internals(fresh).page;
+    expect(owned).not.toBeNull();
+    expect(owned).not.toBe(leftover);
+    expect(leftover.isClosed()).toBe(false);
+    await leftover.close();
+    await owned?.close().catch(() => undefined);
+  });
+
   it("registers a popup to its opener's session only and refuses it to the other", async () => {
     primary.armOpenedTabAdoption();
     satellite.armOpenedTabAdoption();

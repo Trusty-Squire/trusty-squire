@@ -56,6 +56,8 @@ import {
   DRIVE_EMPTY_SNAPSHOT_WAITS,
   DRIVE_WIDGET_UNREADY_WAITS,
   DRIVE_WIDGET_UNREADY_REASON,
+  captchaSolveStillWorking,
+  widgetUnreadySolveReason,
   DRIVE_TERMINAL_OPERATIONS,
   isPickerRow,
   matchingFactKeys,
@@ -1534,6 +1536,12 @@ describe("form-fill assignment helpers", () => {
   it("splits a disabled submit into in-flight, needs-fill, and widget-unready", () => {
     expect(DRIVE_WIDGET_UNREADY_WAITS).toBe(1);
     expect(DRIVE_WIDGET_UNREADY_REASON).toMatch(/gate widget/);
+    expect(captchaSolveStillWorking("fetch_started")).toBe(true);
+    expect(captchaSolveStillWorking("in_flight")).toBe(true);
+    expect(captchaSolveStillWorking("no_key")).toBe(false);
+    expect(captchaSolveStillWorking("unsupported_variant")).toBe(false);
+    expect(captchaSolveStillWorking("solver_error")).toBe(false);
+    expect(widgetUnreadySolveReason("no_key")).toBe(`${DRIVE_WIDGET_UNREADY_REASON} (no_key)`);
     expect(isProgressSubmitRow(["@e:go", "b", "Creating your account|s=d"])).toBe(true);
     expect(isProgressSubmitRow(["@e:go", "b", "Loading Continue|s=d"])).toBe(true);
     expect(isProgressSubmitRow(["@e:go", "b", "Create Account|s=d"])).toBe(false);

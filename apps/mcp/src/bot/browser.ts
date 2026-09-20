@@ -67,6 +67,23 @@ export function contextInitScriptsFor(options: {
   ];
 }
 
+function isColdLaunchBlank(url: string): boolean {
+  return url === "" || url === "about:blank";
+}
+
+/**
+ * This session's page in a shared context. Never adopt a leftover tab
+ * another session already navigated. Chromium / a persistent-context cold
+ * launch always creates one blank page — adopt that sole blank so we do
+ * not leave an extra unused tab.
+ */
+export async function openOwnedContextPage(context: BrowserContext): Promise<Page> {
+  const existing = context.pages();
+  const onlyBlank = existing.length === 1 && isColdLaunchBlank(existing[0]!.url());
+  if (onlyBlank) return existing[0]!;
+  return await context.newPage();
+}
+
 export type { FrameTarget };
 
 export type InjectCardField = "pan" | "cvv";
@@ -642,7 +659,7 @@ export class BrowserController implements BrowserDriver {
     if (contextInitScripts.includes("webgl-spoof")) {
       await context.addInitScript({ content: INSTALL_WEBGL_SPOOF_SCRIPT });
     }
-    this.page = context.pages()[0] ?? (await context.newPage());
+    this.page = await openOwnedContextPage(context);
     this.trackOpenedTabs(this.page);
     this.primaryPage = this.page;
     await this.installPageNormalization(this.page, remoteMode);
