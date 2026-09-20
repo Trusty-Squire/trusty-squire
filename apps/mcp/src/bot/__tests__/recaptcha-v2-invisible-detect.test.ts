@@ -11,7 +11,11 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { detectCaptchaVariant, injectRecaptchaToken } from "../captcha.js";
+import {
+  detectCaptchaVariant,
+  grecaptchaClientCountInWorld,
+  injectRecaptchaToken,
+} from "../captcha.js";
 import { injectCaptchaToken } from "../captcha-solve.js";
 import { BrowserController } from "../browser.js";
 
@@ -151,6 +155,8 @@ describe.skipIf(!available)("recaptcha v2-invisible image challenge (IPInfo shap
       )
       .toBe(true);
     const controller = BrowserController.fromHarnessPage(page);
+    expect(await grecaptchaClientCountInWorld(page, "isolated")).toBe(0);
+    expect(await grecaptchaClientCountInWorld(page, "main")).toBe(1);
     expect(await page.locator("#go").isDisabled()).toBe(true);
     const token = "03AGdBq24-fixture-v2-string-cb";
     expect(await injectRecaptchaToken(controller, token, page)).toBe(true);
