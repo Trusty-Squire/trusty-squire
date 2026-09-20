@@ -116,6 +116,8 @@ import {
   noOtherSignupPathReason,
   oauthProviderForRow,
   isListFilterRow,
+  isContextPickerRow,
+  isListedEntityRow,
   isGoalDestinationRow,
   isSectionNavRow,
   unvisitedSectionNavRows,
@@ -3480,6 +3482,97 @@ describe("post-confirmation navigation", () => {
       { goal: "open the API Keys page and create an API key" },
     );
     expect(sets.CLICK.map((entry) => entry.ref)).toEqual(["@e:keys"]);
+  });
+
+  it("drops Docs and environment pickers from a dashboard when Settings is untried", () => {
+    const docs: WireRow = ["@e:docs", "l", "Docs|u=https://app.example.test/docs"];
+    const settings: WireRow = ["@e:set", "l", "Settings|u=https://app.example.test/settings"];
+    const env: WireRow = ["@e:env", "s", "Environment"];
+    const logo: WireRow = ["@e:logo", "l", "Logo|u=https://app.example.test/"];
+    const url = "https://app.example.test/dashboard";
+    expect(isContextPickerRow(env)).toBe(true);
+    expect(isOffProductNavRow(docs, url)).toBe(true);
+    const sets = driveTargetSets(
+      [docs, env, logo, settings],
+      {},
+      false,
+      [],
+      url,
+      new Map(),
+      (text) => text,
+      [],
+      { goal: "extract an API key" },
+    );
+    expect(sets.CLICK.map((entry) => entry.ref)).toEqual(["@e:set"]);
+    expect(sets.SELECT).toEqual([]);
+  });
+
+  it("presents listed entries first and removes an already-clicked control", () => {
+    const settingsUrl = "https://app.example.test/settings";
+    const entries: WireRow[] = [
+      ["@e:one", "l", "payments-api|q=1/5"],
+      ["@e:two", "l", "billing-api|q=2/5"],
+      ["@e:three", "l", "alerts-api|q=3/5"],
+      ["@e:four", "l", "usage-api|q=4/5"],
+      ["@e:five", "l", "audit-api|q=5/5"],
+    ];
+    const account: WireRow = ["@e:acct", "b", "Account"];
+    const billing: WireRow = ["@e:bill", "b", "Billing"];
+    const reputation: WireRow = [
+      "@e:rep",
+      "l",
+      "Reputation|u=https://app.example.test/reputation",
+    ];
+    const docs: WireRow = ["@e:docs", "l", "Docs|u=https://app.example.test/docs"];
+    const create: WireRow = ["@e:new", "l", "+ New app"];
+    expect(isListedEntityRow(entries[0]!)).toBe(true);
+    expect(isSectionNavRow(account)).toBe(true);
+    expect(isSectionNavRow(reputation)).toBe(true);
+    expect(listedItemRows([...entries, account, reputation, create], settingsUrl).map((row) => row[0])).toEqual([
+      "@e:one",
+      "@e:two",
+      "@e:three",
+      "@e:four",
+      "@e:five",
+    ]);
+    const offered = driveTargetSets(
+      [...entries, account, billing, reputation, docs, create],
+      {},
+      false,
+      [],
+      settingsUrl,
+      new Map(),
+      (text) => text,
+      [],
+      { goal: "extract an API key" },
+    );
+    expect(offered.CLICK.map((entry) => entry.ref)).toEqual([
+      "@e:one",
+      "@e:two",
+      "@e:three",
+      "@e:four",
+      "@e:five",
+    ]);
+    const afterOne = driveTargetSets(
+      [...entries, account, billing, reputation, docs],
+      {},
+      false,
+      [],
+      settingsUrl,
+      new Map(),
+      (text) => text,
+      [],
+      {
+        goal: "extract an API key",
+        visitedSectionKeys: [sectionIdentity(entries[0]!, settingsUrl)],
+      },
+    );
+    expect(afterOne.CLICK.map((entry) => entry.ref)).toEqual([
+      "@e:two",
+      "@e:three",
+      "@e:four",
+      "@e:five",
+    ]);
   });
 
   it("clears cycle and dead-action memory when the goal text changes", () => {

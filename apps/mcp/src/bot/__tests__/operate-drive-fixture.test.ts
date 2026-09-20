@@ -1519,6 +1519,87 @@ describe("operate_drive real-browser fixture", () => {
     }
   }, 30_000);
 
+  it("never opens Docs from a dashboard that still has Settings and a filter picker", async () => {
+    const dashHtml = `<!doctype html><meta charset="utf-8"><title>Dashboard</title>
+<nav>
+  <a id="docs" href="/docs">Docs</a>
+  <a id="settings" href="/settings">Settings</a>
+  <a id="logo" href="/">Logo</a>
+</nav>
+<label>Environment <select id="env"><option>Production</option><option>Sandbox</option></select></label>`;
+    const settingsHtml = `<!doctype html><meta charset="utf-8"><title>Settings</title>
+<nav>
+  <a id="docs" href="/docs">Docs</a>
+  <a id="settings" href="/settings">Settings</a>
+</nav>
+<div role="tablist">
+  <button type="button" role="tab" id="account">Account</button>
+  <button type="button" role="tab" id="billing">Billing</button>
+</div>
+<section>
+  <a id="one" href="/settings/apps/one">payments-api</a>
+  <a id="two" href="/settings/apps/two">billing-api</a>
+  <a id="three" href="/settings/apps/three">alerts-api</a>
+  <a id="new" href="/settings/apps/new">+ New app</a>
+</section>`;
+    const docsHtml = `<!doctype html><meta charset="utf-8"><title>Docs</title>
+<main>
+  <h1>Documentation</h1>
+  <a id="enroll" href="/docs/enrollment">Enrollment</a>
+</main>`;
+    const entryHtml = `<!doctype html><meta charset="utf-8"><title>payments-api</title>
+<main>
+  <h1>payments-api</h1>
+  <p id="secret">••••••••••••</p>
+  <button type="button" id="reveal">Reveal</button>
+</main>
+<script>
+  document.getElementById("reveal").onclick = () => {
+    document.getElementById("secret").textContent = "sk_live_fixturekey01";
+    document.getElementById("reveal").remove();
+  };
+</script>`;
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await page.route("**/*", (route) => {
+      const url = route.request().url();
+      const body = url.includes("/docs")
+        ? docsHtml
+        : url.includes("/settings/apps/")
+          ? entryHtml
+          : url.includes("/settings")
+            ? settingsHtml
+            : dashHtml;
+      route.fulfill({ contentType: "text/html", body });
+    });
+    const startUrl = "https://shape-candidates.test/dashboard";
+    await page.goto(startUrl);
+    const started = await startHarnessProvisionSession({
+      browser: BrowserController.fromHarnessPage(page),
+      serviceUrl: startUrl,
+      format: "compact",
+      initialObservation: "standard",
+    });
+    try {
+      const dependencies = deps(async (_api, _state, questions) => jevFromQuestions(questions));
+      const result = await runOperateDrive(
+        { session_id: started.session_id, goal: "extract an API key", max_steps: 8 },
+        api(),
+        undefined,
+        dependencies,
+      );
+      expect(page.url()).not.toMatch(/\/docs/);
+      expect(page.url()).toMatch(/\/settings\/apps\//);
+      expect(await page.locator("#secret").innerText()).toBe("sk_live_fixturekey01");
+      expect(result.status).toBe("complete");
+      expect(JSON.stringify(result)).not.toContain("sk_live_fixturekey01");
+      expect(JSON.stringify(result.observation?.safe_table)).toMatch(/@key-value\|secret=1\|len=/);
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
   it("does not treat a signed-in /verifications product page as a pre-existing session", async () => {
     const html = `<!doctype html><meta charset="utf-8"><title>Verifications</title>
 <nav>
