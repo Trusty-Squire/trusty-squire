@@ -988,7 +988,7 @@ async function executeAct(
             throw new Error("oauth_login: internal live target changed");
           }
           throw new Error(
-            `oauth_login: no element matched target "${action.target}". Re-observe and use the OAuth button ref.`,
+            `oauth_login: no element matched target "${action.target}". Re-observe and use the OAuth control ref.`,
           );
         }
         if (oauthDeadline === undefined) {

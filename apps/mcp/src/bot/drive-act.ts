@@ -61,6 +61,28 @@ export function drivePointerUsesCdp(reachedTop: boolean, frameIsMain: boolean): 
 
 const LOCATOR_ACT_TIMEOUT_MS = 5000;
 
+export async function driveTargetAccessibleName(
+  page: Page,
+  ref: string,
+): Promise<string | undefined> {
+  const frame = resolveDriveFrame(page, ref);
+  const element = await resolveDriveElement(frame, ref);
+  if (element === null) return undefined;
+  try {
+    const name = await element.evaluate((node) => {
+      if (!(node instanceof HTMLElement)) return "";
+      const labelled = node.getAttribute("aria-label");
+      if (labelled !== null && labelled.trim().length > 0) return labelled.trim();
+      return (node.innerText || node.textContent || "").replace(/\s+/g, " ").trim();
+    });
+    return name.length > 0 ? name : undefined;
+  } catch {
+    return undefined;
+  } finally {
+    await element.dispose().catch(() => undefined);
+  }
+}
+
 async function resolveDriveElement(
   frame: Frame,
   ref: string,
@@ -511,6 +533,33 @@ export async function driveActOnPage(page: Page, action: ProvisionAction): Promi
       ...ZERO_ACT_TIMINGS,
       guardWallMs: Date.now() - wallStarted,
     };
+  }
+  if (action.kind === "oauth_login") {
+    const frame = resolveDriveFrame(page, action.target);
+    const guardStarted = Date.now();
+    try {
+      const guard = await evaluateBound(frame, inPageGuard, {
+        ref: action.target,
+        kind: "click",
+      });
+      if (!guard.ok) {
+        return {
+          kind: "stale",
+          reason: guard.reason,
+          ...ZERO_ACT_TIMINGS,
+          guardScriptMs: guard.scriptMs,
+          guardWallMs: Date.now() - guardStarted,
+        };
+      }
+    } catch {
+      return {
+        kind: "stale",
+        reason: "evaluate_timeout",
+        ...ZERO_ACT_TIMINGS,
+        guardWallMs: Date.now() - guardStarted,
+      };
+    }
+    return { kind: "unsupported" };
   }
   if (action.kind !== "click" && action.kind !== "type" && action.kind !== "select") {
     return { kind: "unsupported" };
