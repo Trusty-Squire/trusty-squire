@@ -686,20 +686,15 @@ const LOGIN_STATUS_CHECK_STALLED_ERROR =
 // persistent profile and both are watched by the same poll loop.
 //
 // Shared-broker stays first: that Chrome already holds the profile, so
-// yielding or flipping order would race it with a second persistent context.
-// A real screen wins inside that Chrome (ownedHeadedBrowserEnvironment
-// uses the host display; exposeSharedBrokerCeremonyDisplay does not attach
-// noVNC) rather than by skipping the broker.
-export async function runInBotChrome(
-  opts: RunInBotChromeOpts,
-  runtime: {
-    tryShared?: (opts: RunInBotChromeOpts) => Promise<LoginRunResult | null>;
-    runForEnvironment?: (opts: RunInBotChromeOpts) => Promise<LoginRunResult>;
-  } = {},
-): Promise<LoginRunResult> {
-  const shared = await (runtime.tryShared ?? tryRunCeremonyInSharedBroker)(opts);
+// yielding or flipping order would only race it against a second persistent
+// context the profile gate then refuses. A real screen wins INSIDE that
+// Chrome — `ownedHeadedBrowserEnvironment` launches it on the host display
+// whenever there is one, and the exposure below never attaches noVNC to a
+// display this repository did not create.
+export async function runInBotChrome(opts: RunInBotChromeOpts): Promise<LoginRunResult> {
+  const shared = await tryRunCeremonyInSharedBroker(opts);
   if (shared !== null) return shared;
-  return await (runtime.runForEnvironment ?? runLoginBrowserForEnvironment)(opts);
+  return await runLoginBrowserForEnvironment(opts);
 }
 
 export interface LoginRunResult {
@@ -720,11 +715,12 @@ export interface LoginRunResult {
 // The result names WHY there is no noVNC exposure, because the ceremony
 // must treat the states differently (round-12 review-3): "unshowable"
 // means the tab provably cannot be shown to anyone (no discoverable
-// display, or the noVNC attach failed) and the ceremony fails immediately
-// instead of silently polling to its deadline; "already_visible" means the
-// tab sits on a display this repository did not create (the machine's own
-// screen), which the user may be looking at right now. Neither failure
-// path ever touches the display or the browser.
+// display on a headless host, or the noVNC attach failed) and the ceremony
+// fails immediately instead of silently polling to its deadline;
+// "already_visible" means the tab is NOT on a display this repository
+// created, so it sits on the machine's own screen, which the user may be
+// looking at right now. Neither failure path ever touches the display or
+// the browser.
 export type SharedCeremonyExposure =
   | { kind: "exposed"; stop: () => Promise<void> }
   | { kind: "already_visible"; reason: string }
@@ -733,28 +729,22 @@ export type SharedCeremonyExposure =
 export async function exposeSharedBrokerCeremonyDisplay(
   profileDir: string,
   label: string,
-  runtime: { hasDisplay?: () => boolean } = {},
 ): Promise<SharedCeremonyExposure> {
   const holderPid = currentProfileHolderPid(profileDir);
   if (holderPid === null)
-    return {
-      kind: "unshowable",
-      reason: "no live browser process holds the profile, so its display could not be discovered",
-    };
+    return undiscoverableCeremonyDisplay(
+      "no live browser process holds the profile, so its display could not be discovered",
+    );
   const tracked = ownerTrackedBrowserDisplay(profileDir, holderPid);
   const env = tracked === null ? readProcessTreeDisplay(holderPid) : null;
   const display = tracked?.display ?? env?.DISPLAY;
   const authFile = tracked?.authFile ?? env?.XAUTHORITY;
   if (display === undefined || authFile === undefined)
-    return {
-      kind: "unshowable",
-      reason:
-        "the browser holding the profile runs without a DISPLAY/XAUTHORITY in its launch record or process tree",
-    };
-  // A launch record IS the proof of ownership: this repo wrote it for this
-  // exact holder launch (same profile, same pid, matching birth identity), so
-  // the rig it names is ours wherever the daemon's TMPDIR put it. A recorded
-  // host XAUTHORITY (not a tsq-login- private dir) is still the machine
+    return undiscoverableCeremonyDisplay(
+      "the browser holding the profile runs without a DISPLAY/XAUTHORITY in its launch record or process tree",
+    );
+  // The rig's private-dir name is the ownership proof, tracked launch record
+  // or not: a host XAUTHORITY (not a tsq-login- dir) is the machine's own
   // screen — do not attach noVNC to a display we did not create.
   if (!isOwnedLoginRigXauthority(authFile))
     return {
@@ -762,15 +752,6 @@ export async function exposeSharedBrokerCeremonyDisplay(
       reason:
         "it runs on a display this repository did not create, which may already be visible " +
         "on this machine's own screen",
-    };
-  // Headless hosts only: Xvfb + noVNC. A machine with a screen keeps the
-  // ceremony on that screen even if a leftover broker still sits on Xvfb.
-  if ((runtime.hasDisplay ?? hasDisplay)())
-    return {
-      kind: "already_visible",
-      reason:
-        "this machine has a screen, so the ceremony stays on that display instead of " +
-        "attaching noVNC to a private Xvfb",
     };
   let rig: RemoteLoginRig | undefined;
   try {
@@ -810,10 +791,20 @@ export async function exposeSharedBrokerCeremonyDisplay(
   };
 }
 
-// Last-resort ownership signal, for a holder with no launch record: rigs this
-// repo creates live in private dirs named `tsq-login-*`. The dir's PARENT is
-// deliberately not compared against this process's temp root — the broker
-// daemon and connect are different processes and may run under different
+// Discovery could not name the holder's display. A host with its own screen
+// is showing that Chrome on it — macOS and Windows keep no DISPLAY to find,
+// and a Linux desktop need not export XAUTHORITY — so the ceremony is visible
+// and must not be failed. Only a headless host has no screen to fall back on.
+function undiscoverableCeremonyDisplay(reason: string): SharedCeremonyExposure {
+  return hasDisplay()
+    ? { kind: "already_visible", reason: `${reason}, but this machine has its own screen` }
+    : { kind: "unshowable", reason };
+}
+
+// The ownership signal for any holder display, tracked launch record or not:
+// rigs this repo creates live in private dirs named `tsq-login-*`. The dir's
+// PARENT is deliberately not compared against this process's temp root — the
+// broker daemon and connect are different processes and may run under different
 // TMPDIRs, and rejecting the broker's own rig on that difference strands a
 // headless user with no noVNC URL until the deadline.
 function isOwnedLoginRigXauthority(authFile: string): boolean {

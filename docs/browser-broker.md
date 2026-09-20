@@ -96,8 +96,11 @@ human can complete.
 Display discovery first reads the holder profile's tracked launch display from
 the owner-reaper manifest, then falls back to the holder's process tree: Chrome
 can erase its main process environment while children retain DISPLAY/XAUTHORITY.
-A display outside the repo-owned rig is treated as already visible. Missing
-usable display evidence or failed noVNC exposure stops the ceremony immediately.
+A display outside the repo-owned rig is treated as already visible, and so is
+missing display evidence on a host that has its own screen — macOS and Windows
+keep no DISPLAY to discover, and a Linux desktop need not export XAUTHORITY.
+Missing display evidence on a headless host, or a failed noVNC exposure, stops
+the ceremony immediately.
 Cleanup removes the ceremony's helpers and tab, preserving the broker's browser
 and display even on setup failure. The self-launch path closes its own browser
 and rig, including when initial page setup fails.

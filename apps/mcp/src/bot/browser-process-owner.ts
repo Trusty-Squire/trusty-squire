@@ -173,7 +173,10 @@ export class BrowserProcessOwner {
       const rig = createXvfbDisplayRig(OPERATOR_BROWSER_WINDOW_SIZE);
       this.ownedDisplayRig = rig;
       await startRemoteLoginDisplay(rig);
-      // Process-exit backstop: a SIGKILL'd broker previously leaked this Xvfb.
+      // In-process exits only. A SIGKILL'd broker is covered elsewhere: the
+      // Xvfb is an owner-tracked helper (its own process group, recorded in
+      // the reaper manifest), so the reaper worker reaps it when this owner
+      // dies and the next start sweeps whatever that missed.
       this.ownedDisplayCleanup = registerRemoteLoginRigCleanup(rig, () => undefined);
     }
     const { remoteLoginEnvironment } = await import("./remote-login-display.js");
