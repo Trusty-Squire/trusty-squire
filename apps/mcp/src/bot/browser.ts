@@ -43,7 +43,7 @@ import { type StealthProfile } from "./browser-process-runtime.js";
 
 import { existsSync, statSync } from "node:fs";
 import type { BrowserContext, ElementHandle, FileChooser, Frame, Locator, Page } from "playwright";
-import type { MailResultRow } from "./capture/verification.js";
+import type { MailResultRow, OpenedMailMessage } from "./capture/verification.js";
 import {
   currentOperatorRequestSignal,
   markOperatorMutationDispatchAttempted,
@@ -1143,6 +1143,79 @@ export class BrowserController implements BrowserDriver {
       .filter((l) => l.url.length > 0)
       .map((l) => this.cardValueOutputMask.maskValue(l));
     return { text: this.cardValueOutputMask.maskText(raw.text), links };
+  }
+
+  // Expand collapsed conversation cards so recipient/date decisions can be
+  // made per message. Returns how many collapsed headers were clicked.
+  async expandCollapsedMailMessages(page: Page | null = this.page): Promise<number> {
+    if (page === null) return 0;
+    const n = await page.evaluate(() => {
+      const els = Array.from(document.querySelectorAll<HTMLElement>(".kv, .kQ"));
+      for (const el of els) el.click();
+      return els.length;
+    });
+    if (n > 0) await page.waitForTimeout(400).catch(() => undefined);
+    return n;
+  }
+
+  // Per-message read of an opened conversation: From, To emails, date, text,
+  // and links on each card. Listing rows omit To and group many messages, so
+  // the recipient and newest-after-session pick happen here.
+  async extractOpenedMailMessages(page: Page | null = this.page): Promise<OpenedMailMessage[]> {
+    if (page === null) return [];
+    await page.waitForSelector(".ii, .a3s, .adn, .kv", { timeout: 2000 }).catch(() => undefined);
+    const raw = await page.evaluate(() => {
+      const cards: HTMLElement[] = [];
+      for (const el of Array.from(document.querySelectorAll<HTMLElement>(".adn, .kv"))) {
+        if (!cards.includes(el)) cards.push(el);
+      }
+      if (cards.length === 0) {
+        for (const b of Array.from(document.querySelectorAll<HTMLElement>(".ii, .a3s"))) {
+          if ((b.innerText ?? "").trim().length === 0) continue;
+          const card = b.closest<HTMLElement>(".adn") ?? b;
+          if (!cards.includes(card)) cards.push(card);
+        }
+      }
+      return cards.map((c) => {
+        const fromEl = c.querySelector<HTMLElement>(".gD[email], .gD, span[email]");
+        const fromEmailRaw = fromEl?.getAttribute("email") ?? "";
+        const fromNameRaw = fromEl?.getAttribute("name") ?? fromEl?.textContent ?? "";
+        const emails: string[] = [];
+        for (const el of Array.from(c.querySelectorAll<HTMLElement>("[email]"))) {
+          const e = (el.getAttribute("email") ?? "").trim();
+          if (e.length > 0 && !emails.includes(e)) emails.push(e);
+        }
+        let dateTitle: string | null = null;
+        for (const span of Array.from(c.querySelectorAll<HTMLElement>(".g3[title], span[title]"))) {
+          const t = (span.getAttribute("title") ?? "").trim();
+          if (/\d{1,2}:\d{2}/.test(t) || /\b(?:19|20)\d{2}\b/.test(t)) {
+            dateTitle = t;
+            break;
+          }
+        }
+        return {
+          fromEmail: fromEmailRaw.replace(/\s+/g, " ").trim() || null,
+          fromName: fromNameRaw.replace(/\s+/g, " ").trim() || null,
+          dateTitle,
+          toEmails: emails.filter((e) => e.toLowerCase() !== fromEmailRaw.toLowerCase()),
+          text: (c.innerText ?? "").replace(/\s+/g, " ").trim(),
+          links: Array.from(c.querySelectorAll("a[href]")).map((a) => ({
+            url: a.getAttribute("href") ?? "",
+            text: (a.textContent ?? "").replace(/\s+/g, " ").trim() || null,
+          })),
+        };
+      });
+    });
+    return raw.map((m) => ({
+      fromEmail: m.fromEmail === null ? null : this.cardValueOutputMask.maskText(m.fromEmail),
+      fromName: m.fromName === null ? null : this.cardValueOutputMask.maskText(m.fromName),
+      dateTitle: m.dateTitle,
+      toEmails: m.toEmails.map((e) => this.cardValueOutputMask.maskText(e)),
+      text: this.cardValueOutputMask.maskText(m.text),
+      links: m.links
+        .filter((l) => l.url.length > 0)
+        .map((l) => this.cardValueOutputMask.maskValue(l)),
+    }));
   }
 
   async goto(

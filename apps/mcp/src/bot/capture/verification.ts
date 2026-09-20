@@ -7,6 +7,7 @@
 // re-exporting the tool layer's import surface; this module imports only from
 // the rest of the tree, never from provision-session.
 
+import { getDomain } from "tldts";
 import type { Page } from "playwright";
 import type { BrowserController } from "../browser.js";
 import { withOAuthActionLease } from "../oauth-login.js";
@@ -304,29 +305,108 @@ export function mailRowMatchesRecipient(
   return hay.includes(recipient.trim().toLowerCase());
 }
 
-/** A mail is a candidate only when it matches the session recipient and/or service host. */
-export function mailRowIsSessionCandidate(
+export function inboxReaderDiagEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return /^(1|true|on|yes)$/i.test((env.TRUSTY_SQUIRE_INBOX_READER_DIAG ?? "").trim());
+}
+
+export function logInboxReaderDiag(line: string): void {
+  if (!inboxReaderDiagEnabled()) return;
+  console.error(`[inbox-reader-diag] ${line}`);
+}
+
+function redactSubject(subject: string | null): string {
+  if (subject === null || subject.length === 0) return "-";
+  return JSON.stringify(subject.replace(/\s+/g, " ").trim().slice(0, 80));
+}
+
+function formatInboxReaderRow(
   row: MailResultRow,
   opts: { recipient?: string; serviceHost?: string; listingScopedToRecipient?: boolean },
-): boolean {
+  sessionStartMs: number,
+  index: number,
+): string {
+  const verdict = sessionCandidateReason(row, opts);
+  const predates = mailRowPredatesSession(row, sessionStartMs);
+  return (
+    `row=${index} from_host=${registrableMailDomain(row.fromEmail) ?? "-"} ` +
+    `from_name=${JSON.stringify((row.fromName ?? "").replace(/\s+/g, " ").trim().slice(0, 40) || "-")} ` +
+    `subject=${redactSubject(row.subject)} ` +
+    `date_parsed=${parseMailRowDate(row.dateTitle) !== null} ` +
+    `candidate=${verdict.ok} reason=${verdict.reason} predates=${predates}`
+  );
+}
+
+function logInboxReaderListing(
+  listing: string,
+  extracted: readonly MailResultRow[],
+  _matching: readonly MailResultRow[],
+  opts: { recipient?: string; serviceHost?: string; listingScopedToRecipient?: boolean },
+  sessionStartMs: number,
+  recipient: string | undefined,
+): void {
+  logInboxReaderDiag(
+    `listing=${listing} extracted=${extracted.length} ` +
+      `recipient=${recipient ?? "-"} host=${opts.serviceHost ?? "-"}`,
+  );
+  extracted.forEach((row, i) => {
+    logInboxReaderDiag(formatInboxReaderRow(row, opts, sessionStartMs, i));
+  });
+}
+
+/** Registrable domain of an email or hostname, or null when it is not a host. */
+export function registrableMailDomain(value: string | null | undefined): string | null {
+  const raw = (value ?? "").trim().toLowerCase();
+  if (raw.length === 0) return null;
+  const host = raw.includes("@") ? (raw.split("@").pop() ?? "") : raw;
+  if (host.length === 0) return null;
+  const domain = getDomain(host);
+  return domain !== null && domain.length > 0 ? domain.toLowerCase() : null;
+}
+
+export function sessionCandidateReason(
+  row: MailResultRow,
+  opts: { recipient?: string; serviceHost?: string; listingScopedToRecipient?: boolean },
+): { ok: boolean; reason: string } {
   const recipient = opts.recipient?.trim();
   const serviceHost = opts.serviceHost?.trim();
   const visibleRecip = mailRowMatchesRecipient(row, recipient);
   const serviceMatch =
     serviceHost !== undefined && serviceHost.length > 0 && mailRowMatchesSender(row, serviceHost);
-  if (recipient !== undefined && recipient.length > 0 && serviceHost !== undefined && serviceHost.length > 0) {
-    // Visible plus-address is enough (ESP From often omits the product host).
-    // A to:-scoped listing may omit To from the snippet, so service match
-    // stands in. All Mail is not to:-scoped: service-only would pick another
-    // run's same-service mail. A leaky Gmail `to:` plus another service is
-    // not a candidate.
-    return visibleRecip || (opts.listingScopedToRecipient === true && serviceMatch);
+  if (
+    recipient !== undefined &&
+    recipient.length > 0 &&
+    serviceHost !== undefined &&
+    serviceHost.length > 0
+  ) {
+    // Listing rows omit To. A to:-scoped search already filtered by recipient,
+    // so those rows are openable even when From does not substring-match the
+    // page host (app.service.test vs noreply@service.test). All Mail is not
+    // to:-scoped: service match (registrable domain / display-name SLD) is
+    // what makes a conversation worth opening; To is decided after open.
+    if (visibleRecip) return { ok: true, reason: "visible_recipient" };
+    if (opts.listingScopedToRecipient === true) return { ok: true, reason: "listing_scoped" };
+    if (serviceMatch) return { ok: true, reason: "service_host" };
+    return { ok: false, reason: "no_recipient_or_service" };
   }
   if (recipient !== undefined && recipient.length > 0) {
-    return visibleRecip || opts.listingScopedToRecipient === true;
+    if (visibleRecip) return { ok: true, reason: "visible_recipient" };
+    if (opts.listingScopedToRecipient === true) return { ok: true, reason: "listing_scoped" };
+    return { ok: false, reason: "recipient_not_visible" };
   }
-  if (serviceHost !== undefined && serviceHost.length > 0) return serviceMatch;
-  return false;
+  if (serviceHost !== undefined && serviceHost.length > 0) {
+    return serviceMatch
+      ? { ok: true, reason: "service_host" }
+      : { ok: false, reason: "service_host_mismatch" };
+  }
+  return { ok: false, reason: "unscoped" };
+}
+
+/** A mail is a candidate only when it matches the session recipient and/or service host. */
+export function mailRowIsSessionCandidate(
+  row: MailResultRow,
+  opts: { recipient?: string; serviceHost?: string; listingScopedToRecipient?: boolean },
+): boolean {
+  return sessionCandidateReason(row, opts).ok;
 }
 
 // The All Mail listing URL. Gmail's SEARCH results are eventually consistent:
@@ -379,6 +459,20 @@ export function mailRowMatchesSender(
   if (fields.length === 0) return true;
   const hint = sender.trim().toLowerCase();
   if (fields.includes(hint)) return true;
+  // Page host is often a product subdomain; From is the registrable domain or
+  // an ESP subdomain of it. Substring of the full host then misses
+  // (app.service.test vs noreply@service.test) even when they are the same
+  // service. Match on the registrable domain, and on the display-name SLD
+  // ("service (19)" next to a conversation count).
+  const hintDomain = registrableMailDomain(hint);
+  if (hintDomain !== null) {
+    if (fields.includes(hintDomain)) return true;
+    const fromDomain = registrableMailDomain(row.fromEmail);
+    if (fromDomain !== null && fromDomain === hintDomain) return true;
+    const sld = hintDomain.split(".")[0] ?? "";
+    const fromName = (row.fromName ?? "").toLowerCase();
+    if (sld.length >= 3 && fromName.includes(sld)) return true;
+  }
   const tokens = hint.split(/\s+/).filter((t) => t.length >= 3);
   return tokens.length > 0 && tokens.every((t) => fields.includes(t));
 }
@@ -417,7 +511,74 @@ export function mailRowPredatesSession(
   sessionStartMs: number,
 ): boolean {
   const ts = parseMailRowDate(row.dateTitle);
-  return ts !== null && ts < sessionStartMs;
+  if (ts === null) return false;
+  // Listing dates are minute precision; session start is milliseconds. A mail
+  // that landed in the same minute the session started must not read as older.
+  const sessionMinuteFloor = Math.floor(sessionStartMs / 60_000) * 60_000;
+  return ts < sessionMinuteFloor;
+}
+
+// One opened conversation message (not a listing row). Recipient, date, and
+// newest-after-session decisions are made here: a conversation row groups
+// many messages and the listing never shows To.
+export interface OpenedMailMessage {
+  fromEmail: string | null;
+  fromName: string | null;
+  dateTitle: string | null;
+  toEmails: string[];
+  text: string;
+  links: Array<{ url: string; text: string | null }>;
+}
+
+export function openedMailMatchesRecipient(
+  message: Pick<OpenedMailMessage, "toEmails" | "text">,
+  recipient: string | undefined,
+): boolean {
+  if (recipient === undefined || recipient.trim().length === 0) return false;
+  const want = recipient.trim().toLowerCase();
+  if (message.toEmails.some((e) => e.trim().toLowerCase() === want)) return true;
+  return message.text.toLowerCase().includes(want);
+}
+
+export function pickOpenedMailMessage(
+  messages: readonly OpenedMailMessage[],
+  opts: { recipient?: string; serviceHost?: string; sessionStartMs: number },
+): OpenedMailMessage | null {
+  if (messages.length === 0) return null;
+  const recipient = opts.recipient?.trim();
+  const dated = (pool: readonly OpenedMailMessage[]): OpenedMailMessage | null => {
+    const rows: MailResultRow[] = pool.map((m, i) => ({
+      selector: String(i),
+      fromEmail: m.fromEmail,
+      fromName: m.fromName,
+      subject: null,
+      dateTitle: m.dateTitle,
+      visibleText: m.text,
+    }));
+    const after = rows.filter((r) => !mailRowPredatesSession(r, opts.sessionStartMs));
+    const pick = pickNewestMailRow(after.length > 0 ? after : [...rows]);
+    if (pick === null) return null;
+    const idx = Number(pick.selector);
+    return pool[idx] ?? null;
+  };
+  if (recipient !== undefined && recipient.length > 0) {
+    const matching = messages.filter((m) => openedMailMatchesRecipient(m, recipient));
+    // Unique plus-address: the message To that address is this run's mail even
+    // when a later session re-reads it. Prefer newest after the session; else
+    // the newest To match. Never return another recipient's message.
+    return matching.length > 0 ? dated(matching) : null;
+  }
+  const serviceHost = opts.serviceHost?.trim();
+  const pool =
+    serviceHost !== undefined && serviceHost.length > 0
+      ? messages.filter((m) =>
+          mailRowMatchesSender(
+            { fromEmail: m.fromEmail, fromName: m.fromName, subject: null },
+            serviceHost,
+          ),
+        )
+      : messages;
+  return dated(pool);
 }
 
 // Gmail search results are ordered by RELEVANCE, not date ("Showing most
@@ -487,21 +648,26 @@ async function readAllMailMatchingRows(
     await waitForCaptchaChallengeToSettle(browser, 1200, 0, page).catch(() => false);
   }
   const now = Date.now();
+  const candidateOpts = {
+    ...(recipient === undefined ? {} : { recipient }),
+    ...(sender === undefined ? {} : { serviceHost: sender }),
+    listingScopedToRecipient: false,
+  };
   const matching = rows.filter(
-    (r) =>
-      mailRowIsSessionCandidate(r, {
-        ...(recipient === undefined ? {} : { recipient }),
-        ...(sender === undefined ? {} : { serviceHost: sender }),
-        listingScopedToRecipient: false,
-      }) &&
-      mailRowIsRecent(r, now),
+    (r) => mailRowIsSessionCandidate(r, candidateOpts) && mailRowIsRecent(r, now),
   );
-  // A matching row older than the session start is a PREVIOUS task's mail:
-  // drop it from the candidates, but report that it was seen so the caller
-  // can end in the distinct stale-match not-found instead of the generic one.
+  const staleMatchSeen = matching.some((r) => mailRowPredatesSession(r, sessionStartMs));
+  logInboxReaderListing("all", rows, matching, candidateOpts, sessionStartMs, recipient);
+  // Recipient-scoped reads decide predates per opened message (listing dates
+  // are the conversation's newest, minute-precision, and omit To). Sender-only
+  // reads still drop predating listing rows so a previous task's link cannot
+  // win before the fresh mail arrives.
+  const scopedToRecipient = recipient !== undefined && recipient.trim().length > 0;
   return {
-    rows: matching.filter((r) => !mailRowPredatesSession(r, sessionStartMs)),
-    staleMatchSeen: matching.some((r) => mailRowPredatesSession(r, sessionStartMs)),
+    rows: scopedToRecipient
+      ? matching
+      : matching.filter((r) => !mailRowPredatesSession(r, sessionStartMs)),
+    staleMatchSeen,
   };
 }
 
@@ -665,19 +831,31 @@ export async function awaitVerification(
           }
         ).openMailResultRow?.bind(browser);
         const rows = (await mailRowsOf?.(inboxTab).catch(() => [])) ?? [];
-        const searchRows = rows.filter((r) =>
-          mailRowIsSessionCandidate(r, {
-            ...(search.recipient === undefined ? {} : { recipient: search.recipient }),
-            ...(search.sender === undefined ? {} : { serviceHost: search.sender }),
-            listingScopedToRecipient: scopedToRecipient,
-          }),
+        const searchCandidateOpts = {
+          ...(search.recipient === undefined ? {} : { recipient: search.recipient }),
+          ...(search.sender === undefined ? {} : { serviceHost: search.sender }),
+          listingScopedToRecipient: scopedToRecipient,
+        };
+        const searchRows = rows.filter((r) => mailRowIsSessionCandidate(r, searchCandidateOpts));
+        logInboxReaderListing(
+          "search",
+          rows,
+          searchRows,
+          searchCandidateOpts,
+          session.startedAt,
+          search.recipient,
         );
         if (searchRows.some((r) => mailRowPredatesSession(r, session.startedAt)))
           staleMatchSeen = true;
+        // Recipient-scoped: listing date is the conversation's newest minute,
+        // not the message To this plus-address. Open the newest candidate and
+        // decide per message. Sender-only still drops predating listing rows.
         let chosen: MailResultRow | null =
           searchRows.length > 0
             ? pickNewestMailRow(
-                searchRows.filter((r) => !mailRowPredatesSession(r, session.startedAt)),
+                scopedToRecipient
+                  ? searchRows
+                  : searchRows.filter((r) => !mailRowPredatesSession(r, session.startedAt)),
               )
             : null;
         // Supplement the search listing with the real-time All Mail listing
@@ -730,12 +908,51 @@ export async function awaitVerification(
         } else if (mailRowsOf === undefined) {
           opened = await browser.openFirstMailResult(inboxTab).catch(() => false);
         }
+        if (chosen !== null) {
+          logInboxReaderDiag(
+            `opened_row listing=${chosenPage === allMailTab ? "all" : "search"} ` +
+              `from_host=${registrableMailDomain(chosen.fromEmail) ?? "-"} ` +
+              `from_name=${JSON.stringify((chosen.fromName ?? "").replace(/\s+/g, " ").trim().slice(0, 40) || "-")} ` +
+              `subject=${redactSubject(chosen.subject)}`,
+          );
+        }
         if (opened) {
-          // Read the opened message's OWN container (card + body) when Gmail
-          // renders one, so page chrome never enters the code parse, the link
-          // scoring, or the sender read. Falls back to the page-wide read,
-          // where chrome anchors are still filtered out below. A controller
-          // without this newer method (older mock surface) falls back too.
+          // Conversation rows group many messages. Expand collapsed cards,
+          // then pick the message whose To (or body) is the session recipient
+          // and that is newest after the session — never the first or an
+          // older sibling's link. Controllers without the per-message extract
+          // keep the concatenated-body fallback.
+          const expandCollapsedOf = (
+            browser as BrowserController & {
+              expandCollapsedMailMessages?: (page: Page | null) => Promise<number>;
+            }
+          ).expandCollapsedMailMessages?.bind(browser);
+          const messagesOf = (
+            browser as BrowserController & {
+              extractOpenedMailMessages?: (page: Page | null) => Promise<OpenedMailMessage[]>;
+            }
+          ).extractOpenedMailMessages?.bind(browser);
+          const expanded = (await expandCollapsedOf?.(chosenPage).catch(() => 0)) ?? 0;
+          const messages = (await messagesOf?.(chosenPage).catch(() => [])) ?? [];
+          const picked =
+            messages.length > 0
+              ? pickOpenedMailMessage(messages, {
+                  ...(search.recipient === undefined ? {} : { recipient: search.recipient }),
+                  ...(search.sender === undefined ? {} : { serviceHost: search.sender }),
+                  sessionStartMs: session.startedAt,
+                })
+              : null;
+          logInboxReaderDiag(
+            `opened_view messages=${messages.length} expanded=${expanded} ` +
+              `picked=${picked === null ? "none" : "yes"} ` +
+              `recip_match=${picked !== null && openedMailMatchesRecipient(picked, search.recipient)} ` +
+              `predates=${picked !== null && mailRowPredatesSession(picked, session.startedAt)}`,
+          );
+          if (messages.length > 0 && scopedToRecipient && picked === null) {
+            // Opened a conversation whose extracted messages have no To match.
+            // Do not parse a sibling's link. Bounded retries / All Mail.
+            continue;
+          }
           const openedBodyOf = (
             browser as BrowserController & {
               extractOpenedMailBody?: (page: Page | null) => Promise<{
@@ -744,16 +961,22 @@ export async function awaitVerification(
               } | null>;
             }
           ).extractOpenedMailBody?.bind(browser);
-          const body = (await openedBodyOf?.(chosenPage).catch(() => null)) ?? null;
+          const body =
+            picked !== null
+              ? { text: picked.text, links: picked.links }
+              : ((await openedBodyOf?.(chosenPage).catch(() => null)) ?? null);
           const openedText = body?.text ?? (await browser.extractVisibleText(chosenPage));
           const openedLinks = body?.links ?? (await rawLinksOf(chosenPage));
-          sourceFrom = extractSenderEmail(openedText);
+          sourceFrom = picked?.fromEmail ?? extractSenderEmail(openedText);
           const expectedDomains = expectedVerificationDomains(search.sender, sourceFrom);
           ({ code, link } = parseVerification(
             openedText,
             [...openedLinks, ...listLinks].filter((l) => !isGmailChromeLink(l.url)),
             expectedDomains,
           ));
+          logInboxReaderDiag(
+            `yield found=${code !== null || link !== null} has_code=${code !== null} has_link=${link !== null}`,
+          );
         } else if (chosen !== null) {
           // The identified row never opened: parse ONLY that row's own list
           // text (subject + snippet), never the page-wide list — another row's
@@ -766,7 +989,10 @@ export async function awaitVerification(
             [],
             expectedVerificationDomains(search.sender, null),
           ));
-        } else if (!scopedToRecipient && (search.sender === undefined || search.sender.length === 0)) {
+        } else if (
+          !scopedToRecipient &&
+          (search.sender === undefined || search.sender.length === 0)
+        ) {
           // No row was ever chosen: only the hint-less read may fall back to
           // the page-wide list parse — the legacy first-row behavior for old
           // controllers (and ONLY old ones: when row extraction exists this
