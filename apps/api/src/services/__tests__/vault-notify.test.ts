@@ -226,6 +226,28 @@ describe("NotifyingVaultAuditStore", () => {
     expect(message).not.toContain("Payment payment_place_order_attempted");
   });
 
+  it("says the total was unreadable instead of announcing a 0.00 payment", () => {
+    const message = formatVaultEventMessage(
+      {
+        account_id: "a",
+        type: VAULT_AUDIT_TYPES.paymentExecuted,
+        payload: {
+          reference: "pay://p5",
+          requester: "agent",
+          merchant: "Synthetic Books",
+          amount_cents: 0,
+          currency: "USD",
+          item: "one hardcover — total not readable",
+          payment_status: "approved",
+        },
+      },
+      NOW,
+    );
+
+    expect(message).toContain("Synthetic Books — total not readable");
+    expect(message).not.toContain("USD 0.00");
+  });
+
   it("logs audit failures without rejecting a completed mutation", async () => {
     const logger = { error: vi.fn() };
     await expect(

@@ -27,6 +27,8 @@ interface AuditEvent {
   amount_cents?: number;
   currency?: string;
   payment_status?: string;
+  // The approval's item line, which carries the unreadable-total marker.
+  item?: string;
   // Egress-grant lifecycle.
   grant_id?: string;
 }
@@ -88,7 +90,9 @@ function describe(e: AuditEvent): { tone: string; label: string; detail: string 
       // Merchant + amount + last4 only — a full PAN never reaches the trail.
       const amount =
         e.amount_cents !== undefined && e.currency !== undefined
-          ? formatAmount(e.amount_cents, e.currency)
+          ? e.amount_cents === 0 && e.item?.includes("total not readable") === true
+            ? "total not readable"
+            : formatAmount(e.amount_cents, e.currency)
           : null;
       const tail = e.last4 !== undefined ? ` ··${e.last4}` : "";
       const pendingManualCheck = e.payment_status === "payment_3ds_authenticated_pending_order";

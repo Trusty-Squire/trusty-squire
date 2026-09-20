@@ -327,8 +327,15 @@ export default function PaymentApprovalPage() {
   const jitReviewBlocked =
     isJitOrigin && (jitBindingMismatch || ceremony?.card === null || cardMetadataError !== null);
   const needsCard = ceremony?.status === "pending" && ceremony.card_ref === null;
+  // operate_drive marks an unreadable checkout total on the item
+  // (apps/mcp/src/bot/checkout-total.ts); the human must never be shown $0.00
+  // for an amount nobody could read.
   const amountLabel =
-    approval !== null ? formatAmount(approval.amount_cents, approval.currency) : "";
+    approval === null
+      ? ""
+      : approval.amount_cents === 0 && approval.item.includes("total not readable")
+        ? "total not readable"
+        : formatAmount(approval.amount_cents, approval.currency);
   const boundCard =
     ceremony?.card_ref == null
       ? null

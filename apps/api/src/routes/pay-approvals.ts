@@ -7,7 +7,7 @@ import {
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import type { ApiDeps } from "../services/deps.js";
-import { formatCurrencyAmount } from "../services/money.js";
+import { approvalAmountLabel } from "../services/money.js";
 import { sendTelegramMessage } from "../services/telegram.js";
 import {
   PAYMENT_VOUCH_CONTEXT,
@@ -358,7 +358,11 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
 
     const account = await opts.deps.accountStore.findAccountById(auth.account_id);
     if (account?.telegram_chat_id != null) {
-      const amount = formatCurrencyAmount(parsed.data.amount_cents, parsed.data.currency);
+      const amount = approvalAmountLabel(
+        parsed.data.amount_cents,
+        parsed.data.currency,
+        parsed.data.item,
+      );
       const cardName = await approvalCardName(
         parsed.data.card_ref ?? null,
         opts.deps,
@@ -422,7 +426,7 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
       const account = await opts.deps.accountStore.findAccountById(auth.account_id);
       let sent = false;
       if (account?.telegram_chat_id != null) {
-        const amount = formatCurrencyAmount(record.amountCents, record.currency);
+        const amount = approvalAmountLabel(record.amountCents, record.currency, record.item);
         const text =
           parsed.data.mode === "detected_challenge"
             ? `🔐 3-D Secure required — approve the ${amount} payment to ${record.merchant} in your bank app to finish checkout.`

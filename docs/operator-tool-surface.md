@@ -44,6 +44,29 @@ nothing stated the drive writes the two-digit year, reads the value back, and
 rewrites that control once with the four-digit year when the write was
 rejected or truncated. A separate year control uses its own maxlength: two
 digits take `exp_year_short`, anything else takes the four-digit `exp_year`.
+
+The approval a fresh card release mints carries the total the checkout page
+itself presents: the drive reads the page's last summary total — a line the
+total label opens, carrying a currency symbol or code — and signs the human's
+approval for that amount. The same words inside a sentence are prose ("you
+saved a total of $12.00 today"), and so are a tax-exclusive figure or a counted
+quantity; none of them answer for the amount. An `amount_cents` fact can only
+confirm it — the page amount still stands when the two disagree, and the
+disagreement is appended to the approval's item so the human reads it beside
+the amount. A `currency` fact names the currency only for a symbol several
+currencies share (`$`, `£`, `¥`); a currency code the page prints, or a symbol
+unique to one currency, wins over the fact and keeps its own minor-unit scale.
+A total the page does not present readably never refuses or blocks the
+purchase: the approval is still minted and marked `total not readable`, which
+the approval page, the Telegram prompt, and the 3-D Secure nudge show in place
+of a zero amount. A summary total that names a currency the drive cannot
+resolve, or whose displayed fraction disagrees with that currency's minor
+units, reads as unreadable in exactly that way rather than being rescaled or
+answered by a running figure higher up the summary. A total that names no
+currency at all ("Total 3 items") is passed over like the prose above. A
+resumed release replays its own approval's terms, so it does not re-read the
+page.
+
 The loop reads verification mail when a verification field is listed, and also
 when a click leaves the page waiting with no fill or live choice left and its
 wording or URL says mail is expected (check-your-email text, an Open Gmail

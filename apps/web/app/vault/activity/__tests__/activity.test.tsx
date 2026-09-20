@@ -171,6 +171,32 @@ describe("activity timeline — card / payment / grant events", () => {
     expect(container.querySelector(".tl-row .tl-dot.err")).toBeNull();
   });
 
+  it("shows an unreadable checkout total as such instead of USD 0.00", async () => {
+    api.apiGet.mockImplementation((path: string) => {
+      if (path === "/v1/status") return Promise.resolve({ billing_enabled: false });
+      if (path.startsWith("/v1/vault/audit")) {
+        return Promise.resolve({
+          events: [
+            {
+              ...EVENTS[1],
+              id: "unreadable-total",
+              amount_cents: 0,
+              item: "one hardcover — total not readable",
+            },
+          ],
+          next_before: null,
+        });
+      }
+      return Promise.reject(new Error(`unexpected GET ${path}`));
+    });
+
+    render(<ActivityPage />);
+    await waitFor(() =>
+      expect(screen.getByText(/Synthetic Books — total not readable/)).toBeTruthy(),
+    );
+    expect(screen.queryByText(/USD 0\.00/)).toBeNull();
+  });
+
   it("renders a caller-placed order attempt neutrally instead of as a successful payment", async () => {
     api.apiGet.mockImplementation((path: string) => {
       if (path === "/v1/status") return Promise.resolve({ billing_enabled: false });

@@ -1182,11 +1182,26 @@ vi.mock("../captcha.js", async (importOriginal) => ({
     return h.invisibleTriggered;
   },
   extractRecaptchaSitekey: async () => "6Lcaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-  injectRecaptchaToken: async () => {
+  // The reCAPTCHA write path the solver drives is injectRecaptchaTokenDetail;
+  // injectRecaptchaToken is the boolean wrapper over it.
+  injectRecaptchaTokenDetail: async () => {
     h.injectCaptchaCalls.push("recaptcha");
     h.captchaToken = true;
     h.variantCaptchaTokens.push("recaptcha_v2", "recaptcha_v3");
-    return true;
+    return {
+      ok: true,
+      world: "main" as const,
+      textareas: 1,
+      clients: 1,
+      isolatedClients: 0,
+      callbacksFunction: 0,
+      callbacksString: 0,
+      callbacksFired: 0,
+      dataCallbackHosts: 0,
+      dataCallbackFired: 0,
+      requestSubmit: false,
+      error: null,
+    };
   },
   extractHcaptchaSitekey: async () => "00000000-0000-0000-0000-000000000000",
   getHcaptchaSolveContext: async () => ({
@@ -1199,6 +1214,9 @@ vi.mock("../captcha.js", async (importOriginal) => ({
     h.captchaToken = true;
     if (h.injectLandsVariantToken) {
       h.variantCaptchaTokens.push(h.hcaptchaCompatOnly ? "recaptcha_v2" : "hcaptcha");
+      // A token the widget accepted takes the challenge down with it; a token
+      // that lands nowhere (injectLandsVariantToken false) leaves it rendered.
+      h.captchaChallengeRendered = false;
     }
     if (h.injectClearsCapture) h.captureOverride = null;
     return true;
@@ -5664,6 +5682,7 @@ describe("operate session — captcha auto-solve on the general drive", () => {
     // The cooldown bounds retries of a FAILING challenge, so it must not
     // suppress this one.
     h.variantCaptchaTokens = [];
+    h.captchaChallengeRendered = true;
     h.captureOverride = challengeCapture();
 
     await observe(started.session_id);

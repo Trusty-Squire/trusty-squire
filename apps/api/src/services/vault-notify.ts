@@ -28,7 +28,7 @@ import type {
 } from "@trusty-squire/vault";
 import { VAULT_AUDIT_TYPES } from "@trusty-squire/vault";
 import type { AccountStore } from "./in-memory-account-store.js";
-import { formatCurrencyAmount } from "./money.js";
+import { approvalAmountLabel } from "./money.js";
 import { sendTelegramMessage } from "./telegram.js";
 
 const NOTIFY_TYPES: ReadonlySet<VaultAuditType> = new Set([
@@ -68,7 +68,7 @@ export function formatVaultEventMessage(event: VaultAuditEventInput, at: Date): 
     case VAULT_AUDIT_TYPES.paymentExecuted: {
       const paymentDetail = `${p.merchant ?? "unknown merchant"}${
         p.amount_cents !== undefined && p.currency !== undefined
-          ? ` — ${formatCurrencyAmount(p.amount_cents, p.currency)}`
+          ? ` — ${approvalAmountLabel(p.amount_cents, p.currency, p.item)}`
           : ""
       }${p.last4 !== undefined ? ` ··${p.last4}` : ""} · ${ts}`;
       if (p.payment_status === "payment_3ds_authenticated_pending_order") {
