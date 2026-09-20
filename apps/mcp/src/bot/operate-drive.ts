@@ -104,6 +104,7 @@ export const DRIVE_MAX_JEV_CALLS = 120;
 export const DRIVE_MAX_CANDIDATES = 250;
 export const DRIVE_MAX_CRITERIA = 128;
 export const DRIVE_WAIT_MS = 1500;
+export const DRIVE_EMPTY_SNAPSHOT_WAITS = 3;
 export const DRIVE_STALE_LIMIT = 3;
 export const DRIVE_IDENTICAL_RESNAP_MS = 200;
 export const DRIVE_FIXED_DONE = "DONE";
@@ -586,6 +587,7 @@ export function isCvvRow(row: WireRow): boolean {
 }
 
 const CARD_EXPIRY_FACT = "card_expiry";
+const CARD_NAME_FACT = "card_name";
 
 export function isExpiryRow(row: WireRow): boolean {
   const hay = `${normalizeKey(fieldNameForRow(row))} ${normalizeKey(readableLabel(row))}`;
@@ -647,16 +649,7 @@ const FIELD_ALIASES: Record<string, readonly string[]> = {
   email: ["email", "user_email", "login", "username"],
   first_name: ["first_name", "firstname", "first", "given_name"],
   last_name: ["last_name", "lastname", "last", "family_name", "surname", "last-name"],
-  name: [
-    "name",
-    "full_name",
-    "fullname",
-    "cardholder",
-    "cardholder_name",
-    "name_on_card",
-    "cc_name",
-    "card_name",
-  ],
+  name: ["name", "full_name", "fullname", "cardholder", "cardholder_name"],
   company: ["company", "organization", "org", "business"],
   address: ["address", "address1", "line1", "street", "address_line1"],
   address2: ["address2", "line2", "address_line2"],
@@ -714,6 +707,12 @@ function aliasKeysFor(token: string): string[] {
 export function matchingFactKeys(facts: Record<string, string>, row: WireRow): string[] {
   const keys = Object.keys(facts);
   if (keys.length === 0) return [];
+  // The shipping name and the cardholder name are different values. A
+  // name-on-card control takes the released card's own name, never the
+  // `name` ensureGeneratedFacts synthesizes from the identity facts.
+  if (isCardholderNameRow(row)) {
+    return keys.filter((key) => normalizeKey(key) === CARD_NAME_FACT);
+  }
   const wanted = new Set<string>([
     ...aliasKeysFor(fieldNameForRow(row)),
     ...aliasKeysFor(readableLabel(row)),
@@ -785,7 +784,7 @@ export function applyReleasedCardFacts(
   const next = { ...facts };
   if (next.exp_month === undefined && month.length > 0) next.exp_month = month;
   if (next.exp_year === undefined && year.length > 0) next.exp_year = year;
-  if (next.name === undefined && name.length > 0) next.name = name;
+  if (next[CARD_NAME_FACT] === undefined && name.length > 0) next[CARD_NAME_FACT] = name;
   if (next[CARD_EXPIRY_FACT] === undefined && month.length > 0 && year.length > 0) {
     const yy = year.length === 4 ? year.slice(-2) : year;
     next[CARD_EXPIRY_FACT] = `${month.padStart(2, "0")}/${yy}`;
@@ -2766,7 +2765,7 @@ async function driveLoop(input: {
   let steps = 0;
   const comboboxAttempts = new Set<string>();
   let comboboxMustYield = false;
-  let emptySnapshotReobserved = false;
+  let emptySnapshotWaits = 0;
 
   const finish = (
     status: DriveStatus,
@@ -3266,18 +3265,19 @@ async function driveLoop(input: {
       });
     }
 
-    // A same-document stage swap (Shopify one-page checkout) leaves one empty
-    // snapshot behind. Re-observe once before Jev is asked to rule on nothing.
-    // A page still empty after that is a real state — a finished signup shows
-    // only a confirmation paragraph — so Jev still gets to call it.
-    if (rows.length === 0 && !emptySnapshotReobserved) {
-      emptySnapshotReobserved = true;
+    // A same-document stage swap (Shopify one-page checkout) and a hydrating
+    // checkout both leave the snapshot empty for a while. Spend the whole
+    // re-observation budget before Jev is consulted at all. A page still empty
+    // afterwards is a real state — a finished signup renders only a
+    // confirmation paragraph — so Jev still gets to call DONE on it.
+    if (rows.length === 0 && emptySnapshotWaits < DRIVE_EMPTY_SNAPSHOT_WAITS) {
+      emptySnapshotWaits += 1;
       const applied = await applyDecision({ kind: "wait", confidence: 1 });
       if (applied !== "continue") return applied;
       steps += 1;
       continue;
     }
-    if (rows.length > 0) emptySnapshotReobserved = false;
+    if (rows.length > 0) emptySnapshotWaits = 0;
 
     const fields = paymentFields(rows);
     // A pending approval records an inject_card trajectory step, so trajectory

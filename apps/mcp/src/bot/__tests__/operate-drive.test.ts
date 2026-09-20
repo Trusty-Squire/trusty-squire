@@ -44,6 +44,7 @@ import {
   requiredFactComboboxAction,
   requiredFillableMissingFact,
   applyReleasedCardFacts,
+  ensureGeneratedFacts,
   isExpiryRow,
   isCardholderNameRow,
   isSelectRow,
@@ -386,15 +387,40 @@ describe("decideAfterJev stop reasons", () => {
 
   it("does not offer name-on-card as fillable until the card is released", () => {
     const cardName: WireRow = ["@e:ncard", "t", "Name on card|s=r"];
-    const facts = { email: "a@b.test", name: "Ada Lovelace", card_ref: "card-1" };
+    const facts = { email: "a@b.test", card_ref: "card-1" };
     expect(fillableCandidates([cardName, EMAIL], facts, true).map((row) => row.ref)).toEqual([
       "@e:email",
     ]);
-    expect(
-      fillableCandidates([cardName, EMAIL], { ...facts, exp_month: "12" }, true).map(
-        (row) => row.ref,
-      ),
-    ).toEqual(["@e:ncard", "@e:email"]);
+    const released = applyReleasedCardFacts(facts, {
+      exp_month: "12",
+      exp_year: "2030",
+      name: "A L Byron",
+    });
+    expect(fillableCandidates([cardName, EMAIL], released, true).map((row) => row.ref)).toEqual([
+      "@e:ncard",
+      "@e:email",
+    ]);
+  });
+
+  it("types the released cardholder name into name-on-card, never the shipping name", () => {
+    const cardName: WireRow = ["@e:ncard", "t", "Name on card|s=r"];
+    const fullName: WireRow = ["@e:full", "t", "Full name|s=r"];
+    // ensureGeneratedFacts has already synthesized the shipping name by the
+    // time the card is released, many steps into the drive.
+    const shipping = ensureGeneratedFacts(
+      [fullName],
+      { first_name: "Ada", last_name: "Lovelace", card_ref: "card-1" },
+    );
+    expect(shipping.name).toBe("Ada Lovelace");
+    const facts = applyReleasedCardFacts(shipping, {
+      exp_month: "12",
+      exp_year: "2030",
+      name: "A L Byron",
+    });
+    expect(matchingFactKeys(facts, cardName)).toEqual(["card_name"]);
+    expect(facts.card_name).toBe("A L Byron");
+    expect(matchingFactKeys(facts, fullName)).toEqual(["name"]);
+    expect(facts.name).toBe("Ada Lovelace");
   });
 
   it("leaves no unfilled typeable fill behind a leftover state select or an unmatched search box", () => {
@@ -421,7 +447,7 @@ describe("decideAfterJev stop reasons", () => {
       email: "a@b.test",
       exp_month: "12",
       exp_year: "2030",
-      name: "Ada",
+      card_name: "Ada",
       card_expiry: "12/30",
     });
   });

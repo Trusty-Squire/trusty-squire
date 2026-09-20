@@ -13,6 +13,7 @@ import { BrowserController } from "../browser.js";
 import { JevUnavailableError, type JevCallOutcome } from "../jev-client.js";
 import {
   DRIVE_CONFIDENCE_THRESHOLD,
+  DRIVE_WAIT_MS,
   runOperateDrive,
   type DriveDependencies,
 } from "../operate-drive.js";
@@ -52,16 +53,19 @@ const NOOP_HTML = `<!doctype html><meta charset="utf-8"><title>Noop fixture</tit
 <main><button id="noop">Do nothing</button><p id="status">idle</p></main>`;
 
 // Shopify one-page checkout in miniature: contact + a shipping SELECT first,
-// then a same-document swap that leaves the snapshot empty for ~600ms before
-// the payment stage mounts card, expiry, name-on-card, a delivery date the
-// card expiry must never be typed into, and a site-search box the drive never
-// fills.
+// then a same-document swap that leaves the snapshot empty before the payment
+// stage mounts card, expiry, name-on-card, a delivery date the card expiry
+// must never be typed into, and a site-search box the drive never fills. The
+// blank window is longer than one DRIVE_WAIT_MS so the loop must spend more
+// than a single re-observation on it no matter how long a snapshot takes.
+const MULTI_STAGE_BLANK_MS = 2000;
 const MULTI_STAGE_CHECKOUT_HTML = `<!doctype html><meta charset="utf-8"><title>Checkout fixture</title>
 <main>
   <h1>Checkout</h1>
   <form id="f">
     <label>Email <input id="email" name="email" required></label>
     <label>First name <input id="first" name="first_name" required></label>
+    <label>Last name <input id="last" name="last_name" required></label>
     <label>State <select id="state" required>
       <option value=""></option><option>NY</option><option>CA</option>
     </select></label>
@@ -72,6 +76,7 @@ const MULTI_STAGE_CHECKOUT_HTML = `<!doctype html><meta charset="utf-8"><title>C
   document.querySelector("#continue").addEventListener("click", () => {
     if (!document.querySelector("#email").value) return;
     if (!document.querySelector("#first").value) return;
+    if (!document.querySelector("#last").value) return;
     document.querySelector("main").innerHTML = "";
     setTimeout(() => {
       document.querySelector("main").innerHTML =
@@ -84,7 +89,7 @@ const MULTI_STAGE_CHECKOUT_HTML = `<!doctype html><meta charset="utf-8"><title>C
         '<option value=""></option><option>NY</option><option>CA</option></select></label>' +
         '<label>Search <input id=q type=search></label>' +
         '<p id=stage>payment</p>';
-    }, 600);
+    }, ${MULTI_STAGE_BLANK_MS});
   });
 </script>`;
 
@@ -387,7 +392,7 @@ describe("operate_drive real-browser fixture", () => {
         cvv: "739",
         exp_month: "12",
         exp_year: "2030",
-        name: "Ada Lovelace",
+        name: "A L Byron",
         billing: { line1: "1 Main St", city: "Boston", postal_code: "02110", country: "US" },
       };
       const dependencies = deps(async (_api, _state, questions) => jevFromQuestions(questions));
@@ -423,20 +428,22 @@ describe("operate_drive real-browser fixture", () => {
           facts: {
             email: "ada@fixture.test",
             first_name: "Ada",
+            last_name: "Lovelace",
             state: "NY",
             card_ref: "card-1",
             merchant: "fixture.test",
           },
-          max_steps: 16,
+          max_steps: 20,
         },
         api(),
         undefined,
         dependencies,
       );
       expect(result.status).not.toBe("stuck");
-      // The same-document swap leaves one empty snapshot; the loop re-observes
-      // rather than asking Jev to rule on nothing.
-      expect(result.trajectory.some((step) => step.action === "wait")).toBe(true);
+      // The blank window outlasts one DRIVE_WAIT_MS, so the loop has to keep
+      // re-observing instead of asking Jev to rule on an empty snapshot.
+      const waits = result.trajectory.filter((step) => step.action === "wait").length;
+      expect(waits).toBeGreaterThanOrEqual(Math.ceil(MULTI_STAGE_BLANK_MS / DRIVE_WAIT_MS));
       expect(await page.locator("#stage").textContent()).toBe("payment");
 
       // The card is released once the typeable shipping/contact fills are done:
@@ -447,9 +454,12 @@ describe("operate_drive real-browser fixture", () => {
       expect(await page.locator("#pan").inputValue()).toBe(card.pan);
       expect(await page.locator("#cvv").inputValue()).toBe(card.cvv);
 
-      // After release the expiry belongs to the card expiry control alone.
+      // After release the expiry and the cardholder name belong to the card
+      // controls alone — "Name on card" takes the card's own name, not the
+      // shipping name synthesized from first_name + last_name.
       expect(await page.locator("#exp").inputValue()).toBe("12/30");
-      expect(await page.locator("#ncard").inputValue()).toBe("Ada Lovelace");
+      expect(await page.locator("#ncard").inputValue()).toBe("A L Byron");
+      expect(await page.locator("#last").count()).toBe(0);
       expect(await page.locator("#when").inputValue()).toBe("");
     } finally {
       await finishProvisionSession(started.session_id);
