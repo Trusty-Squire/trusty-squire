@@ -4,12 +4,20 @@
 # monorepo: apps/mcp and apps/api import the workspace libraries
 # @trusty-squire/skill-schema and @trusty-squire/vault, whose `dist/` must be
 # built first (a fresh gate clone has no dist). Mirror .github/workflows/ci.yml:
-# generate the registry Prisma client, build the packages/** dists, then run the
-# per-package test suites. Deterministic, matches CI exactly.
+# generate the registry Prisma client, build the packages/** dists, then run
+# the per-package suites CI already trusts on PRs.
+#
+# mcp's `test` script is the full `vitest run` (real-browser + slow + fast;
+# ~1064s). CI and this validation lap use `test:fast` (~119s) instead. The
+# nightly / post-merge full pass and `test:real-browser` stay on
+# mcp-slow-tests.yml and stable/`latest` release gates. Do not point this
+# command back at `pnpm -r test`: that is the 17-minute tax that burned
+# the validation deadline on four-line unit fixes.
 commands:
   test: |
     set -eu
     pnpm install --frozen-lockfile
     pnpm --filter '@trusty-squire/registry' prisma:generate
     pnpm -r --filter "./packages/**" --if-present build
-    pnpm -r --if-present test
+    pnpm -r --filter '!@trusty-squire/mcp' --if-present test
+    pnpm --filter @trusty-squire/mcp test:fast
