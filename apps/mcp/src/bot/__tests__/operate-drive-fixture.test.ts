@@ -13,6 +13,7 @@ import { BrowserController } from "../browser.js";
 import { JevUnavailableError, type JevCallOutcome } from "../jev-client.js";
 import {
   DRIVE_CONFIDENCE_THRESHOLD,
+  DRIVE_EMPTY_SNAPSHOT_WAITS,
   DRIVE_WAIT_MS,
   runOperateDrive,
   type DriveDependencies,
@@ -44,7 +45,7 @@ const SIGNUP_HTML = `<!doctype html><meta charset="utf-8"><title>Signup fixture<
       const email = document.querySelector('#email').value;
       const company = document.querySelector('#company').value;
       if (!email || !company) return;
-      document.querySelector('main').innerHTML = '<p id=done>Account created for '+email+' at '+company+'</p>';
+      document.querySelector('main').innerHTML = '<p id=done>Account created for '+email+' at '+company+'</p><a id=dash href=#dashboard>Go to dashboard</a>';
     ">Continue</button>
   </form>
 </main>`;
@@ -467,6 +468,35 @@ describe("operate_drive real-browser fixture", () => {
     }
   }, 60_000);
 
+  it("stops as stuck on a page that never renders a control, without consulting Jev", async () => {
+    const { context, started } = await openFixture(
+      `<!doctype html><meta charset="utf-8"><title>Blank</title><main><p>Loading…</p></main>`,
+      "blank-snapshot.test",
+    );
+    try {
+      let jevCalls = 0;
+      const result = await runOperateDrive(
+        { session_id: started.session_id, goal: "reach the checkout" },
+        api(),
+        undefined,
+        deps(async (_api, _state, questions) => {
+          jevCalls += 1;
+          return jevFromQuestions(questions);
+        }),
+      );
+      expect(result.status).toBe("stuck");
+      // Zero rows offers no action to choose from, so the model is never paid
+      // to rule on the blank snapshot.
+      expect(jevCalls).toBe(0);
+      expect(result.trajectory.filter((step) => step.action === "wait")).toHaveLength(
+        DRIVE_EMPTY_SNAPSHOT_WAITS,
+      );
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
   it("checks DONE against a fresh snapshot even on an unchanged page", async () => {
     const { context, started } = await openFixture(NOOP_HTML, "done-unchanged.test");
     try {
@@ -618,7 +648,10 @@ describe("operate_drive real-browser fixture", () => {
     try {
       await context.route("**/destination", async (route) => {
         await new Promise((resolve) => setTimeout(resolve, 150));
-        await route.fulfill({ contentType: "text/html", body: "<main>Destination ready</main>" });
+        await route.fulfill({
+          contentType: "text/html",
+          body: `<main>Destination ready<a href="#start">Start</a></main>`,
+        });
       });
       let decisions = 0;
       const result = await runOperateDrive(

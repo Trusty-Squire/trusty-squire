@@ -452,6 +452,52 @@ describe("decideAfterJev stop reasons", () => {
     });
   });
 
+  it("leaves a passport expiry as an ordinary fillable the card value never reaches", () => {
+    const passport: WireRow = ["@e:pp", "t", "Passport expiry|f=date|s=r"];
+    const cardExpiry: WireRow = ["@e:exp", "t", "Expiration date (MM / YY)|f=date|s=r"];
+    expect(isExpiryRow(passport)).toBe(false);
+    expect(isExpiryRow(cardExpiry)).toBe(true);
+    const facts = applyReleasedCardFacts(
+      { card_ref: "card-1" },
+      { exp_month: "12", exp_year: "2030", name: "Ada" },
+    );
+    expect(matchingFactKeys(facts, passport)).toEqual([]);
+    expect(matchingFactKeys(facts, cardExpiry)).toEqual(["card_expiry"]);
+    // Deferred payment controls are hidden before release; a passport expiry
+    // is not one, so it stays a reportable required field.
+    expect(requiredFillableMissingFact([passport], { card_ref: "card-1" }, true)?.ref).toBe(
+      "@e:pp",
+    );
+    expect(
+      requiredFillableMissingFact([cardExpiry], { card_ref: "card-1" }, true)?.ref,
+    ).toBeUndefined();
+  });
+
+  it("gives the card expiry control the card value even when a travel date fact exists", () => {
+    const cardExpiry: WireRow = ["@e:exp", "t", "Expiration date (MM / YY)|f=date|s=r"];
+    const departure: WireRow = ["@e:dep", "t", "Departure date|f=date"];
+    const facts = applyReleasedCardFacts(
+      { date: "2026-12-01", card_ref: "card-1" },
+      { exp_month: "12", exp_year: "2030", name: "Ada" },
+    );
+    expect(Object.keys(facts).indexOf("date")).toBeLessThan(
+      Object.keys(facts).indexOf("card_expiry"),
+    );
+    expect(matchingFactKeys(facts, cardExpiry)).toEqual(["card_expiry"]);
+    expect(matchingFactKeys(facts, departure)).toEqual(["date"]);
+  });
+
+  it("sends split month and year controls their own released card fields", () => {
+    const month: WireRow = ["@e:m", "t", "Expiration month|f=date"];
+    const year: WireRow = ["@e:y", "t", "Expiration year|f=date"];
+    const facts = applyReleasedCardFacts(
+      { card_ref: "card-1" },
+      { exp_month: "12", exp_year: "2030", name: "Ada" },
+    );
+    expect(matchingFactKeys(facts, month)).toEqual(["exp_month"]);
+    expect(matchingFactKeys(facts, year)).toEqual(["exp_year"]);
+  });
+
   it("offers the released expiry only to the card expiry control, never to a delivery date", () => {
     const expiry: WireRow = ["@e:exp", "t", "Expiration date (MM / YY)|s=r"];
     const deliveryDate: WireRow = ["@e:when", "t", "Delivery date"];

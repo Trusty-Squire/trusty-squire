@@ -589,9 +589,25 @@ export function isCvvRow(row: WireRow): boolean {
 const CARD_EXPIRY_FACT = "card_expiry";
 const CARD_NAME_FACT = "card_name";
 
+// A card expiry control names its card context or its MM/YY shape. A bare
+// `expir` substring is a passport or licence expiry just as often, and that
+// field must stay an ordinary fillable the drive neither hides nor types a
+// card value into.
+const CARD_EXPIRY_ROW =
+  /cc_exp|(?:credit_)?card_\w*exp|exp_month|exp_year|exp_date|expiration_month|expiration_year|mm_yy/;
+
 export function isExpiryRow(row: WireRow): boolean {
   const hay = `${normalizeKey(fieldNameForRow(row))} ${normalizeKey(readableLabel(row))}`;
-  return /expir|exp_month|exp_year|exp_date|cc_exp/.test(hay);
+  return CARD_EXPIRY_ROW.test(hay);
+}
+
+function cardExpiryFactFor(row: WireRow): string {
+  const hay = `${normalizeKey(fieldNameForRow(row))} ${normalizeKey(readableLabel(row))}`;
+  const month = /month|mm/.test(hay);
+  const year = /year|yy/.test(hay);
+  if (month && !year) return "exp_month";
+  if (year && !month) return "exp_year";
+  return CARD_EXPIRY_FACT;
 }
 
 export function isCardholderNameRow(row: WireRow): boolean {
@@ -713,6 +729,13 @@ export function matchingFactKeys(facts: Record<string, string>, row: WireRow): s
   if (isCardholderNameRow(row)) {
     return keys.filter((key) => normalizeKey(key) === CARD_NAME_FACT);
   }
+  // Same separation for the expiry: the card's own value is the only thing a
+  // card expiry control takes, so a host-supplied travel `date` fact cannot
+  // outrank it on the control card_expiry exists for.
+  if (isExpiryRow(row)) {
+    const wantedFact = cardExpiryFactFor(row);
+    return keys.filter((key) => normalizeKey(key) === wantedFact);
+  }
   const wanted = new Set<string>([
     ...aliasKeysFor(fieldNameForRow(row)),
     ...aliasKeysFor(readableLabel(row)),
@@ -745,10 +768,6 @@ export function matchingFactKeys(facts: Record<string, string>, row: WireRow): s
   ) {
     for (const alias of aliasKeysFor("date")) wanted.add(alias);
   }
-  // The released card's combined MM/YY carries its own key rather than joining
-  // the shared travel/delivery `date` family, so a "Delivery date" input on the
-  // same checkout can never be typed with the expiry.
-  if (isExpiryRow(row)) wanted.add(CARD_EXPIRY_FACT);
   if (label.includes("ticket_type") || label.includes("trip_type")) {
     for (const alias of aliasKeysFor("ticket_type")) wanted.add(alias);
   }
@@ -3266,18 +3285,25 @@ async function driveLoop(input: {
     }
 
     // A same-document stage swap (Shopify one-page checkout) and a hydrating
-    // checkout both leave the snapshot empty for a while. Spend the whole
-    // re-observation budget before Jev is consulted at all. A page still empty
-    // afterwards is a real state — a finished signup renders only a
-    // confirmation paragraph — so Jev still gets to call DONE on it.
-    if (rows.length === 0 && emptySnapshotWaits < DRIVE_EMPTY_SNAPSHOT_WAITS) {
+    // checkout both leave the snapshot empty for a while. Re-observe on the
+    // whole budget, then stop: there is no action to choose from zero rows, so
+    // Jev is never asked to rule on an empty snapshot.
+    if (rows.length === 0) {
+      if (emptySnapshotWaits >= DRIVE_EMPTY_SNAPSHOT_WAITS) {
+        return finish("stuck", {
+          question: {
+            question: nextActionInstructions(drive.goal),
+            options: actionCriteria(rows, includePayment),
+          },
+        });
+      }
       emptySnapshotWaits += 1;
       const applied = await applyDecision({ kind: "wait", confidence: 1 });
       if (applied !== "continue") return applied;
       steps += 1;
       continue;
     }
-    if (rows.length > 0) emptySnapshotWaits = 0;
+    emptySnapshotWaits = 0;
 
     const fields = paymentFields(rows);
     // A pending approval records an inject_card trajectory step, so trajectory
