@@ -132,6 +132,8 @@ import {
   isReissuedRef,
   isCreateEntryRow,
   listedItemRows,
+  untriedListedItemRows,
+  isSiblingSectionNavRow,
   isDeeperDestination,
   isRevealOrCopyRow,
   pageShowsRevealedKey,
@@ -3262,6 +3264,47 @@ describe("post-confirmation navigation", () => {
     expect(isDeeperDestination("https://app.example.test/settings/apps/one", settingsUrl)).toBe(true);
     expect(isDeeperDestination("https://app.example.test/reputation", settingsUrl)).toBe(false);
     expect(listedItemRows([nested, sibling], settingsUrl).map((row) => row[0])).toEqual(["@e:one"]);
+    const account: WireRow = ["@e:acct", "tb", "Account"];
+    const billing: WireRow = ["@e:bill", "tb", "Billing"];
+    const apps: WireRow = ["@e:apps", "tb", "Apps"];
+    const entries: WireRow[] = [
+      ["@e:one", "l", "payments-api|u=https://app.example.test/settings/apps/one"],
+      ["@e:two", "l", "billing-api|u=https://app.example.test/settings/apps/two"],
+      ["@e:three", "l", "alerts-api|u=https://app.example.test/settings/apps/three"],
+    ];
+    expect(isSiblingSectionNavRow(account, settingsUrl, [...entries, account])).toBe(true);
+    expect(isSiblingSectionNavRow(entries[0]!, settingsUrl, [...entries, account])).toBe(false);
+    expect(untriedListedItemRows([...entries, account, create], [], settingsUrl).map((row) => row[0])).toEqual([
+      "@e:one",
+      "@e:two",
+      "@e:three",
+    ]);
+    const offered = driveTargetSets(
+      [...entries, account, billing, apps, create],
+      {},
+      false,
+      [],
+      settingsUrl,
+      new Map(),
+      (text) => text,
+      [],
+      { goal: "extract an API key" },
+    );
+    expect(offered.CLICK.map((entry) => entry.ref)).toEqual(["@e:one", "@e:two", "@e:three"]);
+    expect(offered.CLICK.map((entry) => entry.ref)).not.toContain("@e:acct");
+    const afterAccount = driveTargetSets(
+      [...entries, account, billing, apps],
+      {},
+      false,
+      [],
+      settingsUrl,
+      new Map(),
+      (text) => text,
+      [],
+      { goal: "extract an API key", visitedSectionKeys: [sectionIdentity(account, settingsUrl)] },
+    );
+    expect(afterAccount.CLICK.map((entry) => entry.ref)).not.toContain("@e:acct");
+    expect(afterAccount.CLICK.map((entry) => entry.ref)[0]).toBe("@e:one");
     expect(isRevealOrCopyRow(["@e:show", "b", "Reveal"])).toBe(true);
     expect(isRevealOrCopyRow(["@e:copy", "b", "Copy"])).toBe(true);
     expect(isRevealOrCopyRow(["@e:acct", "tb", "Account"])).toBe(false);
