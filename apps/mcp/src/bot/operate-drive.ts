@@ -311,7 +311,16 @@ export function mergeFacts(
   existing: Record<string, string>,
   added: Record<string, string> | undefined,
 ): Record<string, string> {
-  return added === undefined ? { ...existing } : { ...existing, ...added };
+  const next = { ...existing };
+  if (added === undefined) return next;
+  for (const [key, value] of Object.entries(added)) {
+    // Only a release may write these. Accepting them from the caller both
+    // types an unvouched value into a live payment form and defeats the
+    // deferral that keeps card controls unoffered until the card is out.
+    if (CARD_DERIVED_FACTS.has(key)) continue;
+    next[key] = value;
+  }
+  return next;
 }
 
 export function wireRowsFromObservation(
@@ -593,10 +602,15 @@ export function isCvvRow(row: WireRow): boolean {
 }
 
 const CARD_EXPIRY_FACT = "card_expiry";
+const CARD_EXPIRY_LONG_FACT = "card_expiry_long";
 const CARD_NAME_FACT = "card_name";
 const EXP_YEAR_SHORT_FACT = "exp_year_short";
+const CARD_EXPIRY_LONG_LENGTH = "MM/YYYY".length;
+/** Facts only a card release may write. A host cannot supply them and they
+ * never outlive the release that produced them. */
 const CARD_DERIVED_FACTS = new Set([
   CARD_EXPIRY_FACT,
+  CARD_EXPIRY_LONG_FACT,
   CARD_NAME_FACT,
   EXP_YEAR_SHORT_FACT,
   "exp_month",
@@ -652,7 +666,12 @@ function cardExpiryFactFor(row: WireRow): string {
   // card is declined with nothing to read. The control's own declared width
   // decides this, never how the merchant spelled the label.
   if (year && !month) return rowWidth(row) === 2 ? EXP_YEAR_SHORT_FACT : "exp_year";
-  return CARD_EXPIRY_FACT;
+  // A combined control wide enough to hold MM/YYYY is asking for four year
+  // digits; anything narrower can only take MM/YY.
+  const width = rowWidth(row);
+  return width !== undefined && width >= CARD_EXPIRY_LONG_LENGTH
+    ? CARD_EXPIRY_LONG_FACT
+    : CARD_EXPIRY_FACT;
 }
 
 export function isCardholderNameRow(row: WireRow): boolean {
@@ -846,16 +865,21 @@ export function applyReleasedCardFacts(
   const month = card.exp_month.trim();
   const year = card.exp_year.trim();
   const name = card.name.trim();
-  const next = { ...facts };
   const shortYear = year.length === 4 ? year.slice(-2) : year;
-  if (next.exp_month === undefined && month.length > 0) next.exp_month = month;
-  if (next.exp_year === undefined && year.length > 0) next.exp_year = year;
-  if (next[EXP_YEAR_SHORT_FACT] === undefined && shortYear.length > 0) {
-    next[EXP_YEAR_SHORT_FACT] = shortYear;
-  }
-  if (next[CARD_NAME_FACT] === undefined && name.length > 0) next[CARD_NAME_FACT] = name;
-  if (next[CARD_EXPIRY_FACT] === undefined && month.length > 0 && year.length > 0) {
-    next[CARD_EXPIRY_FACT] = `${month.padStart(2, "0")}/${shortYear}`;
+  const next = { ...facts };
+  // A retry after a decline releases a second card into the same session, so
+  // every one of these is rebuilt from the card actually in play. Keeping a
+  // previously written value types the declined card's expiry beside the new
+  // card's PAN, and nothing downstream would report it.
+  for (const key of CARD_DERIVED_FACTS) delete next[key];
+  if (month.length > 0) next.exp_month = month;
+  if (year.length > 0) next.exp_year = year;
+  if (shortYear.length > 0) next[EXP_YEAR_SHORT_FACT] = shortYear;
+  if (name.length > 0) next[CARD_NAME_FACT] = name;
+  if (month.length > 0 && year.length > 0) {
+    const paddedMonth = month.padStart(2, "0");
+    next[CARD_EXPIRY_FACT] = `${paddedMonth}/${shortYear}`;
+    next[CARD_EXPIRY_LONG_FACT] = `${paddedMonth}/${year}`;
   }
   return next;
 }
@@ -1132,16 +1156,6 @@ export function fillableCandidates(
     if (isOffscreenRow(row) && !allowOffscreen) continue;
     if (!includePayment && (isPaymentRow(row) || isCvvRow(row))) continue;
     if (isPaymentRow(row) || isCvvRow(row)) continue;
-    // Cardholder name and expiry are filled from the released card. Offering
-    // them earlier pulls the viewport onto payment while shipping is unfinished
-    // (Shopify one-page checkout) and then offscreen types stale-loop.
-    if (
-      includePayment &&
-      facts.exp_month === undefined &&
-      (isExpiryRow(row) || isCardholderNameRow(row))
-    ) {
-      continue;
-    }
     if (isOtpRow(row) && matchingFactKeys(facts, row).length === 0) continue;
     if (matchingFactKeys(facts, row).length === 0) continue;
     const role = ROLE_LETTERS[row[1]] ?? row[1];

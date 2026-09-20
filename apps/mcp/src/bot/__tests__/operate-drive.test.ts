@@ -495,7 +495,89 @@ describe("decideAfterJev stop reasons", () => {
       exp_year_short: "30",
       card_name: "Ada",
       card_expiry: "12/30",
+      card_expiry_long: "12/2030",
     });
+  });
+
+  it("rebuilds every card-derived fact from the card actually in play", () => {
+    const declined = applyReleasedCardFacts(
+      { email: "a@b.test", card_ref: "card-A" },
+      { exp_month: "12", exp_year: "2030", name: "A L Byron" },
+    );
+    expect(declined.card_expiry).toBe("12/30");
+    // The host retries with a second card; drive.facts survives the retry, so
+    // the first card's values must not be typed beside the second card's PAN.
+    const retried = applyReleasedCardFacts(declined, {
+      exp_month: "3",
+      exp_year: "2027",
+      name: "Ada Lovelace",
+    });
+    expect(retried.card_expiry).toBe("03/27");
+    expect(retried.card_expiry_long).toBe("03/2027");
+    expect(retried.exp_month).toBe("3");
+    expect(retried.exp_year).toBe("2027");
+    expect(retried.exp_year_short).toBe("27");
+    expect(retried.card_name).toBe("Ada Lovelace");
+    expect(retried.email).toBe("a@b.test");
+  });
+
+  it("clears a card-derived fact the newly released card cannot supply", () => {
+    const first = applyReleasedCardFacts(
+      { card_ref: "card-A" },
+      { exp_month: "12", exp_year: "2030", name: "A L Byron" },
+    );
+    expect(first.card_name).toBe("A L Byron");
+    const blankName = applyReleasedCardFacts(first, {
+      exp_month: "12",
+      exp_year: "2030",
+      name: "   ",
+    });
+    expect(blankName.card_name).toBeUndefined();
+  });
+
+  it("sizes a combined expiry write from the control's declared width", () => {
+    const facts = applyReleasedCardFacts(
+      { card_ref: "card-1" },
+      { exp_month: "12", exp_year: "2030", name: "Ada" },
+    );
+    const valueFor = (row: WireRow): string | undefined => facts[matchingFactKeys(facts, row)[0]!];
+    // A control wide enough for MM/YYYY is asking for four year digits.
+    expect(valueFor(["@e:l", "t", "Expiration date (MM/YYYY)|f=date|w=7"])).toBe("12/2030");
+    expect(valueFor(["@e:s", "t", "Expiration date (MM / YY)|f=date|w=5"])).toBe("12/30");
+    // No declared width is no signal, so the near-universal MM/YY is written.
+    expect(valueFor(["@e:u", "t", "Expiration date (MM / YY)|f=date"])).toBe("12/30");
+    // The label's spelling decides nothing either way.
+    expect(valueFor(["@e:x", "t", "Expiration date (MM / YY)|f=date|w=7"])).toBe("12/2030");
+  });
+
+  it("refuses card-derived facts supplied by the caller", () => {
+    const merged = mergeFacts(
+      { email: "a@b.test" },
+      {
+        card_ref: "card-1",
+        exp_month: "01",
+        exp_year: "1999",
+        exp_year_short: "99",
+        card_name: "Mallory",
+        card_expiry: "01/99",
+        card_expiry_long: "01/1999",
+      },
+    );
+    // Only a release may write these; a caller-supplied value would be typed
+    // into a live payment form and would also switch off the deferral that
+    // keeps card controls unoffered until the card is out.
+    expect(merged).toEqual({ email: "a@b.test", card_ref: "card-1" });
+  });
+
+  it("keeps card controls unoffered when the caller passes a card-derived fact", () => {
+    const cardName: WireRow = ["@e:ncard", "t", "Name on card|s=r"];
+    const expiry: WireRow = ["@e:exp", "t", "Expiration date (MM / YY)|f=date|s=r"];
+    const rows = [cardName, expiry, EMAIL];
+    const facts = mergeFacts(
+      {},
+      { email: "a@b.test", card_ref: "card-1", exp_month: "12", card_name: "Mallory" },
+    );
+    expect(fillableCandidates(rows, facts, true).map((row) => row.ref)).toEqual(["@e:email"]);
   });
 
   it("sizes the year write from the control's declared width, not its label", () => {
