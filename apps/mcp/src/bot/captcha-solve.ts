@@ -348,9 +348,14 @@ function autoSolveState(session: Session): AutoSolveState {
  * blocked on it would hold its lease and wedge every later call and
  * operate_finish.
  *
- * Never throws and never rejects.
+ * Never throws and never rejects. The returned string is the last
+ * decision this call made (inject landed, fetch armed, or why it cannot
+ * solve) so a caller that would otherwise finish stuck can say why.
  */
-export async function attemptOperateCaptchaAutoSolve(session: Session, page?: Page): Promise<void> {
+export async function attemptOperateCaptchaAutoSolve(
+  session: Session,
+  page?: Page,
+): Promise<string> {
   // A released card is live in the page. Injecting a token fires the site's own
   // success callbacks, which on a checkout is the order submit — and a payment
   // advances only through the operator's explicit actions, after the
@@ -360,15 +365,20 @@ export async function attemptOperateCaptchaAutoSolve(session: Session, page?: Pa
     outcome: "autosolve_entry",
     card_released: session.releasedPaymentCard !== null,
   });
-  if (session.releasedPaymentCard !== null) return;
-  await injectPendingCaptchaToken(session, page);
-  startDetachedTokenFetch(session, page);
+  if (session.releasedPaymentCard !== null) return "card_released";
+  const injected = await injectPendingCaptchaToken(session, page);
+  const fetch = await startDetachedTokenFetch(session, page);
+  if (injected === "injected" || injected === "already_settled") return injected;
+  return fetch;
 }
 
-async function injectPendingCaptchaToken(session: Session, page?: Page): Promise<void> {
+async function injectPendingCaptchaToken(
+  session: Session,
+  page?: Page,
+): Promise<string | null> {
   const state = autoSolveState(session);
   const pending = state.pending;
-  if (pending === null) return;
+  if (pending === null) return null;
   state.pending = null;
 
   try {
@@ -386,7 +396,7 @@ async function injectPendingCaptchaToken(session: Session, page?: Page): Promise
       console.error(
         `[captcha-autosolve-diag] session=${session.id} variant=${pending.variant} outcome=token_expired age_ms=${Date.now() - pending.fetchedAt}`,
       );
-      return;
+      return "token_expired";
     }
     // A token is bound to the document it was bought for. The agent kept
     // driving while 2Captcha worked, so the form may have been submitted or
@@ -397,7 +407,7 @@ async function injectPendingCaptchaToken(session: Session, page?: Page): Promise
       console.error(
         `[captcha-autosolve-diag] session=${session.id} variant=${pending.variant} outcome=stale_page`,
       );
-      return;
+      return "stale_page";
     }
     // The same question the fetch side asks before spending: a widget that
     // settled while 2Captcha worked — the agent clicked the checkbox, or the
@@ -414,7 +424,7 @@ async function injectPendingCaptchaToken(session: Session, page?: Page): Promise
       );
       state.consecutiveExpiries = 0;
       state.expiryBackoffUntil = 0;
-      return;
+      return "already_settled";
     }
     // The token is being consumed — the purchase→consume pipeline worked this
     // time, so a later expiry would be a fresh observation, not a streak.
@@ -432,7 +442,7 @@ async function injectPendingCaptchaToken(session: Session, page?: Page): Promise
           `[captcha-autosolve-diag] session=${session.id} variant=${pending.variant} outcome=gate_handoff_started`,
         );
         void runGateHandoffSolve(session, page, gateUrl, pending.token, pending.variant);
-        return;
+        return "gate_handoff_started";
       }
     }
     const res = await injectCaptchaToken(session.browser, pending.variant, pending.token, page);
@@ -459,6 +469,7 @@ async function injectPendingCaptchaToken(session: Session, page?: Page): Promise
     if (page) {
       void deliverGateHandoff(page, pending.variant);
     }
+    return confirmed ? "injected" : "token_not_confirmed";
   } catch (error) {
     audit(session.id, "captcha_autosolve", {
       variant: pending.variant,
@@ -466,6 +477,7 @@ async function injectPendingCaptchaToken(session: Session, page?: Page): Promise
       error: error instanceof Error ? error.message : String(error),
     });
     state.lastFinishedAt = Date.now();
+    return "error";
   }
 }
 
@@ -615,36 +627,35 @@ async function deliverGateHandoff(page: Page, variant: string): Promise<void> {
   }
 }
 
-function startDetachedTokenFetch(session: Session, page?: Page): void {
+async function startDetachedTokenFetch(session: Session, page?: Page): Promise<string> {
   const state = autoSolveState(session);
   if (state.inFlight) {
     audit(session.id, "captcha_autosolve", { outcome: "fetch_skipped", reason: "in_flight" });
-    return;
+    return "in_flight";
   }
   if (
     state.lastFinishedAt > 0 &&
     Date.now() - state.lastFinishedAt < CAPTCHA_AUTOSOLVE_RETRY_COOLDOWN_MS
   ) {
     audit(session.id, "captcha_autosolve", { outcome: "fetch_skipped", reason: "cooldown" });
-    return;
+    return "cooldown";
   }
   if (Date.now() < state.expiryBackoffUntil) {
     audit(session.id, "captcha_autosolve", { outcome: "fetch_skipped", reason: "expiry_backoff" });
     console.error(
       `[captcha-autosolve-diag] session=${session.id} outcome=fetch_skipped reason=expiry_backoff expiries=${state.consecutiveExpiries} remaining_ms=${state.expiryBackoffUntil - Date.now()}`,
     );
-    return;
+    return "expiry_backoff";
   }
   // Claim the slot SYNCHRONOUSLY. Observations are serialized by the session
   // call lease, but the fetch they start is not, so a later observation has to
   // see the claim even while this one is still detecting.
   state.inFlight = true;
-  void runDetachedTokenFetch(session, page);
+  return await runDetachedTokenFetch(session, page);
 }
 
-async function runDetachedTokenFetch(session: Session, page?: Page): Promise<void> {
+async function runDetachedTokenFetch(session: Session, page?: Page): Promise<string> {
   const state = autoSolveState(session);
-  let failedAt = 0;
   let variant: CaptchaVariant | null = null;
   audit(session.id, "captcha_autosolve", { outcome: "fetch_start" });
   try {
@@ -667,7 +678,87 @@ async function runDetachedTokenFetch(session: Session, page?: Page): Promise<voi
     // Only a RENDERED challenge escalates to the solver. A mere checkbox
     // (or a settled widget) with a response token needs nothing, and a
     // no-challenge page must never spend the funded key.
-    if (!det.challengeRendered || !AUTOSOLVE_VARIANTS.has(det.variant)) return;
+    if (!det.challengeRendered || !AUTOSOLVE_VARIANTS.has(det.variant)) {
+      state.inFlight = false;
+      return det.challengeRendered ? "unsupported_variant" : "no_challenge";
+    }
+    // Scoped to the DETECTED provider: a co-resident reCAPTCHA v3 badge token
+    // must not read as "the rendered hCaptcha is already solved".
+    if (await variantTokenPresent(session, det.variant, page)) {
+      state.inFlight = false;
+      return "already_settled";
+    }
+    // A gate challenge that renders again after this page's one-shot handoff
+    // can only be re-attempted through the destructive live-widget injection
+    // (the handoff is one-shot per page). Whether the delivered code was then
+    // rejected by the site or the handoff never produced one, further
+    // purchases are guaranteed waste — skip them and leave the challenge
+    // visible for the operator.
+    if (page !== undefined && findGateFrameUrl(page) !== null && gateHandoffAttempted.has(page)) {
+      const delivered = gateHandoffDeliveredCount.get(page) ?? 0;
+      audit(session.id, "captcha_autosolve", {
+        variant: det.variant,
+        outcome: "autosolve_disabled",
+        reason:
+          delivered >= GATE_HANDOFF_MAX_DELIVERED_PER_PAGE
+            ? "gate_handoff_delivered_but_rejected"
+            : "gate_handoff_already_attempted",
+      });
+      console.error(
+        `[captcha-autosolve-diag] session=${session.id} variant=${det.variant} outcome=autosolve_disabled reason=${delivered >= GATE_HANDOFF_MAX_DELIVERED_PER_PAGE ? "gate_handoff_delivered_but_rejected" : "gate_handoff_already_attempted"} delivered=${delivered}`,
+      );
+      state.inFlight = false;
+      return "autosolve_disabled";
+    }
+    variant = det.variant;
+
+    const solver = await buildTwoCaptchaSolver(session.api, {
+      requestTimeoutMs: CAPTCHA_AUTOSOLVE_REQUEST_TIMEOUT_MS,
+    });
+    if (!solver.isAvailable()) {
+      audit(session.id, "captcha_autosolve", {
+        variant,
+        outcome: "no_key",
+        solved: false,
+        solver_ready: false,
+      });
+      console.error(
+        `[captcha-autosolve-diag] session=${session.id} variant=${variant} outcome=no_key`,
+      );
+      state.inFlight = false;
+      return "no_key";
+    }
+    void purchaseCaptchaToken(session, page, variant, solver);
+    return "fetch_started";
+  } catch (error) {
+    // Best-effort: any solver or transport error — including the page or the
+    // whole session going away mid-fetch — leaves the challenge on the page for
+    // the agent to see, exactly as if no solver existed. Detection racing a
+    // navigation is still audited: a silent swallow is indistinguishable from
+    // the fetch never running (the gap this module exists to close).
+    audit(session.id, "captcha_autosolve", {
+      ...(variant !== null ? { variant } : {}),
+      outcome: "error",
+      error: error instanceof Error ? error.message : String(error),
+    });
+    console.error(
+      `[captcha-autosolve-diag] session=${session.id} variant=${variant} outcome=error error=${error instanceof Error ? error.message : String(error)}`,
+    );
+    state.inFlight = false;
+    state.lastFinishedAt = Date.now();
+    return "error";
+  }
+}
+
+async function purchaseCaptchaToken(
+  session: Session,
+  page: Page | undefined,
+  variant: CaptchaVariant,
+  solver: TwoCaptchaSolver,
+): Promise<void> {
+  const state = autoSolveState(session);
+  let failedAt = 0;
+  try {
     // One-shot SDK-surface dump (no credential values, shape only): tells us
     // where the site's hcaptcha SDK keeps its callbacks before we rely on the
     // injection path firing them.
@@ -719,36 +810,7 @@ async function runDetachedTokenFetch(session: Session, page?: Page): Promise<voi
         // diagnostic only
       }
     }
-    // Scoped to the DETECTED provider: a co-resident reCAPTCHA v3 badge token
-    // must not read as "the rendered hCaptcha is already solved".
-    if (await variantTokenPresent(session, det.variant, page)) return;
-    // A gate challenge that renders again after this page's one-shot handoff
-    // can only be re-attempted through the destructive live-widget injection
-    // (the handoff is one-shot per page). Whether the delivered code was then
-    // rejected by the site or the handoff never produced one, further
-    // purchases are guaranteed waste — skip them and leave the challenge
-    // visible for the operator.
-    if (page !== undefined && findGateFrameUrl(page) !== null && gateHandoffAttempted.has(page)) {
-      const delivered = gateHandoffDeliveredCount.get(page) ?? 0;
-      audit(session.id, "captcha_autosolve", {
-        variant: det.variant,
-        outcome: "autosolve_disabled",
-        reason:
-          delivered >= GATE_HANDOFF_MAX_DELIVERED_PER_PAGE
-            ? "gate_handoff_delivered_but_rejected"
-            : "gate_handoff_already_attempted",
-      });
-      console.error(
-        `[captcha-autosolve-diag] session=${session.id} variant=${det.variant} outcome=autosolve_disabled reason=${delivered >= GATE_HANDOFF_MAX_DELIVERED_PER_PAGE ? "gate_handoff_delivered_but_rejected" : "gate_handoff_already_attempted"} delivered=${delivered}`,
-      );
-      return;
-    }
-    variant = det.variant;
-
     const solvedUrl = page?.url() ?? session.browser.currentUrl();
-    const solver = await buildTwoCaptchaSolver(session.api, {
-      requestTimeoutMs: CAPTCHA_AUTOSOLVE_REQUEST_TIMEOUT_MS,
-    });
     const fetched = await fetchCaptchaToken(solver, session.browser, variant, page);
     if (fetched.token === null) {
       audit(session.id, "captcha_autosolve", {
@@ -776,13 +838,8 @@ async function runDetachedTokenFetch(session: Session, page?: Page): Promise<voi
       `[captcha-autosolve-diag] session=${session.id} variant=${variant} outcome=token_purchased`,
     );
   } catch (error) {
-    // Best-effort: any solver or transport error — including the page or the
-    // whole session going away mid-fetch — leaves the challenge on the page for
-    // the agent to see, exactly as if no solver existed. Detection racing a
-    // navigation is still audited: a silent swallow is indistinguishable from
-    // the fetch never running (the gap this module exists to close).
     audit(session.id, "captcha_autosolve", {
-      ...(variant !== null ? { variant } : {}),
+      variant,
       outcome: "error",
       error: error instanceof Error ? error.message : String(error),
     });

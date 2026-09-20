@@ -157,6 +157,35 @@ const NEVER_SETTLES_HTML = `<!doctype html><meta charset="utf-8"><title>Never se
   <form id="f"><button type="button" id="create" disabled>Creating…</button></form>
 </main>`;
 
+// Filled form whose submit stays disabled behind a gate widget until the
+// operate-path solver injects a token. The widget is a generic challenge
+// surface, not a named provider.
+const CAPTCHA_GATE_HTML = `<!doctype html><meta charset="utf-8"><title>Gate widget</title>
+<main>
+  <h1>Create account</h1>
+  <p id="status">Ready</p>
+  <form id="f">
+    <label>Email <input id="email" name="email" type="email"></label>
+    <iframe id="challenge" title="challenge" src="about:blank" width="300" height="80"></iframe>
+    <button type="button" id="continue">Continue</button>
+  </form>
+</main>
+<script>
+  document.getElementById("continue").addEventListener("click", () => {
+    const email = document.getElementById("email");
+    const btn = document.getElementById("continue");
+    const status = document.getElementById("status");
+    if (!email.value) return;
+    if (btn.dataset.unlocked === "1") {
+      document.querySelector("main").innerHTML = "<p id=done>Account created</p>";
+      return;
+    }
+    btn.disabled = true;
+    btn.dataset.gated = "1";
+    status.textContent = "Waiting for challenge";
+  });
+</script>`;
+
 // A payment settling behind a blank processor screen: no rows, ever.
 const BLANK_PROCESSOR_HTML = `<!doctype html><meta charset="utf-8"><title>Processing</title>
 <main></main>`;
@@ -1699,6 +1728,93 @@ describe("operate_drive real-browser fixture", () => {
       expect(handoff.trajectory.some((step) => step.action === "wait")).toBe(true);
       expect(handoff.trajectory.some((step) => step.action === "goto_verify")).toBe(true);
       expect(handoff.status).toBe("complete");
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 60_000);
+
+  it("invokes the captcha solver on a disabled submit and continues after injection", async () => {
+    const host = "captcha-gate.test";
+    const { context, page, started } = await openFixture(CAPTCHA_GATE_HTML, host);
+    try {
+      let nowMs = 0;
+      const solverCalls: string[] = [];
+      const dependencies = deps(async (_api, state, questions) => {
+        const pageUrl =
+          typeof state === "object" &&
+          state !== null &&
+          "page" in state &&
+          typeof (state as { page?: { url?: string } }).page?.url === "string"
+            ? (state as { page: { url: string } }).page.url
+            : "";
+        if (pageUrl.includes("done") || (await page.locator("#done").count()) > 0) {
+          return jevFromQuestions(questions, true);
+        }
+        const typeKeys = Object.keys(choiceCriteria(questions.TYPE_TEXT_target));
+        if (typeKeys.length > 0) return jevFromQuestions(questions);
+        const clickCriteria = choiceCriteria(questions.CLICK_target);
+        const continueKey = Object.keys(clickCriteria).find((key) =>
+          (clickCriteria[key] ?? "").toLowerCase().includes("continue"),
+        );
+        const opKeys = Object.keys(choiceCriteria(questions.operation));
+        if (continueKey !== undefined) {
+          return {
+            attempts: 1,
+            elapsedMs: 12,
+            result: {
+              answers: {
+                operation: {
+                  choice: "CLICK",
+                  confidence: 0.93,
+                  probabilities: peaked(opKeys, "CLICK"),
+                },
+                CLICK_target: {
+                  choice: continueKey,
+                  confidence: 0.93,
+                  probabilities: peaked(Object.keys(clickCriteria), continueKey),
+                },
+              },
+            },
+          };
+        }
+        return jevFromQuestions(questions, true);
+      });
+      dependencies.now = () => nowMs;
+      dependencies.awaitVerification = async (sessionId) => {
+        nowMs += 45_000;
+        return { session_id: sessionId, found: false, code: null, link: null };
+      };
+      dependencies.attemptCaptchaAutoSolve = async (_session, target) => {
+        solverCalls.push("solve");
+        // First call is the post-submit refresh (fetch still running).
+        // Inject on the widget-unready retry, which is the stuck-branch hook.
+        if (solverCalls.length === 1) return "fetch_started";
+        const unlock = target ?? page;
+        const gated = await unlock.evaluate(() => {
+          const btn = document.getElementById("continue") as HTMLButtonElement | null;
+          if (btn === null || btn.dataset.gated !== "1") return false;
+          btn.disabled = false;
+          btn.dataset.unlocked = "1";
+          return true;
+        });
+        return gated ? "injected" : "no_challenge";
+      };
+      const handoff = await runOperateDrive(
+        {
+          session_id: started.session_id,
+          goal: "create an account",
+          facts: { email: "ada@fixture.test" },
+          max_seconds: 120,
+        },
+        api(),
+        undefined,
+        dependencies,
+      );
+      expect(solverCalls.length).toBeGreaterThanOrEqual(1);
+      expect(handoff.status).toBe("complete");
+      expect(handoff.reason ?? "").not.toMatch(/gate widget/);
+      expect(await page.locator("#done").count()).toBe(1);
     } finally {
       await finishProvisionSession(started.session_id);
       await context.close();
