@@ -621,6 +621,112 @@ describe("operate_drive real-browser fixture", () => {
     }
   }, 30_000);
 
+  it("invokes oauth_login on a provider link without treating the miss as fatal", async () => {
+    const html = `<!doctype html><meta charset="utf-8"><title>Signup</title>
+<main>
+  <h1>Create account</h1>
+  <a id="google" href="/oauth/google">Continue with Google</a>
+  <a id="github" href="/oauth/github">Continue with GitHub</a>
+</main>`;
+    const { context, started } = await openFixture(html, "oauth-links.test");
+    try {
+      const dependencies = deps(async (_api, _state, questions) => jevFromQuestions(questions));
+      const actions: ProvisionAction[] = [];
+      dependencies.act = async (sessionId, action) => {
+        actions.push(action);
+        if (action.kind === "oauth_login") {
+          return {
+            session_id: sessionId,
+            format: "browser-use-control-query",
+            stage: "auth",
+            url: "https://oauth-links.test/",
+            safe_table: [],
+            needs_user: {
+              wall: "google_session",
+              message: "No live Google session — reconnect with `connect` and retry.",
+              resume: "connect",
+            },
+          } as Observation;
+        }
+        throw new Error("oauth_login: unexpected non-oauth act");
+      };
+      const result = await runOperateDrive(
+        { session_id: started.session_id, goal: "create an account" },
+        api(),
+        undefined,
+        dependencies,
+      );
+      expect(actions).toEqual([
+        expect.objectContaining({ kind: "oauth_login", provider: "google" }),
+      ]);
+      expect(result.status).toBe("needs_value");
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
+  it("finishes a third-party-only signup when the goal excludes those links", async () => {
+    const html = `<!doctype html><meta charset="utf-8"><title>Signup</title>
+<main>
+  <h1>Create account</h1>
+  <a id="google" href="/oauth/google">Continue with Google</a>
+  <a id="github" href="/oauth/github">Continue with GitHub</a>
+</main>`;
+    const { context, started } = await openFixture(html, "oauth-links-excluded.test");
+    try {
+      const dependencies = deps(async (_api, _state, questions) => jevFromQuestions(questions));
+      dependencies.act = async () => {
+        throw new Error("oauth_login must not run when the goal excludes third-party sign-in");
+      };
+      const result = await runOperateDrive(
+        {
+          session_id: started.session_id,
+          goal: "create an account with email, not Google or GitHub",
+          max_steps: 6,
+        },
+        api(),
+        undefined,
+        dependencies,
+      );
+      expect(result.status).toBe("stuck");
+      expect(result.reason).toMatch(/no other sign-up path/i);
+      expect(result.steps).toBeLessThanOrEqual(4);
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
+  it("records a failed oauth_login as a step instead of aborting the drive", async () => {
+    const html = `<!doctype html><meta charset="utf-8"><title>Signup</title>
+<main>
+  <h1>Create account</h1>
+  <a id="google" href="/oauth/google">Continue with Google</a>
+  <a id="github" href="/oauth/github">Continue with GitHub</a>
+</main>`;
+    const { context, started } = await openFixture(html, "oauth-links-failed.test");
+    try {
+      const dependencies = deps(async (_api, _state, questions) => jevFromQuestions(questions));
+      dependencies.act = async () => {
+        throw new Error(
+          'oauth_login: no element matched target "@e:f0d2". Re-observe and use the OAuth button ref.',
+        );
+      };
+      const result = await runOperateDrive(
+        { session_id: started.session_id, goal: "sign up with Google", max_steps: 4 },
+        api(),
+        undefined,
+        dependencies,
+      );
+      expect(["budget", "stuck", "no_progress"]).toContain(result.status);
+      expect(result.trajectory.some((step) => step.action === "oauth_login")).toBe(true);
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
   it("advances a whole-purchase goal across the empty snapshot into the payment stage", async () => {
     const { context, page, started } = await openFixture(
       MULTI_STAGE_CHECKOUT_HTML,

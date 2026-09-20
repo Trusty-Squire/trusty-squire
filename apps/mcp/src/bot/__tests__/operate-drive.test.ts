@@ -111,6 +111,10 @@ import {
   goalSeeksKey,
   rowMatchesGoalSeek,
   clickGoalSeekScore,
+  goalExcludesOauth,
+  pageOffersOnlyThirdPartySignup,
+  noOtherSignupPathReason,
+  oauthProviderForRow,
 } from "../operate-drive.js";
 import { operateDriveTool } from "../../tools/provision-drive.js";
 import type { JevAnswer } from "../jev-client.js";
@@ -2935,5 +2939,85 @@ describe("inboxPollMissReason", () => {
     expect(inboxPollMissReason({ query: "newer_than:1d" })).toBe(
       "inbox poll found nothing (query=newer_than:1d)",
     );
+  });
+});
+
+describe("third-party-only signup", () => {
+  const google: WireRow = ["@e:g", "l", "Continue with Google"];
+  const github: WireRow = ["@e:h", "l", "Continue with GitHub"];
+  const email: WireRow = ["@e:email", "t", "Email|f=email"];
+  const signIn: WireRow = ["@e:in", "l", "Sign in"];
+
+  it("reads OAuth providers from link and button rows alike", () => {
+    expect(oauthProviderForRow(google)).toBe("google");
+    expect(oauthProviderForRow(github)).toBe("github");
+    expect(oauthProviderForRow(["@e:g", "b", "Continue with Google"])).toBe("google");
+    expect(oauthProviderForRow(email)).toBeUndefined();
+  });
+
+  it("treats a page of only provider links as having no other sign-up path", () => {
+    expect(pageOffersOnlyThirdPartySignup([google, github])).toBe(true);
+    expect(pageOffersOnlyThirdPartySignup([google, github, signIn])).toBe(true);
+    expect(pageOffersOnlyThirdPartySignup([google, github, email])).toBe(false);
+    expect(pageOffersOnlyThirdPartySignup([email, SUBMIT])).toBe(false);
+  });
+
+  it("detects a goal that excludes third-party sign-in without naming a host", () => {
+    expect(goalExcludesOauth("create an account with email, not Google or GitHub")).toBe(true);
+    expect(goalExcludesOauth("sign up without Google")).toBe(true);
+    expect(goalExcludesOauth("create an account using email only")).toBe(true);
+    expect(goalExcludesOauth("sign up with Google")).toBe(false);
+    expect(goalExcludesOauth("create an account")).toBe(false);
+    expect(noOtherSignupPathReason()).toMatch(/no other sign-up path/i);
+  });
+
+  it("emits oauth_login for a provider link the same way as a provider button", () => {
+    const rows = [google, github];
+    const sets = driveTargetSets(rows, {}, false);
+    const questions = buildDriveQuestions(rows, {}, "create an account", false, [], "", new Map(), sets);
+    const clickCriteria =
+      questions.CLICK_target?.type === "choice" ? questions.CLICK_target.criteria : {};
+    const googleSlug = sets.CLICK.find((entry) => entry.ref === google[0])!.slug;
+    const githubSlug = sets.CLICK.find((entry) => entry.ref === github[0])!.slug;
+    const operationCriteria =
+      questions.operation?.type === "choice" ? questions.operation.criteria : {};
+    expect(
+      decideAfterJev({
+        rows,
+        facts: {},
+        goal: "create an account",
+        fingerprint: "a",
+        lastFingerprint: null,
+        lastActionKey: null,
+        sets,
+        questions,
+        answers: {
+          operation: valid("CLICK", operationCriteria),
+          CLICK_target: valid(googleSlug, clickCriteria),
+        },
+      }),
+    ).toMatchObject({
+      kind: "act",
+      action: { kind: "oauth_login", target: google[0], provider: "google" },
+    });
+    expect(
+      decideAfterJev({
+        rows,
+        facts: {},
+        goal: "create an account",
+        fingerprint: "a",
+        lastFingerprint: null,
+        lastActionKey: null,
+        sets,
+        questions,
+        answers: {
+          operation: valid("CLICK", operationCriteria),
+          CLICK_target: valid(githubSlug, clickCriteria),
+        },
+      }),
+    ).toMatchObject({
+      kind: "act",
+      action: { kind: "oauth_login", target: github[0], provider: "github" },
+    });
   });
 });

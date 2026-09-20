@@ -65,6 +65,7 @@ import {
   documentEpochOf,
   documentOriginOf,
   driveActOnPage,
+  driveTargetAccessibleName,
   pageFingerprintOf,
   reenterDriveField,
   resolveDriveFrame,
@@ -1283,18 +1284,57 @@ export function isCardholderNameRow(row: WireRow): boolean {
   return /name_on_card|cardholder|cc_name|card_name|nameoncard/.test(rowHay(row));
 }
 
-export function isGoogleAuthRow(row: WireRow): boolean {
+const OAUTH_CONTROL_ROLES = new Set(["b", "l", "button", "link"]);
+
+export function oauthProviderForRow(row: WireRow): "google" | "github" | undefined {
+  if (!OAUTH_CONTROL_ROLES.has(row[1])) return undefined;
   const label = rowLabel(row).toLowerCase();
-  return (
-    /google/.test(label) &&
-    (row[1] === "b" || row[1] === "l" || row[1] === "button" || row[1] === "link")
-  );
+  if (/google/.test(label)) return "google";
+  if (/github/.test(label)) return "github";
+  return undefined;
+}
+
+export function isGoogleAuthRow(row: WireRow): boolean {
+  return oauthProviderForRow(row) === "google";
 }
 
 export function isOauthChromeRow(row: WireRow): boolean {
-  if (isGoogleAuthRow(row)) return true;
+  if (oauthProviderForRow(row) !== undefined) return true;
   const label = readableLabel(row).toLowerCase();
   return /github|sso|\boauth\b/.test(label);
+}
+
+/** Goal text that rules out third-party sign-in as the path to take. */
+export function goalExcludesOauth(goal: string): boolean {
+  const text = goal.toLowerCase();
+  if (
+    /\b(?:without|not|don't|dont|exclude|avoid|no)\b[\s\S]{0,48}\b(?:google|github|sso|oauth|third[- ]party)\b/.test(
+      text,
+    )
+  ) {
+    return true;
+  }
+  if (
+    /\b(?:google|github|sso|oauth|third[- ]party)\b[\s\S]{0,48}\b(?:excluded|forbidden|disabled)\b/.test(
+      text,
+    )
+  ) {
+    return true;
+  }
+  return (
+    /\b(?:email|password)\b/.test(text) &&
+    /\b(?:only|instead|without|not|exclude|avoid)\b/.test(text)
+  );
+}
+
+/** Sign-up chrome is only third-party links — no email, password, or native submit. */
+export function pageOffersOnlyThirdPartySignup(rows: readonly WireRow[]): boolean {
+  if (!rows.some((row) => isOauthChromeRow(row))) return false;
+  return formSurfaceRows(rows).length === 0;
+}
+
+export function noOtherSignupPathReason(): string {
+  return "The page offers no other sign-up path besides third-party sign-in links.";
 }
 
 export function isChoiceRow(row: WireRow): boolean {
@@ -3183,10 +3223,11 @@ export function decideAfterJev(input: {
         special: "card",
       };
     }
-    if (isGoogleAuthRow(row)) {
+    const oauthProvider = oauthProviderForRow(row);
+    if (oauthProvider !== undefined) {
       return {
         kind: "act",
-        action: { kind: "oauth_login", target: ref, provider: "google" },
+        action: { kind: "oauth_login", target: ref, provider: oauthProvider },
         actionKey: ref,
         confidence,
         special: "oauth",
@@ -3733,21 +3774,35 @@ async function actDriveSafely(
   return acted;
 }
 
+async function resolveOauthActTarget(sessionId: string, target: string): Promise<string> {
+  const session = sessionForCall(sessionId);
+  if (session === undefined) return target;
+  const translated = await canonicalDriveRefs(session, [target]);
+  const canonical = translated.get(target);
+  if (canonical !== undefined) return canonical;
+  const page = session.browser.page;
+  if (page === null) return target;
+  return (await driveTargetAccessibleName(page, target)) ?? target;
+}
+
 async function actSafely(
   deps: DriveDependencies,
   sessionId: string,
   action: ProvisionAction,
 ): Promise<Observation> {
+  const resolved =
+    action.kind === "oauth_login"
+      ? { ...action, target: await resolveOauthActTarget(sessionId, action.target) }
+      : action;
   try {
-    return await deps.act(sessionId, action, "compact", "compact", true);
+    return await deps.act(sessionId, resolved, "compact", "compact", true);
   } catch (error) {
     if (error instanceof TargetStaleError) return await deps.observe(sessionId, "compact");
-    const message = error instanceof Error ? error.message : String(error);
-    if (action.kind === "select" && "text" in action && typeof action.text === "string") {
+    if (resolved.kind === "select" && "text" in resolved && typeof resolved.text === "string") {
       try {
         return await deps.act(
           sessionId,
-          { kind: "type", target: action.target, text: action.text },
+          { kind: "type", target: resolved.target, text: resolved.text },
           "compact",
           "compact",
           true,
@@ -3756,8 +3811,7 @@ async function actSafely(
         return await deps.observe(sessionId, "compact");
       }
     }
-    if (message.includes("selection_failed")) return await deps.observe(sessionId, "compact");
-    throw error;
+    return await deps.observe(sessionId, "compact");
   }
 }
 
@@ -5014,6 +5068,10 @@ async function driveLoop(input: {
       continue;
     } else {
       return finish("stuck", { reason: missingPay });
+    }
+
+    if (goalExcludesOauth(args.goal) && pageOffersOnlyThirdPartySignup(rows)) {
+      return finish("stuck", { reason: noOtherSignupPathReason() });
     }
 
     if (drive.jevCalls >= DRIVE_MAX_JEV_CALLS) {
