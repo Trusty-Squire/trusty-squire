@@ -516,6 +516,12 @@ The nightly full suite (`vitest run`) remains the partition-drift backstop.
 When adding a test that launches a browser, list it in `REAL_BROWSER_FILES`;
 when adding non-browser behavior coverage, list it in the REQUIRED_* files.
 
+Vitest `--related` is not usable on this package. `provision-session.ts`,
+`browser.ts`, and `act.ts` are hubs: a transitive walk collapses to the
+operator cone (~134 files) for almost any leaf. Select tests with
+`apps/mcp/scripts/run-related-tests.mjs` (own test + direct importers +
+one hop of non-hub production callers). Do not call `vitest related`.
+
 ### 15. Operator browser lifetime is owner-bound
 
 `apps/mcp/src/bot/owner-process-reaper.ts` is the crash/SIGKILL backstop for
