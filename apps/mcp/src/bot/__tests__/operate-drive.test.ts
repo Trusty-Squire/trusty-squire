@@ -1709,6 +1709,27 @@ describe("form-fill assignment helpers", () => {
     expect(inboxSpecialPlan(ROWS, "act", true, 0)).toBeUndefined();
     expect(
       inboxSpecialPlan(
+        ROWS,
+        "stuck",
+        true,
+        0,
+        "https://app.example.test/signup",
+        "Check your email",
+      ),
+    ).toEqual({ kind: "link" });
+    expect(
+      inboxSpecialPlan(
+        [["@e:home", "l", "Home"]],
+        "stuck",
+        true,
+        0,
+        "https://app.example.test/signup",
+        "",
+        "sign up and complete email verification",
+      ),
+    ).toEqual({ kind: "link" });
+    expect(
+      inboxSpecialPlan(
         [
           ["@e:role", "combobox", "Founder/CTO|a=picker|n=Founder/CTO"],
           ["@e:cb", "c", "checkbox|s=u"],
@@ -1887,6 +1908,13 @@ describe("facts, fingerprint, compact merge", () => {
       ["@e:ad", "l", "Own Your AI: Control your models"],
     ];
     const key = pageProgressKey("https://api-ninjas.com/register", filled, ["@e:email"]);
+    expect(
+      pageProgressKey("https://app.example.test/signup", filled, ["@e:email"], ["Create account"]),
+    ).not.toBe(
+      pageProgressKey("https://app.example.test/signup", filled, ["@e:email"], [
+        "Check your email",
+      ]),
+    );
     expect(
       pageProgressKey("https://api-ninjas.com/register", filled, ["@e:email", "@e:pw"]),
     ).not.toBe(key);
