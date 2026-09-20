@@ -4879,11 +4879,23 @@ describe("operate session — operation-scoped Google gate", () => {
     expect(result).toMatchObject({
       session_id: started.session_id,
       format: "browser-use-dom",
-      stage: "auth",
       url: "https://app.example.com/login",
     });
+    // The wall rides the page as it actually is — the live control map, not a
+    // blank one that claims the page has nothing on it.
+    expect(domRefs(result)).toEqual(domRefs(started));
     expect(h.identityProbeCalls).toBe(1);
     expect(h.dispatchTargets).toEqual([]);
+
+    const compact = await act(
+      started.session_id,
+      { kind: "oauth_login", provider: "google", target: domRefs(started)[0]! },
+      undefined,
+      "compact",
+    );
+    expect(compact.needs_user?.wall).toBe("google_session");
+    expect(compact.format).toBe("browser-use-control-query");
+    expect(compact.safe_table?.length).toBeGreaterThan(0);
     await finishProvisionSession(started.session_id);
   });
 

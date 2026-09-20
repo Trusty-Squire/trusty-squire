@@ -98,15 +98,19 @@ async function withOAuthActionBoundary(
   if (provider === "google") {
     const gate = await googleSessionGateForSession(session.id);
     if (!gate.ok) {
+      const observation = await observeSession(
+        session,
+        outputFormat,
+        undefined,
+        undefined,
+        false,
+        outputFormat,
+        false,
+        true,
+        true,
+      );
       return {
-        observation: {
-          session_id: session.id,
-          format: outputFormat === "compact" ? "browser-use-control-query" : "browser-use-dom",
-          stage: "auth",
-          url: session.browser.currentUrl(),
-          ...(outputFormat === "compact" ? { safe_table: [] } : {}),
-          needs_user: gate.needs_user,
-        },
+        observation: { ...observation, needs_user: gate.needs_user },
         outcome: {},
       };
     }
