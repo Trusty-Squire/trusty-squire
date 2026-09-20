@@ -67,10 +67,6 @@ export interface SessionStartPorts {
 }
 
 const sessions = new Map<string, Session>();
-// A Google-gated start returns an ID so the caller can correlate its handoff,
-// but it never creates a browser session. Its terminal acknowledgement is a
-// no-op rather than an "unknown session" error.
-const refusedStartSessionIds = new Set<string>();
 
 interface AcquiredBrowser {
   controller: BrowserController;
@@ -498,11 +494,10 @@ export interface HarnessStartOptions extends Omit<StartOptions, "profileDir" | "
   browser: BrowserController;
 }
 
-// Fail-closed precondition GATE — NOT autonomous recovery. An operate task that
-// acts as the user needs a usable Google session before it drives; absent /
-// expired / 2FA-challenged → hand back BEFORE the task starts, so the
-// human-in-the-loop dependency is explicit, never hidden (Codex). Pairs with the
-// install-time gate (install/cli.ts) that already requires a Google session.
+// Fail-closed Google identity hand-back — NOT autonomous recovery. Apply this
+// only when an operation actually needs the user's live Google identity (Google
+// OAuth, Google-backed signup preparation, or Gmail verification), never as a
+// blanket precondition on starting an unrelated browsing or checkout task.
 export interface NeedsUserLogin {
   wall: "google_session";
   message: string;
@@ -512,14 +507,12 @@ export interface NeedsUserLogin {
   // command to users. Keep it pointing at `connect`.
   resume: "connect";
 }
-/** The connect re-auth ceremony's own start must pass the admission gate
- * unconditionally: the ceremony is what CREATES the live Google session, so
- * gating it deadlocked every enrolled machine whose profile had none — the
- * gate's own remedy (`connect --force-relogin=google`) is the ceremony
- * itself, making the refusal self-referential. The context below is entered
- * ONLY by the broker's ceremony open (an `open` request carrying
- * `ceremony: true`), which the agent-facing `operate_start` surface cannot
- * reach: no other caller can bypass the gate.
+/** Preserve the connect re-auth ceremony's admission context. Ordinary starts
+ * no longer have a Google gate, but the ceremony remains explicitly marked
+ * because it is what CREATES the live Google session and must never inherit a
+ * Google-dependent operation gate. The context below is entered ONLY by the
+ * broker's ceremony open (an `open` request carrying `ceremony: true`), which
+ * the agent-facing `operate_start` surface cannot reach.
  */
 const ceremonyStartAdmissionContext = new AsyncLocalStorage<true>();
 
@@ -550,7 +543,7 @@ export function googleSessionGate(
   };
 }
 
-async function ensureProvisionPrimaryProviderSession(
+async function detectProvisionPrimaryProviderSession(
   browser: BrowserController,
 ): Promise<{ providers: OAuthProviderId[]; userEmail: string | null }> {
   // Chrome materializes the real profile's provider jar after the account
@@ -570,6 +563,25 @@ async function ensureProvisionPrimaryProviderSession(
   return { providers, userEmail };
 }
 
+/** Re-check the live Google identity at the operation that needs it.
+ * Successful detection refreshes the session email for signup and inbox work;
+ * a missing provider returns the long-standing google_session hand-back.
+ */
+export async function googleSessionGateForSession(
+  sessionId: string,
+): Promise<{ ok: true } | { ok: false; needs_user: NeedsUserLogin }> {
+  const session = sessions.get(sessionId);
+  if (session === undefined) throw new UnknownProvisionSessionError(sessionId);
+  const identity = await detectProvisionPrimaryProviderSession(session.browser);
+  const gate = googleSessionGate(identity.providers);
+  if (gate.ok) {
+    session.userEmail = identity.userEmail;
+  } else {
+    audit(sessionId, "connect_gate", { ok: false, wall: "google_session" });
+  }
+  return gate;
+}
+
 export async function startProvisionSession(
   opts: StartOptions,
   ports: SessionStartPorts,
@@ -577,39 +589,10 @@ export async function startProvisionSession(
   const id = randomUUID();
   const requestedFormat = opts.format ?? "full";
   let browser: BrowserController;
-  let liveProviders: OAuthProviderId[];
-  let workerEmail: string | null = null;
   const acquired = await acquireWarmBrowser(opts);
   browser = acquired.controller;
   try {
-    const identity = await ensureProvisionPrimaryProviderSession(browser);
-    liveProviders = identity.providers;
-    workerEmail = identity.userEmail;
     assertProvisionStartAdmitted(acquired.shutdownGeneration);
-    const gate = ceremonyStartAdmission()
-      ? { ok: true as const }
-      : googleSessionGate(liveProviders);
-    if (!gate.ok) {
-      audit(id, "connect_gate", { ok: false, wall: "google_session" });
-      await releaseWarmBrowserPage(browser, false);
-      refusedStartSessionIds.add(id);
-      return requestedFormat === "full"
-        ? {
-            session_id: id,
-            format: "browser-use-dom",
-            stage: "auth",
-            url: "",
-            needs_user: gate.needs_user,
-          }
-        : {
-            session_id: id,
-            format: "browser-use-control-query",
-            stage: "auth",
-            url: "",
-            safe_table: [],
-            needs_user: gate.needs_user,
-          };
-    }
   } catch (error) {
     await releaseWarmBrowserPage(browser, false);
     throw error;
@@ -627,7 +610,7 @@ export async function startProvisionSession(
     allowedHosts,
     startUrl: opts.serviceUrl,
     consentInboxRead: opts.consentInboxRead !== false,
-    userEmail: workerEmail,
+    userEmail: null,
     ...(opts.api !== undefined ? { api: opts.api } : {}),
   });
   sessions.set(id, session);
@@ -659,7 +642,9 @@ export async function startProvisionSession(
           await waitForCaptchaChallengeToSettle(browser, 800, 0).catch(() => false);
       }
     }
-    const loginHint = loginSessionGuidance(liveProviders);
+    // Provider detection is intentionally lazy: ordinary starts pay no Google
+    // identity probe and receive provider-neutral login guidance.
+    const loginHint = loginSessionGuidance([]);
     if (opts.initialObservation === "drive") {
       session.initializing = false;
       session.lastActivityAt = Date.now();
@@ -921,9 +906,6 @@ export async function finishProvisionSessionWithPreparation<T>(
 }
 
 export async function finishProvisionSession(sessionId: string): Promise<FinishResult> {
-  if (refusedStartSessionIds.delete(sessionId)) {
-    return finishReceipt(sessionId, "", true);
-  }
   return (await finishProvisionSessionWithPreparation(sessionId, async () => undefined)).finish;
 }
 
@@ -959,7 +941,6 @@ export async function closeAllProvisionSessions(): Promise<void> {
       if (closeError !== undefined) throw closeError;
     })();
   } finally {
-    refusedStartSessionIds.clear();
     shutdownInProgress -= 1;
   }
 }

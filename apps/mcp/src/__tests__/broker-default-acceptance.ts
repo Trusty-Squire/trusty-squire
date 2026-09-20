@@ -125,10 +125,14 @@ export async function checkDefaultBrokerAcceptance(
     await client.connect(transport);
     const result = await client.callTool({
       name: "operate_start",
-      arguments: { service_url: "http://127.0.0.1:1" },
+      arguments: {
+        service_url:
+          "data:text/html,%3Cform%3E%3Clabel%3EName%3Cinput%20name%3Dname%3E%3C%2Flabel%3E%3C%2Fform%3E",
+      },
     });
     expect(result.isError, JSON.stringify(result)).not.toBe(true);
-    expect(result.structuredContent).toMatchObject({ needs_user: { wall: "google_session" } });
+    expect(result.structuredContent).toMatchObject({ session_id: expect.any(String) });
+    expect(result.structuredContent).not.toHaveProperty("needs_user");
     process.stdout.write(
       "default-broker MCP operate_start:" + " " + JSON.stringify(result.structuredContent) + "\n",
     );

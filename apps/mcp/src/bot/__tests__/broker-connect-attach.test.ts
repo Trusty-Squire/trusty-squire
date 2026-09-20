@@ -373,10 +373,11 @@ describe("connect attaches to the live broker for the profile it is connecting",
       // tab open.
       expect(outcome.openUrl).toBe(CONFIRM_URL);
       // The open names itself as the ceremony — Contract B's ONE optional
-      // field. It scopes the google_session admission-gate bypass to this
-      // open, and it is what makes the open identity-neutral (the ceremony
-      // reuses whatever identity the shared browser is live under rather than
-      // requesting a bare one; deriveOpenToolArgs pins that rule).
+      // field. It keeps this identity-creating open distinct from an operator
+      // action that depends on Google, and it is what makes the open
+      // identity-neutral (the ceremony reuses whatever identity the shared
+      // browser is live under rather than requesting a bare one;
+      // deriveOpenToolArgs pins that rule).
       expect(outcome.openCeremony).toBe(true);
       // The session tab is closed at the lease boundary.
       expect(outcome.closedSession).toBe("tab-1");

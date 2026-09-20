@@ -1,7 +1,6 @@
-// Login guidance built from the user's ACTUAL live sessions (the bot knows
-// which providers are authenticated — detectSessionProviders). Google is
-// preferred when multiple sessions exist. This is session-state, so it's
-// composed at provision_start.
+// Login guidance can reflect live providers when a caller already has that
+// information. Ordinary provision_start deliberately passes an empty list so
+// starting unrelated browser work never probes Google identity.
 
 import type { OAuthProviderId } from "./oauth-providers.js";
 

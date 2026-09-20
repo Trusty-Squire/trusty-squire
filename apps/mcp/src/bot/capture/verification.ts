@@ -14,7 +14,12 @@ import { waitForCaptchaChallengeToSettle } from "../captcha.js";
 import { pickVerificationLink, type VerificationLinkCandidate } from "../email-verification.js";
 import { findOtpCredential } from "../credential-shape.js";
 import type { Session } from "../session/model.js";
-import { audit, sessionForCall } from "../session/lifecycle.js";
+import {
+  audit,
+  googleSessionGateForSession,
+  sessionForCall,
+  type NeedsUserLogin,
+} from "../session/lifecycle.js";
 import { stashSecretSlot, type SlotHandle } from "../session/slots.js";
 import { invalidateCompactV2Snapshot } from "../observe/observe.js";
 import { runSerializedGoogleIdentityOperation } from "../act/act.js";
@@ -53,7 +58,7 @@ export interface VerificationResult {
   link: string | null;
   // Set when found=false: the code wasn't auto-retrievable from the inbox. The
   // session is alive — ASK THE USER for the code and type it, don't abandon.
-  needs_user?: NeedsUserCode;
+  needs_user?: NeedsUserCode | NeedsUserLogin;
   // Set when into_slot was requested AND a code was found: the OTP was sealed
   // into a session slot (host gets only the masked handle) so it never round-
   // trips through the host. Enter it with operate_act type_secret{slot,target}.
@@ -492,6 +497,17 @@ export async function awaitVerification(
   if (!session.consentInboxRead) {
     audit(sessionId, "await_verification", { refused: "no_inbox_consent" });
     return buildConsentRefusal(sessionId);
+  }
+
+  const googleGate = await googleSessionGateForSession(sessionId);
+  if (!googleGate.ok) {
+    return {
+      session_id: sessionId,
+      found: false,
+      code: null,
+      link: null,
+      needs_user: googleGate.needs_user,
+    };
   }
 
   invalidateCompactV2Snapshot(session);

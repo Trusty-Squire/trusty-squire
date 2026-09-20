@@ -340,7 +340,7 @@ describe("characterization: Session construction", () => {
       startUrl: "https://app.example.com/signup",
       startedAt: expect.any(Number),
       terminalTeardownOwner: null,
-      userEmail: "operator@example.com",
+      userEmail: null,
       watchdog: { kind: "object", ctor: "OperatorBrowserWatchdog" },
     });
     // `api` is ABSENT (not present-and-undefined) when the tool layer passed none.

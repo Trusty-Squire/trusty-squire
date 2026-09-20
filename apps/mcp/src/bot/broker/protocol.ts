@@ -53,10 +53,9 @@ export interface OpenRequest {
   /** This open IS the connect re-auth ceremony. Two things follow from it,
    * and neither is separately selectable:
    *
-   * 1. Its start passes the `google_session` admission gate, because the
-   *    ceremony is what creates the live Google session — gating it
-   *    deadlocked every enrolled machine whose profile had none (the gate's
-   *    own remedy, `connect --force-relogin=google`, is the ceremony itself).
+   * 1. Its start remains explicitly marked as the identity-creating ceremony.
+   *    Ordinary starts no longer have a Google gate, and this ceremony marker
+   *    must not be treated as a Google-dependent operation.
    * 2. It adopts whatever identity the shared browser is already live under
    *    instead of requesting one. Without that, an open carrying no proxy
    *    against a proxied Chrome is refused `incompatible_runtime` while other
