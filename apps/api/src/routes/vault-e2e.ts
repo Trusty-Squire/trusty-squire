@@ -41,6 +41,10 @@ const paymentAuditBody = z.object({
   // event (operate_act's place-order guard).
   cardRef: z.string().max(256).optional(),
   approvalId: z.string().max(256).optional(),
+  // The approval's item line, which is where operate_drive records a checkout
+  // total it could not read. Carried so the trail presents an unknown total
+  // the same way the approval did instead of rendering 0.00.
+  item: z.string().trim().min(1).max(500).optional(),
 });
 
 const paymentAuditCursor = z.string().transform((value, ctx) => {
@@ -244,6 +248,7 @@ export const registerVaultE2ERoute: FastifyPluginAsync<{
             ...(parsed.data.approvalId !== undefined
               ? { approval_id: parsed.data.approvalId }
               : {}),
+            ...(parsed.data.item !== undefined ? { item: parsed.data.item } : {}),
           },
         }) as const;
       let id: string;

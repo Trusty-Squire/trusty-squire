@@ -158,6 +158,7 @@ describe("card / payment / grant events on the vault audit trail", () => {
         mandateId: "mandate_abc",
         cardRef: "card_guard",
         approvalId: "appr_guard",
+        item: "one hardcover — total not readable",
       },
     });
     expect(res.statusCode).toBe(201);
@@ -174,6 +175,7 @@ describe("card / payment / grant events on the vault audit trail", () => {
       mandate_id: "mandate_abc",
       card_ref: "card_guard",
       approval_id: "appr_guard",
+      item: "one hardcover — total not readable",
     });
     // Never "executed" for a caller-placed attempt Squire cannot verify.
     expect(payment!.payment_status).not.toBe("payment_executed");

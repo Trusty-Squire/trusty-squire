@@ -7,7 +7,7 @@ import {
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import type { ApiDeps } from "../services/deps.js";
-import { formatCurrencyAmount } from "../services/money.js";
+import { approvalAmountLabel } from "../services/money.js";
 import { sendTelegramMessage } from "../services/telegram.js";
 import {
   PAYMENT_VOUCH_CONTEXT,
@@ -18,16 +18,6 @@ import {
 } from "../services/vouch-mandate.js";
 import { authenticatedRequester } from "../services/requesting-agent.js";
 import { VAULT_AUDIT_TYPES } from "@trusty-squire/vault";
-
-/** operate_drive marks an unreadable checkout total on the item; the human must
- * never be shown $0.00 for an amount nobody could read. */
-const CHECKOUT_TOTAL_UNREADABLE = "total not readable";
-
-function approvalAmountLabel(amountCents: number, currency: string, item: string): string {
-  return amountCents === 0 && item.includes(CHECKOUT_TOTAL_UNREADABLE)
-    ? CHECKOUT_TOTAL_UNREADABLE
-    : formatCurrencyAmount(amountCents, currency);
-}
 
 // Web base for the approval link sent to Telegram. Reuses PWA_BASE_URL
 // (the same override server.ts's defaultPwaBaseUrl() reads) if set, else

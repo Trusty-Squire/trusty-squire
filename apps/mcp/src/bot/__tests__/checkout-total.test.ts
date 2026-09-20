@@ -142,6 +142,26 @@ $76.00 USD`;
     });
   });
 
+  it("refuses a lone three-digit group under a three-minor-digit currency rather than guess", () => {
+    expect(resolveDriveApprovalAmount(["Total KWD 1,234"], {})).toMatchObject({
+      amount_cents: 0,
+      note: CHECKOUT_TOTAL_UNREADABLE,
+    });
+    expect(resolveDriveApprovalAmount(["Total 1.234 BHD"], {})).toMatchObject({
+      amount_cents: 0,
+      note: CHECKOUT_TOTAL_UNREADABLE,
+    });
+    // Two groups can only be thousands separators, so the total stays readable.
+    expect(resolveDriveApprovalAmount(["Total KWD 1,234,567"], {})).toMatchObject({
+      amount_cents: 1234567000,
+      currency: "KWD",
+    });
+    expect(resolveDriveApprovalAmount(["Total KWD 1,234.567"], {})).toMatchObject({
+      amount_cents: 1234567,
+      currency: "KWD",
+    });
+  });
+
   it("degrades a wedged renderer to an unknown total without cancelling the drive request", async () => {
     vi.useFakeTimers();
     const wedged = wedgedPage();

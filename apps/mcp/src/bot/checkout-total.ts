@@ -148,7 +148,10 @@ function resolveCheckoutCurrencyToken(token: string | undefined): PageCurrency |
 }
 
 /** A currency whose minor digits disagree with the fraction the page displays
- * would rescale the number, so the total is unreadable rather than rewritten. */
+ * would rescale the number, so the total is unreadable rather than rewritten.
+ * A lone three-digit group reads as a thousands group only where no currency
+ * spends three minor digits — under KWD/BHD `1,234` is genuinely either 1234
+ * or 1.234, and a guess would show the human the wrong money. */
 function displayedScaleMismatches(raw: string, minorDigits: number): boolean {
   const value = raw.replace(/\s/g, "");
   const comma = value.lastIndexOf(",");
@@ -156,7 +159,9 @@ function displayedScaleMismatches(raw: string, minorDigits: number): boolean {
   const separator = Math.max(comma, dot);
   if (separator < 0) return false;
   const fractionLength = value.length - separator - 1;
-  if (fractionLength === 3 && (comma < 0 || dot < 0)) return false;
+  if (fractionLength === 3 && (comma < 0 || dot < 0)) {
+    return (value.match(/[.,]/gu) ?? []).length === 1 && minorDigits >= 3;
+  }
   return fractionLength > minorDigits;
 }
 

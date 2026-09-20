@@ -186,6 +186,9 @@ export interface VaultAuditPayload {
   mandate_id?: string;
   card_ref?: string;
   approval_id?: string;
+  // The approval's item line. Non-secret display text; it also carries the
+  // "total not readable" marker so the trail can present an unknown total.
+  item?: string;
   // Delivery metadata for payment approval requests. This records the
   // notification path and failure category without carrying payment data.
   channel?: string;
