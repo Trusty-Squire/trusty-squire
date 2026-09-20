@@ -23,7 +23,6 @@ import {
   askJev,
   type JevAnswer,
   type JevCallOutcome,
-  type JevChoiceQuestion,
   type JevQuestion,
 } from "./jev-client.js";
 import {
@@ -393,11 +392,17 @@ function progressFingerprint(
   rows: readonly WireRow[],
   drive: SessionDriveState,
   session: Session,
+  pageText: string = "",
 ): string {
   const fieldState = [
     ...[...session.committedSelectValues.entries()].map(([key, value]) => `sel:${key}=${value}`),
     ...drive.filledRefs.map((ref) => `filled:${ref}`),
   ];
+  // A control-free page can only move by changing its text, so on zero rows
+  // that text is the whole progress signal. Where rows exist the row tuples
+  // already carry it, and folding body text in there would churn the
+  // fingerprint on any ticking content and defeat no-progress detection.
+  if (rows.length === 0 && pageText.length > 0) fieldState.push(`text:${pageText}`);
   return observationFingerprint(url, rows, fieldState);
 }
 
@@ -1339,28 +1344,6 @@ export function compactRowsText(
 ): string {
   const header = stage === undefined ? url : `${url} stage=${stage}`;
   return `${header}\n${JSON.stringify(rows)}`;
-}
-
-/** The only question a zero-row snapshot can answer: has the goal landed, is it
- * blocked, or is the page still settling.
- *
- * No action operation is offered and no target is asked for, because there is
- * nothing on the page to act on or name. Judgment comes from the page text.
- * WAIT is offered because a submitted payment, a processor redirect and a bank
- * page all render control-free for longer than the re-observation budget.
- */
-export function terminalOnlyQuestion(goal: string): { operation: JevChoiceQuestion } {
-  return {
-    operation: {
-      type: "choice",
-      instructions:
-        `You are driving a browser to: ${goal}. The page lists no control to act on. ` +
-        "Judge from the page text alone: pick DONE if the goal is already complete, " +
-        "WAIT if the page is still loading or a submitted result has not settled yet, " +
-        "otherwise pick BLOCKED.",
-      criteria: operationCriteria(["WAIT", "DONE", "BLOCKED"]),
-    },
-  };
 }
 
 export function nextActionInstructions(goal: string): string {
@@ -2879,7 +2862,7 @@ async function driveLoop(input: {
       await sleepDrive(DRIVE_IDENTICAL_RESNAP_MS, context?.signal);
       const snap = await snapshotOrTimeout(framesIfNeeded());
       if (snap !== "ok") return snap;
-      confirmed = progressFingerprint(observation.url, rows, drive, session);
+      confirmed = progressFingerprint(observation.url, rows, drive, session, observation.dom ?? "");
     }
     drive.staleNonWait = confirmed === fingerprint ? drive.staleNonWait + 1 : 0;
     drive.lastFingerprint = confirmed;
@@ -2895,7 +2878,7 @@ async function driveLoop(input: {
     if (decision.kind === "complete") {
       const completeSnap = await snapshotOrTimeout(framesIfNeeded());
       if (completeSnap !== "ok") return completeSnap;
-      const fresh = progressFingerprint(observation.url, rows, drive, session);
+      const fresh = progressFingerprint(observation.url, rows, drive, session, observation.dom ?? "");
       if (drive.boundFingerprint !== null && fresh !== drive.boundFingerprint) {
         drive.consumedActionKey = null;
         return "continue";
@@ -2932,7 +2915,7 @@ async function driveLoop(input: {
         ...(jevMs === undefined ? {} : { jev_ms: jevMs }),
       });
       drive.history.push("wait");
-      drive.lastFingerprint = progressFingerprint(observation.url, rows, drive, session);
+      drive.lastFingerprint = progressFingerprint(observation.url, rows, drive, session, observation.dom ?? "");
       drive.lastActionKey = "WAIT";
       drive.consumedActionKey = null;
       return "continue";
@@ -2971,7 +2954,7 @@ async function driveLoop(input: {
         reason: decision.reason,
       });
     }
-    const fingerprint = progressFingerprint(observation?.url ?? "", rows, drive, session);
+    const fingerprint = progressFingerprint(observation?.url ?? "", rows, drive, session, observation?.dom ?? "");
     if (drive.boundFingerprint !== null && fingerprint !== drive.boundFingerprint) {
       drive.consumedActionKey = null;
       return "continue";
@@ -3074,7 +3057,7 @@ async function driveLoop(input: {
         ...takeActProfile(drive),
       });
       drive.history.push("inject card");
-      const nextFingerprint = progressFingerprint(observation.url, rows, drive, session);
+      const nextFingerprint = progressFingerprint(observation.url, rows, drive, session, observation.dom ?? "");
       return await noteProgress(fingerprint, nextFingerprint, decision.actionKey);
     }
 
@@ -3126,7 +3109,7 @@ async function driveLoop(input: {
       drive.history.push(
         verification.code !== null ? "type verification code" : "open verification link",
       );
-      const nextFingerprint = progressFingerprint(observation.url, rows, drive, session);
+      const nextFingerprint = progressFingerprint(observation.url, rows, drive, session, observation.dom ?? "");
       return await noteProgress(fingerprint, nextFingerprint, decision.actionKey);
     }
 
@@ -3221,7 +3204,7 @@ async function driveLoop(input: {
         drive.filledRefs.push(decision.actionKey);
       }
     }
-    const nextFingerprint = progressFingerprint(observation.url, rows, drive, session);
+    const nextFingerprint = progressFingerprint(observation.url, rows, drive, session, observation.dom ?? "");
     appendDriveTrace(session, {
       at: "after_act",
       step: drive.trajectory.length,
@@ -3241,7 +3224,7 @@ async function driveLoop(input: {
     // approval that completed on the phone) must pass the consume-once gate
     // on its first post-resume attempt instead of bouncing off a
     // boundFingerprint left over from the previous drive call.
-    drive.boundFingerprint = progressFingerprint(observation.url, rows, drive, session);
+    drive.boundFingerprint = progressFingerprint(observation.url, rows, drive, session, observation.dom ?? "");
     drive.consumedActionKey = null;
     const resumed = await applyDecision(
       resumeAction(answer, rows, drive.facts, drive.goal, drive.facts.card_ref),
@@ -3300,7 +3283,7 @@ async function driveLoop(input: {
     comboboxMustYield = false;
     if (comboboxFill !== undefined) {
       comboboxAttempts.add(comboboxObservation);
-      drive.boundFingerprint = progressFingerprint(observation.url, rows, drive, session);
+      drive.boundFingerprint = progressFingerprint(observation.url, rows, drive, session, observation.dom ?? "");
       drive.consumedActionKey = null;
       const applied = await applyDecision({
         kind: "act",
@@ -3326,68 +3309,20 @@ async function driveLoop(input: {
     }
 
     // A same-document stage swap (Shopify one-page checkout) and a hydrating
-    // checkout both leave the snapshot empty for a while. Re-observe on the
-    // whole budget first. A snapshot still empty afterwards carries no action
-    // to choose, but the page text still says whether the goal landed — an
-    // order confirmation renders as prose — so the only question asked is the
-    // terminal one, never an action with no target. Its WAIT keeps the loop
-    // re-observing for as long as the ordinary step and time budgets allow, so
-    // a payment left settling behind a blank processor screen is not forced to
-    // a verdict at 4.5s.
-    if (rows.length === 0) {
-      if (emptySnapshotWaits < DRIVE_EMPTY_SNAPSHOT_WAITS) {
-        emptySnapshotWaits += 1;
-        const applied = await applyDecision({ kind: "wait", confidence: 1 });
-        if (applied !== "continue") return applied;
-        steps += 1;
-        continue;
-      }
-      const terminalQuestion = terminalOnlyQuestion(drive.goal);
-      const criteria = terminalQuestion.operation.criteria;
-      // The confirmation evidence on a control-free page is prose, and the
-      // ordinary page text carries only title and headings. The body text
-      // goes into this question's state alone.
-      const terminalState = buildJevState(
-        drive.goal,
-        Object.keys(drive.facts),
-        drive.history,
-        observation.url,
-        observation.semantic?.title,
-        [],
-        pageTextFromObservation(observation, [observation.dom ?? ""]),
-      );
-      drive.boundFingerprint = progressFingerprint(observation.url, rows, drive, session);
-      drive.consumedActionKey = null;
-      let answer: JevAnswer | undefined;
-      for (let attempt = 0; attempt < 2; attempt += 1) {
-        const terminal = await ask(terminalState, terminalQuestion);
-        if (!("result" in terminal)) return terminal;
-        answer = terminal.result.answers.operation;
-        if (validateChoice(criteria, answer)) break;
-        answer = undefined;
-      }
-      const choice = answer?.choice;
-      if (choice === DRIVE_FIXED_DONE || choice === "WAIT") {
-        // A DONE goes through the same post-decision re-snapshot every other
-        // completion does: a page that moved while the answer was in flight
-        // continues the loop instead of reporting the stale blank snapshot.
-        const applied = await applyDecision(
-          choice === DRIVE_FIXED_DONE
-            ? { kind: "complete", confidence: confidenceOf(answer) }
-            : { kind: "wait", confidence: confidenceOf(answer) },
-        );
-        if (applied !== "continue") return applied;
-        steps += 1;
-        continue;
-      }
-      return finish("stuck", {
-        question: {
-          question: terminalQuestion.operation.instructions,
-          options: criteria,
-        },
-      });
+    // checkout both leave the snapshot empty for a while, so spend the
+    // re-observation budget before asking anything. Past it the ordinary
+    // question already offers exactly WAIT/DONE/BLOCKED and no target, because
+    // zero rows yield no action candidates — its WAIT keeps a payment settling
+    // behind a blank processor screen for as long as the step and time budgets
+    // allow.
+    if (rows.length === 0 && emptySnapshotWaits < DRIVE_EMPTY_SNAPSHOT_WAITS) {
+      emptySnapshotWaits += 1;
+      const applied = await applyDecision({ kind: "wait", confidence: 1 });
+      if (applied !== "continue") return applied;
+      steps += 1;
+      continue;
     }
-    emptySnapshotWaits = 0;
+    if (rows.length > 0) emptySnapshotWaits = 0;
 
     const fields = paymentFields(rows);
     // A pending approval records an inject_card trajectory step, so trajectory
@@ -3425,7 +3360,7 @@ async function driveLoop(input: {
       // describes the preceding action; without rebinding, applyDecision's
       // consume-once gate returns "continue" forever and this branch spins
       // without acting until the time budget expires.
-      drive.boundFingerprint = progressFingerprint(observation.url, rows, drive, session);
+      drive.boundFingerprint = progressFingerprint(observation.url, rows, drive, session, observation.dom ?? "");
       drive.consumedActionKey = null;
       const applied = await applyDecision({
         kind: "act",
@@ -3474,12 +3409,15 @@ async function driveLoop(input: {
         stateSeenRefs.add(candidate.ref);
         return true;
       }),
-      pageTextFromObservation(observation),
+      // A control-free page's only evidence is its prose, and the ordinary
+      // page text carries just title and headings. Fold the body text in for
+      // that case alone.
+      pageTextFromObservation(observation, rows.length === 0 ? [observation.dom ?? ""] : []),
     );
     const prepareMs = Date.now() - prepareStarted;
     const questionCount = Object.keys(questions).length;
     const stateBytes = Buffer.byteLength(JSON.stringify(state));
-    const fingerprint = progressFingerprint(observation.url, rows, drive, session);
+    const fingerprint = progressFingerprint(observation.url, rows, drive, session, observation.dom ?? "");
     if (drive.boundFingerprint !== fingerprint) drive.consumedActionKey = null;
     drive.boundFingerprint = fingerprint;
     const decide = (answers: Record<string, JevAnswer>): DriveDecision =>

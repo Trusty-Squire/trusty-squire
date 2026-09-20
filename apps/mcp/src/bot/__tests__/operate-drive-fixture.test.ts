@@ -628,7 +628,7 @@ describe("operate_drive real-browser fixture", () => {
     }
   }, 60_000);
 
-  it("refuses a terminal DONE whose probabilities do not back it", async () => {
+  it("reports a malformed DONE on a control-free page as invalid_answer, not stuck", async () => {
     const { context, started } = await openFixture(CONFIRMATION_HTML, "blank-unbacked.test");
     try {
       let calls = 0;
@@ -648,15 +648,18 @@ describe("operate_drive real-browser fixture", () => {
                 operation: {
                   choice: "DONE",
                   confidence: 0.9,
-                  probabilities: { DONE: 0.2, BLOCKED: 0.8 },
+                  probabilities: { WAIT: 0.1, DONE: 0.2, BLOCKED: 0.7 },
                 },
               },
             },
           };
         }),
       );
-      // A purchase that was never submitted must not be reported complete.
-      expect(result.status).toBe("stuck");
+      // A purchase that was never submitted must not be reported complete, and
+      // a model that answered garbage is not a blocking page: the host's
+      // recovery for the two differs.
+      expect(result.status).toBe("invalid_answer");
+      expect(result.reason).toBe("choice_not_argmax");
       expect(calls).toBe(2);
     } finally {
       await finishProvisionSession(started.session_id);
@@ -664,7 +667,7 @@ describe("operate_drive real-browser fixture", () => {
     }
   }, 30_000);
 
-  it("refuses a terminal DONE that carries no probabilities at all", async () => {
+  it("reports a DONE carrying no probabilities as invalid_answer", async () => {
     const { context, started } = await openFixture(CONFIRMATION_HTML, "blank-noprob.test");
     try {
       const result = await runOperateDrive(
@@ -677,12 +680,63 @@ describe("operate_drive real-browser fixture", () => {
           result: { answers: { operation: { choice: "DONE", confidence: 0.9 } } },
         })),
       );
-      expect(result.status).toBe("stuck");
+      expect(result.status).toBe("invalid_answer");
+      expect(result.reason).toBe("missing_probabilities");
     } finally {
       await finishProvisionSession(started.session_id);
       await context.close();
     }
   }, 30_000);
+
+  it("refuses a DONE when a control-free page changed only its text", async () => {
+    // The optimistic interstitial is replaced by the real PSP result while the
+    // answer is in flight. Both snapshots are control-free at the same URL, so
+    // only the text can say the page moved.
+    const INTERSTITIAL_HTML = `<!doctype html><meta charset="utf-8"><title>Blank</title>
+<main><p id="body">Thank you! We're placing your order…</p></main>`;
+    const { context, page, started } = await openFixture(INTERSTITIAL_HTML, "decline-swap.test");
+    try {
+      const seen: string[] = [];
+      let calls = 0;
+      const criteriaOf = (question: JevQuestion | undefined): string[] =>
+        question?.type === "choice" ? Object.keys(question.criteria) : [];
+      const result = await runOperateDrive(
+        { session_id: started.session_id, goal: "buy one item", max_seconds: 30 },
+        api(),
+        undefined,
+        deps(async (_api, state, questions) => {
+          calls += 1;
+          seen.push((state as { page?: { text?: string } }).page?.text ?? "");
+          if (calls === 1) {
+            await page.evaluate(() => {
+              document.querySelector("#body")!.textContent =
+                "Payment declined — your card was not charged.";
+            });
+          }
+          const keys = criteriaOf(questions.operation);
+          const pick = calls === 1 ? "DONE" : "BLOCKED";
+          return {
+            attempts: 1,
+            elapsedMs: 5,
+            result: {
+              answers: {
+                operation: { choice: pick, confidence: 0.9, probabilities: peaked(keys, pick) },
+              },
+            },
+          };
+        }),
+      );
+      // The DONE was formed against the interstitial; by the time it landed the
+      // page said the payment failed, so it must not be reported complete.
+      expect(result.status).not.toBe("complete");
+      expect(calls).toBeGreaterThan(1);
+      expect(seen[0]).toContain("Thank you! We're placing your order");
+      expect(seen.at(-1)).toContain("Payment declined");
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 60_000);
 
   it("checks DONE against a fresh snapshot even on an unchanged page", async () => {
     const { context, started } = await openFixture(NOOP_HTML, "done-unchanged.test");
