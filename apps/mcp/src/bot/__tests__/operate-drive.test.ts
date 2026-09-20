@@ -78,6 +78,7 @@ import {
   validateChoiceReason,
   type DriveCandidate,
   type WireRow,
+  outstandingEmptyFill,
 } from "../operate-drive.js";
 import { operateDriveTool } from "../../tools/provision-drive.js";
 import type { JevAnswer } from "../jev-client.js";
@@ -1509,8 +1510,40 @@ describe("form-fill assignment helpers", () => {
       ["@e:go", "b", "Create Account|s=d"],
     ];
     expect(isSubmitLikeRow(fireworksInFlight[2]!)).toBe(false);
-    expect(snapshotNeedsSettle(fireworksInFlight, 0)).toBe(true);
+    expect(snapshotNeedsSettle(fireworksInFlight, 0)).toBe(false);
+    expect(outstandingEmptyFill(fireworksInFlight)?.[0]).toBe("@e:pw");
     expect(pageHasListedWork(fireworksInFlight, 0, 0)).toBe(false);
+  });
+
+  it("treats a disabled submit as empty-required, not a gate", () => {
+    const empty: WireRow[] = [
+      ["@e:email", "t", "Email|f=email"],
+      ["@e:pw", "t", "Password|f=password"],
+      ["@e:go", "b", "Create account|s=d"],
+    ];
+    expect(outstandingEmptyFill(empty)?.[0]).toBe("@e:email");
+    expect(snapshotNeedsSettle(empty, 0)).toBe(false);
+    expect(clickableCandidates(empty, false).map((c) => c.ref)).not.toContain("@e:go");
+    const emailOnly: WireRow[] = [
+      ["@e:email", "t", "Email|f=email|n=a@b.test"],
+      ["@e:pw", "t", "Password|f=password"],
+      ["@e:go", "b", "Create account|s=d"],
+    ];
+    expect(outstandingEmptyFill(emailOnly)?.[0]).toBe("@e:pw");
+    expect(snapshotNeedsSettle(emailOnly, 0)).toBe(false);
+    expect(clickableCandidates(emailOnly, false, [], "", ["@e:email"]).map((c) => c.ref)).not.toContain(
+      "@e:go",
+    );
+    const filled: WireRow[] = [
+      ["@e:email", "t", "Email|f=email|n=a@b.test"],
+      ["@e:pw", "t", "Password|f=password"],
+      ["@e:go", "b", "Create account"],
+    ];
+    expect(outstandingEmptyFill(filled, ["@e:email", "@e:pw"])).toBeUndefined();
+    expect(snapshotNeedsSettle(filled, 0, ["@e:email", "@e:pw"])).toBe(false);
+    expect(
+      clickableCandidates(filled, false, [], "", ["@e:email", "@e:pw"]).map((c) => c.ref),
+    ).toContain("@e:go");
   });
 
   it("omits BLOCKED while a listed fill or enabled submit remains", () => {
@@ -1792,9 +1825,13 @@ describe("facts, fingerprint, compact merge", () => {
     expect(driveCandidates([last, SUBMIT], false).map((c) => c.ref)).toEqual(["@e:go"]);
   });
 
-  it("keeps a disabled continue/submit in the clickable set", () => {
+  it("withholds a disabled submit while a field is still empty", () => {
     const cont: WireRow = ["@e:go", "b", "@continue|s=d"];
-    expect(clickableCandidates([EMAIL, cont], false).map((c) => c.ref)).toEqual(["@e:go"]);
+    expect(clickableCandidates([EMAIL, cont], false).map((c) => c.ref)).toEqual([]);
+    const filledEmail: WireRow = ["@e:email", "t", "@email|f=email|s=r|n=a@b.test"];
+    expect(clickableCandidates([filledEmail, cont], false, [], "", ["@e:email"]).map((c) => c.ref)).toEqual(
+      ["@e:go"],
+    );
   });
 
   it("omits a click that just came back stale so the overlay can be chosen", () => {

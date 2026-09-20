@@ -153,6 +153,7 @@ export const DRIVE_RULES: readonly string[] = [
   "Do not choose a field that already contains the requested value.",
   "Identifying values come only from the provided facts; never invent them.",
   "A search or query field may receive a phrase assigned from the goal or facts; pick none rather than composing one.",
+  "A disabled submit means a required field is still empty until every fillable is populated. Disable is not a gate.",
 ];
 // Drive rules above adapt browser-use/jev-ultrafast (MIT) NEXT_ACTION / TARGET prose.
 
@@ -928,12 +929,57 @@ export function formSurfaceRows(rows: readonly WireRow[]): WireRow[] {
   });
 }
 
+export function isInvalidRow(row: WireRow): boolean {
+  return /(?:^|\|)s=[^|]*i/.test(row[2] ?? "");
+}
+
+/** A submit whose label is the page working, not a static Create/Sign up. */
+export function isProgressSubmitRow(row: WireRow): boolean {
+  return /\b(?:creating|loading|submitting|processing|saving|sending|please\s+wait)\b/.test(
+    readableLabel(row).toLowerCase(),
+  );
+}
+
+function rowValueMissing(row: WireRow): boolean {
+  const match = /(?:^|\|)n=([^|]*)/.exec(row[2] ?? "");
+  return match === null || match[1] === undefined || match[1].length === 0;
+}
+
+/** An empty or invalid field the submit is waiting on. Fill it; disable is not a gate. */
+export function outstandingEmptyFill(
+  rows: readonly WireRow[],
+  filledRefs: readonly string[] = [],
+): WireRow | undefined {
+  const filled = new Set(filledRefs);
+  return rows.find((row) => {
+    if (!isFillableRow(row) || isDisabledRow(row) || isActedRow(row) || filled.has(row[0])) {
+      return false;
+    }
+    if (
+      isSearchRow(row) ||
+      isPaymentRow(row) ||
+      isCvvRow(row) ||
+      isOtpRow(row) ||
+      allowsGoalValueAssignment(row)
+    ) {
+      return false;
+    }
+    if (isInvalidRow(row)) return true;
+    if (isPasswordRow(row)) return true;
+    return rowValueMissing(row);
+  });
+}
+
 /** Empty page, or a form whose only remaining surface is disabled — mid-transition, not blocked. */
 export function snapshotNeedsSettle(
   rows: readonly WireRow[],
   remainingFillCount: number = -1,
+  filledRefs: readonly string[] = [],
 ): boolean {
   if (rows.length === 0) return true;
+  // Empty required is the first hypothesis. A static disabled Create/Sign up
+  // while a field is still empty is not in-flight and is not a gate.
+  if (outstandingEmptyFill(rows, filledRefs) !== undefined) return false;
   const surface = formSurfaceRows(rows);
   if (surface.length === 0) return false;
   if (surface.every((row) => isDisabledRow(row))) return true;
@@ -941,7 +987,13 @@ export function snapshotNeedsSettle(
   // no fills left, no live choice, every submit disabled — wait for the hop.
   if (remainingFillCount === 0 && !surface.some((row) => isChoiceRow(row) && !isDisabledRow(row))) {
     const submits = surface.filter((row) => isSubmitLikeRow(row));
-    if (submits.length > 0 && submits.every((row) => isDisabledRow(row))) return true;
+    if (
+      submits.length > 0 &&
+      submits.every((row) => isDisabledRow(row)) &&
+      submits.some((row) => isProgressSubmitRow(row))
+    ) {
+      return true;
+    }
   }
   return false;
 }
@@ -1400,9 +1452,11 @@ export function clickableCandidates(
   includePayment: boolean,
   skippedRefs: readonly string[] = [],
   pageUrl: string = "",
+  filledRefs: readonly string[] = [],
 ): DriveCandidate[] {
   const skipped = new Set(skippedRefs);
   const formBusy = formSurfaceRows(rows).some((row) => !isDisabledRow(row));
+  const needsFill = outstandingEmptyFill(rows, filledRefs) !== undefined;
   return driveCandidates(rows, includePayment, pageUrl)
     .filter((candidate) => {
       if (skipped.has(candidate.ref)) return false;
@@ -1425,7 +1479,7 @@ export function clickableCandidates(
       if (
         isDisabledRow(candidate.row) &&
         isSubmitLikeRow(candidate.row) &&
-        formSurfaceRows(rows).some((row) => isChoiceRow(row) && !isDisabledRow(row))
+        (needsFill || formSurfaceRows(rows).some((row) => isChoiceRow(row) && !isDisabledRow(row)))
       ) {
         return false;
       }
@@ -1997,7 +2051,7 @@ export function driveTargetSets(
     remaining,
   );
   const click = takeCapped(
-    clickableCandidates(rows, includePayment, skippedClickRefs, pageUrl),
+    clickableCandidates(rows, includePayment, skippedClickRefs, pageUrl, filledRefs),
     remaining,
   );
   const scroll = takeCapped(scrollTargets(rows), remaining);
@@ -4136,7 +4190,7 @@ async function driveLoop(input: {
     // every non-empty snapshot, which is exactly when this branch runs, so
     // sharing it left the bound permanently unreached and the loop waited out
     // its whole budget on a form that never settles.
-    if (rows.length > 0 && snapshotNeedsSettle(rows, remainingFills.length)) {
+    if (rows.length > 0 && snapshotNeedsSettle(rows, remainingFills.length, drive.filledRefs)) {
       if (
         settleWaits < DRIVE_EMPTY_SNAPSHOT_WAITS &&
         !(drive.exhaustedActionKeys ?? []).includes("WAIT")
