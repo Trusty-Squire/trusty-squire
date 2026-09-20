@@ -119,6 +119,13 @@ import {
   isGoalDestinationRow,
   isSectionNavRow,
   unvisitedSectionNavRows,
+  sectionIdentity,
+  isEligibleSectionNavRow,
+  isSamePageAnchorRow,
+  isAppRootOrLogoRow,
+  isPageLevelSiteAnswer,
+  sectionsTriedReason,
+  recordDestinationAlternation,
   rowLooksLikeEmail,
   rowCarriesGoalNoun,
   isOffProductNavRow,
@@ -3082,10 +3089,68 @@ describe("post-confirmation navigation", () => {
     expect(
       unvisitedSectionNavRows(
         [settings, billing, account, apps],
-        [stableControlKey(billing, url)],
+        [sectionIdentity(billing, url)],
         url,
       ).map((row) => row[0]),
     ).toEqual(["@e:acct", "@e:apps"]);
+  });
+
+  it("identifies a section by destination and label, not by reminted ref or current path", () => {
+    const fromDash: WireRow = ["@e:f0d3", "l", "Emails|u=https://app.example.test/emails"];
+    const reminted: WireRow = ["@e:f0d11", "l", "Emails|u=https://app.example.test/emails"];
+    expect(sectionIdentity(fromDash, "https://app.example.test/dashboard")).toBe(
+      sectionIdentity(reminted, "https://app.example.test/console"),
+    );
+    expect(
+      unvisitedSectionNavRows(
+        [reminted],
+        [sectionIdentity(fromDash, "https://app.example.test/dashboard")],
+        "https://app.example.test/console",
+      ),
+    ).toEqual([]);
+  });
+
+  it("explores only same-app section navigation", () => {
+    const url = "https://app.example.test/dashboard";
+    const logo: WireRow = ["@e:logo", "l", "Acme|u=https://app.example.test/"];
+    const home: WireRow = ["@e:home", "l", "Home|u=https://app.example.test/dashboard"];
+    const anchor: WireRow = ["@e:prim", "l", "Primitives|u=https://app.example.test/dashboard#primitives"];
+    const hashOnly: WireRow = ["@e:use", "l", "Use cases|u=#use-cases"];
+    const notice: WireRow = [
+      "@e:comp",
+      "l",
+      "Provide more information to reactivate it|u=https://app.example.test/compliance",
+    ];
+    const emails: WireRow = ["@e:mail", "l", "Emails|u=https://app.example.test/emails"];
+    expect(isAppRootOrLogoRow(logo, url)).toBe(true);
+    expect(isSamePageAnchorRow(anchor, url)).toBe(true);
+    expect(isSamePageAnchorRow(hashOnly, url)).toBe(true);
+    expect(isEligibleSectionNavRow(logo, url)).toBe(false);
+    expect(isEligibleSectionNavRow(home, url)).toBe(false);
+    expect(isEligibleSectionNavRow(anchor, url)).toBe(false);
+    expect(isEligibleSectionNavRow(hashOnly, url)).toBe(false);
+    expect(isEligibleSectionNavRow(notice, url)).toBe(false);
+    expect(isEligibleSectionNavRow(emails, url)).toBe(true);
+    expect(unvisitedSectionNavRows([logo, anchor, hashOnly, notice, emails], [], url).map((row) => row[0])).toEqual([
+      "@e:mail",
+    ]);
+  });
+
+  it("finishes after A-B-A-B destination alternation regardless of refs", () => {
+    const drive = emptyDriveState("extract an API key", {});
+    expect(recordDestinationAlternation(drive, "https://app.example.test/emails")).toBe("continue");
+    expect(recordDestinationAlternation(drive, "https://app.example.test/reputation")).toBe(
+      "continue",
+    );
+    expect(recordDestinationAlternation(drive, "https://app.example.test/emails")).toBe("continue");
+    expect(recordDestinationAlternation(drive, "https://app.example.test/reputation")).toBe("cycle");
+    expect(sectionsTriedReason(["https://app.example.test/emails\temails"])).toBe(
+      "tried sections without reaching the goal: emails",
+    );
+    expect(
+      isPageLevelSiteAnswer("Your account needs more information to be reactivated."),
+    ).toBe(true);
+    expect(isPageLevelSiteAnswer("API Keys sk_live_fixture")).toBe(false);
   });
 
   it("never matches a company fact to an email-shaped field", () => {
@@ -3124,6 +3189,8 @@ describe("post-confirmation navigation", () => {
     drive.progressReturnCounts = { "https://example.test/settings": 2 };
     drive.exhaustedActionKeys = ["@e:set"];
     drive.visitedSectionKeys = ["tb\tbilling\t"];
+    drive.seenDestinations = ["https://example.test/settings"];
+    drive.awaitingDecideAfterExplore = true;
     drive.filledRefs = ["@e:email"];
     drive.silentSubmitKeys = ["pay"];
     resetDriveGoalMemory(drive);
@@ -3131,6 +3198,8 @@ describe("post-confirmation navigation", () => {
     expect(drive.progressReturnCounts).toEqual({});
     expect(drive.exhaustedActionKeys).toEqual([]);
     expect(drive.visitedSectionKeys).toEqual([]);
+    expect(drive.seenDestinations).toEqual([]);
+    expect(drive.awaitingDecideAfterExplore).toBe(false);
     expect(drive.filledRefs).toEqual(["@e:email"]);
     expect(drive.silentSubmitKeys).toEqual(["pay"]);
   });

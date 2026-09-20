@@ -805,6 +805,143 @@ describe("operate_drive real-browser fixture", () => {
     }
   }, 30_000);
 
+  it("reaches a key section from a dashboard without re-entering logo or anchors", async () => {
+    const dashboardHtml = `<!doctype html><meta charset="utf-8"><title>Dashboard</title>
+<a id="logo" href="/">Acme</a>
+<a id="primitives" href="#primitives">Primitives</a>
+<nav><a id="settings" href="/settings">Settings</a></nav>
+<section id="primitives"><p>Product primitives</p></section>`;
+    const settingsHtml = `<!doctype html><meta charset="utf-8"><title>Settings</title>
+<nav><a id="keys" href="/keys">API Keys</a></nav>`;
+    const keysHtml = `<!doctype html><meta charset="utf-8"><title>API Keys</title>
+<main><h1>API Keys</h1><p id="key">sk_live_fixture</p></main>`;
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    const hits: string[] = [];
+    await page.route("**/*", (route) => {
+      const url = route.request().url();
+      hits.push(new URL(url).pathname);
+      const body = url.includes("/keys")
+        ? keysHtml
+        : url.includes("/settings")
+          ? settingsHtml
+          : dashboardHtml;
+      route.fulfill({ contentType: "text/html", body });
+    });
+    const startUrl = "https://section-key.test/dashboard";
+    await page.goto(startUrl);
+    const started = await startHarnessProvisionSession({
+      browser: BrowserController.fromHarnessPage(page),
+      serviceUrl: startUrl,
+      format: "compact",
+      initialObservation: "standard",
+    });
+    try {
+      let jevCalls = 0;
+      const dependencies = deps(async (_api, _state, questions) => {
+        jevCalls += 1;
+        return jevFromQuestions(questions);
+      });
+      const result = await runOperateDrive(
+        { session_id: started.session_id, goal: "extract an API key", max_steps: 8 },
+        api(),
+        undefined,
+        dependencies,
+      );
+      expect(page.url()).toMatch(/\/keys/);
+      expect(hits.filter((path) => path === "/").length).toBe(0);
+      expect(result.trajectory.filter((step) => step.action === "click").length).toBeLessThanOrEqual(
+        3,
+      );
+      expect(jevCalls).toBeGreaterThanOrEqual(1);
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
+  it("ends an A-B-A-B two-link page with no_progress in a handful of steps", async () => {
+    const alphaHtml = `<!doctype html><meta charset="utf-8"><title>Alpha</title>
+<nav>
+  <a id="logo" href="/">Acme</a>
+  <a id="beta" href="/beta">Beta</a>
+</nav>`;
+    const betaHtml = `<!doctype html><meta charset="utf-8"><title>Beta</title>
+<nav>
+  <a id="logo" href="/">Acme</a>
+  <a id="alpha" href="/alpha">Alpha</a>
+</nav>`;
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await page.route("**/*", (route) => {
+      const url = route.request().url();
+      route.fulfill({
+        contentType: "text/html",
+        body: url.includes("/beta") ? betaHtml : alphaHtml,
+      });
+    });
+    const startUrl = "https://section-cycle.test/alpha";
+    await page.goto(startUrl);
+    const started = await startHarnessProvisionSession({
+      browser: BrowserController.fromHarnessPage(page),
+      serviceUrl: startUrl,
+      format: "compact",
+      initialObservation: "standard",
+    });
+    try {
+      const dependencies = deps(async (_api, _state, questions) => jevFromQuestions(questions));
+      const result = await runOperateDrive(
+        { session_id: started.session_id, goal: "extract an API key", max_steps: 16 },
+        api(),
+        undefined,
+        dependencies,
+      );
+      expect(result.status).toBe("no_progress");
+      expect(result.steps).toBeLessThanOrEqual(8);
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
+  it("reports a page-level notice after navigation as the outcome", async () => {
+    const dashHtml = `<!doctype html><meta charset="utf-8"><title>Dashboard</title>
+<nav><a id="settings" href="/settings">Settings</a></nav>`;
+    const noticeHtml = `<!doctype html><meta charset="utf-8"><title>Settings</title>
+<main><p role="alert">Your account needs more information to be reactivated.</p></main>`;
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await page.route("**/*", (route) => {
+      const url = route.request().url();
+      route.fulfill({
+        contentType: "text/html",
+        body: url.includes("/settings") ? noticeHtml : dashHtml,
+      });
+    });
+    const startUrl = "https://section-notice.test/dashboard";
+    await page.goto(startUrl);
+    const started = await startHarnessProvisionSession({
+      browser: BrowserController.fromHarnessPage(page),
+      serviceUrl: startUrl,
+      format: "compact",
+      initialObservation: "standard",
+    });
+    try {
+      const dependencies = deps(async (_api, _state, questions) => jevFromQuestions(questions));
+      const result = await runOperateDrive(
+        { session_id: started.session_id, goal: "extract an API key", max_steps: 6 },
+        api(),
+        undefined,
+        dependencies,
+      );
+      expect(result.status).toBe("stuck");
+      expect(result.reason).toMatch(/more information/i);
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
   it("chooses the in-app API Keys link over a docs link with the same noun", async () => {
     const html = `<!doctype html><meta charset="utf-8"><title>Dashboard</title>
 <nav><a id="keys" href="/keys">API Keys</a></nav>

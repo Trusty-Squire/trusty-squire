@@ -220,6 +220,10 @@ export interface SessionDriveState {
   silentSubmitKeys?: string[];
   /** Section tabs / sidebar / app entries already opened this drive. */
   visitedSectionKeys?: string[];
+  /** Origin+path of each navigated page, for destination alternation. */
+  seenDestinations?: string[];
+  /** Explorer supplied one click; the next loop must consult the decider. */
+  awaitingDecideAfterExplore?: boolean;
 }
 
 // The last extracted elements are resealed on every retain so each retained
