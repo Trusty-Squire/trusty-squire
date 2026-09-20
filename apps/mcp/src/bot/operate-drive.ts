@@ -835,8 +835,10 @@ export function submitHadNoResponse(input: {
   responseText?: string | null | undefined;
   beforeDisabled: string;
   afterDisabled: string;
+  rerendered?: boolean;
 }): boolean {
   if (input.navigated) return false;
+  if (input.rerendered === true) return false;
   if (typeof input.responseText === "string" && input.responseText.length > 0) return false;
   return input.beforeDisabled === input.afterDisabled;
 }
@@ -1352,6 +1354,88 @@ export function isLogoutRow(row: WireRow): boolean {
 
 export function alreadySignedInReason(): string {
   return "already signed in as another account";
+}
+
+const EMAIL_IN_TEXT = /[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/gi;
+
+export function emailsInText(text: string): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const match of text.matchAll(EMAIL_IN_TEXT)) {
+    const email = match[0]!.toLowerCase();
+    if (seen.has(email)) continue;
+    seen.add(email);
+    out.push(email);
+  }
+  return out;
+}
+
+/** Goal asks to use an already-signed-in third-party identity. */
+export function goalSeeksThirdPartySignin(goal: string): boolean {
+  if (goalExcludesOauth(goal)) return false;
+  return /continue with (?:google|github)|sign(?:\s*up|\s*in) with (?:google|github)|third[- ]party sign-?in|account already signed in/.test(
+    goal.toLowerCase(),
+  );
+}
+
+/**
+ * A check-your-email / verify page — current URL and visible copy only.
+ * Hrefs on other controls must not count: a dashboard often links to verify.
+ */
+export function pageLooksLikeEmailVerification(
+  rows: readonly WireRow[],
+  pageUrl: string = "",
+  pageText: string = "",
+): boolean {
+  if (rows.some((row) => isOtpRow(row) && isFillableRow(row))) return true;
+  const hay = `${pageUrl} ${pageText}`.toLowerCase();
+  return /(?:check|confirm|verify) your e-?mail|verification (?:link|e-?mail|code)|we(?:'| ha)ve sent|sent you an? e-?mail|\/(?:e-?mail\/)?(?:verif(?:y|ication)s?|confirm)(?:\/|\?|#|\s|$)/.test(
+    hay,
+  );
+}
+
+/** Page copy names an email the goal did not. Unknown or matching identity is not this. */
+export function pageShowsForeignIdentity(
+  rows: readonly WireRow[],
+  pageText: string,
+  goal: string,
+): boolean {
+  const wanted = emailsInText(goal);
+  if (wanted.length === 0) return false;
+  const wantedSet = new Set(wanted);
+  const pageEmails = emailsInText(
+    `${pageText} ${rows.map((row) => readableLabel(row)).join(" ")}`,
+  );
+  return pageEmails.some((email) => !wantedSet.has(email));
+}
+
+export function isPreexistingSessionPage(input: {
+  rows: readonly WireRow[];
+  pageUrl: string;
+  pageText: string;
+  goal: string;
+  submittedThisDrive: boolean;
+}): boolean {
+  if (goalSeeksThirdPartySignin(input.goal)) return false;
+  if (pageShowsForeignIdentity(input.rows, input.pageText, input.goal)) return true;
+  return (
+    input.submittedThisDrive !== true &&
+    pageLooksLikeEmailVerification(input.rows, input.pageUrl, input.pageText)
+  );
+}
+
+export function invalidFieldReason(
+  rows: readonly WireRow[],
+  notices: readonly string[] = [],
+): string | undefined {
+  for (const notice of notices) {
+    const text = notice.replace(/\s+/g, " ").trim();
+    if (text.length > 0) return text.slice(0, SUBMIT_RESPONSE_REASON_MAX);
+  }
+  const invalid = rows.find((row) => isInvalidRow(row));
+  if (invalid === undefined) return undefined;
+  const label = readableLabel(invalid);
+  return label.length > 0 ? `${label} was marked invalid` : "a field was marked invalid";
 }
 
 export function decisionTargetBinding(row: WireRow, pageUrl: string): string {
@@ -5088,12 +5172,34 @@ async function driveLoop(input: {
       }
       if (clickedBefore !== undefined && isSubmitLikeRow(clickedBefore)) {
         const navigated = pagePathKey(observation.url) !== pagePathKey(urlBeforeClick);
+        const fieldError = invalidFieldReason(rows, observationNoticeTexts(observation));
+        if (fieldError !== undefined) {
+          drive.lastSubmitResponse = fieldError;
+          return finish("stuck", { reason: fieldError });
+        }
+        const fresh = submitResponseText(
+          textBeforeClick,
+          observation.dom ?? "",
+          observationNoticeTexts(observation),
+        );
+        if (fresh !== undefined && isPageLevelSiteAnswer(fresh)) {
+          drive.lastSubmitResponse = fresh;
+          return finish("stuck", { reason: fresh });
+        }
+        const afterFingerprint =
+          session.browser.page === null ? "" : await pageFingerprintOf(session.browser.page);
+        const rerendered =
+          (observation.dom ?? "") !== textBeforeClick ||
+          (beforePageFingerprint.length > 0 &&
+            afterFingerprint.length > 0 &&
+            afterFingerprint !== beforePageFingerprint);
         if (
           submitHadNoResponse({
             navigated,
             responseText: drive.lastSubmitResponse,
             beforeDisabled: disableBeforeClick,
             afterDisabled: controlDisabledSignature(rows, observation.url),
+            rerendered,
           })
         ) {
           const stable = stableControlKey(clickedBefore, urlBeforeClick);
@@ -5388,12 +5494,13 @@ async function driveLoop(input: {
       pageUrl,
     );
     if (
-      drive.submittedThisDrive !== true &&
-      pageSuggestsInboxWait(
+      isPreexistingSessionPage({
         rows,
         pageUrl,
-        pageTextFromObservation(observation, [observation.dom ?? ""]),
-      )
+        pageText: pageTextFromObservation(observation, [observation.dom ?? ""]),
+        goal: args.goal,
+        submittedThisDrive: drive.submittedThisDrive === true,
+      })
     ) {
       if (drive.preexistingRestarted === true || rows.find((row) => isLogoutRow(row)) === undefined) {
         return finish("stuck", { reason: alreadySignedInReason() });

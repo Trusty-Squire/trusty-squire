@@ -730,13 +730,42 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
     if (!visible(el)) continue;
     addNotice(el.textContent ?? "");
   }
+  const describedIds = (el: Element): string[] =>
+    `${el.getAttribute("aria-describedby") ?? ""} ${el.getAttribute("aria-errormessage") ?? ""}`
+      .split(/\s+/)
+      .filter((id) => id.length > 0);
   for (const el of Array.from(document.querySelectorAll("[aria-invalid='true']"))) {
-    const ids = (el.getAttribute("aria-describedby") ?? "").split(/\s+/);
-    for (const id of ids) {
-      if (id.length === 0) continue;
+    for (const id of describedIds(el)) {
       const desc = document.getElementById(id);
-      if (desc === null || !visible(desc)) continue;
+      if (desc === null) continue;
       addNotice(desc.textContent ?? "");
+    }
+    if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
+      addNotice(el.validationMessage);
+    }
+  }
+  const collectJsonErrors = (value: unknown, depth: number): void => {
+    if (depth > 6 || notices.length >= 12) return;
+    if (typeof value === "string") {
+      if (value.length > 4) addNotice(value);
+      return;
+    }
+    if (Array.isArray(value)) {
+      for (const entry of value) collectJsonErrors(entry, depth + 1);
+      return;
+    }
+    if (value === null || typeof value !== "object") return;
+    for (const [key, entry] of Object.entries(value)) {
+      if (/error/i.test(key)) collectJsonErrors(entry, depth + 1);
+    }
+  };
+  for (const script of Array.from(document.querySelectorAll("script"))) {
+    const raw = (script.textContent ?? "").trim();
+    if (raw.length < 8 || (raw[0] !== "{" && raw[0] !== "[")) continue;
+    try {
+      collectJsonErrors(JSON.parse(raw) as unknown, 0);
+    } catch {
+      // Not JSON — ordinary application scripts stay ignored.
     }
   }
   const text = [notices.join("\n"), words.join("\n")]
