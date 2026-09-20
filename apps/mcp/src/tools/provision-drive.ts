@@ -1482,6 +1482,7 @@ export const operateWaitTool: Tool<z.infer<typeof waitSchema>> = {
 const readInboxSchema = z.object({
   session_id: z.string().min(1),
   sender: z.string().min(1).max(200).optional(),
+  recipient: z.string().min(3).max(320).optional(),
   into_slot: z.string().min(1).max(120).optional(),
   grant_inbox_consent: z.boolean().optional(),
 });
@@ -1494,12 +1495,16 @@ export const operateReadInboxTool: Tool<z.infer<typeof readInboxSchema>> = {
     "dedicated tab that is closed when done, so a signup form or dialog waiting for " +
     "the code stays exactly as it is. NEVER navigate the session to the mailbox for " +
     "a code or link — navigating away and back resets the form and closes the " +
-    "waiting dialog. `sender` narrows the search — matched against the From " +
-    'address, its display name, AND the subject (e.g. "proton.me"); the newest ' +
-    "matching mail is the one read, cross-checked across the search listing AND " +
-    "the real-time All Mail listing (Gmail's search index can lag fresh mail by " +
-    "minutes — found:false means the mail is not in the mailbox, not that the " +
-    "search was stale). `into_slot` " +
+    "waiting dialog. The read is scoped to this session: the signup recipient " +
+    "(drive fact `email`, or `recipient`) and the service host from the session " +
+    "start URL. A verification mail that matches neither is not a candidate — " +
+    "returning another service's newest mail is worse than returning nothing. " +
+    "`sender` and `recipient` override those defaults when the caller has a " +
+    "narrower hint. The newest matching mail is the one read, cross-checked " +
+    "across the search listing AND the real-time All Mail listing (Gmail's " +
+    "search index can lag fresh mail by minutes — found:false means the mail is " +
+    "not in the mailbox, not that the search was stale). A miss reports the " +
+    "query it searched. `into_slot` " +
     "seals a found OTP into a session slot so it is typed with operate_type slot and " +
     "never crosses the MCP boundary; `grant_inbox_consent` overrides the session's " +
     "inbox-read consent for this call. Returns needs_user when nothing is found yet " +
@@ -1514,6 +1519,7 @@ export const operateReadInboxTool: Tool<z.infer<typeof readInboxSchema>> = {
     properties: {
       session_id: { type: "string" },
       sender: { type: "string" },
+      recipient: { type: "string" },
       into_slot: { type: "string" },
       grant_inbox_consent: { type: "boolean" },
     },
@@ -1522,6 +1528,7 @@ export const operateReadInboxTool: Tool<z.infer<typeof readInboxSchema>> = {
   async handler(args) {
     return await awaitVerification(args.session_id, {
       ...(args.sender !== undefined ? { sender: args.sender } : {}),
+      ...(args.recipient !== undefined ? { recipient: args.recipient } : {}),
       ...(args.into_slot !== undefined ? { intoSlot: args.into_slot } : {}),
       ...(args.grant_inbox_consent !== undefined ? { grantConsent: args.grant_inbox_consent } : {}),
     });

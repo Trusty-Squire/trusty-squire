@@ -21,6 +21,7 @@ import {
   DRIVE_STALE_LIMIT,
   DRIVE_EXHAUSTED_ACTION_LIMIT,
   pageProgressKey,
+  inboxPollMissReason,
   recordDeadAction,
   deadActionReason,
   actionDescription,
@@ -2696,5 +2697,22 @@ describe("drive aim ranking", () => {
       { goal: "Sign up using the email/password form" },
     );
     expect(sets.CLICK.map((entry) => entry.ref)).toEqual(["@e:join", "@e:in"]);
+  });
+});
+
+describe("inboxPollMissReason", () => {
+  it("names the recipient and service host that a silent poll searched for", () => {
+    expect(
+      inboxPollMissReason({
+        query: "to:ada+run1@example.test (subject:(verify OR confirm) OR newer_than:1d)",
+        recipient: "ada+run1@example.test",
+        sender: "app.example.test",
+      }),
+    ).toBe(
+      "inbox poll found nothing (query=to:ada+run1@example.test (subject:(verify OR confirm) OR newer_than:1d) to=ada+run1@example.test host=app.example.test)",
+    );
+    expect(inboxPollMissReason({ query: "newer_than:1d" })).toBe(
+      "inbox poll found nothing (query=newer_than:1d)",
+    );
   });
 });

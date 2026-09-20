@@ -73,11 +73,17 @@ export interface VerificationResult {
   // from the expected service before using it — a broad (no-sender) search can
   // surface an unrelated sender's OTP, so this makes a wrong-sender grab visible.
   source_from?: string;
+  // What this read actually searched for. Always set so a miss is auditable.
+  searched?: { query: string; recipient?: string; sender?: string };
 }
 
 export interface AwaitVerificationOptions {
-  // Narrow the Gmail search to the sending service, e.g. "resend.com".
+  // Narrow the Gmail search to the sending service host from the session URL.
   sender?: string;
+  // Exact To: address this session signed up with (plus-address). Strongest
+  // scope: one mailbox holds many verification mails; only this recipient is
+  // this run's mail.
+  recipient?: string;
   // Seal a found OTP into this session slot instead of returning it, so the
   // code is typed via type_secret and never crosses the MCP boundary to the
   // host (also dodges host-side payload truncation — see T3).
@@ -179,10 +185,18 @@ export function buildVerificationResult(
   link: string | null,
   sourceFrom: string | null = null,
   staleMatchSeen = false,
+  searched?: { query: string; recipient?: string; sender?: string },
 ): VerificationResult {
   const found = code !== null || link !== null;
   const src = sourceFrom !== null ? { source_from: sourceFrom } : {};
-  if (found) return { session_id: sessionId, found, code, link, ...src };
+  const searchedField = searched === undefined ? {} : { searched };
+  if (found) return { session_id: sessionId, found, code, link, ...src, ...searchedField };
+  const searchHint =
+    searched === undefined
+      ? ""
+      : ` Searched ${searched.query}` +
+        (searched.recipient === undefined ? "" : ` to:${searched.recipient}`) +
+        (searched.sender === undefined ? "" : ` host:${searched.sender}.`);
   const needs_user: NeedsUserCode = staleMatchSeen
     ? {
         wall: "verification_code",
@@ -191,7 +205,8 @@ export function buildVerificationResult(
           "mail for this task has not arrived yet — the older mail's link/code is " +
           "stale (its single-use link is already consumed or expired) and was NOT " +
           "returned. Call operate_read_inbox AGAIN in a few seconds; the fresh " +
-          "mail commonly lands within 10–30s. The session stays live either way.",
+          "mail commonly lands within 10–30s. The session stays live either way." +
+          searchHint,
         resume: "code",
       }
     : {
@@ -201,10 +216,11 @@ export function buildVerificationResult(
           "arrived (they commonly take 10–30s) — call operate_read_inbox AGAIN " +
           "in a few seconds. If it still fails, the code may have gone by SMS/" +
           "authenticator: ask the user for it and type it with operate_type. The " +
-          "session stays live either way.",
+          "session stays live either way." +
+          searchHint,
         resume: "code",
       };
-  return { session_id: sessionId, found, code, link, needs_user, ...src };
+  return { session_id: sessionId, found, code, link, needs_user, ...src, ...searchedField };
 }
 
 // Inbox-read opt-out refusal. The session stays live (resumable): the host asks
@@ -245,11 +261,72 @@ export function buildConsentRefusal(sessionId: string): VerificationResult {
 // From address, its display name, AND the subject), so one brittle Gmail
 // operator can never veto the search; a broad keyword query over the last day
 // stays within one results page. Exported for unit tests.
-export function buildVerificationSearchQuery(): string {
-  return [
+export function buildVerificationSearchQuery(opts: { recipient?: string } = {}): string {
+  const parts = [
     "newer_than:1d",
     '(verify OR verification OR confirm OR confirmation OR code OR otp OR passcode OR password OR login OR "log in" OR "sign in" OR "sign-in" OR signin OR "sign up" OR signup OR "magic link" OR activate OR activation OR welcome OR "link account" OR "link your" OR continue)',
-  ].join(" ");
+  ];
+  const recipient = opts.recipient?.trim();
+  if (recipient !== undefined && recipient.includes("@")) {
+    parts.unshift(`to:${recipient}`);
+  }
+  return parts.join(" ");
+}
+
+export function serviceHostFromUrl(url: string): string | undefined {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    return host.length === 0 ? undefined : host;
+  } catch {
+    return undefined;
+  }
+}
+
+export function resolveInboxSearch(
+  session: { startUrl: string; drive: { facts: Record<string, string> } | null },
+  opts: { recipient?: string; sender?: string } = {},
+): { query: string; recipient?: string; sender?: string } {
+  const recipient = (opts.recipient ?? session.drive?.facts.email ?? "").trim() || undefined;
+  const sender = (opts.sender ?? serviceHostFromUrl(session.startUrl) ?? "").trim() || undefined;
+  return {
+    query: buildVerificationSearchQuery(recipient === undefined ? {} : { recipient }),
+    ...(recipient === undefined ? {} : { recipient }),
+    ...(sender === undefined ? {} : { sender }),
+  };
+}
+
+export function mailRowMatchesRecipient(
+  row: Pick<MailResultRow, "visibleText" | "subject">,
+  recipient: string | undefined,
+): boolean {
+  if (recipient === undefined || recipient.trim().length === 0) return false;
+  const hay = `${row.visibleText ?? ""} ${row.subject ?? ""}`.toLowerCase();
+  return hay.includes(recipient.trim().toLowerCase());
+}
+
+/** A mail is a candidate only when it matches the session recipient and/or service host. */
+export function mailRowIsSessionCandidate(
+  row: MailResultRow,
+  opts: { recipient?: string; serviceHost?: string; listingScopedToRecipient?: boolean },
+): boolean {
+  const recipient = opts.recipient?.trim();
+  const serviceHost = opts.serviceHost?.trim();
+  const visibleRecip = mailRowMatchesRecipient(row, recipient);
+  const serviceMatch =
+    serviceHost !== undefined && serviceHost.length > 0 && mailRowMatchesSender(row, serviceHost);
+  if (recipient !== undefined && recipient.length > 0 && serviceHost !== undefined && serviceHost.length > 0) {
+    // Visible plus-address is enough (ESP From often omits the product host).
+    // A to:-scoped listing may omit To from the snippet, so service match
+    // stands in. All Mail is not to:-scoped: service-only would pick another
+    // run's same-service mail. A leaky Gmail `to:` plus another service is
+    // not a candidate.
+    return visibleRecip || (opts.listingScopedToRecipient === true && serviceMatch);
+  }
+  if (recipient !== undefined && recipient.length > 0) {
+    return visibleRecip || opts.listingScopedToRecipient === true;
+  }
+  if (serviceHost !== undefined && serviceHost.length > 0) return serviceMatch;
+  return false;
 }
 
 // The All Mail listing URL. Gmail's SEARCH results are eventually consistent:
@@ -400,6 +477,7 @@ async function readAllMailMatchingRows(
   rowsOf: (page: Page | null) => Promise<MailResultRow[]>,
   sender: string | undefined,
   sessionStartMs: number,
+  recipient?: string,
 ): Promise<{ rows: MailResultRow[]; staleMatchSeen: boolean }> {
   await browser.goto(GMAIL_ALL_MAIL_URL, page);
   let rows: MailResultRow[] = [];
@@ -409,7 +487,15 @@ async function readAllMailMatchingRows(
     await waitForCaptchaChallengeToSettle(browser, 1200, 0, page).catch(() => false);
   }
   const now = Date.now();
-  const matching = rows.filter((r) => mailRowMatchesSender(r, sender) && mailRowIsRecent(r, now));
+  const matching = rows.filter(
+    (r) =>
+      mailRowIsSessionCandidate(r, {
+        ...(recipient === undefined ? {} : { recipient }),
+        ...(sender === undefined ? {} : { serviceHost: sender }),
+        listingScopedToRecipient: false,
+      }) &&
+      mailRowIsRecent(r, now),
+  );
   // A matching row older than the session start is a PREVIOUS task's mail:
   // drop it from the candidates, but report that it was seen so the caller
   // can end in the distinct stale-match not-found instead of the generic one.
@@ -516,8 +602,14 @@ export async function awaitVerification(
 
   invalidateCompactV2Snapshot(session);
 
+  const search = resolveInboxSearch(session, {
+    ...(opts.recipient === undefined ? {} : { recipient: opts.recipient }),
+    ...(opts.sender === undefined ? {} : { sender: opts.sender }),
+  });
+  const scopedToRecipient = search.recipient !== undefined;
+
   const verification = await runDetachedGoogleIdentityOperation(session, async (browser) => {
-    const query = buildVerificationSearchQuery();
+    const query = search.query;
     const searchUrl = `https://mail.google.com/mail/u/0/#search/${encodeURIComponent(query)}`;
     // DEDICATED utility tab, closed before this call returns. Navigating the
     // session's operation page to the mailbox RESETS the form/dialog that is
@@ -573,7 +665,13 @@ export async function awaitVerification(
           }
         ).openMailResultRow?.bind(browser);
         const rows = (await mailRowsOf?.(inboxTab).catch(() => [])) ?? [];
-        const searchRows = rows.filter((r) => mailRowMatchesSender(r, opts.sender));
+        const searchRows = rows.filter((r) =>
+          mailRowIsSessionCandidate(r, {
+            ...(search.recipient === undefined ? {} : { recipient: search.recipient }),
+            ...(search.sender === undefined ? {} : { serviceHost: search.sender }),
+            listingScopedToRecipient: scopedToRecipient,
+          }),
+        );
         if (searchRows.some((r) => mailRowPredatesSession(r, session.startedAt)))
           staleMatchSeen = true;
         let chosen: MailResultRow | null =
@@ -597,8 +695,9 @@ export async function awaitVerification(
             browser,
             allMailTab,
             mailRowsOf,
-            opts.sender,
+            search.sender,
             session.startedAt,
+            search.recipient,
           );
           if (allStale) staleMatchSeen = true;
           const allPick = allRows.length > 0 ? pickNewestMailRow(allRows) : null;
@@ -609,8 +708,7 @@ export async function awaitVerification(
         if (
           chosen === null &&
           mailRowsOf !== undefined &&
-          opts.sender !== undefined &&
-          opts.sender.length > 0
+          (scopedToRecipient || (search.sender !== undefined && search.sender.length > 0))
         ) {
           // NEITHER the search listing nor the real-time All Mail listing has
           // a row matching the hint's From address, display name, or subject:
@@ -650,7 +748,7 @@ export async function awaitVerification(
           const openedText = body?.text ?? (await browser.extractVisibleText(chosenPage));
           const openedLinks = body?.links ?? (await rawLinksOf(chosenPage));
           sourceFrom = extractSenderEmail(openedText);
-          const expectedDomains = expectedVerificationDomains(opts.sender, sourceFrom);
+          const expectedDomains = expectedVerificationDomains(search.sender, sourceFrom);
           ({ code, link } = parseVerification(
             openedText,
             [...openedLinks, ...listLinks].filter((l) => !isGmailChromeLink(l.url)),
@@ -666,9 +764,9 @@ export async function awaitVerification(
           ({ code, link } = parseVerification(
             chosen.visibleText,
             [],
-            expectedVerificationDomains(opts.sender, null),
+            expectedVerificationDomains(search.sender, null),
           ));
-        } else if (opts.sender === undefined || opts.sender.length === 0) {
+        } else if (!scopedToRecipient && (search.sender === undefined || search.sender.length === 0)) {
           // No row was ever chosen: only the hint-less read may fall back to
           // the page-wide list parse — the legacy first-row behavior for old
           // controllers (and ONLY old ones: when row extraction exists this
@@ -678,7 +776,7 @@ export async function awaitVerification(
           ({ code, link } = parseVerification(
             listText,
             listLinks.filter((l) => !isGmailChromeLink(l.url)),
-            expectedVerificationDomains(opts.sender, null),
+            expectedVerificationDomains(search.sender, null),
           ));
         }
       }
@@ -691,7 +789,9 @@ export async function awaitVerification(
   const { code, link, sourceFrom, staleMatchSeen } = verification;
   const found = code !== null || link !== null;
   audit(sessionId, "await_verification", {
-    sender: opts.sender ?? null,
+    sender: search.sender ?? null,
+    recipient: search.recipient ?? null,
+    query: search.query,
     source_from: sourceFrom,
     has_code: code !== null,
     has_link: link !== null,
@@ -709,8 +809,9 @@ export async function awaitVerification(
       link,
       sealed: true,
       slot: handle,
+      searched: search,
       ...(sourceFrom !== null ? { source_from: sourceFrom } : {}),
     };
   }
-  return buildVerificationResult(sessionId, code, link, sourceFrom, staleMatchSeen);
+  return buildVerificationResult(sessionId, code, link, sourceFrom, staleMatchSeen, search);
 }

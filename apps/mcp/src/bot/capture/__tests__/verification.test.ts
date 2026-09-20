@@ -10,6 +10,10 @@ import {
   buildVerificationResult,
   buildConsentRefusal,
   buildVerificationSearchQuery,
+  mailRowIsSessionCandidate,
+  mailRowMatchesRecipient,
+  resolveInboxSearch,
+  serviceHostFromUrl,
   isGmailChromeLink,
   mailRowMatchesSender,
   parseMailRowDate,
@@ -219,6 +223,14 @@ describe("buildVerificationSearchQuery (finds passwordless mail)", () => {
     // and subject of the returned rows are all matched), so one brittle
     // Gmail operator must not gate the query.
     expect(q).not.toContain("from:");
+  });
+  it("scopes the Gmail query to the session recipient when one is known", () => {
+    const q = buildVerificationSearchQuery({
+      recipient: "ada+run1@example.test",
+    });
+    expect(q.startsWith("to:ada+run1@example.test ")).toBe(true);
+    expect(q).toContain("newer_than:1d");
+    expect(buildVerificationSearchQuery().startsWith("to:")).toBe(false);
   });
   it("end-to-end: the real Loops login email now yields its magic link", () => {
     // The actual email body + the actual /api/auth/callback link (token redacted).
@@ -435,5 +447,103 @@ describe("mailRowPredatesSession (a previous task's mail never becomes this task
   it("never marks rows without a parseable date (cannot be proven old)", () => {
     expect(mailRowPredatesSession(row(null), sessionStart)).toBe(false);
     expect(mailRowPredatesSession(row("Not starred"), sessionStart)).toBe(false);
+  });
+});
+
+describe("session-scoped inbox candidates", () => {
+  const row = (partial: Partial<MailResultRow>): MailResultRow => ({
+    selector: '[data-ts-mail-row="0"]',
+    fromEmail: null,
+    fromName: null,
+    subject: null,
+    dateTitle: null,
+    visibleText: "",
+    ...partial,
+  });
+
+  it("rejects a verification mail that matches neither recipient nor service host", () => {
+    const foreign = row({
+      fromEmail: "support@other.test",
+      subject: "Confirm your registration",
+      visibleText: "Confirm your registration",
+    });
+    expect(
+      mailRowIsSessionCandidate(foreign, {
+        recipient: "ada+run1@example.test",
+        serviceHost: "app.example.test",
+      }),
+    ).toBe(false);
+    expect(mailRowIsSessionCandidate(foreign, { serviceHost: "app.example.test" })).toBe(false);
+    expect(mailRowIsSessionCandidate(foreign, {})).toBe(false);
+  });
+
+  it("accepts a to-scoped search row when From or the plus-address ties it to this session", () => {
+    const espOnly = row({
+      fromEmail: "notify@mailer.example.test",
+      subject: "Check your email",
+      visibleText: "Check your email",
+    });
+    expect(
+      mailRowIsSessionCandidate(espOnly, {
+        recipient: "ada+run1@example.test",
+        serviceHost: "app.example.test",
+        listingScopedToRecipient: true,
+      }),
+    ).toBe(false);
+    expect(
+      mailRowIsSessionCandidate(
+        row({ ...espOnly, fromEmail: "notify@mail.app.example.test" }),
+        {
+          recipient: "ada+run1@example.test",
+          serviceHost: "app.example.test",
+          listingScopedToRecipient: true,
+        },
+      ),
+    ).toBe(true);
+    expect(
+      mailRowIsSessionCandidate(
+        row({ ...espOnly, visibleText: "to ada+run1@example.test" }),
+        {
+          recipient: "ada+run1@example.test",
+          serviceHost: "app.example.test",
+          listingScopedToRecipient: true,
+        },
+      ),
+    ).toBe(true);
+    expect(mailRowMatchesRecipient(espOnly, "ada+run1@example.test")).toBe(false);
+  });
+
+  it("requires the plus-address on an unscoped listing so another run's mail cannot win", () => {
+    const otherRun = row({
+      fromEmail: "hello@app.example.test",
+      subject: "Confirm your account",
+      visibleText: "to ada+run0@example.test",
+    });
+    expect(
+      mailRowIsSessionCandidate(otherRun, {
+        recipient: "ada+run1@example.test",
+        serviceHost: "app.example.test",
+      }),
+    ).toBe(false);
+    expect(
+      mailRowIsSessionCandidate(
+        row({ ...otherRun, visibleText: "to ada+run1@example.test" }),
+        {
+          recipient: "ada+run1@example.test",
+          serviceHost: "app.example.test",
+        },
+      ),
+    ).toBe(true);
+  });
+
+  it("resolves recipient from drive facts and host from the session start URL", () => {
+    const search = resolveInboxSearch({
+      startUrl: "https://app.example.test/signup",
+      drive: { facts: { email: "ada+run1@example.test" } },
+    });
+    expect(search.recipient).toBe("ada+run1@example.test");
+    expect(search.sender).toBe("app.example.test");
+    expect(search.query.startsWith("to:ada+run1@example.test ")).toBe(true);
+    expect(serviceHostFromUrl("https://app.example.test/signup")).toBe("app.example.test");
   });
 });

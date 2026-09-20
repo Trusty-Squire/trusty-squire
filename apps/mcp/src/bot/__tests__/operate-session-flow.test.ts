@@ -4933,6 +4933,7 @@ describe("operate session — await_verification into_slot (T3 fix: OTP never ro
     });
     const sid = obs.session_id;
     h.visibleText = "Your verification code is 481920. It expires in 10 minutes.";
+    h.openFirstMailResult = true;
     const res = (await awaitVerification(sid, { intoSlot: "otp" })) as Awaited<
       ReturnType<typeof awaitVerification>
     >;
@@ -4970,6 +4971,7 @@ describe("operate session — await_verification into_slot (T3 fix: OTP never ro
     });
     h.currentUrl = "https://app.example.com/verify-email";
     h.visibleText = "Your verification code is 481920.";
+    h.openFirstMailResult = true;
     h.captureStorageStates.set(1, {
       ...googleState,
       origins: [
@@ -5078,6 +5080,7 @@ describe("operate session — await_verification into_slot (T3 fix: OTP never ro
   it("reads the inbox by default when no consent option is supplied", async () => {
     const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
     h.visibleText = "Your verification code is 481920.";
+    h.openFirstMailResult = true;
     const res = await awaitVerification(obs.session_id, {});
     expect(res.found).toBe(true);
     expect(res.code).toBe("481920");
@@ -5087,6 +5090,7 @@ describe("operate session — await_verification into_slot (T3 fix: OTP never ro
     h.providers = ["google"];
     h.liveGoogleEmail = "captain@example.test";
     h.visibleText = "Your verification code is 481920.";
+    h.openFirstMailResult = true;
     const first = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
 
     expect((await awaitVerification(first.session_id, {})).found).toBe(true);
@@ -5105,6 +5109,7 @@ describe("operate session — await_verification into_slot (T3 fix: OTP never ro
     h.providers = [];
     h.liveGoogleEmail = null;
     h.visibleText = "Your verification code is 481920.";
+    h.openFirstMailResult = true;
     const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
 
     const refused = await awaitVerification(obs.session_id, {});
@@ -5128,6 +5133,7 @@ describe("operate session — await_verification into_slot (T3 fix: OTP never ro
     expect(obs).not.toHaveProperty("user_email");
 
     h.visibleText = "Your verification code is 481920.";
+    h.openFirstMailResult = true;
     const res = await awaitVerification(obs.session_id, {});
     expect(res.found).toBe(true);
 
@@ -5153,6 +5159,7 @@ describe("operate session — await_verification into_slot (T3 fix: OTP never ro
     const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
     const sid = obs.session_id;
     h.visibleText = "Your verification code is 481920.";
+    h.openFirstMailResult = true;
     // Explicit false wins over the default-on preference.
     const optedOut = await awaitVerification(sid, { grantConsent: false });
     expect(optedOut.found).toBe(false);
