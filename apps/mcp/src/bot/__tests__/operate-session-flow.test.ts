@@ -5089,6 +5089,26 @@ describe("operate session — await_verification into_slot (T3 fix: OTP never ro
     await finishProvisionSession(first.session_id);
   });
 
+  it("re-probes the same session after a refusal, so connect clears the wall", async () => {
+    h.providers = [];
+    h.liveGoogleEmail = null;
+    h.visibleText = "Your verification code is 481920.";
+    const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+
+    const refused = await awaitVerification(obs.session_id, {});
+    expect(refused.needs_user?.wall).toBe("google_session");
+    expect(refused.found).toBe(false);
+
+    h.providers = ["google"];
+    h.liveGoogleEmail = "captain@example.test";
+    const retried = await awaitVerification(obs.session_id, {});
+    expect(retried.needs_user).toBeUndefined();
+    expect(retried.found).toBe(true);
+    expect(retried.code).toBe("481920");
+
+    await finishProvisionSession(obs.session_id);
+  });
+
   it("emits the captured identity email on a later observation, never at start", async () => {
     h.providers = ["google"];
     h.liveGoogleEmail = "captain@example.test";

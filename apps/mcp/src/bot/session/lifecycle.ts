@@ -544,15 +544,16 @@ async function detectProvisionPrimaryProviderSession(
   return { providers, userEmail };
 }
 
-/** One live-identity detection per session, shared by every Google-dependent
- * operation: the probe costs a navigation, and re-running it per operation gave
- * a mid-flight task several independent chances to be refused by one transient
- * read. The first operation that needs the identity pays for it; the rest reuse
- * the same answer for the life of the session.
+/** A LIVE Google identity, held for the life of the session and shared by every
+ * Google-dependent operation: the probe costs a navigation, and re-running it
+ * per operation gave a mid-flight task several independent chances to be
+ * refused by one transient read. Only a detection that found Google is kept — a
+ * negative or failed one is exactly the answer that must not go stale, since
+ * the wall's own remedy is to run `connect` and retry on this same session.
  */
-const sessionIdentityDetection = new WeakMap<
+const sessionGoogleIdentity = new WeakMap<
   Session,
-  Promise<{ providers: OAuthProviderId[]; userEmail: string | null }>
+  { providers: OAuthProviderId[]; userEmail: string | null }
 >();
 
 /** Check the live Google identity at the operation that needs it.
@@ -564,14 +565,12 @@ export async function googleSessionGateForSession(
 ): Promise<{ ok: true } | { ok: false; needs_user: NeedsUserLogin }> {
   const session = sessions.get(sessionId);
   if (session === undefined) throw new UnknownProvisionSessionError(sessionId);
-  let detection = sessionIdentityDetection.get(session);
-  if (detection === undefined) {
-    detection = detectProvisionPrimaryProviderSession(session.browser);
-    sessionIdentityDetection.set(session, detection);
-  }
-  const identity = await detection;
+  const identity =
+    sessionGoogleIdentity.get(session) ??
+    (await detectProvisionPrimaryProviderSession(session.browser));
   const gate = googleSessionGate(identity.providers);
   if (gate.ok) {
+    sessionGoogleIdentity.set(session, identity);
     session.userEmail = identity.userEmail;
   } else {
     audit(sessionId, "connect_gate", { ok: false, wall: "google_session" });
