@@ -2175,7 +2175,7 @@ describe("operate_drive real-browser fixture", () => {
     }
   }, 30_000);
 
-  it("keeps offscreen fields and drops ordinary offscreen buttons", async () => {
+  it("keeps offscreen fields and offscreen buttons", async () => {
     const html = `<!doctype html><meta charset="utf-8"><title>Picker viewport</title>
 <main style="min-height:4000px">
   <label>Departure <input id="dep" aria-haspopup="dialog"></label>
@@ -2196,7 +2196,10 @@ describe("operate_drive real-browser fixture", () => {
       expect(labels.some((label) => label.includes("Departure"))).toBe(true);
       expect(labels.some((label) => label.includes("Company"))).toBe(true);
       expect(labels).toContain("Done");
-      expect(labels.filter((label) => /^Day \d+$/.test(label))).toEqual([]);
+      expect(labels.filter((label) => /^Day \d+$/.test(label))).toHaveLength(40);
+      const day7 = snap.elements.find((element) => element.label === "Day 7");
+      expect(day7?.offscreen).toBe(true);
+      expect(day7?.role).toBe("button");
       const company = snap.elements.find((element) => element.label.includes("Company"));
       expect(company?.offscreen).toBe(true);
       expect(company?.role).toBe("textbox");

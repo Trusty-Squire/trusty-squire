@@ -36,6 +36,8 @@ import {
   isPaymentSubmitRow,
   paymentSubmitControlMissing,
   paymentSubmitDispatched,
+  actionHistoryLine,
+  scrollDescription,
   fillActionForCandidate,
   fillableCandidates,
   isOtpRow,
@@ -233,9 +235,8 @@ describe("request building", () => {
       includePayment: true,
       alreadyCard: true,
       cardRetry: false,
-      onCheckout: true,
+      pageUrl: "https://whitejade.xyz/checkouts/cn/hWNH38PujD9hoKo3tgk00iw6/en-us",
       remainingFills: 0,
-      stage: undefined,
       history: [],
     };
     expect(paymentSubmitControlMissing({ ...gate, rows: [back] })).toMatch(
@@ -251,9 +252,8 @@ describe("request building", () => {
       includePayment: true,
       alreadyCard: true,
       cardRetry: false,
-      onCheckout: true,
+      pageUrl: "https://whitejade.xyz/checkouts/cn/hWNH38PujD9hoKo3tgk00iw6/en-us",
       remainingFills: 0,
-      stage: undefined,
       history: [],
     };
     expect(paymentSubmitControlMissing(gate)).toBeDefined();
@@ -263,13 +263,18 @@ describe("request building", () => {
         history: [DRIVE_INJECT_CARD_HISTORY, 'click the button labeled "Pay now$68.00"'],
       }),
     ).toBeUndefined();
-    expect(paymentSubmitControlMissing({ ...gate, stage: "complete" })).toBeUndefined();
+    expect(
+      paymentSubmitControlMissing({
+        ...gate,
+        pageUrl: "https://whitejade.xyz/checkouts/cn/hWNH38PujD9hoKo3tgk00iw6/thank-you",
+      }),
+    ).toBeUndefined();
   });
 
   it("ignores a pay click that predates the card release", () => {
     expect(
       paymentSubmitDispatched([
-        'click the button labeled "Buy it now"',
+        'click the button labeled "Buy now"',
         DRIVE_INJECT_CARD_HISTORY,
         "type into the Name on card field",
       ]),
@@ -280,6 +285,26 @@ describe("request building", () => {
         'click the button labeled "Place order"',
       ]),
     ).toBe(true);
+  });
+
+  it("does not treat a scroll onto Pay now as a dispatched payment", () => {
+    const pay: WireRow = ["@e:pay", "b", "Pay now$68.00|v=offscreen"];
+    const scrolled = actionHistoryLine({ kind: "scroll", direction: "down" }, pay, [pay]);
+    const clicked = actionHistoryLine({ kind: "click", target: "@e:pay" }, pay, [pay]);
+    expect(scrolled).toBe(scrollDescription(pay, [pay]));
+    expect(paymentSubmitDispatched([DRIVE_INJECT_CARD_HISTORY, scrolled])).toBe(false);
+    expect(paymentSubmitDispatched([DRIVE_INJECT_CARD_HISTORY, clicked])).toBe(true);
+    expect(
+      paymentSubmitControlMissing({
+        rows: [["@e:back", "b", "Back to finalize order"]],
+        includePayment: true,
+        alreadyCard: true,
+        cardRetry: false,
+        pageUrl: "https://whitejade.xyz/checkouts/cn/hWNH38PujD9hoKo3tgk00iw6/en-us",
+        remainingFills: 0,
+        history: [DRIVE_INJECT_CARD_HISTORY, scrolled],
+      }),
+    ).toBeDefined();
   });
 
   it("puts SELECT option keys on the SELECT_target head", () => {

@@ -39,6 +39,7 @@ import {
 import { audit, sessionForCall } from "./session/lifecycle.js";
 import { registrableHost } from "./session/hosts.js";
 import { observedThreeDsChallenge, rememberCompactV2SourcePage } from "./observe/observe.js";
+import { safeStageV2 } from "./compact-observation-v2.js";
 import {
   lastSelectOptions,
   type DriveActProfile,
@@ -652,7 +653,9 @@ export function offscreenRowStaysOffered(row: WireRow, pageUrl: string): boolean
  */
 export function paymentSubmitDispatched(history: readonly string[]): boolean {
   const sinceRelease = history.slice(history.lastIndexOf(DRIVE_INJECT_CARD_HISTORY) + 1);
-  return sinceRelease.some((line) => PAYMENT_SUBMIT_LABEL.test(line.toLowerCase()));
+  return sinceRelease.some(
+    (line) => /^click /i.test(line) && PAYMENT_SUBMIT_LABEL.test(line.toLowerCase()),
+  );
 }
 
 /** Fill, select, an enabled non-OAuth submit, or an enabled choice is still listed — WAIT and BLOCKED are not honest. */
@@ -673,18 +676,17 @@ export function paymentSubmitControlMissing(input: {
   includePayment: boolean;
   alreadyCard: boolean;
   cardRetry: boolean;
-  onCheckout: boolean;
+  pageUrl: string;
   remainingFills: number;
-  stage: Observation["stage"];
   history: readonly string[];
 }): string | undefined {
   if (
     !input.includePayment ||
     !input.alreadyCard ||
     input.cardRetry ||
-    !input.onCheckout ||
+    !isCheckoutUrl(input.pageUrl) ||
     input.remainingFills > 0 ||
-    input.stage === "complete" ||
+    safeStageV2(input.pageUrl, []) === "complete" ||
     paymentSubmitDispatched(input.history) ||
     input.rows.some((row) => isPaymentSubmitRow(row))
   ) {
@@ -1549,6 +1551,34 @@ export function selectTargets(
   return targets;
 }
 
+export function scrollDescription(row: WireRow, rows: readonly WireRow[]): string {
+  return `scroll to reveal the ${actionDescription(row, rows)}`;
+}
+
+/** The recent-actions line for a dispatched action.
+ *
+ * A scroll reveals a control; it does not operate it. Describing one as a click
+ * both misinforms the model and makes a scroll onto Pay look like a dispatched
+ * payment to `paymentSubmitDispatched`.
+ */
+export function actionHistoryLine(
+  action: ProvisionAction,
+  acted: WireRow | undefined,
+  rows: readonly WireRow[],
+): string {
+  if (acted === undefined) return action.kind;
+  if (action.kind === "scroll") return scrollDescription(acted, rows);
+  const operation =
+    action.kind === "click"
+      ? "CLICK"
+      : action.kind === "type"
+        ? "TYPE_TEXT"
+        : action.kind === "select"
+          ? "SELECT"
+          : undefined;
+  return actionDescription(acted, rows, operation);
+}
+
 export function scrollTargets(rows: readonly WireRow[]): DriveCandidate[] {
   const used = new Set<string>();
   const targets: DriveCandidate[] = [];
@@ -1563,7 +1593,7 @@ export function scrollTargets(rows: readonly WireRow[]): DriveCandidate[] {
       ref: row[0],
       role,
       slug,
-      description: `scroll to reveal the ${actionDescription(row, rows)}`,
+      description: scrollDescription(row, rows),
       row,
     });
   }
@@ -3702,19 +3732,7 @@ async function driveLoop(input: {
       return await noteProgress(fingerprint, nextFingerprint, decision.actionKey);
     }
 
-    const historyLine = (() => {
-      const acted = findRow(rows, decision.actionKey);
-      if (acted === undefined) return decision.action.kind;
-      const operation =
-        decision.action.kind === "click"
-          ? "CLICK"
-          : decision.action.kind === "type"
-            ? "TYPE_TEXT"
-            : decision.action.kind === "select"
-              ? "SELECT"
-              : undefined;
-      return actionDescription(acted, rows, operation);
-    })();
+    const historyLine = actionHistoryLine(decision.action, findRow(rows, decision.actionKey), rows);
     const beforeEpoch =
       drive.lastDocumentEpoch ??
       (session.browser.page === null ? "" : await documentEpochOf(session.browser.page));
@@ -4134,9 +4152,8 @@ async function driveLoop(input: {
       includePayment,
       alreadyCard,
       cardRetry,
-      onCheckout,
+      pageUrl,
       remainingFills: remainingFills.length,
-      stage: observation.stage,
       history: drive.history,
     });
     if (missingPay === undefined) {
