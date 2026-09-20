@@ -76,6 +76,13 @@ import {
   typeableCandidates,
   validateChoice,
   validateChoiceReason,
+  actionFailureKey,
+  filledFormIds,
+  inferPagePhase,
+  rankDriveCandidates,
+  rememberFailedAction,
+  rowFormId,
+  rowOccluder,
   type DriveCandidate,
   type WireRow,
 } from "../operate-drive.js";
@@ -2338,5 +2345,102 @@ describe("drive outbound choice budgets", () => {
       kind: "act",
       action: { kind: "type", text: valueQuestion.criteria[valueKey] },
     });
+  });
+});
+
+describe("drive aim ranking", () => {
+  const formEmail: WireRow = ["@e:email", "t", "Email|f=email|fm=1"];
+  const formSubmit: WireRow = ["@e:go", "b", "Create account|fm=1"];
+  const otherSubmit: WireRow = ["@e:news", "b", "Create account|fm=2"];
+  const accept: WireRow = ["@e:ok", "b", "Accept All"];
+  const covered: WireRow = ["@e:go", "b", "Sign Up|oc=@e:ok"];
+
+  function candidate(row: WireRow): DriveCandidate {
+    return {
+      ref: row[0],
+      role: row[1],
+      slug: row[0].replace("@e:", ""),
+      description: row[2] ?? row[0],
+      row,
+    };
+  }
+
+  it("reads form membership and cover facts from the wire row", () => {
+    expect(rowFormId(formEmail)).toBe("1");
+    expect(rowOccluder(covered)).toBe("@e:ok");
+    expect(filledFormIds([formEmail, formSubmit], ["@e:email"])).toEqual(new Set(["1"]));
+  });
+
+  it("infers page phase from the URL path and headings, never a hostname", () => {
+    expect(inferPagePhase("https://example.test/register")).toBe("signup");
+    expect(inferPagePhase("https://example.test/users/sign_in")).toBe("login");
+    expect(inferPagePhase("https://example.test/email/verify")).toBe("verify");
+    expect(inferPagePhase("https://example.test/welcome")).toBe("onboarding");
+    expect(inferPagePhase("https://example.test/settings/api-keys")).toBe("keys");
+    expect(inferPagePhase("https://example.test/checkouts/cn/token")).toBe("checkout");
+    expect(inferPagePhase("https://example.test/app", ["Create an API key"])).toBe("keys");
+    expect(inferPagePhase("https://example.test/app", ["Check your email"])).toBe("verify");
+    expect(inferPagePhase("https://example.test/app")).toBe("unknown");
+  });
+
+  it("prefers the submit of the form just filled over a same-label control on another form", () => {
+    const ranked = rankDriveCandidates([candidate(otherSubmit), candidate(formSubmit)], {
+      rows: [formEmail, formSubmit, otherSubmit],
+      filledRefs: ["@e:email"],
+      pageUrl: "https://example.test/register",
+    });
+    expect(ranked.map((entry) => entry.ref)).toEqual(["@e:go", "@e:news"]);
+  });
+
+  it("offers the covering control ahead of the covered target", () => {
+    const ranked = rankDriveCandidates([candidate(covered), candidate(accept)], {
+      rows: [covered, accept],
+      pageUrl: "https://example.test/register",
+    });
+    expect(ranked.map((entry) => entry.ref)).toEqual(["@e:ok", "@e:go"]);
+  });
+
+  it("downweights a remounted control whose role and label already failed", () => {
+    const first: WireRow = ["@e:old", "b", "Log in"];
+    const remount: WireRow = ["@e:new", "b", "Log in"];
+    const create: WireRow = ["@e:join", "b", "Create account"];
+    const drive = { failedActionKeys: [] as string[] };
+    rememberFailedAction(drive, [first], "@e:old");
+    expect(drive.failedActionKeys).toEqual([actionFailureKey(first)]);
+    const ranked = rankDriveCandidates([candidate(remount), candidate(create)], {
+      rows: [remount, create],
+      pageUrl: "https://example.test/login",
+      failedKeys: drive.failedActionKeys,
+      goal: "Sign up using the email/password form and reach the API key page",
+    });
+    expect(ranked.map((entry) => entry.ref)).toEqual(["@e:join", "@e:new"]);
+  });
+
+  it("keeps document order when no form, cover, failure, or phase signal applies", () => {
+    const one: WireRow = ["@e:a", "b", "Alpha"];
+    const two: WireRow = ["@e:b", "b", "Beta"];
+    expect(
+      rankDriveCandidates([candidate(one), candidate(two)], {
+        rows: [one, two],
+        pageUrl: "https://example.test/app",
+      }).map((entry) => entry.ref),
+    ).toEqual(["@e:a", "@e:b"]);
+  });
+
+  it("ranks Create account ahead of Log in on a login URL when the goal is a signup", () => {
+    const login: WireRow = ["@e:in", "b", "Log in"];
+    const join: WireRow = ["@e:join", "b", "Create account"];
+    const sets = driveTargetSets(
+      [login, join],
+      {},
+      false,
+      [],
+      "https://example.test/login",
+      new Map(),
+      (text) => text,
+      [],
+      { goal: "Sign up using the email/password form" },
+    );
+    expect(sets.CLICK.map((entry) => entry.ref)).toEqual(["@e:join", "@e:in"]);
   });
 });

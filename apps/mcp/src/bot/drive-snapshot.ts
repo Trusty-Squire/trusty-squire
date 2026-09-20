@@ -36,6 +36,10 @@ export interface DriveSnapshotElement {
   pattern?: string;
   inputMode?: string;
   invalid?: boolean;
+  /** HTML form owner identity, stable for one snapshot walk. */
+  formId?: number;
+  /** Covering control ref, or a region kind when the cover is not a listed control. */
+  occludedBy?: string;
   operations: Array<"click" | "fill" | "select">;
   options?: DriveSnapshotOption[];
   frameOrdinal: number;
@@ -163,6 +167,10 @@ export function driveRowsFromSnapshot(snapshot: DriveSnapshot): SnapshotRow[] {
     }
     const choice = optionOrdinal.get(element.ref);
     if (choice !== undefined) facts.push(`q=${choice.index}/${choice.total}`);
+    if (element.formId !== undefined) facts.push(`fm=${element.formId}`);
+    if (element.occludedBy !== undefined && element.occludedBy.length > 0) {
+      facts.push(`oc=${element.occludedBy.replace(/\|/g, " ").slice(0, 40)}`);
+    }
     const roleLetter =
       element.role === "button"
         ? "b"
@@ -389,6 +397,25 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
     }
     return null;
   };
+  const formIds = new WeakMap<Element, number>();
+  let nextForm = 1;
+  const formIdOf = (element: Element): number | undefined => {
+    const owner =
+      element instanceof HTMLInputElement ||
+      element instanceof HTMLButtonElement ||
+      element instanceof HTMLSelectElement ||
+      element instanceof HTMLTextAreaElement
+        ? element.form
+        : element.closest("form");
+    if (owner === null) return undefined;
+    let id = formIds.get(owner);
+    if (id === undefined) {
+      id = nextForm;
+      nextForm += 1;
+      formIds.set(owner, id);
+    }
+    return id;
+  };
   const inView: DriveSnapshotElement[] = [];
   const offscreenControls: DriveSnapshotElement[] = [];
   let omittedValues = 0;
@@ -503,6 +530,7 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
       ((element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) &&
         element.value.length > 0 &&
         !element.validity.valid);
+    const formId = formIdOf(element);
     const options =
       element instanceof HTMLSelectElement
         ? Array.from(element.options)
@@ -531,10 +559,47 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
       ...(pattern.length > 0 ? { pattern } : {}),
       ...(inputMode.length > 0 ? { inputMode } : {}),
       ...(invalid ? { invalid: true } : {}),
+      ...(formId === undefined ? {} : { formId }),
       ...(options === undefined ? {} : { options }),
     };
     if (inViewport) inView.push(row);
     else offscreenControls.push(row);
+  }
+  // Offer-time occlusion: the act guard already refuses a covered target.
+  // Recording the cover here lets ranking prefer it before a wasted click.
+  const refOf = new WeakMap<Element, string>();
+  for (const [ref, node] of cache.nodes) refOf.set(node, ref);
+  const occluderOf = (element: Element, selfRef: string): string | undefined => {
+    const rect = element.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return undefined;
+    const x = Math.min(innerWidth - 1, Math.max(0, rect.x + rect.width / 2));
+    const y = Math.min(innerHeight - 1, Math.max(0, rect.y + rect.height / 2));
+    const hit = document.elementFromPoint(x, y);
+    if (hit === null || hit === element || element.contains(hit) || hit.contains(element)) {
+      return undefined;
+    }
+    let cur: Element | null = hit;
+    while (cur !== null) {
+      const cover = refOf.get(cur);
+      if (cover !== undefined && cover !== selfRef) return cover;
+      cur = cur.parentElement;
+    }
+    const named = hit.closest(
+      "dialog,[role='dialog'],[role='alertdialog'],[role='banner'],[role='complementary'],aside,header",
+    );
+    if (named !== null) {
+      const role = (named.getAttribute("role") ?? named.tagName).toLowerCase();
+      if (role === "dialog" || role === "alertdialog" || named.tagName === "DIALOG") return "dialog";
+      if (role === "banner" || named.tagName === "HEADER") return "banner";
+      if (role === "complementary" || named.tagName === "ASIDE") return "aside";
+    }
+    return "overlay";
+  };
+  for (const row of inView) {
+    const node = cache.nodes.get(row.ref);
+    if (node === undefined) continue;
+    const occludedBy = occluderOf(node, row.ref);
+    if (occludedBy !== undefined) row.occludedBy = occludedBy;
   }
   const fieldsFirst = (list: DriveSnapshotElement[]): DriveSnapshotElement[] => {
     const fields = list.filter(

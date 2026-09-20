@@ -153,6 +153,9 @@ export const DRIVE_RULES: readonly string[] = [
   "Do not choose a field that already contains the requested value.",
   "Identifying values come only from the provided facts; never invent them.",
   "A search or query field may receive a phrase assigned from the goal or facts; pick none rather than composing one.",
+  "Prefer the submit that belongs to the form just filled over a similarly labeled control elsewhere.",
+  "If a needed control is covered, act on whatever covers it first.",
+  "Prefer controls that match the current page phase implied by the URL and headings.",
 ];
 // Drive rules above adapt browser-use/jev-ultrafast (MIT) NEXT_ACTION / TARGET prose.
 
@@ -311,6 +314,7 @@ export function emptyDriveState(goal: string, facts: Record<string, string>): Se
     staleClickRefs: [],
     exhaustedProgressKey: null,
     exhaustedActionKeys: [],
+    failedActionKeys: [],
     boundFingerprint: null,
     consumedActionKey: null,
     lastActProfile: null,
@@ -613,6 +617,205 @@ export function recordDeadAction(
 
 export function deadActionReason(actionKeys: readonly string[], url: string): string {
   return `no change after ${actionKeys.join(", ")} on ${url}`;
+}
+
+export type DrivePagePhase =
+  | "signup"
+  | "login"
+  | "verify"
+  | "onboarding"
+  | "keys"
+  | "checkout"
+  | "unknown";
+
+export interface DriveAimContext {
+  headings?: readonly string[];
+  failedKeys?: readonly string[];
+  goal?: string;
+}
+
+export function rowFormId(row: WireRow): string | undefined {
+  const match = /(?:^|\|)fm=([^|]+)/.exec(row[2] ?? "");
+  return match?.[1];
+}
+
+export function rowOccluder(row: WireRow): string | undefined {
+  const match = /(?:^|\|)oc=([^|]+)/.exec(row[2] ?? "");
+  return match?.[1];
+}
+
+export function actionFailureKey(row: WireRow): string {
+  return `${row[1]}\t${normalizeKey(readableLabel(row))}`;
+}
+
+export function rememberFailedAction(
+  drive: Pick<SessionDriveState, "failedActionKeys">,
+  rows: readonly WireRow[],
+  actionKey: string,
+): void {
+  drive.failedActionKeys ??= [];
+  const row = rows.find((entry) => entry[0] === actionKey);
+  const key = row === undefined ? actionKey : actionFailureKey(row);
+  if (!drive.failedActionKeys.includes(key)) drive.failedActionKeys.push(key);
+}
+
+export function filledFormIds(
+  rows: readonly WireRow[],
+  filledRefs: readonly string[],
+): Set<string> {
+  const filled = new Set(filledRefs);
+  const ids = new Set<string>();
+  for (const row of rows) {
+    if (!filled.has(row[0])) continue;
+    const id = rowFormId(row);
+    if (id !== undefined) ids.add(id);
+  }
+  return ids;
+}
+
+export function inferPagePhase(
+  url: string,
+  headings: readonly string[] = [],
+): DrivePagePhase {
+  if (isCheckoutUrl(url)) return "checkout";
+  const path = urlPathname(url);
+  const headingText = headings.join("\n").toLowerCase();
+  if (/(?:^|\/)(?:sign[-_]?up|register|users\/sign_up|create[-_]?account)(?:\/|$)/.test(path)) {
+    return "signup";
+  }
+  if (/(?:^|\/)(?:log[-_]?in|sign[-_]?in|users\/sign_in)(?:\/|$)/.test(path)) return "login";
+  if (
+    /(?:^|\/)(?:verify|confirm|confirmation|email[-_]?verify|confirm[-_]?account)(?:\/|$)/.test(path)
+  ) {
+    return "verify";
+  }
+  if (/(?:^|\/)(?:welcome|onboarding|getting[-_]?started)(?:\/|$)/.test(path)) return "onboarding";
+  if (/(?:^|\/)(?:api[-_]?keys?|tokens?|credentials|access[-_]?tokens?)(?:\/|$)/.test(path)) {
+    return "keys";
+  }
+  if (/api\s*key|access\s*token|create\s+(?:a\s+)?(?:key|token)/.test(headingText)) return "keys";
+  if (/check\s+your\s+email|confirm\s+your\s+(?:email|account)|verify\s+your/.test(headingText)) {
+    return "verify";
+  }
+  if (/welcome|tell\s+us\s+about|getting\s+started/.test(headingText)) return "onboarding";
+  if (/create\s+(?:an?\s+)?account|sign\s*up/.test(headingText) && !/log\s*in/.test(headingText)) {
+    return "signup";
+  }
+  if (/log\s*in|sign\s*in/.test(headingText)) return "login";
+  return "unknown";
+}
+
+function goalWantsSignup(goal: string | undefined): boolean {
+  if (goal === undefined || goal.length === 0) return false;
+  return /sign\s*up|register|create\s+(?:an?\s+)?account/.test(goal.toLowerCase());
+}
+
+function goalWantsKey(goal: string | undefined): boolean {
+  if (goal === undefined || goal.length === 0) return false;
+  return /api\s*key|access\s*token|credential/.test(goal.toLowerCase());
+}
+
+function isCreateAccountRow(row: WireRow): boolean {
+  const label = readableLabel(row).toLowerCase();
+  return /create\s+(?:an?\s+)?account|sign\s*up|register/.test(label);
+}
+
+function isLoginRow(row: WireRow): boolean {
+  const label = readableLabel(row).toLowerCase();
+  return /log\s*in|sign\s*in/.test(label) && !isCreateAccountRow(row);
+}
+
+function isKeyNavRow(row: WireRow): boolean {
+  const label = readableLabel(row).toLowerCase();
+  return /api\s*key|access\s*token|create\s+(?:a\s+)?(?:key|token)|credentials?|settings/.test(
+    label,
+  );
+}
+
+function isNavChromeRow(row: WireRow): boolean {
+  if (isSubmitLikeRow(row) || isFillableRow(row) || isChoiceRow(row) || isConsentRow(row)) {
+    return false;
+  }
+  return row[1] === "l" || row[1] === "link" || row[1] === "tb" || row[1] === "tab";
+}
+
+export function candidateAimScore(
+  candidate: DriveCandidate,
+  input: {
+    rows: readonly WireRow[];
+    filledRefs?: readonly string[];
+    pageUrl?: string;
+    headings?: readonly string[];
+    failedKeys?: readonly string[];
+    goal?: string;
+    phase?: DrivePagePhase;
+  },
+): number {
+  const row = candidate.row;
+  const phase = input.phase ?? inferPagePhase(input.pageUrl ?? "", input.headings ?? []);
+  const filledIds = filledFormIds(input.rows, input.filledRefs ?? []);
+  const formId = rowFormId(row);
+  const occluder = rowOccluder(row);
+  const failed = new Set(input.failedKeys ?? []);
+  let score = 0;
+  if (formId !== undefined && filledIds.has(formId)) {
+    score += isSubmitLikeRow(row) ? 100 : 30;
+  } else if (filledIds.size > 0 && isSubmitLikeRow(row)) {
+    score += formId === undefined ? -20 : -40;
+  }
+  if (occluder !== undefined) score -= 80;
+  if (input.rows.some((other) => other[0] !== row[0] && rowOccluder(other) === row[0])) {
+    score += 90;
+  }
+  if (isConsentRow(row) && input.rows.some((other) => rowOccluder(other) !== undefined)) {
+    score += 70;
+  }
+  if (failed.has(actionFailureKey(row)) || failed.has(row[0])) score -= 70;
+  if (phase === "signup") {
+    if (isSubmitLikeRow(row) || isFillableRow(row) || isChoiceRow(row)) score += 40;
+    if (isOauthChromeRow(row)) score -= 40;
+    if (isSearchRow(row) && rowListChoice(row) === undefined) score -= 30;
+    if (isLoginRow(row)) score -= 20;
+  } else if (phase === "login") {
+    if (goalWantsSignup(input.goal) && isCreateAccountRow(row)) score += 80;
+    else if (isLoginRow(row) || isSubmitLikeRow(row)) score += 20;
+    if (isOauthChromeRow(row) && goalWantsSignup(input.goal)) score -= 30;
+  } else if (phase === "verify") {
+    if (/verify|confirm|email|inbox|gmail|mail/.test(readableLabel(row).toLowerCase())) score += 50;
+  } else if (phase === "onboarding") {
+    if (isChoiceRow(row) || rowListChoice(row) !== undefined) score += 40;
+    if (isSearchRow(row) && rowListChoice(row) === undefined) score -= 40;
+  } else if (phase === "keys" || (phase === "unknown" && goalWantsKey(input.goal))) {
+    if (isKeyNavRow(row)) score += 80;
+  } else if (phase === "checkout") {
+    if (isButtonLikeRow(row) || isPaymentRow(row) || isCvvRow(row)) score += 40;
+  }
+  if (isNavChromeRow(row) && (phase === "signup" || phase === "onboarding" || phase === "login")) {
+    score -= 10;
+  }
+  return score;
+}
+
+export function rankDriveCandidates<T extends DriveCandidate>(
+  candidates: readonly T[],
+  input: {
+    rows: readonly WireRow[];
+    filledRefs?: readonly string[];
+    pageUrl?: string;
+    headings?: readonly string[];
+    failedKeys?: readonly string[];
+    goal?: string;
+  },
+): T[] {
+  const phase = inferPagePhase(input.pageUrl ?? "", input.headings ?? []);
+  return candidates
+    .map((candidate, index) => ({
+      candidate,
+      index,
+      score: candidateAimScore(candidate, { ...input, phase }),
+    }))
+    .sort((left, right) => right.score - left.score || left.index - right.index)
+    .map((entry) => entry.candidate);
 }
 
 export function isSubmitLikeRow(row: WireRow): boolean {
@@ -1976,31 +2179,49 @@ export function driveTargetSets(
   pageOptions: ReadonlyMap<string, readonly string[]> = new Map(),
   maskText: (text: string) => string = (text) => text,
   skippedClickRefs: readonly string[] = [],
+  aim: DriveAimContext = {},
 ): DriveTargetSets {
   const remaining = { n: DRIVE_MAX_CANDIDATES };
   const skipped = new Set(skippedClickRefs);
+  const aimInput = {
+    rows,
+    filledRefs,
+    pageUrl,
+    headings: aim.headings ?? [],
+    failedKeys: aim.failedKeys ?? [],
+    ...(aim.goal === undefined ? {} : { goal: aim.goal }),
+  };
   const typeText = takeCapped(
-    typeableCandidates(rows, facts, includePayment, filledRefs, pageUrl).filter(
-      (candidate) => !skipped.has(candidate.ref),
+    rankDriveCandidates(
+      typeableCandidates(rows, facts, includePayment, filledRefs, pageUrl).filter(
+        (candidate) => !skipped.has(candidate.ref),
+      ),
+      aimInput,
     ),
     remaining,
   );
   const select = takeCapped(
-    selectTargets(
-      selectCandidates(rows, facts, includePayment, filledRefs, pageUrl).filter(
-        (candidate) => !skipped.has(candidate.ref),
+    rankDriveCandidates(
+      selectTargets(
+        selectCandidates(rows, facts, includePayment, filledRefs, pageUrl).filter(
+          (candidate) => !skipped.has(candidate.ref),
+        ),
+        facts,
+        pageOptions,
+        maskText,
       ),
-      facts,
-      pageOptions,
-      maskText,
+      aimInput,
     ),
     remaining,
   );
   const click = takeCapped(
-    clickableCandidates(rows, includePayment, skippedClickRefs, pageUrl),
+    rankDriveCandidates(
+      clickableCandidates(rows, includePayment, skippedClickRefs, pageUrl),
+      aimInput,
+    ),
     remaining,
   );
-  const scroll = takeCapped(scrollTargets(rows), remaining);
+  const scroll = takeCapped(rankDriveCandidates(scrollTargets(rows), aimInput), remaining);
   const operations: DriveOperation[] = [];
   if (click.length > 0) operations.push("CLICK");
   if (typeText.length > 0) operations.push("TYPE_TEXT");
@@ -2050,7 +2271,10 @@ export function buildDriveQuestions(
   precomputed?: DriveTargetSets,
 ): Record<string, JevQuestion> {
   const sets =
-    precomputed ?? driveTargetSets(rows, facts, includePayment, filledRefs, pageUrl, pageOptions);
+    precomputed ??
+    driveTargetSets(rows, facts, includePayment, filledRefs, pageUrl, pageOptions, (text) => text, [], {
+      goal,
+    });
   const questions: Record<string, JevQuestion> = {
     operation: {
       type: "choice",
@@ -3282,6 +3506,7 @@ export async function runOperateDrive(
   if (!Array.isArray(drive.staleClickRefs)) drive.staleClickRefs = [];
   if (drive.exhaustedProgressKey === undefined) drive.exhaustedProgressKey = null;
   if (!Array.isArray(drive.exhaustedActionKeys)) drive.exhaustedActionKeys = [];
+  if (!Array.isArray(drive.failedActionKeys)) drive.failedActionKeys = [];
   if (drive.boundFingerprint === undefined) drive.boundFingerprint = null;
   if (drive.consumedActionKey === undefined) drive.consumedActionKey = null;
   drive.running = true;
@@ -3452,6 +3677,7 @@ async function driveLoop(input: {
     return "continue";
   };
   const markDead = (actionKey: string): DriveHandoff | "continue" => {
+    rememberFailedAction(drive, rows, actionKey);
     const key = pageProgressKey(observation.url, rows, drive.filledRefs);
     if (recordDeadAction(drive, key, actionKey) === "stop") {
       return finish("no_progress", {
@@ -3801,6 +4027,7 @@ async function driveLoop(input: {
       if (!drive.staleClickRefs.includes(decision.actionKey)) {
         drive.staleClickRefs.push(decision.actionKey);
       }
+      rememberFailedAction(drive, rows, decision.actionKey);
       const staleSnap = await snapshotOrTimeout(framesIfNeeded());
       if (staleSnap !== "ok") return staleSnap;
       if (modelChosen) {
@@ -4248,6 +4475,11 @@ async function driveLoop(input: {
       pageOptions,
       (text) => maskDriveOutput(session, text),
       skippedActions,
+      {
+        headings: observation.semantic?.headings ?? [],
+        failedKeys: drive.failedActionKeys ?? [],
+        goal: drive.goal,
+      },
     );
     const actionable = sets.operations.filter(
       (op) => op !== "DONE" && op !== "BLOCKED" && op !== "WAIT",

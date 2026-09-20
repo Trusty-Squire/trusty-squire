@@ -211,6 +211,43 @@ describe("drive snapshot conversion", () => {
     ).toEqual(["card_expiry_long"]);
   });
 
+  it("serializes form membership and the covering control onto the row", () => {
+    const rows = driveRowsFromSnapshot(
+      snapshot({
+        elements: [
+          {
+            ref: "@e:f0d1",
+            role: "textbox",
+            label: "Email",
+            formId: 1,
+            operations: ["fill"],
+            frameOrdinal: 0,
+          },
+          {
+            ref: "@e:f0d2",
+            role: "button",
+            label: "Create account",
+            formId: 1,
+            occludedBy: "@e:f0d3",
+            operations: ["click"],
+            frameOrdinal: 0,
+          },
+          {
+            ref: "@e:f0d3",
+            role: "button",
+            label: "Accept All",
+            operations: ["click"],
+            frameOrdinal: 0,
+          },
+        ],
+      }),
+    );
+    expect(rows.find((row) => row[0] === "@e:f0d1")?.[2]).toContain("fm=1");
+    expect(rows.find((row) => row[0] === "@e:f0d2")?.[2]).toContain("fm=1");
+    expect(rows.find((row) => row[0] === "@e:f0d2")?.[2]).toContain("oc=@e:f0d3");
+    expect(rows.find((row) => row[0] === "@e:f0d3")?.[2]).not.toContain("oc=");
+  });
+
   it("maps a fillable combobox to a text field, not a select", () => {
     const rows = driveRowsFromSnapshot(
       snapshot({
