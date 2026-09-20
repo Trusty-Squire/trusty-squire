@@ -594,29 +594,53 @@ export function isCvvRow(row: WireRow): boolean {
 
 const CARD_EXPIRY_FACT = "card_expiry";
 const CARD_NAME_FACT = "card_name";
+const EXP_YEAR_SHORT_FACT = "exp_year_short";
+const CARD_DERIVED_FACTS = new Set([
+  CARD_EXPIRY_FACT,
+  CARD_NAME_FACT,
+  EXP_YEAR_SHORT_FACT,
+  "exp_month",
+  "exp_year",
+]);
 
 function rowHay(row: WireRow): string {
   return `${normalizeKey(fieldNameForRow(row))} ${normalizeKey(readableLabel(row))}`;
 }
 
-function readsAsExpiry(row: WireRow): boolean {
-  return /expir|exp_month|exp_year|exp_date|cc_exp|mm_yy/.test(rowHay(row));
-}
-
-/** True when the row itself, or the snapshot it belongs to, is a card form.
+/** Every word a card expiry control spells, and nothing else.
  *
- * A "Passport expiry" reads exactly like a card expiry, so the label alone
- * cannot decide it. The card number control is what makes the surrounding
- * fields card fields, and `isPaymentRow` already owns recognizing it.
+ * A checkout can carry other expiry dates — a driver's licence, a passport —
+ * and a sibling card-number row says nothing about which one this is. What
+ * separates them is the control's own wording: a card expiry names only the
+ * date and its format, while every other expiry names what it belongs to.
  */
-function hasCardContext(row: WireRow, rows: readonly WireRow[]): boolean {
-  const facts = row[2] ?? "";
-  if (facts.includes("f=payment") || facts.includes("a=payment")) return true;
-  return rows.some((other) => other !== row && isPaymentRow(other));
-}
+const CARD_EXPIRY_WORDS = new Set([
+  "card",
+  "cc",
+  "credit",
+  "debit",
+  "date",
+  "exp",
+  "expiry",
+  "expiration",
+  "expires",
+  "mm",
+  "yy",
+  "yyyy",
+  "month",
+  "year",
+  "valid",
+  "thru",
+  "through",
+]);
 
-export function isExpiryRow(row: WireRow, rows: readonly WireRow[] = []): boolean {
-  return readsAsExpiry(row) && hasCardContext(row, rows);
+export function isExpiryRow(row: WireRow): boolean {
+  const hay = rowHay(row);
+  if (!/expir|exp_month|exp_year|exp_date|cc_exp|mm_yy/.test(hay)) return false;
+  return hay
+    .split(/[\s_]+/)
+    .filter((word) => word.length > 0)
+    .every((word) => CARD_EXPIRY_WORDS.has(word));
 }
 
 function cardExpiryFactFor(row: WireRow): string {
@@ -624,7 +648,9 @@ function cardExpiryFactFor(row: WireRow): string {
   const month = /month|mm/.test(hay);
   const year = /year|yy/.test(hay);
   if (month && !year) return "exp_month";
-  if (year && !month) return "exp_year";
+  // A control that spells its width as YY cannot hold "2030": the extra
+  // characters are dropped and the card is declined with nothing to read.
+  if (year && !month) return /yyyy/.test(hay) || !/yy/.test(hay) ? "exp_year" : EXP_YEAR_SHORT_FACT;
   return CARD_EXPIRY_FACT;
 }
 
@@ -737,11 +763,7 @@ function aliasKeysFor(token: string): string[] {
   return [field];
 }
 
-export function matchingFactKeys(
-  facts: Record<string, string>,
-  row: WireRow,
-  rows: readonly WireRow[] = [],
-): string[] {
+export function matchingFactKeys(facts: Record<string, string>, row: WireRow): string[] {
   const keys = Object.keys(facts);
   if (keys.length === 0) return [];
   // Card controls take the released card's own values and nothing else — the
@@ -754,7 +776,7 @@ export function matchingFactKeys(
     if (isCardholderNameRow(row)) {
       return keys.filter((key) => normalizeKey(key) === CARD_NAME_FACT);
     }
-    if (isExpiryRow(row, rows)) {
+    if (isExpiryRow(row)) {
       const wantedFact = cardExpiryFactFor(row);
       return keys.filter((key) => normalizeKey(key) === wantedFact);
     }
@@ -824,12 +846,15 @@ export function applyReleasedCardFacts(
   const year = card.exp_year.trim();
   const name = card.name.trim();
   const next = { ...facts };
+  const shortYear = year.length === 4 ? year.slice(-2) : year;
   if (next.exp_month === undefined && month.length > 0) next.exp_month = month;
   if (next.exp_year === undefined && year.length > 0) next.exp_year = year;
+  if (next[EXP_YEAR_SHORT_FACT] === undefined && shortYear.length > 0) {
+    next[EXP_YEAR_SHORT_FACT] = shortYear;
+  }
   if (next[CARD_NAME_FACT] === undefined && name.length > 0) next[CARD_NAME_FACT] = name;
   if (next[CARD_EXPIRY_FACT] === undefined && month.length > 0 && year.length > 0) {
-    const yy = year.length === 4 ? year.slice(-2) : year;
-    next[CARD_EXPIRY_FACT] = `${month.padStart(2, "0")}/${yy}`;
+    next[CARD_EXPIRY_FACT] = `${month.padStart(2, "0")}/${shortYear}`;
   }
   return next;
 }
@@ -846,7 +871,7 @@ export function ensureGeneratedFacts(
   }
   for (const row of rows) {
     if (!isFillableRow(row) || isActedRow(row) || isPaymentRow(row) || isCvvRow(row)) continue;
-    if (isPasswordRow(row) && matchingFactKeys(next, row, rows).length === 0) {
+    if (isPasswordRow(row) && matchingFactKeys(next, row).length === 0) {
       next.password = generatePassword();
     }
   }
@@ -991,7 +1016,12 @@ export function goalValueCriteria(
     criteria[slug] = value;
   };
   for (const phrase of goalValuePhrases(goal)) add(phrase);
-  for (const [key, value] of Object.entries(facts)) add(value, key);
+  for (const [key, value] of Object.entries(facts)) {
+    // A released card value is never a goal phrase. Left in, the drive can be
+    // told to type the expiry or the cardholder name into a site-search box.
+    if (CARD_DERIVED_FACTS.has(key)) continue;
+    add(value, key);
+  }
   criteria[DRIVE_FIXED_NONE] = "none of the listed phrases belong in this field; skip it";
   return criteria;
 }
@@ -1107,12 +1137,12 @@ export function fillableCandidates(
     if (
       includePayment &&
       facts.exp_month === undefined &&
-      (isExpiryRow(row, rows) || isCardholderNameRow(row))
+      (isExpiryRow(row) || isCardholderNameRow(row))
     ) {
       continue;
     }
-    if (isOtpRow(row) && matchingFactKeys(facts, row, rows).length === 0) continue;
-    if (matchingFactKeys(facts, row, rows).length === 0) continue;
+    if (isOtpRow(row) && matchingFactKeys(facts, row).length === 0) continue;
+    if (matchingFactKeys(facts, row).length === 0) continue;
     const role = ROLE_LETTERS[row[1]] ?? row[1];
     const seed = `${row[2] ?? readableLabel(row)}_${role}`;
     const slug = uniqueCriteriaSlug(seed, used);
@@ -1204,7 +1234,6 @@ export function selectTargets(
   facts: Record<string, string>,
   pageOptions: ReadonlyMap<string, readonly string[]> = new Map(),
   maskText: (text: string) => string = (text) => text,
-  rows: readonly WireRow[] = [],
 ): DriveCandidate[] {
   const targets: DriveCandidate[] = [];
   for (const candidate of candidates) {
@@ -1225,7 +1254,7 @@ export function selectTargets(
         optionLabel: label,
       });
     };
-    for (const key of matchingFactKeys(facts, candidate.row, rows)) {
+    for (const key of matchingFactKeys(facts, candidate.row)) {
       const text = facts[key];
       if (text === undefined || text.length === 0) continue;
       addOption(text);
@@ -1286,7 +1315,7 @@ export function requiredFactComboboxAction(
     if (row[1] !== "combobox" || isDisabledRow(row) || isActedRow(row) || filled.has(row[0])) {
       continue;
     }
-    const key = matchingFactKeys(facts, row, rows)[0];
+    const key = matchingFactKeys(facts, row)[0];
     if (key === undefined) continue;
     const fact = facts[key];
     if (fact === undefined || fact.length === 0) continue;
@@ -1323,9 +1352,9 @@ export function requiredFillableMissingFact(
     if (isOffscreenRow(row) && !allowOffscreen) continue;
     if (isPaymentRow(row) || isCvvRow(row) || isOtpRow(row) || allowsGoalValueAssignment(row))
       continue;
-    if (isExpiryRow(row, rows) || isCardholderNameRow(row)) continue;
+    if (isExpiryRow(row) || isCardholderNameRow(row)) continue;
     if (!isRequiredRow(row)) continue;
-    if (matchingFactKeys(facts, row, rows).length > 0) continue;
+    if (matchingFactKeys(facts, row).length > 0) continue;
     const role = ROLE_LETTERS[row[1]] ?? row[1];
     return {
       ref: row[0],
@@ -1473,7 +1502,7 @@ export function valueCriteria(
   row?: WireRow,
   rows: readonly WireRow[] = [],
 ): Record<string, string> {
-  const keys = row === undefined ? Object.keys(facts) : matchingFactKeys(facts, row, rows);
+  const keys = row === undefined ? Object.keys(facts) : matchingFactKeys(facts, row);
   const from = keys.length > 0 ? keys : Object.keys(facts);
   const criteria: Record<string, string> = {};
   for (const key of from) {
@@ -1534,7 +1563,6 @@ export function driveTargetSets(
       facts,
       pageOptions,
       maskText,
-      rows,
     ),
     remaining,
   );
@@ -1604,7 +1632,7 @@ export function buildDriveQuestions(
     sets.TYPE_TEXT.some(
       (candidate) =>
         allowsGoalValueAssignment(candidate.row) &&
-        matchingFactKeys(facts, candidate.row, rows).length === 0,
+        matchingFactKeys(facts, candidate.row).length === 0,
     )
   ) {
     questions[DRIVE_VALUE_QUESTION] = {
@@ -1944,7 +1972,7 @@ export function decideAfterJev(input: {
       // An explicitly supplied matching fact wins over the inbox path: a
       // resumed drive carrying the OTP must type it, not re-read the inbox
       // (which returns the same needs_value handoff when Gmail lags).
-      const matched = matchingFactKeys(input.facts, row, input.rows);
+      const matched = matchingFactKeys(input.facts, row);
       if (matched.length > 0) {
         const filled = fillActionForCandidate(candidate, input.facts, matched[0]!, confidence);
         return filled ?? { kind: "needs_value", field: fieldLabelForRow(row) };
@@ -1994,7 +2022,7 @@ export function decideAfterJev(input: {
       return { kind: "needs_value", field: fieldLabelForRow(row) };
     }
     if (choice === "SELECT") {
-      const key = matchingFactKeys(input.facts, row, input.rows)[0];
+      const key = matchingFactKeys(input.facts, row)[0];
       let text = candidate.option ?? (key === undefined ? undefined : input.facts[key]);
       if (text === undefined && !isIdentityOrPaymentRow(row)) {
         const pageOptions = input.pageOptions ?? new Map();
@@ -3336,18 +3364,18 @@ async function driveLoop(input: {
       pageUrl,
     );
     // inject_card writes only pan/cvv. Expiry, cardholder name, and billing
-    // are typed after release. The gate counts the identity and address fills
-    // a fact actually backs, minus SELECT rows: a leftover state/country
-    // dropdown must not hold the card back. A site-search or promo input the
+    // are typed after release. The gate waits on every fill a fact actually
+    // backs, dropdowns included: resolving a State or Country after the card
+    // is in makes the merchant re-cost the order and remount the card frames,
+    // which wipes the PAN with no path back. A site-search or promo input the
     // drive has no fact for is not a fill at all and never enters this list —
     // it would otherwise sit here forever and the card would never be
     // released.
-    const remainingTypes = remainingFills.filter((candidate) => !isSelectRow(candidate.row));
     if (
       includePayment &&
       (!alreadyCard || cardRetry) &&
       onCheckout &&
-      remainingTypes.length === 0 &&
+      remainingFills.length === 0 &&
       (fields.pan !== undefined || fields.cvv !== undefined)
     ) {
       // Bind the automatic decision to the current snapshot before applying

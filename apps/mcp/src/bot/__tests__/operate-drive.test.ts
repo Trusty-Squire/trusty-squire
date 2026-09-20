@@ -367,7 +367,7 @@ describe("decideAfterJev stop reasons", () => {
 
   it("never halts on a card expiry control, with or without a card in play", () => {
     const expiry: WireRow = ["@e:exp", "t", "Expiration date (MM / YY)|s=r"];
-    expect(isExpiryRow(expiry, [expiry, PAYMENT])).toBe(true);
+    expect(isExpiryRow(expiry)).toBe(true);
     expect(
       requiredFillableMissingFact([expiry, PAYMENT, EMAIL], {
         email: "a@b.test",
@@ -405,7 +405,7 @@ describe("decideAfterJev stop reasons", () => {
     expect(facts.name).toBe("Ada Lovelace");
     // A provisioning drive that meets an inline cardholder control resolves it
     // through the ordinary name alias and carries on.
-    expect(matchingFactKeys(facts, cardholder, rows)).toEqual(["name"]);
+    expect(matchingFactKeys(facts, cardholder)).toEqual(["name"]);
     expect(fillableCandidates(rows, facts, false).map((row) => row.ref)).toContain("@e:ch");
     expect(requiredFillableMissingFact(rows, facts)?.ref).toBeUndefined();
   });
@@ -423,7 +423,7 @@ describe("decideAfterJev stop reasons", () => {
       exp_year: "2030",
       name: "A L Byron",
     });
-    expect(matchingFactKeys(released, cardholder, rows)).toEqual(["card_name"]);
+    expect(matchingFactKeys(released, cardholder)).toEqual(["card_name"]);
     expect(released.card_name).toBe("A L Byron");
   });
 
@@ -465,21 +465,23 @@ describe("decideAfterJev stop reasons", () => {
     expect(facts.name).toBe("Ada Lovelace");
   });
 
-  it("leaves no unfilled typeable fill behind a leftover state select or an unmatched search box", () => {
+  it("counts a fact-backed select as an outstanding fill but an unmatched search box as none", () => {
     const filledEmail: WireRow = ["@e:email", "t", "Email|f=email|s=r|n=a@b.test"];
     const search: WireRow = ["@e:q", "t", "Search|f=search"];
     const facts = { email: "a@b.test", state: "NY", card_ref: "card-1" };
     const rows = [filledEmail, STATE, search, PAYMENT];
+    // This is the set the inject_card gate waits on. The required State
+    // dropdown is in it, so the card is not released before it is resolved.
     const fills = fillableCandidates(rows, facts, true, ["@e:email"]);
     expect(fills.map((candidate) => candidate.ref)).toEqual(["@e:state"]);
-    expect(
-      fills.filter((candidate) => !isSelectRow(candidate.row)).map((candidate) => candidate.ref),
-    ).toEqual([]);
-    // typeableCandidates re-admits the unfillable search row, which is why the
-    // inject_card gate counts fills-minus-selects instead.
+    // The search row has no fact and never will, so it is absent — gating on
+    // a set that re-admits it (typeableCandidates does) would deadlock the
+    // release, because such a row only leaves once something types into it.
     expect(typeableCandidates(rows, facts, true, ["@e:email"]).map((row) => row.ref)).toEqual([
       "@e:q",
     ]);
+    const resolved = fillableCandidates(rows, facts, true, ["@e:email", "@e:state"]);
+    expect(resolved).toEqual([]);
   });
 
   it("copies released card public fields so expiry can be typed after inject", () => {
@@ -489,9 +491,70 @@ describe("decideAfterJev stop reasons", () => {
       email: "a@b.test",
       exp_month: "12",
       exp_year: "2030",
+      exp_year_short: "30",
       card_name: "Ada",
       card_expiry: "12/30",
     });
+  });
+
+  it("writes a two-digit year into a control that spells its width as YY", () => {
+    const facts = applyReleasedCardFacts(
+      { card_ref: "card-1" },
+      { exp_month: "12", exp_year: "2030", name: "Ada" },
+    );
+    const yy: WireRow = ["@e:yy", "t", "Expiration year (YY)|f=date"];
+    const yyyy: WireRow = ["@e:yyyy", "t", "Expiration year (YYYY)|f=date"];
+    const plain: WireRow = ["@e:y", "t", "Expiration year|f=date"];
+    const valueFor = (row: WireRow): string | undefined => facts[matchingFactKeys(facts, row)[0]!];
+    // A maxlength=2 input silently keeps "20" out of "2030" and the card is
+    // declined with nothing to read anywhere in the drive.
+    expect(valueFor(yy)).toBe("30");
+    expect(valueFor(yyyy)).toBe("2030");
+    expect(valueFor(plain)).toBe("2030");
+  });
+
+  it("leaves a non-card expiry on a card page to the ordinary aliases", () => {
+    const pan: WireRow = ["@e:pan", "t", "Card number|f=payment"];
+    const licence: WireRow = ["@e:dl", "t", "Driver's license expiration|f=date|s=r"];
+    const passport: WireRow = ["@e:pp", "t", "Passport expiry|f=date|s=r"];
+    const cardExpiry: WireRow = ["@e:exp", "t", "Expiration date (MM / YY)|f=date|s=r"];
+    const facts = applyReleasedCardFacts(
+      { card_ref: "card-1" },
+      { exp_month: "12", exp_year: "2030", name: "Ada" },
+    );
+    // A sibling PAN row does not make every expiry on the page a card expiry.
+    expect(isExpiryRow(licence)).toBe(false);
+    expect(isExpiryRow(passport)).toBe(false);
+    expect(isExpiryRow(cardExpiry)).toBe(true);
+    expect(matchingFactKeys(facts, licence)).toEqual([]);
+    expect(matchingFactKeys(facts, passport)).toEqual([]);
+    expect(matchingFactKeys(facts, cardExpiry)).toEqual(["card_expiry"]);
+    // Only the card control is offered the card value, and the licence field
+    // is still surfaced as a missing required fact rather than silently filled.
+    expect(
+      fillableCandidates([pan, licence, passport, cardExpiry], facts, true).map((row) => row.ref),
+    ).toEqual(["@e:exp"]);
+    expect(requiredFillableMissingFact([pan, licence, cardExpiry], facts)?.ref).toBe("@e:dl");
+  });
+
+  it("keeps released card values out of the goal-value criteria", () => {
+    const facts = applyReleasedCardFacts(
+      { card_ref: "card-1", merchant: "fixture.test" },
+      { exp_month: "12", exp_year: "2030", name: "A L Byron" },
+    );
+    const criteria = goalValueCriteria("Buy one item", facts);
+    // A site-search or promo row must never be offered the card expiry or the
+    // cardholder name as a phrase to type.
+    expect(Object.values(criteria)).not.toContain("12/30");
+    expect(Object.values(criteria)).not.toContain("A L Byron");
+    expect(Object.values(criteria)).not.toContain("2030");
+    expect(Object.keys(criteria)).not.toContain("card_expiry");
+    expect(Object.keys(criteria)).not.toContain("card_name");
+    expect(Object.keys(criteria)).not.toContain("exp_month");
+    expect(Object.keys(criteria)).not.toContain("exp_year");
+    expect(Object.keys(criteria)).not.toContain("exp_year_short");
+    // Ordinary facts still reach it.
+    expect(Object.values(criteria)).toContain("fixture.test");
   });
 
   it("reads a plain Expiration date / Expiry date label as the card expiry", () => {
@@ -502,8 +565,8 @@ describe("decideAfterJev stop reasons", () => {
         { card_ref: "card-1" },
         { exp_month: "12", exp_year: "2030", name: "Ada" },
       );
-      expect(isExpiryRow(expiry, [expiry, PAYMENT])).toBe(true);
-      expect(matchingFactKeys(facts, expiry, [expiry, PAYMENT])).toEqual(["card_expiry"]);
+      expect(isExpiryRow(expiry)).toBe(true);
+      expect(matchingFactKeys(facts, expiry)).toEqual(["card_expiry"]);
       expect(
         fillableCandidates([expiry, PAYMENT], facts, true).map((candidate) => candidate.ref),
       ).toEqual(["@e:exp"]);
@@ -516,8 +579,8 @@ describe("decideAfterJev stop reasons", () => {
       { card_ref: "card-1" },
       { exp_month: "12", exp_year: "2030", name: "Ada" },
     );
-    expect(isExpiryRow(passport, [passport])).toBe(false);
-    expect(matchingFactKeys(facts, passport, [passport])).toEqual([]);
+    expect(isExpiryRow(passport)).toBe(false);
+    expect(matchingFactKeys(facts, passport)).toEqual([]);
     // Not a deferred payment control, so it stays a reportable required field.
     expect(requiredFillableMissingFact([passport], { card_ref: "card-1" })?.ref).toBe(
       "@e:pp",
@@ -535,8 +598,8 @@ describe("decideAfterJev stop reasons", () => {
     expect(Object.keys(facts).indexOf("date")).toBeLessThan(
       Object.keys(facts).indexOf("card_expiry"),
     );
-    expect(matchingFactKeys(facts, cardExpiry, rows)).toEqual(["card_expiry"]);
-    expect(matchingFactKeys(facts, departure, rows)).toEqual(["date"]);
+    expect(matchingFactKeys(facts, cardExpiry)).toEqual(["card_expiry"]);
+    expect(matchingFactKeys(facts, departure)).toEqual(["date"]);
   });
 
   it("sends split month and year controls their own released card fields", () => {
@@ -547,8 +610,8 @@ describe("decideAfterJev stop reasons", () => {
       { card_ref: "card-1" },
       { exp_month: "12", exp_year: "2030", name: "Ada" },
     );
-    expect(matchingFactKeys(facts, month, rows)).toEqual(["exp_month"]);
-    expect(matchingFactKeys(facts, year, rows)).toEqual(["exp_year"]);
+    expect(matchingFactKeys(facts, month)).toEqual(["exp_month"]);
+    expect(matchingFactKeys(facts, year)).toEqual(["exp_year"]);
   });
 
   it("offers the released expiry only to the card expiry control, never to a delivery date", () => {
@@ -559,8 +622,8 @@ describe("decideAfterJev stop reasons", () => {
       { email: "a@b.test", card_ref: "card-1" },
       { exp_month: "12", exp_year: "2030", name: "Ada" },
     );
-    expect(matchingFactKeys(facts, expiry, rows)).toEqual(["card_expiry"]);
-    expect(matchingFactKeys(facts, deliveryDate, rows)).toEqual([]);
+    expect(matchingFactKeys(facts, expiry)).toEqual(["card_expiry"]);
+    expect(matchingFactKeys(facts, deliveryDate)).toEqual([]);
     expect(fillableCandidates(rows, facts, true).map((candidate) => candidate.ref)).toEqual([
       "@e:exp",
     ]);

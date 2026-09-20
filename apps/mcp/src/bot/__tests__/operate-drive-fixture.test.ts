@@ -447,14 +447,14 @@ describe("operate_drive real-browser fixture", () => {
       expect(waits).toBeGreaterThanOrEqual(Math.ceil(MULTI_STAGE_BLANK_MS / DRIVE_WAIT_MS));
       expect(await page.locator("#stage").textContent()).toBe("payment");
 
-      // The card is released once the fact-backed identity/address fills are
-      // done. Neither the leftover State select nor the site-search box the
-      // drive has no fact for may hold it back — the search input is never
-      // filled at all, so gating on it would deadlock the purchase. Expiry and
-      // name-on-card stay untouched until the card is released.
+      // The card is released only once every fact-backed fill is done, the
+      // required State dropdown included: resolving it afterwards would make
+      // the merchant re-cost the order and remount the card frames. The
+      // site-search box the drive has no fact for is not a fill and must not
+      // hold the card back — gating on it would deadlock the purchase. Expiry
+      // and name-on-card stay untouched until the card is released.
       expect(injections).toBe(1);
-      expect(atInject.state2).toBe("");
-      expect(atInject.q).toBe("");
+      expect(atInject.state2).toBe("NY");
       expect({ exp: atInject.exp, ncard: atInject.ncard, when: atInject.when }).toEqual({
         exp: "",
         ncard: "",
