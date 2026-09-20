@@ -752,6 +752,7 @@ export interface DriveAimContext {
   headings?: readonly string[];
   failedKeys?: readonly string[];
   goal?: string;
+  submittedThisDrive?: boolean;
 }
 
 export function rowFormId(row: WireRow): string | undefined {
@@ -1392,7 +1393,7 @@ export function sectionIdentity(row: WireRow, pageUrl: string): string {
   const label = normalizeKey(readableLabel(row));
   const href = rowHref(row);
   if (href === undefined || href.length === 0 || href.startsWith("#")) {
-    return `${pagePathKey(pageUrl)}\t${label}`;
+    return label;
   }
   try {
     const target = new URL(href, pageUrl);
@@ -1448,6 +1449,29 @@ export function unvisitedSectionNavRows(
     if (!isEligibleSectionNavRow(row, pageUrl) || isAlreadyHereNav(row, pageUrl)) return false;
     return !visited.has(sectionIdentity(row, pageUrl));
   });
+}
+
+export function nextExploreRow(
+  rows: readonly WireRow[],
+  visitedKeys: readonly string[],
+  pageUrl: string,
+): WireRow | undefined {
+  const nextEntry = listedItemRows(rows, pageUrl).find(
+    (row) => !visitedKeys.includes(sectionIdentity(row, pageUrl)),
+  );
+  return nextEntry ?? unvisitedSectionNavRows(rows, visitedKeys, pageUrl)[0];
+}
+
+function shouldRecordVisit(row: WireRow, pageUrl: string): boolean {
+  if (isOffProductNavRow(row, pageUrl) || isAppRootOrLogoRow(row, pageUrl)) return false;
+  if (isSamePageAnchorRow(row, pageUrl)) return false;
+  if (isEligibleSectionNavRow(row, pageUrl)) return true;
+  const kind = row[1];
+  return kind === "l" || kind === "link" || kind === "tb" || kind === "tab";
+}
+
+function decisionIsActionable(decision: DriveDecision): boolean {
+  return decision.kind === "act";
 }
 
 export function rowCarriesGoalNoun(row: WireRow, goal: string): boolean {
@@ -3042,6 +3066,7 @@ export function driveTargetSets(
   const pageText = (aim.headings ?? []).join(" ");
   const inboxReady =
     !skipped.has("INBOX") &&
+    aim.submittedThisDrive === true &&
     (pageSuggestsInboxWait(rows, pageUrl, pageText) ||
       (goalSeeksVerification(aim.goal ?? "") && !listedWork));
   if (inboxReady) operations.push("INBOX");
@@ -3294,7 +3319,7 @@ export function pageSuggestsInboxWait(
 ): boolean {
   if (rows.some((row) => isOtpRow(row) && isFillableRow(row))) return true;
   const hay = `${pageUrl} ${rows.map((row) => row[2]).join(" ")} ${pageText}`.toLowerCase();
-  return /(?:check|confirm|verify) your e-?mail|verification (?:link|e-?mail|code)|we(?:'| ha)ve sent|sent you an? e-?mail|open gmail|\/(?:e-?mail\/)?(?:verify|confirm)(?:\/|\?|#|\s|$)|#search\//.test(
+  return /(?:check|confirm|verify) your e-?mail|verification (?:link|e-?mail|code)|we(?:'| ha)ve sent|sent you an? e-?mail|open gmail|\/(?:e-?mail\/)?(?:verif(?:y|ication)s?|confirm)(?:\/|\?|#|\s|$)|#search\//.test(
     hay,
   );
 }
@@ -3308,7 +3333,7 @@ export function goalSeeksVerification(goal: string): boolean {
 export function inboxSpecialPlan(
   rows: readonly WireRow[],
   decisionKind: DriveDecision["kind"],
-  clicked: boolean,
+  _clicked: boolean,
   remainingFillCount: number,
   pageUrl: string = "",
   pageText: string = "",
@@ -3327,7 +3352,7 @@ export function inboxSpecialPlan(
   const otp = rows.find((row) => isOtpRow(row) && isFillableRow(row));
   if (otp !== undefined) return { kind: "otp", target: otp[0] };
   if (waitingForMail) {
-    if (submittedThisDrive || clicked || goalSeeksVerification(goal)) return { kind: "link" };
+    if (submittedThisDrive) return { kind: "link" };
     return undefined;
   }
   if (remainingFillCount > 0) return undefined;
@@ -3343,10 +3368,10 @@ export function inboxSpecialPlan(
         !isOffscreenRow(row),
     )
   ) {
-    if (clicked && goalSeeksVerification(goal)) return { kind: "link" };
+    if (submittedThisDrive && goalSeeksVerification(goal)) return { kind: "link" };
     return undefined;
   }
-  if (goalSeeksVerification(goal)) return { kind: "link" };
+  if (submittedThisDrive && goalSeeksVerification(goal)) return { kind: "link" };
   return undefined;
 }
 
@@ -5126,7 +5151,7 @@ async function driveLoop(input: {
     }
     if (decision.action.kind === "click" || decision.action.kind === "oauth_login") {
       const clicked = clickedBefore ?? findRow(rows, decision.actionKey, urlBeforeClick);
-      if (clicked !== undefined && isEligibleSectionNavRow(clicked, urlBeforeClick)) {
+      if (clicked !== undefined && shouldRecordVisit(clicked, urlBeforeClick)) {
         drive.visitedSectionKeys ??= [];
         const key = sectionIdentity(clicked, urlBeforeClick);
         if (!drive.visitedSectionKeys.includes(key)) drive.visitedSectionKeys.push(key);
@@ -5364,7 +5389,6 @@ async function driveLoop(input: {
     );
     if (
       drive.submittedThisDrive !== true &&
-      !goalSeeksVerification(args.goal) &&
       pageSuggestsInboxWait(
         rows,
         pageUrl,
@@ -5522,6 +5546,7 @@ async function driveLoop(input: {
     } else if (
       rows.length > 0 &&
       !inboxSilent &&
+      drive.submittedThisDrive === true &&
       lastNonWaitWasClick(drive.trajectory) &&
       context?.consentInboxRead !== false &&
       (disabledSubmitKind(rows, remainingFills.length, drive.filledRefs, true) ===
@@ -5625,39 +5650,7 @@ async function driveLoop(input: {
         isGoalDestinationRow(row) &&
         !isOffProductNavRow(row, pageUrl),
     );
-    if (goalSeeksKey(args.goal) && !hasGoalDestination) {
-      if (drive.awaitingDecideAfterExplore === true) {
-        drive.awaitingDecideAfterExplore = false;
-      } else {
-        const visited = drive.visitedSectionKeys ?? [];
-        const nextEntry = listedItemRows(rows, pageUrl).find(
-          (row) => !visited.includes(sectionIdentity(row, pageUrl)),
-        );
-        const nextSection =
-          nextEntry ??
-          unvisitedSectionNavRows(rows, visited, pageUrl)[0];
-        if (nextSection !== undefined) {
-          drive.awaitingDecideAfterExplore = true;
-          drive.boundFingerprint = driveProgressFingerprint(observation, rows, drive, session);
-          drive.consumedActionKey = null;
-          const applied = await applyDecision({
-            kind: "act",
-            action: { kind: "click", target: nextSection[0] },
-            actionKey: nextSection[0],
-            confidence: 1,
-          });
-          if (applied !== "continue") return applied;
-          drive.boundFingerprint = driveProgressFingerprint(observation, rows, drive, session);
-          drive.consumedActionKey = null;
-          steps += 1;
-          continue;
-        }
-        const tried = drive.visitedSectionKeys ?? [];
-        if (tried.length > 0) {
-          return finish("no_progress", { reason: sectionsTriedReason(tried) });
-        }
-      }
-    }
+    drive.awaitingDecideAfterExplore = false;
 
     if (drive.jevCalls >= DRIVE_MAX_JEV_CALLS) {
       return finish(
@@ -5687,6 +5680,7 @@ async function driveLoop(input: {
         headings: observation.semantic?.headings ?? [],
         failedKeys: drive.failedActionKeys ?? [],
         goal: drive.goal,
+        submittedThisDrive: drive.submittedThisDrive === true,
       },
     );
     const actionable = sets.operations.filter(
@@ -5856,6 +5850,26 @@ async function driveLoop(input: {
       if (applied !== "continue") return applied;
       steps += 1;
       continue;
+    }
+    if (!decisionIsActionable(decision) && goalSeeksKey(args.goal) && !hasGoalDestination) {
+      const nextSection = nextExploreRow(rows, drive.visitedSectionKeys ?? [], pageUrl);
+      if (nextSection !== undefined) {
+        const applied = await applyDecision({
+          kind: "act",
+          action: { kind: "click", target: nextSection[0] },
+          actionKey: nextSection[0],
+          confidence: 1,
+        });
+        if (applied !== "continue") return applied;
+        drive.boundFingerprint = driveProgressFingerprint(observation, rows, drive, session);
+        drive.consumedActionKey = null;
+        steps += 1;
+        continue;
+      }
+      const tried = drive.visitedSectionKeys ?? [];
+      if (tried.length > 0) {
+        return finish("no_progress", { reason: sectionsTriedReason(tried) });
+      }
     }
     const applied = await applyDecision(decision, jevMs, true);
     if (applied !== "continue") return applied;

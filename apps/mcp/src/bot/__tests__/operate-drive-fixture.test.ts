@@ -1090,7 +1090,7 @@ describe("operate_drive real-browser fixture", () => {
     });
     try {
       const dependencies = deps(async (_api, _state, questions) => jevFromQuestions(questions));
-      await runOperateDrive(
+      const result = await runOperateDrive(
         {
           session_id: started.session_id,
           goal: "extract an API key",
@@ -1102,9 +1102,65 @@ describe("operate_drive real-browser fixture", () => {
         dependencies,
       );
       expect(page.url()).toMatch(/\/apps\/(?:one|two)/);
+      const firstClick = result.trajectory.find((step) => step.action === "click");
+      expect(firstClick?.jev_ms).toBeGreaterThan(0);
       if (page.url().includes("/apps/new")) {
         expect(await page.locator("#name").inputValue()).not.toBe("");
       }
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
+  it("decides on a settings page with entries before exploring a section", async () => {
+    const settingsHtml = `<!doctype html><meta charset="utf-8"><title>Settings</title>
+<nav>
+  <a id="settings" href="/settings">Settings</a>
+  <a id="reputation" href="/reputation">Reputation</a>
+</nav>
+<section>
+  <a id="one" href="/apps/one">payments-api</a>
+  <a id="two" href="/apps/two">billing-api</a>
+  <a id="new" href="/apps/new">+ New app</a>
+</section>`;
+    const entryHtml = `<!doctype html><meta charset="utf-8"><title>App</title>
+<main><h1>API Keys</h1><p id="key">sk_live_fixture</p></main>`;
+    const reputationHtml = `<!doctype html><meta charset="utf-8"><title>Reputation</title>
+<nav>
+  <a id="settings" href="/settings">Settings</a>
+  <a id="reputation" href="/reputation">Reputation</a>
+</nav>
+<p>scores</p>`;
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await page.route("**/*", (route) => {
+      const url = route.request().url();
+      const body = url.includes("/reputation")
+        ? reputationHtml
+        : url.includes("/apps/")
+          ? entryHtml
+          : settingsHtml;
+      route.fulfill({ contentType: "text/html", body });
+    });
+    const startUrl = "https://settings-entries.test/settings";
+    await page.goto(startUrl);
+    const started = await startHarnessProvisionSession({
+      browser: BrowserController.fromHarnessPage(page),
+      serviceUrl: startUrl,
+      format: "compact",
+      initialObservation: "standard",
+    });
+    try {
+      const dependencies = deps(async (_api, _state, questions) => jevFromQuestions(questions));
+      const result = await runOperateDrive(
+        { session_id: started.session_id, goal: "extract an API key", max_steps: 8 },
+        api(),
+        undefined,
+        dependencies,
+      );
+      const firstClick = result.trajectory.find((step) => step.action === "click");
+      expect(firstClick?.jev_ms).toBeGreaterThan(0);
     } finally {
       await finishProvisionSession(started.session_id);
       await context.close();
@@ -1151,15 +1207,25 @@ describe("operate_drive real-browser fixture", () => {
       initialObservation: "standard",
     });
     try {
-      const dependencies = deps(async (_api, _state, questions) => jevFromQuestions(questions));
+      const offered: string[][] = [];
+      const dependencies = deps(async (_api, _state, questions) => {
+        const operation = questions.operation;
+        if (operation?.type === "choice") offered.push(Object.keys(operation.criteria));
+        return jevFromQuestions(questions);
+      });
       const startedAt = Date.now();
       const result = await runOperateDrive(
-        { session_id: started.session_id, goal: "sign up and extract an API key", max_steps: 6 },
+        {
+          session_id: started.session_id,
+          goal: "sign up, complete email verification, and extract an API key",
+          max_steps: 6,
+        },
         api(),
         undefined,
         dependencies,
       );
       expect(Date.now() - startedAt).toBeLessThan(20_000);
+      expect(offered[0] ?? []).not.toContain("INBOX");
       expect(result.trajectory.some((step) => step.action === "inbox")).toBe(false);
       expect(
         result.reason?.match(/already signed in/i) ||
