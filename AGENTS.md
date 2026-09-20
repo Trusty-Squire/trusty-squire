@@ -742,6 +742,22 @@ is 120s — a `token_expired` diag means the observer's cadence, not the
 solver, missed the window. A risk engine (Kaggle) can also stop issuing
 challenges entirely after repeated cycles; no challenge, no solve.
 
+### 22. Inbox reader: listing rows omit To and group conversations
+
+`operate_read_inbox` (`awaitVerification` in
+`apps/mcp/src/bot/capture/verification.ts`) runs in the **broker** process —
+a local MCP `server` forwards the tool, so a worktree fix is invisible until
+that broker is rebuilt. Listing rows do not show To and one row can group
+many same-subject messages. Open a to:-scoped or same-registrable-domain
+row; pick the opened message whose To/body is the session recipient.
+`mailRowMatchesSender` matches the page host to From on eTLD+1 (and the
+display-name SLD), not a substring of `app.service.test`.
+`mailRowPredatesSession` floors session start to the minute. Recipient-scoped
+reads do not veto a predating listing row — the plus-address pick happens
+after open. `TRUSTY_SQUIRE_INBOX_READER_DIAG=1` logs `[inbox-reader-diag]`
+to broker stderr (listing, per-row candidate/predates, which row opened,
+opened-view yield). No bodies, links, codes, or full From addresses.
+
 ## Final note
 
 You are reading this file because a prior agent burned four version numbers, confused users, and forced a human to intervene. The agent was not malicious. It was not lazy. It was pattern-matching on its own prose instead of on tool output.

@@ -20,8 +20,14 @@ import {
   mailRowIsRecent,
   mailRowPredatesSession,
   pickNewestMailRow,
+  pickOpenedMailMessage,
+  openedMailMatchesRecipient,
+  registrableMailDomain,
+  sessionCandidateReason,
+  inboxReaderDiagEnabled,
   chooseMailRow,
   type MailResultRow,
+  type OpenedMailMessage,
 } from "../verification.js";
 
 describe("parseVerification (email OTP + link extraction)", () => {
@@ -444,6 +450,11 @@ describe("mailRowPredatesSession (a previous task's mail never becomes this task
     expect(mailRowPredatesSession(row("Sep 17, 2026, 5:10 AM"), sessionStart)).toBe(false);
     expect(mailRowPredatesSession(row("Sep 17, 2026, 5:00 AM"), sessionStart)).toBe(false);
   });
+  it("keeps a same-minute row whose listing date floors before the millisecond session start", () => {
+    const sessionInMinute = new Date("2026-09-20T16:20:56").getTime();
+    expect(mailRowPredatesSession(row("Sep 20, 2026, 4:20 PM"), sessionInMinute)).toBe(false);
+    expect(mailRowPredatesSession(row("Sep 20, 2026, 4:19 PM"), sessionInMinute)).toBe(true);
+  });
   it("never marks rows without a parseable date (cannot be proven old)", () => {
     expect(mailRowPredatesSession(row(null), sessionStart)).toBe(false);
     expect(mailRowPredatesSession(row("Not starred"), sessionStart)).toBe(false);
@@ -479,41 +490,100 @@ describe("session-scoped inbox candidates", () => {
 
   it("accepts a to-scoped search row when From or the plus-address ties it to this session", () => {
     const espOnly = row({
-      fromEmail: "notify@mailer.example.test",
+      fromEmail: "notify@mailer.other.test",
       subject: "Check your email",
       visibleText: "Check your email",
     });
+    // A to:-scoped listing already filtered by recipient; From can omit the
+    // product host. Opening is cheap; To is decided on the opened message.
     expect(
       mailRowIsSessionCandidate(espOnly, {
         recipient: "ada+run1@example.test",
         serviceHost: "app.example.test",
         listingScopedToRecipient: true,
       }),
-    ).toBe(false);
-    expect(
-      mailRowIsSessionCandidate(
-        row({ ...espOnly, fromEmail: "notify@mail.app.example.test" }),
-        {
-          recipient: "ada+run1@example.test",
-          serviceHost: "app.example.test",
-          listingScopedToRecipient: true,
-        },
-      ),
     ).toBe(true);
     expect(
-      mailRowIsSessionCandidate(
-        row({ ...espOnly, visibleText: "to ada+run1@example.test" }),
-        {
-          recipient: "ada+run1@example.test",
-          serviceHost: "app.example.test",
-          listingScopedToRecipient: true,
-        },
-      ),
+      sessionCandidateReason(espOnly, {
+        recipient: "ada+run1@example.test",
+        serviceHost: "app.example.test",
+        listingScopedToRecipient: true,
+      }).reason,
+    ).toBe("listing_scoped");
+    expect(
+      mailRowIsSessionCandidate(row({ ...espOnly, fromEmail: "notify@mail.app.example.test" }), {
+        recipient: "ada+run1@example.test",
+        serviceHost: "app.example.test",
+        listingScopedToRecipient: true,
+      }),
+    ).toBe(true);
+    expect(
+      mailRowIsSessionCandidate(row({ ...espOnly, visibleText: "to ada+run1@example.test" }), {
+        recipient: "ada+run1@example.test",
+        serviceHost: "app.example.test",
+        listingScopedToRecipient: true,
+      }),
     ).toBe(true);
     expect(mailRowMatchesRecipient(espOnly, "ada+run1@example.test")).toBe(false);
   });
 
-  it("requires the plus-address on an unscoped listing so another run's mail cannot win", () => {
+  it("matches a conversation row whose From is a subdomain of the service host", () => {
+    // Live mailbox shape: one conversation groups a day's confirmations
+    // ("service (19)"), From is an ESP subdomain, dateTitle is minute
+    // precision, and the listing never shows To.
+    const conversation = row({
+      fromEmail: "notify@mailer.example.test",
+      fromName: "example (19)",
+      subject: "Confirm your account",
+      dateTitle: "Sep 20, 2026, 4:20 PM",
+      visibleText: "example (19) Confirm your account 4:20 PM",
+    });
+    expect(registrableMailDomain("notify@mailer.example.test")).toBe("example.test");
+    expect(mailRowMatchesSender(conversation, "example.test")).toBe(true);
+    expect(mailRowMatchesSender(conversation, "app.example.test")).toBe(true);
+    expect(
+      mailRowIsSessionCandidate(conversation, {
+        recipient: "ada+run1@example.test",
+        serviceHost: "app.example.test",
+        listingScopedToRecipient: true,
+      }),
+    ).toBe(true);
+    // All Mail omits To: service-host match is enough to open; To is later.
+    expect(
+      mailRowIsSessionCandidate(conversation, {
+        recipient: "ada+run1@example.test",
+        serviceHost: "app.example.test",
+      }),
+    ).toBe(true);
+    expect(mailRowMatchesRecipient(conversation, "ada+run1@example.test")).toBe(false);
+  });
+
+  it("matches a page-host hint against the registrable From domain", () => {
+    expect(
+      mailRowMatchesSender(
+        {
+          fromEmail: "noreply@example.test",
+          fromName: "Example",
+          subject: "Confirm your account",
+        },
+        "app.example.test",
+      ),
+    ).toBe(true);
+    expect(
+      mailRowMatchesSender(
+        {
+          fromEmail: "noreply@other.test",
+          fromName: "Other",
+          subject: "Confirm your account",
+        },
+        "app.example.test",
+      ),
+    ).toBe(false);
+  });
+
+  it("opens an unscoped same-service row and rejects the wrong plus-address after open", () => {
+    // All Mail never shows To, so a same-service conversation is openable.
+    // The wrong plus-address is dropped on the opened message, not the row.
     const otherRun = row({
       fromEmail: "hello@app.example.test",
       subject: "Confirm your account",
@@ -524,15 +594,12 @@ describe("session-scoped inbox candidates", () => {
         recipient: "ada+run1@example.test",
         serviceHost: "app.example.test",
       }),
-    ).toBe(false);
+    ).toBe(true);
     expect(
-      mailRowIsSessionCandidate(
-        row({ ...otherRun, visibleText: "to ada+run1@example.test" }),
-        {
-          recipient: "ada+run1@example.test",
-          serviceHost: "app.example.test",
-        },
-      ),
+      mailRowIsSessionCandidate(row({ ...otherRun, visibleText: "to ada+run1@example.test" }), {
+        recipient: "ada+run1@example.test",
+        serviceHost: "app.example.test",
+      }),
     ).toBe(true);
   });
 
@@ -545,5 +612,102 @@ describe("session-scoped inbox candidates", () => {
     expect(search.sender).toBe("app.example.test");
     expect(search.query.startsWith("to:ada+run1@example.test ")).toBe(true);
     expect(serviceHostFromUrl("https://app.example.test/signup")).toBe("app.example.test");
+  });
+});
+
+describe("pickOpenedMailMessage (per-message To, never the conversation's first card)", () => {
+  const msg = (over: Partial<OpenedMailMessage>): OpenedMailMessage => ({
+    fromEmail: "notify@mailer.example.test",
+    fromName: "example",
+    dateTitle: "Sep 20, 2026, 4:00 PM",
+    toEmails: [],
+    text: "",
+    links: [],
+    ...over,
+  });
+  const sessionStart = new Date("2026-09-20T16:20:30").getTime();
+
+  it("picks the message whose To is the session recipient, not an older sibling", () => {
+    const older = msg({
+      toEmails: ["ada+run0@example.test"],
+      text: "Confirm older run",
+      dateTitle: "Sep 20, 2026, 3:10 PM",
+      links: [{ url: "https://example.test/confirm?t=old", text: "Confirm" }],
+    });
+    const newestWrong = msg({
+      toEmails: ["ada+run2@example.test"],
+      text: "Confirm other plus-address",
+      dateTitle: "Sep 20, 2026, 4:25 PM",
+      links: [{ url: "https://example.test/confirm?t=other", text: "Confirm" }],
+    });
+    const ours = msg({
+      toEmails: ["ada+run1@example.test"],
+      text: "Confirm this run sent to ada+run1@example.test",
+      dateTitle: "Sep 20, 2026, 4:20 PM",
+      links: [{ url: "https://example.test/confirm?t=fresh", text: "Confirm" }],
+    });
+    const picked = pickOpenedMailMessage([older, ours, newestWrong], {
+      recipient: "ada+run1@example.test",
+      serviceHost: "app.example.test",
+      sessionStartMs: sessionStart,
+    });
+    expect(picked).toBe(ours);
+    expect(openedMailMatchesRecipient(newestWrong, "ada+run1@example.test")).toBe(false);
+  });
+
+  it("matches recipient from the opened body when To headers are only 'to me'", () => {
+    const picked = pickOpenedMailMessage(
+      [
+        msg({
+          toEmails: [],
+          text: "This email was sent to ada+run1@example.test to confirm",
+          dateTitle: "Sep 20, 2026, 4:20 PM",
+        }),
+      ],
+      {
+        recipient: "ada+run1@example.test",
+        sessionStartMs: sessionStart,
+      },
+    );
+    expect(picked?.text).toContain("ada+run1@example.test");
+  });
+
+  it("returns null when no opened message is To the session recipient", () => {
+    expect(
+      pickOpenedMailMessage(
+        [
+          msg({
+            toEmails: ["ada+run0@example.test"],
+            text: "Confirm older run",
+            dateTitle: "Sep 20, 2026, 4:20 PM",
+          }),
+        ],
+        { recipient: "ada+run1@example.test", sessionStartMs: sessionStart },
+      ),
+    ).toBeNull();
+  });
+
+  it("returns a matching-To message even when it predates a later re-read session", () => {
+    const mail = msg({
+      toEmails: ["ada+run1@example.test"],
+      text: "Confirm this run",
+      dateTitle: "Sep 20, 2026, 4:20 PM",
+    });
+    const laterSession = new Date("2026-09-20T16:40:00").getTime();
+    expect(
+      pickOpenedMailMessage([mail], {
+        recipient: "ada+run1@example.test",
+        sessionStartMs: laterSession,
+      }),
+    ).toBe(mail);
+  });
+});
+
+describe("inboxReaderDiagEnabled", () => {
+  it("is off by default and on for 1/true/on/yes", () => {
+    expect(inboxReaderDiagEnabled({})).toBe(false);
+    expect(inboxReaderDiagEnabled({ TRUSTY_SQUIRE_INBOX_READER_DIAG: "1" })).toBe(true);
+    expect(inboxReaderDiagEnabled({ TRUSTY_SQUIRE_INBOX_READER_DIAG: "true" })).toBe(true);
+    expect(inboxReaderDiagEnabled({ TRUSTY_SQUIRE_INBOX_READER_DIAG: "off" })).toBe(false);
   });
 });
