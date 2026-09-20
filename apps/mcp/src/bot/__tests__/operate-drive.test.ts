@@ -33,7 +33,6 @@ import {
   decideAfterJev,
   driveCandidates,
   isCandidateRow,
-  isButtonLikeRow,
   paymentSubmitControlMissing,
   paymentSubmitDispatched,
   checkoutPastPaymentForm,

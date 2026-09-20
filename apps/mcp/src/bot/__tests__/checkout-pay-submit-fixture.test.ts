@@ -257,6 +257,51 @@ describe("checkout pay-submit reachability (real browser)", () => {
     }
   }, 60_000);
 
+  it("waits for a Pay now that mounts late instead of calling the checkout stuck", async () => {
+    // Shopify hydrates the summary and the back link before the submit, so the
+    // snapshot is non-empty while Pay now has not mounted. The bounded
+    // re-observation budget must ride that out rather than abort a paid order.
+    const late = `<script>
+      setTimeout(() => {
+        const b = document.createElement("button");
+        b.id = "pay";
+        b.type = "button";
+        b.textContent = "Pay now";
+        b.style.cssText = "position:absolute;top:${PAY_TOP_PX}px";
+        b.onclick = () => {
+          document.querySelector("#status").textContent = "order placed";
+          location.href = "${PROCESSING_PATH}";
+        };
+        document.querySelector("main").appendChild(b);
+      }, 3200);
+    </script>`;
+    const { context, page, started } = await openCheckout(checkoutHtml(late), CHECKOUT_PATH);
+    try {
+      // Precondition: the submit is genuinely absent when the drive starts.
+      expect(await page.locator("#pay").count()).toBe(0);
+      const asked: unknown[] = [];
+      const result = await runOperateDrive(
+        {
+          session_id: started.session_id,
+          goal: "pay for the order with the saved card",
+          facts: { card_ref: "card-1", merchant: "whitejade.xyz" },
+          max_steps: 8,
+        },
+        api(),
+        undefined,
+        deps(jevPreferring("Pay now", asked)),
+      );
+      expect(result.status).not.toBe("stuck");
+      expect(JSON.stringify(asked)).toContain("Pay now");
+      expect(page.url()).toContain(PROCESSING_PATH);
+      expect(await page.locator("#status").textContent()).toBe("order placed");
+      await shoot(page, "05-late-pay-now-order-processing");
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 60_000);
+
   it("never offers an offscreen Buy now away from a checkout", async () => {
     const { context, page, started } = await openCheckout(
       checkoutHtml(payButton("Buy now")),

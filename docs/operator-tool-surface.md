@@ -175,6 +175,17 @@ now" on a product page unclickable. Jev's visible element state includes each
 ref once even when it supports both typing and clicking; the operation-specific
 choices remain separate.
 
+On a checkout URL after a card release, with every requested fill done and no
+pay click dispatched since that release, a snapshot carrying no button at all
+is re-observed for up to three automatic waits. If no button has mounted by
+then and the page still offers some other visible clickable control, the drive
+returns `stuck` with `the control for this operation is not present (CLICK
+pay/place-order)` and names the controls it did see, rather than clicking a
+substitute such as a back link. A retry of an incomplete card release, and a
+page already past the payment form — a processing path or a completed checkout
+— do not stop this way. Reachability and refusal regressions live in
+[`checkout-pay-submit-fixture.test.ts`](../apps/mcp/src/bot/__tests__/checkout-pay-submit-fixture.test.ts).
+
 `operate_read_inbox` reads the session's signed-in Gmail inbox for a
 verification email in dedicated utility tabs that are closed when the read
 finishes, so the page waiting for the code never navigates away. Because
