@@ -522,6 +522,13 @@ operator cone (~134 files) for almost any leaf. Select tests with
 `apps/mcp/scripts/run-related-tests.mjs` (own test + direct importers +
 one hop of non-hub production callers). Do not call `vitest related`.
 
+Validation fail-closed policy lives in `apps/mcp/scripts/validation-plan.mjs`
+and is executed by `apps/mcp/scripts/run-validation-tests.mjs`. When the
+map cannot prove a test irrelevant it runs `test:fast`, not the full
+suite. Only the real-browser / broker / vitest / lockfile cone pays a
+full `vitest run`. A mapper bug here skips tests, so treat a planner
+failure as a safety regression, not a test to weaken.
+
 ### 15. Operator browser lifetime is owner-bound
 
 `apps/mcp/src/bot/owner-process-reaper.ts` is the crash/SIGKILL backstop for
