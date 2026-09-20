@@ -29,6 +29,7 @@ export interface DriveSnapshotElement {
   disabled?: boolean;
   required?: boolean;
   offscreen?: boolean;
+  picker?: boolean;
   operations: Array<"click" | "fill" | "select">;
   options?: DriveSnapshotOption[];
   frameOrdinal: number;
@@ -77,6 +78,10 @@ const FIELD_FROM_LABEL: Array<{ test: RegExp; field: string }> = [
   { test: /search|query|\bfind\b/, field: "search" },
   { test: /where\s+from|\borigin\b|leaving\s+from/, field: "origin" },
   { test: /where\s+to|\bdestination\b|going\s+to/, field: "destination" },
+  {
+    test: /\bdepart(?:ure)?(?:\s*date)?\b|\barrival(?:\s*date)?\b|\bexpir(?:y|ation|es)?\b|\bcalendar\b|\bdate\b/,
+    field: "date",
+  },
   { test: /password/, field: "password" },
   { test: /phone|tel|mobile/, field: "phone" },
   { test: /\baddress[\s-]*(?:line[\s-]*)?2\b|\b(?:apt|apartment|unit|suite)\b/, field: "address2" },
@@ -134,6 +139,7 @@ export function driveRowsFromSnapshot(snapshot: DriveSnapshot): SnapshotRow[] {
     }
     if (states.length > 0) facts.push(`s=${states.join("")}`);
     if (element.offscreen === true) facts.push("v=offscreen");
+    if (element.picker === true) facts.push("a=picker");
     if (element.value !== undefined && element.value.length > 0) {
       facts.push(`n=${element.value.replace(/\|/g, " ").slice(0, 80)}`);
     }
@@ -379,7 +385,6 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
     const inViewport =
       rect.bottom > 0 && rect.top < innerHeight && rect.right > 0 && rect.left < innerWidth;
     const keepOffscreen =
-      role === "button" ||
       role === "textbox" ||
       role === "searchbox" ||
       role === "spinbutton" ||
@@ -431,6 +436,15 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
       element.getAttribute("aria-readonly") !== "true" &&
       (["textbox", "searchbox", "spinbutton"].includes(role) ||
         (role === "combobox" && (element.tagName === "INPUT" || element.tagName === "TEXTAREA")));
+    const picker =
+      (["textbox", "searchbox", "combobox", "spinbutton"].includes(role) ||
+        element.tagName === "INPUT") &&
+      (role === "combobox" ||
+        element.getAttribute("aria-haspopup") !== null ||
+        element.getAttribute("aria-autocomplete") !== null ||
+        element.getAttribute("aria-readonly") === "true" ||
+        (element instanceof HTMLInputElement &&
+          (element.readOnly || ["date", "datetime-local", "month"].includes(element.type))));
     const operations: Array<"click" | "fill" | "select"> = [];
     if (element.tagName === "SELECT") operations.push("select");
     else if (editable) {
@@ -478,6 +492,7 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
       ...(disabled ? { disabled: true } : {}),
       ...(required ? { required: true } : {}),
       ...(inViewport ? {} : { offscreen: true }),
+      ...(picker ? { picker: true } : {}),
       ...(options === undefined ? {} : { options }),
     };
     if (inViewport) inView.push(row);

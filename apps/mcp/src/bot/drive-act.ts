@@ -8,6 +8,7 @@ import type { ProvisionAction } from "./provision-session.js";
 
 export const DRIVE_SETTLE_MS = 50;
 export const DRIVE_COMBOBOX_WAIT_MS = 400;
+export const DRIVE_OVERLAY_REFRESH_WAIT_MS = 2000;
 
 export type DriveActTimings = {
   guardScriptMs: number;
@@ -100,8 +101,14 @@ function inPageGuard(input: {
   const combobox =
     element.getAttribute("role") === "combobox" ||
     element.getAttribute("role") === "searchbox" ||
+    element.getAttribute("aria-haspopup") !== null ||
     (element instanceof HTMLInputElement &&
-      (element.type === "search" || element.getAttribute("aria-autocomplete") !== null));
+      (element.type === "search" ||
+        element.type === "date" ||
+        element.type === "datetime-local" ||
+        element.type === "month" ||
+        element.readOnly ||
+        element.getAttribute("aria-autocomplete") !== null));
   const ariaLabel = element.getAttribute("aria-label") ?? "";
   const placeholder = element instanceof HTMLInputElement ? element.placeholder : "";
   const searchSubmit =
@@ -178,6 +185,87 @@ function selectAllInPage(input: { ref: string }): boolean {
     return true;
   }
   return false;
+}
+
+const OVERLAY_OPTION_SELECTOR =
+  '[role="option"],[role="listbox"] a,[role="listbox"] [role="option"],.suggestions a,.suggestion-link,.suggestions-dropdown a,[aria-selected],[role="grid"] button,[role="grid"] [role="gridcell"],[role="gridcell"],[role="dialog"] [role="gridcell"],[role="dialog"] [role="grid"] button';
+
+async function waitForOpenedOverlay(page: Page): Promise<void> {
+  await evaluateBound(
+    page,
+    async (input) => {
+      const start = performance.now();
+      const visibleSuggestion = (node: Element): boolean => {
+        if (node.closest('[aria-hidden="true"],[inert]') !== null) return false;
+        if (typeof node.checkVisibility === "function") {
+          return node.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true });
+        }
+        const style = getComputedStyle(node);
+        return style.display !== "none" && style.visibility !== "hidden";
+      };
+      while (performance.now() - start < input.cap) {
+        const options = Array.from(document.querySelectorAll(input.selector)).filter(
+          visibleSuggestion,
+        );
+        if (options.length > 0) return;
+        await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      }
+    },
+    { selector: OVERLAY_OPTION_SELECTOR, cap: DRIVE_COMBOBOX_WAIT_MS },
+  );
+}
+
+async function overlayOptionLabels(page: Page): Promise<string[]> {
+  return evaluateBound(
+    page,
+    (selector) => {
+      const visible = (node: Element): boolean => {
+        if (node.closest('[aria-hidden="true"],[inert]') !== null) return false;
+        if (typeof node.checkVisibility === "function") {
+          return node.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true });
+        }
+        const style = getComputedStyle(node);
+        return style.display !== "none" && style.visibility !== "hidden";
+      };
+      return Array.from(document.querySelectorAll(selector))
+        .filter(visible)
+        .map((node) => (node.textContent ?? "").replace(/\s+/g, " ").trim());
+    },
+    OVERLAY_OPTION_SELECTOR,
+  ).catch(() => [] as string[]);
+}
+
+async function waitForOverlayOptionsToChange(page: Page, before: string[]): Promise<void> {
+  await evaluateBound(
+    page,
+    async (input) => {
+      const visibleSuggestion = (node: Element): boolean => {
+        if (node.closest('[aria-hidden="true"],[inert]') !== null) return false;
+        if (typeof node.checkVisibility === "function") {
+          return node.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true });
+        }
+        const style = getComputedStyle(node);
+        return style.display !== "none" && style.visibility !== "hidden";
+      };
+      const read = (): string[] =>
+        Array.from(document.querySelectorAll(input.selector))
+          .filter(visibleSuggestion)
+          .map((node) => (node.textContent ?? "").replace(/\s+/g, " ").trim());
+      const same = (left: string[], right: string[]): boolean => {
+        if (left.length !== right.length) return false;
+        const a = left.slice().sort();
+        const b = right.slice().sort();
+        return a.every((value, index) => value === b[index]);
+      };
+      const start = performance.now();
+      while (performance.now() - start < input.cap) {
+        const labels = read();
+        if (labels.length > 0 && !same(labels, input.before)) return;
+        await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      }
+    },
+    { selector: OVERLAY_OPTION_SELECTOR, before, cap: DRIVE_OVERLAY_REFRESH_WAIT_MS },
+  );
 }
 
 export async function driveActOnPage(page: Page, action: ProvisionAction): Promise<DriveActResult> {
@@ -301,18 +389,53 @@ export async function driveActOnPage(page: Page, action: ProvisionAction): Promi
       button: "left",
       clickCount: 1,
     });
-    const selected = await evaluateBound(frame, selectAllInPage, { ref: action.target }).catch(
-      () => false,
-    );
-    if (!selected) {
-      return {
-        kind: "stale",
-        reason: "reselection_failed",
-        ...timings,
-        cdpMs: Date.now() - cdpStarted,
-      };
+    // A picker click focuses the overlay input (Flights "Where else?").
+    // Refocusing the snapshot ref yanks that away and insertText writes
+    // behind the dialog. Match jev-ultrafast: wait for the overlay, then
+    // selectAll+insertText with no in-page focus. Plain fields still
+    // reselect the clicked ref so a detached target cannot type into a neighbor.
+    let overlayLabelsBeforeType: string[] = [];
+    if (guard.combobox) {
+      await waitForOpenedOverlay(page).catch(() => undefined);
+      overlayLabelsBeforeType = await overlayOptionLabels(page);
+    } else {
+      const selected = await evaluateBound(frame, selectAllInPage, { ref: action.target }).catch(
+        () => false,
+      );
+      if (!selected) {
+        return {
+          kind: "stale",
+          reason: "reselection_failed",
+          ...timings,
+          cdpMs: Date.now() - cdpStarted,
+        };
+      }
     }
+    // Selection API select() / selectNodeContents does not replace a committed
+    // Flights city chip after another overlay has just closed. Issue the
+    // browser's own selectAll command (same as jev-ultrafast) so insertText
+    // overwrites whatever the click focused.
+    const modifier = process.platform === "darwin" ? 4 : 2;
+    await cdp.send("Input.dispatchKeyEvent", {
+      type: "keyDown",
+      key: "a",
+      code: "KeyA",
+      modifiers: modifier,
+      commands: ["selectAll"],
+    });
+    await cdp.send("Input.dispatchKeyEvent", {
+      type: "keyUp",
+      key: "a",
+      code: "KeyA",
+      modifiers: modifier,
+    });
     await cdp.send("Input.insertText", { text: action.text });
+    // Autocomplete keeps the pre-type rows until the network refresh
+    // (~110ms on Flights). Returning at first option presence snapshots
+    // the stale set and the model BLOCKED.
+    if (guard.combobox) {
+      await waitForOverlayOptionsToChange(page, overlayLabelsBeforeType).catch(() => undefined);
+    }
     if (guard.searchSubmit) {
       await cdp.send("Input.dispatchKeyEvent", {
         type: "keyDown",
@@ -360,32 +483,7 @@ export async function settleDriveStep(page: Page, combobox: boolean): Promise<nu
       },
       DRIVE_SETTLE_MS,
     );
-    if (combobox) {
-      await evaluateBound(
-        page,
-        async (cap) => {
-          const start = performance.now();
-          const visibleSuggestion = (element: Element): boolean => {
-            if (element.closest('[aria-hidden="true"],[inert]') !== null) return false;
-            if (typeof element.checkVisibility === "function") {
-              return element.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true });
-            }
-            const style = getComputedStyle(element);
-            return style.display !== "none" && style.visibility !== "hidden";
-          };
-          while (performance.now() - start < cap) {
-            const options = Array.from(
-              document.querySelectorAll(
-                '[role="option"],[role="listbox"] a,.suggestions a,.suggestion-link,.suggestions-dropdown a,[aria-selected]',
-              ),
-            ).filter(visibleSuggestion);
-            if (options.length > 0) return;
-            await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-          }
-        },
-        DRIVE_COMBOBOX_WAIT_MS,
-      );
-    }
+    if (combobox) await waitForOpenedOverlay(page);
   } catch {
     return Date.now() - started;
   }

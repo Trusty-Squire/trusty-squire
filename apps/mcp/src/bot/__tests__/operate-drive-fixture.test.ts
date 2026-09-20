@@ -398,6 +398,293 @@ describe("operate_drive real-browser fixture", () => {
     }
   }, 30_000);
 
+  it.each(["offscreen", "occluded"] as const)(
+    "yields a %s Country combobox to model recovery before retrying",
+    async (placement) => {
+      const html = `<!doctype html><title>Country picker</title>
+<main style="${placement === "offscreen" ? "padding-top:1800px;padding-bottom:120px" : ""}">
+  <div role="combobox" aria-label="Country" id="country" tabindex="0"
+    style="width:200px;height:40px" onclick="document.querySelector('#options').hidden=false">Choose country</div>
+  <div id="options" hidden><button onclick="
+    document.querySelector('#country').textContent='Canada';
+    document.querySelector('#options').hidden=true;
+  ">Canada</button></div>
+</main>
+${
+  placement === "occluded"
+    ? `<div id="cover" style="position:absolute;top:0;left:0;width:220px;height:60px"></div>
+<button style="margin-top:80px" onclick="document.querySelector('#cover').remove();this.remove()">Dismiss</button>`
+    : ""
+}`;
+      const { context, page, started } = await openFixture(html, `country-${placement}.test`);
+      const outcomes: string[] = [];
+      let modelCalls = 0;
+      try {
+        const dependencies = deps(async (_api, _state, questions) => {
+          modelCalls += 1;
+          if (modelCalls > 2) return jevFromQuestions(questions, true);
+          if (modelCalls === 1) {
+            expect(outcomes).toEqual(["stale"]);
+            expect(await page.locator("#options").isVisible()).toBe(false);
+          } else {
+            expect(outcomes).toEqual(["stale", "ok", "ok"]);
+            expect(await page.locator("#options").isVisible()).toBe(true);
+          }
+          const operation = modelCalls === 1 && placement === "offscreen" ? "SCROLL" : "CLICK";
+          const head = questions[`${operation}_target`];
+          if (head?.type !== "choice") throw new Error(`missing ${operation} recovery`);
+          const target =
+            operation === "SCROLL"
+              ? "bottom"
+              : Object.keys(head.criteria).find(
+                  (key) => head.criteria[key] === (modelCalls === 1 ? "Dismiss" : "Canada"),
+                );
+          if (target === undefined) throw new Error("missing recovery target");
+          const result = jevFromQuestions(questions);
+          for (const [name, pick] of [
+            ["operation", operation],
+            [`${operation}_target`, target],
+          ] as const) {
+            const question = questions[name];
+            if (question?.type !== "choice") throw new Error(`missing ${name}`);
+            result.result.answers[name] = {
+              choice: pick,
+              confidence: 0.93,
+              probabilities: peaked(Object.keys(question.criteria), pick),
+            };
+          }
+          return result;
+        });
+        dependencies.driveAct = async (_sessionId, action) => {
+          const result = await driveActOnPage(page, action);
+          outcomes.push(result.kind);
+          if (outcomes.length === 1) {
+            expect(result.kind).toBe("stale");
+            await page.locator("#country").evaluate((element) => {
+              element.setAttribute("aria-label", "Country choice");
+            });
+          }
+          return result;
+        };
+        const handoff = await runOperateDrive(
+          {
+            session_id: started.session_id,
+            goal: "Choose Canada as the country",
+            facts: { country: "Canada" },
+            max_steps: 8,
+          },
+          api(),
+          undefined,
+          dependencies,
+        );
+        expect(handoff.status).toBe("complete");
+        expect(modelCalls).toBe(3);
+        expect(outcomes).toEqual(["stale", "ok", "ok", "ok"]);
+        expect(await page.locator("#country").textContent()).toBe("Canada");
+        expect(handoff.trajectory[0]?.action).toBe(placement === "offscreen" ? "scroll" : "click");
+      } finally {
+        await finishProvisionSession(started.session_id);
+        await context.close();
+      }
+    },
+    30_000,
+  );
+
+  it.each(["button", "option"])(
+    "yields Billing Country's Canada %s without marking Shipping Country filled",
+    async (role) => {
+      const { context, page, started } = await openFixture(
+        `<!doctype html><title>Shipping and billing</title>
+<div id="shipping" role="combobox" aria-label="Shipping Country" tabindex="0"
+  onclick="window.shippingClicks=(window.shippingClicks||0)+1">United States</div>
+<div id="billing" role="combobox" aria-label="Billing Country" aria-controls="billing-menu"
+  aria-expanded="true" tabindex="0">United States</div>
+<div id="billing-menu" role="listbox"><div role="${role}" tabindex="0" onclick="
+  document.querySelector('#billing').textContent='Canada';
+  document.querySelector('#billing-menu').hidden=true;
+">Canada</div></div>`,
+        `country-ownership-${role}.test`,
+      );
+      const ask = vi.fn<DriveDependencies["askJev"]>(async (_api, _state, questions) => {
+        expect(await page.locator("#shipping").textContent()).toBe("United States");
+        expect(await page.locator("#billing").textContent()).toBe("United States");
+        expect(await page.evaluate("window.shippingClicks || 0")).toBe(0);
+        expect(sessionForCall(started.session_id)?.drive?.filledRefs).toEqual([]);
+        return jevFromQuestions(questions, true);
+      });
+      try {
+        const handoff = await runOperateDrive(
+          {
+            session_id: started.session_id,
+            goal: "Choose Canada for Shipping Country",
+            facts: { country: "Canada" },
+            max_steps: 1,
+          },
+          api(),
+          undefined,
+          deps(ask),
+        );
+        expect(ask).toHaveBeenCalledOnce();
+        expect(handoff.trajectory).toEqual([]);
+        expect(sessionForCall(started.session_id)?.drive?.filledRefs).toEqual([]);
+      } finally {
+        await finishProvisionSession(started.session_id);
+        await context.close();
+      }
+    },
+    30_000,
+  );
+
+  it("attempts an unchanged fact-backed combobox only once before asking the model", async () => {
+    const { context, page, started } = await openFixture(
+      `<!doctype html><title>Country picker</title>
+<div role="combobox" aria-label="Country" tabindex="0" onclick="window.clicks=(window.clicks||0)+1">Choose country</div>`,
+      "country-noop.test",
+    );
+    const ask = vi.fn<DriveDependencies["askJev"]>(async (_api, _state, questions) => {
+      expect(await page.evaluate("window.clicks")).toBe(1);
+      return jevFromQuestions(questions, true);
+    });
+    try {
+      const handoff = await runOperateDrive(
+        {
+          session_id: started.session_id,
+          goal: "Choose Canada as the country",
+          facts: { country: "Canada" },
+          max_steps: 5,
+        },
+        api(),
+        undefined,
+        deps(ask),
+      );
+      expect(ask).toHaveBeenCalledOnce();
+      expect(handoff.status).toBe("complete");
+      expect(await page.evaluate("window.clicks")).toBe(1);
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
+  it("keeps offscreen fields and drops ordinary offscreen buttons", async () => {
+    const html = `<!doctype html><meta charset="utf-8"><title>Picker viewport</title>
+<main style="min-height:4000px">
+  <label>Departure <input id="dep" aria-haspopup="dialog"></label>
+  <label>Company <input id="company" style="position:absolute;top:5000px"></label>
+  <button type="button" id="done">Done</button>
+  <div id="days">${Array.from(
+    { length: 40 },
+    (_, i) =>
+      `<button type="button" style="position:absolute;top:${3000 + i * 40}px">Day ${i + 1}</button>`,
+  ).join("")}</div>
+</main>`;
+    const { context, page, started } = await openFixture(html, "picker-viewport.test");
+    try {
+      const snap = await captureFrameSnapshot(page, [], 0);
+      expect(snap).not.toBeNull();
+      if (snap === null) return;
+      const labels = snap.elements.map((element) => element.label);
+      expect(labels.some((label) => label.includes("Departure"))).toBe(true);
+      expect(labels.some((label) => label.includes("Company"))).toBe(true);
+      expect(labels).toContain("Done");
+      expect(labels.filter((label) => /^Day \d+$/.test(label))).toEqual([]);
+      const company = snap.elements.find((element) => element.label.includes("Company"));
+      expect(company?.offscreen).toBe(true);
+      expect(company?.role).toBe("textbox");
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
+  it("types into the remounted overlay input a picker click focused", async () => {
+    const html = `<!doctype html><meta charset="utf-8"><title>Origin picker</title>
+<label>Where from? <input id="from" role="combobox" aria-haspopup="listbox" value="Philadelphia"></label>
+<div id="overlay"></div>
+<script>
+  document.getElementById("from").addEventListener("click", () => {
+    setTimeout(() => {
+      const input = document.createElement("input");
+      input.id = "else";
+      input.setAttribute("role", "combobox");
+      input.setAttribute("aria-label", "Where else?");
+      input.value = "Philadelphia";
+      const list = document.createElement("div");
+      list.setAttribute("role", "listbox");
+      const option = document.createElement("div");
+      option.setAttribute("role", "option");
+      option.textContent = "Philadelphia, Pennsylvania";
+      list.appendChild(option);
+      document.getElementById("overlay").replaceChildren(input, list);
+      input.focus();
+      input.select();
+      input.addEventListener("input", () => {
+        const typed = input.value;
+        setTimeout(() => {
+          option.textContent = typed.includes("Zurich")
+            ? "Zurich Airport (ZRH)"
+            : "Philadelphia, Pennsylvania";
+        }, 80);
+      });
+    }, 80);
+  });
+</script>`;
+    const { context, page, started } = await openFixture(html, "picker-overlay-type.test");
+    try {
+      const snap = await captureFrameSnapshot(page, [], 0);
+      const from = snap?.elements.find((element) => element.label.includes("Where from?"));
+      expect(from).toBeDefined();
+      if (from === undefined) return;
+      const typed = await driveActOnPage(page, {
+        kind: "type",
+        target: from.ref,
+        text: "Zurich",
+      });
+      expect(typed.kind).toBe("ok");
+      expect(await page.locator("#else").inputValue()).toBe("Zurich");
+      expect(await page.locator('[role="option"]').textContent()).toBe("Zurich Airport (ZRH)");
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
+  it("waits for date-grid cells after a click-open", async () => {
+    const html = `<!doctype html><meta charset="utf-8"><title>Date picker</title>
+<label>Departure <input id="dep" aria-haspopup="dialog" readonly></label>
+<div id="cal"></div>
+<script>
+  document.getElementById("dep").addEventListener("click", () => {
+    setTimeout(() => {
+      const grid = document.createElement("div");
+      grid.setAttribute("role", "grid");
+      const cell = document.createElement("button");
+      cell.setAttribute("role", "gridcell");
+      cell.textContent = "Sunday, September 20, 2026";
+      grid.appendChild(cell);
+      document.getElementById("cal").appendChild(grid);
+    }, 80);
+  });
+</script>`;
+    const { context, page, started } = await openFixture(html, "date-settle.test");
+    try {
+      const snap = await captureFrameSnapshot(page, [], 0);
+      const departure = snap?.elements.find((element) => element.label.includes("Departure"));
+      expect(departure).toBeDefined();
+      if (departure === undefined) return;
+      const acted = await driveActOnPage(page, { kind: "click", target: departure.ref });
+      expect(acted.kind).toBe("ok");
+      if (acted.kind !== "ok") return;
+      expect(acted.combobox).toBe(true);
+      const waited = await settleDriveStep(page, acted.combobox);
+      expect(waited).toBeGreaterThan(0);
+      expect(await page.locator('[role="gridcell"]').count()).toBe(1);
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
   it("returns a snapshot on a lazily-growing DOM instead of walking forever", async () => {
     // Exercise drive capture without first walking the growing DOM through
     // general observation during fixture setup.

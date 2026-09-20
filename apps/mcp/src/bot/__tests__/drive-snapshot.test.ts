@@ -43,6 +43,8 @@ describe("drive snapshot conversion", () => {
     expect(inferFieldFromLabel("Search Wikipedia", "searchbox")).toBe("search");
     expect(inferFieldFromLabel("Where from?", "combobox")).toBe("origin");
     expect(inferFieldFromLabel("Where to?", "combobox")).toBe("destination");
+    expect(inferFieldFromLabel("Departure", "textbox")).toBe("date");
+    expect(inferFieldFromLabel("Expiry", "textbox")).toBe("date");
     expect(inferFieldFromLabel("Card number", "textbox")).toBe("payment");
     const rows = driveRowsFromSnapshot(
       snapshot({
@@ -145,6 +147,36 @@ describe("drive snapshot conversion", () => {
       }),
     );
     expect(options.get("@e:f0d8")).toEqual(["California", "Oregon"]);
+  });
+
+  it("marks a picker on the wire so fillable date and combobox fields stay clickable", () => {
+    const rows = driveRowsFromSnapshot(
+      snapshot({
+        elements: [
+          {
+            ref: "@e:dep",
+            role: "textbox",
+            label: "Departure",
+            picker: true,
+            operations: ["fill", "click"],
+            frameOrdinal: 0,
+          },
+          {
+            ref: "@e:from",
+            role: "combobox",
+            label: "Where from?",
+            picker: true,
+            operations: ["fill", "click"],
+            frameOrdinal: 0,
+          },
+        ],
+      }),
+    );
+    expect(rows[0]?.[2]).toContain("f=date");
+    expect(rows[0]?.[2]).toContain("a=picker");
+    expect(rows[1]?.[1]).toBe("t");
+    expect(rows[1]?.[2]).toContain("f=origin");
+    expect(rows[1]?.[2]).toContain("a=picker");
   });
 
   it("maps a fillable combobox to a text field, not a select", () => {

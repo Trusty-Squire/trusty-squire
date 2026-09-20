@@ -31,13 +31,16 @@ import {
   fillableCandidates,
   isOtpRow,
   lastActionWasClick,
+  isPickerRow,
   matchingFactKeys,
   mergeCompactTable,
+  operationsForRow,
   mergeFacts,
   nextActionInstructions,
   observationFingerprint,
   pageTextFromObservation,
   peakedProbabilities,
+  requiredFactComboboxAction,
   requiredFillableMissingFact,
   selectTargetKey,
   selectTargets,
@@ -857,6 +860,87 @@ describe("facts, fingerprint, compact merge", () => {
       "@e:from",
       "@e:to",
     ]);
+  });
+
+  it("offers CLICK Open on fillable pickers and keeps TYPE_TEXT", () => {
+    const departure: WireRow = ["@e:dep", "t", "Departure|f=date"];
+    const from: WireRow = ["@e:from", "t", "Where from?|f=origin"];
+    const facts = { origin: "Zurich", date: "2026-09-20" };
+    expect(isPickerRow(departure)).toBe(true);
+    expect(isPickerRow(from)).toBe(true);
+    expect(isPickerRow(EMAIL)).toBe(false);
+    expect(operationsForRow(departure)).toEqual(["TYPE_TEXT", "CLICK"]);
+    expect(operationsForRow(EMAIL)).toEqual(["TYPE_TEXT"]);
+    expect(actionDescription(departure, [departure], "CLICK")).toBe("Open Departure");
+    expect(actionDescription(departure)).toBe("type into the Departure field");
+    expect(clickableCandidates([departure, from, EMAIL, SUBMIT], false).map((c) => c.ref)).toEqual([
+      "@e:dep",
+      "@e:from",
+      "@e:go",
+    ]);
+    expect(
+      typeableCandidates([departure, from, EMAIL], { ...facts, email: "a@b.test" }, false).map(
+        (c) => c.ref,
+      ),
+    ).toEqual(["@e:dep", "@e:from", "@e:email"]);
+    const questions = buildDriveQuestions(
+      [departure, from, EMAIL, SUBMIT],
+      { ...facts, email: "a@b.test" },
+      "one-way Zurich to London",
+    );
+    expect(questions.TYPE_TEXT_target?.type).toBe("choice");
+    expect(questions.CLICK_target?.type).toBe("choice");
+    if (
+      questions.CLICK_target?.type !== "choice" ||
+      questions.TYPE_TEXT_target?.type !== "choice"
+    ) {
+      return;
+    }
+    expect(Object.values(questions.CLICK_target.criteria)).toEqual(
+      expect.arrayContaining(["Open Departure", "Open Where from?", "continue"]),
+    );
+    expect(Object.values(questions.CLICK_target.criteria)).not.toContain("Open email");
+    expect(Object.values(questions.TYPE_TEXT_target.criteria)).toEqual(
+      expect.arrayContaining(["Departure", "Where from?", "email"]),
+    );
+  });
+
+  it("maps a Departure field to the date fact, not origin", () => {
+    const departure: WireRow = ["@e:dep", "t", "Departure"];
+    const facts = { origin: "Zurich", destination: "London", date: "2026-09-20" };
+    expect(matchingFactKeys(facts, departure)).toEqual(["date"]);
+    expect(typeableCandidates([departure], facts, false).map((c) => c.ref)).toEqual(["@e:dep"]);
+  });
+
+  it("opens a fact-backed combobox but yields unassociated option clicks to the model", () => {
+    const trip: WireRow = [
+      "@e:trip",
+      "combobox",
+      "Change ticket type. Round trip|a=picker|n=Round trip",
+    ];
+    const cabin: WireRow = [
+      "@e:cabin",
+      "combobox",
+      "Change seating class. Economy|a=picker|n=Economy",
+    ];
+    const oneWay: WireRow = ["@e:ow", "b", "One way"];
+    const facts = { ticket_type: "One way", cabin: "Economy" };
+    expect(matchingFactKeys(facts, trip)).toEqual(["ticket_type"]);
+    expect(matchingFactKeys(facts, cabin)).toEqual(["cabin"]);
+    expect(requiredFactComboboxAction([trip, cabin], facts)).toEqual({ target: "@e:trip" });
+    expect(requiredFactComboboxAction([trip, cabin, oneWay], facts)).toBeUndefined();
+    expect(requiredFactComboboxAction([cabin], facts)).toBeUndefined();
+    expect(requiredFactComboboxAction([trip], facts, ["@e:trip"])).toBeUndefined();
+  });
+
+  it("yields when another Country menu or an unrelated button offers the fact", () => {
+    const shipping: WireRow = ["@e:shipping", "combobox", "Shipping Country|n=United States"];
+    const billing: WireRow = ["@e:billing", "combobox", "Billing Country|n=United States"];
+    const facts = { country: "Canada" };
+    for (const role of ["b", "l"]) {
+      const canada: WireRow = ["@e:canada", role, "Canada"];
+      expect(requiredFactComboboxAction([shipping, billing, canada], facts)).toBeUndefined();
+    }
   });
 
   it("assigns a page-supplied select option from a goal phrase without a matching fact", () => {

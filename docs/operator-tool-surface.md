@@ -26,7 +26,7 @@ still require another observation or an explicit wait.
 For a signup, checkout, or other goal-shaped website task, call `operate_drive`
 with the goal and a `facts` bag (email, name, address, `card_ref`, …). Pass
 `session_id` of an open session, or `url` to open the page and drive in one
-call; provide exactly one. Each step asks Jev for one operation (CLICK, TYPE_TEXT, SELECT,
+call; provide exactly one. Model-directed steps ask Jev for one operation (CLICK, TYPE_TEXT, SELECT,
 SCROLL, WAIT, DONE, BLOCKED) plus a matching per-operation target; unused
 target heads cannot act. Identifying values come only from the facts bag. A
 search or query field may receive a phrase Jev assigns from the goal's own
@@ -52,6 +52,23 @@ and settling retry. Consent overlays remain ordinary controls for the drive
 loop to handle. The live Google-session admission gate still applies.
 Standalone `operate_start` retains its general initial observation in the
 requested format and best-effort consent-banner dismissal before that read.
+
+Drive offers `Open <label>` click choices for recognized picker fields alongside
+typing where supported. Supply `origin`, `destination`, and `date` facts for
+travel forms: Departure matches the date, not the origin. Picker typing preserves
+the input focused by the opening click. Opening waits up to 400 ms for visible
+options or calendar cells; typing waits up to 2 seconds for changed suggestion
+labels. These bounded waits do not guarantee that an asynchronous picker is ready.
+
+A custom combobox with a missing or different displayed value can be opened
+automatically when a supplied fact matches its field, including `ticket_type`,
+`cabin`, and `passengers`. Within a call, automatic opening is attempted once per
+observation fingerprint. A stale, occluded, or offscreen click yields the next
+decision to Jev even if the recovery observation changes. A matching page-wide
+option also yields to Jev: the dispatcher cannot establish custom option
+ownership and does not select it or mark the field filled. Native selects stay
+on the model decision path. Recovery and option-ownership regressions live in
+[`operate-drive-fixture.test.ts`](../apps/mcp/src/bot/__tests__/operate-drive-fixture.test.ts).
 
 Calls default to 60 steps and 45 seconds; `max_steps` and `max_seconds` set
 the per-call allowances within the registered schema's limits.
@@ -80,7 +97,7 @@ browser-use/jev-ultrafast (MIT) adoptions live in `operate-drive.ts`. Mapping:
 | 9 | Three consecutive non-wait actions with no fingerprint change | `DRIVE_STALE_LIMIT`, `staleNonWait` |
 | 10 | Decision bound to the observation fingerprint, consumed once | `boundFingerprint`, `consumedActionKey` |
 | 11 | Candidate and question budgets; only offered choices can be selected | `driveTargetSets`, `buildDriveQuestions` |
-| 12 | Snapshot, Jev decision, guarded CDP action, then bounded settling; frame refreshes and primitive handoffs can add calls | `drive-snapshot.ts`, `drive-act.ts`, `operate-drive.ts` |
+| 12 | Snapshot, decision, guarded CDP action, then bounded settling; automatic combobox opening follows the policy above | `drive-snapshot.ts`, `drive-act.ts`, `operate-drive.ts` |
 
 The drive considers up to 250 candidates and caps each decision batch at 128
 total choice criteria, including operation and goal-value choices. Truncation
@@ -88,6 +105,12 @@ is disclosed in the question instructions; retained dropdown choices with
 omitted siblings carry `options_elided` in planner state. The allocator reserves
 a usable goal-value choice alongside `none` when available. Omitted choices
 cannot be selected in that batch.
+
+The drive snapshot excludes ordinary offscreen buttons, retaining offscreen
+form controls and controls in header, navigation, and footer regions. This
+limits calendar-button floods. Jev's visible element state includes each ref
+once even when it supports both typing and clicking; the operation-specific
+choices remain separate.
 
 `operate_read_inbox` reads the session's signed-in Gmail inbox for a
 verification email in dedicated utility tabs that are closed when the read
