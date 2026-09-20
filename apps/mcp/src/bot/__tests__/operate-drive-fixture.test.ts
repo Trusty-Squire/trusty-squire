@@ -148,6 +148,19 @@ const STALLED_HTML = `<!doctype html><meta charset="utf-8"><title>Stalled form</
   <p id="status">Validating your workspace…</p>
 </main>`;
 
+// A submit that never leaves its in-flight state: every settle wait observes
+// the same disabled surface, so the settle budget is the only thing that ends
+// the wait.
+const NEVER_SETTLES_HTML = `<!doctype html><meta charset="utf-8"><title>Never settles</title>
+<main>
+  <h1>Create account</h1>
+  <form id="f"><button type="button" id="create" disabled>Creating…</button></form>
+</main>`;
+
+// A payment settling behind a blank processor screen: no rows, ever.
+const BLANK_PROCESSOR_HTML = `<!doctype html><meta charset="utf-8"><title>Processing</title>
+<main></main>`;
+
 const GROWING_HTML = `<!doctype html><meta charset="utf-8"><title>Growing</title>
 <main><a href="#keep">Keep</a><div id="sink"></div></main>
 <script>
@@ -1790,6 +1803,93 @@ describe("operate_drive real-browser fixture", () => {
       for (const operations of offered) expect(operations).not.toEqual(["DONE"]);
       expect(handoff.status).not.toBe("complete");
       expect(await page.locator("#create").isDisabled()).toBe(true);
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 60_000);
+
+  it("bounds the settle wait on a form that never settles", async () => {
+    const { context, started } = await openFixture(NEVER_SETTLES_HTML, "signup-never-settles.test");
+    try {
+      const offered: string[][] = [];
+      const handoff = await runOperateDrive(
+        {
+          session_id: started.session_id,
+          goal: "create an account",
+          max_steps: 8,
+        },
+        api(),
+        undefined,
+        deps(async (_api, _state, questions) => {
+          const operations = Object.keys(choiceCriteria(questions.operation));
+          offered.push(operations);
+          const pick = operations.includes("BLOCKED") ? "BLOCKED" : operations[0]!;
+          return {
+            attempts: 1,
+            elapsedMs: 12,
+            result: {
+              answers: {
+                operation: {
+                  choice: pick,
+                  confidence: 0.93,
+                  probabilities: peaked(operations, pick),
+                },
+              },
+            },
+          };
+        }),
+      );
+      const waits = handoff.trajectory.filter((step) => step.action === "wait");
+      expect(waits.length).toBeLessThanOrEqual(DRIVE_EMPTY_SNAPSHOT_WAITS);
+      expect(handoff.status).not.toBe("budget");
+      expect(handoff.status).not.toBe("complete");
+      expect(offered).toEqual([["DONE", "BLOCKED"]]);
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 60_000);
+
+  it("keeps offering WAIT on a blank page past the automatic empty-snapshot waits", async () => {
+    const { context, started } = await openFixture(
+      BLANK_PROCESSOR_HTML,
+      "blank-processor.test",
+      "standard",
+      "/checkouts/cn9",
+    );
+    try {
+      const offered: string[][] = [];
+      const handoff = await runOperateDrive(
+        {
+          session_id: started.session_id,
+          goal: "complete the purchase",
+          max_steps: 5,
+        },
+        api(),
+        undefined,
+        deps(async (_api, _state, questions) => {
+          const operations = Object.keys(choiceCriteria(questions.operation));
+          offered.push(operations);
+          const pick = operations.includes("WAIT") ? "WAIT" : operations[0]!;
+          return {
+            attempts: 1,
+            elapsedMs: 12,
+            result: {
+              answers: {
+                operation: {
+                  choice: pick,
+                  confidence: 0.93,
+                  probabilities: peaked(operations, pick),
+                },
+              },
+            },
+          };
+        }),
+      );
+      expect(offered.length).toBeGreaterThanOrEqual(1);
+      for (const operations of offered) expect(operations).toContain("WAIT");
+      expect(handoff.status).not.toBe("complete");
     } finally {
       await finishProvisionSession(started.session_id);
       await context.close();

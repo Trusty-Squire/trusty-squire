@@ -58,10 +58,14 @@ evaluate, and drive rules prose are adapted from browser-use/jev-ultrafast
 
 WAIT and BLOCKED are offered only while no listed work remains: an enabled
 fill, select, choice, or non-OAuth submit that is actually offered keeps both
-out of the answer set, and WAIT is also withheld after a WAIT that changed
-nothing. When the snapshot is empty, its whole form surface is disabled, or a
-submit is in flight with no fills left, the loop takes up to three automatic
-waits itself and then offers only DONE and BLOCKED.
+out of the answer set, and a chosen WAIT that leaves a page still listing rows
+unchanged is withheld afterwards. When the snapshot is empty the loop takes up
+to three automatic waits itself and then asks the ordinary question, which on
+zero rows offers exactly WAIT, DONE, and BLOCKED — an empty processor screen is
+not a no-op loop, so a payment keeps settling for as long as the budgets allow.
+When instead the whole form surface is disabled or a submit is in flight with
+no fills left, the loop takes up to three automatic settle waits on that page
+and then offers only DONE and BLOCKED.
 
 An action that produced no observable change is not offered again while the
 page's URL, form surface, and filled fields stay the same; WAIT counts in that

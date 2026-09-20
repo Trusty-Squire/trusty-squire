@@ -1837,7 +1837,6 @@ export function driveTargetSets(
   pageUrl: string = "",
   pageOptions: ReadonlyMap<string, readonly string[]> = new Map(),
   maskText: (text: string) => string = (text) => text,
-  allowWait: boolean = true,
   skippedClickRefs: readonly string[] = [],
 ): DriveTargetSets {
   const remaining = { n: DRIVE_MAX_CANDIDATES };
@@ -1871,7 +1870,11 @@ export function driveTargetSets(
   // as the only admissible answer and force a false "complete".
   const listedWork =
     operations.length > 0 && pageHasListedWork(rows, typeText.length, select.length);
-  if (allowWait && !listedWork && !skipped.has("WAIT")) operations.push("WAIT");
+  // WAIT is withheld only where the repeat-cap recorded it as dead — a
+  // model-chosen wait that left a page with rows unchanged. An empty snapshot
+  // never records one, so a payment settling behind a blank processor screen
+  // keeps its wait for as long as the budgets allow.
+  if (!listedWork && !skipped.has("WAIT")) operations.push("WAIT");
   operations.push("DONE");
   if (!listedWork) operations.push("BLOCKED");
   return { operations, TYPE_TEXT: typeText, SELECT: select, CLICK: click, SCROLL: scroll };
@@ -3219,6 +3222,7 @@ async function driveLoop(input: {
   const expiryRewriteAttempts = new Set<string>();
   let typeMustYield = false;
   let emptySnapshotWaits = 0;
+  let settleWaits = 0;
 
   const finish = (
     status: DriveStatus,
@@ -3977,14 +3981,26 @@ async function driveLoop(input: {
       steps += 1;
       continue;
     }
+    // Per page, and read before the settle branch below: dead actions recorded
+    // on the page the model just left must not rule on the page it is on now.
+    const progressKey = pageProgressKey(pageUrl, rows, drive.filledRefs);
+    if (drive.exhaustedProgressKey !== progressKey) {
+      drive.exhaustedProgressKey = progressKey;
+      drive.exhaustedActionKeys = [];
+      settleWaits = 0;
+    }
     // In-flight disabled submit while the form is still listed: settle, then
     // a terminal-only question. Empty snapshots already took the path above.
+    // The settle budget is its own counter: emptySnapshotWaits is cleared on
+    // every non-empty snapshot, which is exactly when this branch runs, so
+    // sharing it left the bound permanently unreached and the loop waited out
+    // its whole budget on a form that never settles.
     if (rows.length > 0 && snapshotNeedsSettle(rows, remainingFills.length)) {
       if (
-        emptySnapshotWaits < DRIVE_EMPTY_SNAPSHOT_WAITS &&
+        settleWaits < DRIVE_EMPTY_SNAPSHOT_WAITS &&
         !(drive.exhaustedActionKeys ?? []).includes("WAIT")
       ) {
-        emptySnapshotWaits += 1;
+        settleWaits += 1;
         const applied = await applyDecision({ kind: "wait", confidence: 1 });
         if (applied !== "continue") return applied;
         steps += 1;
@@ -4051,15 +4067,9 @@ async function driveLoop(input: {
       session,
       observation.dom ?? "",
     );
-    const progressKey = pageProgressKey(pageUrl, rows, drive.filledRefs);
-    if (drive.exhaustedProgressKey !== progressKey) {
-      drive.exhaustedProgressKey = progressKey;
-      drive.exhaustedActionKeys = [];
-    }
     if (drive.lastFingerprint !== null && drive.lastFingerprint !== fingerprint) {
       drive.staleClickRefs = [];
     }
-    const staleWait = drive.lastActionKey === "WAIT" && drive.lastFingerprint === fingerprint;
     const skippedActions = [
       ...new Set([...(drive.exhaustedActionKeys ?? []), ...(drive.staleClickRefs ?? [])]),
     ];
@@ -4071,7 +4081,6 @@ async function driveLoop(input: {
       pageUrl,
       pageOptions,
       (text) => maskDriveOutput(session, text),
-      !staleWait,
       skippedActions,
     );
     const actionable = sets.operations.filter(

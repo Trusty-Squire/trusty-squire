@@ -1383,21 +1383,6 @@ describe("form-fill assignment helpers", () => {
     );
     expect(nav.operations).toContain("WAIT");
     expect(nav.operations).toContain("BLOCKED");
-    expect(
-      driveTargetSets(
-        [
-          ["@e:home", "l", "Home"],
-          ["@e:models", "l", "Models"],
-        ],
-        {},
-        false,
-        [],
-        "",
-        new Map(),
-        (text) => text,
-        false,
-      ).operations,
-    ).not.toContain("WAIT");
   });
 
   it("keeps a non-DONE answer when every listed control is suppressed", () => {
@@ -1682,7 +1667,6 @@ describe("facts, fingerprint, compact merge", () => {
       "https://api-ninjas.com/register",
       new Map(),
       (text) => text,
-      true,
       ["@e:go", "WAIT"],
     );
     expect(sets.CLICK.map((c) => c.ref)).toEqual(["@e:ok", "@e:ad"]);
