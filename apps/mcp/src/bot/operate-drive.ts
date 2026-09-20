@@ -414,17 +414,39 @@ function progressFingerprint(
   drive: SessionDriveState,
   session: Session,
   pageText: string = "",
+  headings: readonly string[] = [],
 ): string {
   const fieldState = [
     ...[...session.committedSelectValues.entries()].map(([key, value]) => `sel:${key}=${value}`),
     ...drive.filledRefs.map((ref) => `filled:${ref}`),
   ];
+  const headingKey = headings
+    .map((heading) => heading.trim().toLowerCase())
+    .filter((heading) => heading.length > 0)
+    .join("|");
+  if (headingKey.length > 0) fieldState.push(`head:${headingKey}`);
   // A control-free page can only move by changing its text, so on zero rows
   // that text is the whole progress signal. Where rows exist the row tuples
-  // already carry it, and folding body text in there would churn the
-  // fingerprint on any ticking content and defeat no-progress detection.
+  // already carry labels; folding the full body in would churn the
+  // fingerprint on ticking content. Headings are the SPA-confirm signal.
   if (rows.length === 0 && pageText.length > 0) fieldState.push(`text:${pageText}`);
   return observationFingerprint(url, rows, fieldState);
+}
+
+function driveProgressFingerprint(
+  observation: Observation,
+  rows: readonly WireRow[],
+  drive: SessionDriveState,
+  session: Session,
+): string {
+  return progressFingerprint(
+    observation.url,
+    rows,
+    drive,
+    session,
+    observation.dom ?? "",
+    observation.semantic?.headings ?? [],
+  );
 }
 
 function sleepDrive(ms: number, signal: AbortSignal | undefined): Promise<void> {
@@ -596,12 +618,17 @@ export function pageProgressKey(
   url: string,
   rows: readonly WireRow[],
   filledRefs: readonly string[] = [],
+  headings: readonly string[] = [],
 ): string {
   const kept = rows.filter(
     (row) => isConsentRow(row) || isFillableRow(row) || isSubmitLikeRow(row) || isChoiceRow(row),
   );
   const stable = kept.map((row) => `${row[0]}\t${row[1]}\t${row[2] ?? ""}`).sort();
-  return `${url}\n${stable.join("\n")}\nfilled:${[...filledRefs].sort().join(",")}`;
+  const headingKey = headings
+    .map((heading) => heading.trim().toLowerCase())
+    .filter((heading) => heading.length > 0)
+    .join("\n");
+  return `${url}\n${headingKey}\n${stable.join("\n")}\nfilled:${[...filledRefs].sort().join(",")}`;
 }
 
 export function recordDeadAction(
@@ -2561,6 +2588,12 @@ export function pageSuggestsInboxWait(
   );
 }
 
+export function goalSeeksVerification(goal: string): boolean {
+  return /verif(?:y|ication)|confirm(?:ation)?(?:\s+your)?\s+e-?mail|check your e-?mail/.test(
+    goal.toLowerCase(),
+  );
+}
+
 export function inboxSpecialPlan(
   rows: readonly WireRow[],
   decisionKind: DriveDecision["kind"],
@@ -2568,6 +2601,7 @@ export function inboxSpecialPlan(
   remainingFillCount: number,
   pageUrl: string = "",
   pageText: string = "",
+  goal: string = "",
 ): InboxSpecialPlan | undefined {
   if (!clicked || remainingFillCount > 0) return undefined;
   if (decisionKind !== "stuck" && decisionKind !== "wait") return undefined;
@@ -2576,8 +2610,9 @@ export function inboxSpecialPlan(
   }
   const otp = rows.find((row) => isOtpRow(row) && isFillableRow(row));
   if (otp !== undefined) return { kind: "otp", target: otp[0] };
-  // Still looking at the signup form (Meilisearch /register after Register):
-  // wait for the SPA to leave. Inbox belongs on a check-email page, not here.
+  // A check-email heading is success even when the signup form is still listed.
+  if (pageSuggestsInboxWait(rows, pageUrl, pageText)) return { kind: "link" };
+  // Still looking at the signup form with no confirm text: wait for the SPA.
   if (
     rows.some(
       (row) =>
@@ -2590,10 +2625,8 @@ export function inboxSpecialPlan(
   ) {
     return undefined;
   }
-  // Logged-in chrome after a successful submit (Meilisearch /teams) is not
-  // a mailbox wait. Require check-email wording or a verify URL.
-  if (!pageSuggestsInboxWait(rows, pageUrl, pageText)) return undefined;
-  return { kind: "link" };
+  if (goalSeeksVerification(goal)) return { kind: "link" };
+  return undefined;
 }
 
 export function inboxVerificationDecision(
@@ -3737,7 +3770,7 @@ async function driveLoop(input: {
       await sleepDrive(DRIVE_IDENTICAL_RESNAP_MS, context?.signal);
       const snap = await snapshotOrTimeout(framesIfNeeded());
       if (snap !== "ok") return snap;
-      confirmed = progressFingerprint(observation.url, rows, drive, session, observation.dom ?? "");
+      confirmed = driveProgressFingerprint(observation, rows, drive, session);
     }
     drive.staleNonWait = confirmed === fingerprint ? drive.staleNonWait + 1 : 0;
     drive.lastFingerprint = confirmed;
@@ -3745,7 +3778,7 @@ async function driveLoop(input: {
     if (
       deadKeyBaseline !== undefined &&
       confirmed === fingerprint &&
-      pageProgressKey(observation.url, rows, drive.filledRefs) === deadKeyBaseline
+      pageProgressKey(observation.url, rows, drive.filledRefs, observation.semantic?.headings ?? []) === deadKeyBaseline
     ) {
       const dead = markDead(actionKey);
       if (dead !== "continue") return dead;
@@ -3755,7 +3788,7 @@ async function driveLoop(input: {
   };
   const markDead = (actionKey: string): DriveHandoff | "continue" => {
     rememberFailedAction(drive, rows, actionKey);
-    const key = pageProgressKey(observation.url, rows, drive.filledRefs);
+    const key = pageProgressKey(observation.url, rows, drive.filledRefs, observation.semantic?.headings ?? []);
     if (recordDeadAction(drive, key, actionKey) === "stop") {
       return finish("no_progress", {
         reason: deadActionReason(drive.exhaustedActionKeys ?? [], observation.url),
@@ -3777,13 +3810,7 @@ async function driveLoop(input: {
     if (decision.kind === "complete") {
       const completeSnap = await snapshotOrTimeout(framesIfNeeded());
       if (completeSnap !== "ok") return completeSnap;
-      const fresh = progressFingerprint(
-        observation.url,
-        rows,
-        drive,
-        session,
-        observation.dom ?? "",
-      );
+      const fresh = driveProgressFingerprint(observation, rows, drive, session);
       if (drive.boundFingerprint !== null && fresh !== drive.boundFingerprint) {
         drive.consumedActionKey = null;
         return "continue";
@@ -3791,7 +3818,7 @@ async function driveLoop(input: {
       return finish("complete");
     }
     if (decision.kind === "wait") {
-      const beforeKey = pageProgressKey(observation.url, rows, drive.filledRefs);
+      const beforeKey = pageProgressKey(observation.url, rows, drive.filledRefs, observation.semantic?.headings ?? []);
       await new Promise<void>((resolve, reject) => {
         const timer = setTimeout(resolve, DRIVE_WAIT_MS);
         const signal = context?.signal;
@@ -3821,19 +3848,13 @@ async function driveLoop(input: {
         ...(jevMs === undefined ? {} : { jev_ms: jevMs }),
       });
       drive.history.push("wait");
-      drive.lastFingerprint = progressFingerprint(
-        observation.url,
-        rows,
-        drive,
-        session,
-        observation.dom ?? "",
-      );
+      drive.lastFingerprint = driveProgressFingerprint(observation, rows, drive, session);
       drive.lastActionKey = "WAIT";
       drive.consumedActionKey = null;
       if (
         modelChosen &&
         rows.length > 0 &&
-        pageProgressKey(observation.url, rows, drive.filledRefs) === beforeKey
+        pageProgressKey(observation.url, rows, drive.filledRefs, observation.semantic?.headings ?? []) === beforeKey
       ) {
         const dead = markDead("WAIT");
         if (dead !== "continue") return dead;
@@ -3874,13 +3895,10 @@ async function driveLoop(input: {
         reason: decision.reason,
       });
     }
-    const fingerprint = progressFingerprint(
-      observation?.url ?? "",
-      rows,
-      drive,
-      session,
-      observation?.dom ?? "",
-    );
+    const fingerprint =
+      observation === undefined
+        ? progressFingerprint("", rows, drive, session)
+        : driveProgressFingerprint(observation, rows, drive, session);
     if (drive.boundFingerprint !== null && fingerprint !== drive.boundFingerprint) {
       drive.consumedActionKey = null;
       return "continue";
@@ -3983,13 +4001,7 @@ async function driveLoop(input: {
         ...takeActProfile(drive),
       });
       drive.history.push(DRIVE_INJECT_CARD_HISTORY);
-      const nextFingerprint = progressFingerprint(
-        observation.url,
-        rows,
-        drive,
-        session,
-        observation.dom ?? "",
-      );
+      const nextFingerprint = driveProgressFingerprint(observation, rows, drive, session);
       return await noteProgress(fingerprint, nextFingerprint, decision.actionKey);
     }
 
@@ -4072,13 +4084,7 @@ async function driveLoop(input: {
       drive.history.push(
         verification.code !== null ? "type verification code" : "open verification link",
       );
-      const nextFingerprint = progressFingerprint(
-        observation.url,
-        rows,
-        drive,
-        session,
-        observation.dom ?? "",
-      );
+      const nextFingerprint = driveProgressFingerprint(observation, rows, drive, session);
       return await noteProgress(fingerprint, nextFingerprint, decision.actionKey);
     }
 
@@ -4093,7 +4099,7 @@ async function driveLoop(input: {
     const beforePageFingerprint =
       session.browser.page === null ? "" : await pageFingerprintOf(session.browser.page);
     const actStarted = Date.now();
-    const beforeKey = pageProgressKey(observation.url, rows, drive.filledRefs);
+    const beforeKey = pageProgressKey(observation.url, rows, drive.filledRefs, observation.semantic?.headings ?? []);
     const acted = await actDriveSafely(session, sessionId, decision.action, dependencies);
     if (acted.kind === "stale") {
       comboboxMustYield = true;
@@ -4182,13 +4188,7 @@ async function driveLoop(input: {
         }
       }
     }
-    const nextFingerprint = progressFingerprint(
-      observation.url,
-      rows,
-      drive,
-      session,
-      observation.dom ?? "",
-    );
+    const nextFingerprint = driveProgressFingerprint(observation, rows, drive, session);
     appendDriveTrace(session, {
       at: "after_act",
       step: drive.trajectory.length,
@@ -4213,13 +4213,7 @@ async function driveLoop(input: {
     // approval that completed on the phone) must pass the consume-once gate
     // on its first post-resume attempt instead of bouncing off a
     // boundFingerprint left over from the previous drive call.
-    drive.boundFingerprint = progressFingerprint(
-      observation.url,
-      rows,
-      drive,
-      session,
-      observation.dom ?? "",
-    );
+    drive.boundFingerprint = driveProgressFingerprint(observation, rows, drive, session);
     drive.consumedActionKey = null;
     const resumed = await applyDecision(
       resumeAction(answer, rows, drive.facts, drive.goal, drive.facts.card_ref, observation.url),
@@ -4277,13 +4271,7 @@ async function driveLoop(input: {
     comboboxMustYield = false;
     if (comboboxFill !== undefined) {
       comboboxAttempts.add(comboboxObservation);
-      drive.boundFingerprint = progressFingerprint(
-        observation.url,
-        rows,
-        drive,
-        session,
-        observation.dom ?? "",
-      );
+      drive.boundFingerprint = driveProgressFingerprint(observation, rows, drive, session);
       drive.consumedActionKey = null;
       const applied = await applyDecision({
         kind: "act",
@@ -4310,13 +4298,7 @@ async function driveLoop(input: {
       !selectAttempts.has(selectAttemptKey)
     ) {
       selectAttempts.add(selectAttemptKey);
-      drive.boundFingerprint = progressFingerprint(
-        observation.url,
-        rows,
-        drive,
-        session,
-        observation.dom ?? "",
-      );
+      drive.boundFingerprint = driveProgressFingerprint(observation, rows, drive, session);
       drive.consumedActionKey = null;
       const applied = await applyDecision({
         kind: "act",
@@ -4346,13 +4328,7 @@ async function driveLoop(input: {
       !drive.expiryLongAttemptedRefs.includes(rewriteTarget)
     ) {
       expiryRewriteAttempts.add(rewriteAttemptKey);
-      drive.boundFingerprint = progressFingerprint(
-        observation.url,
-        rows,
-        drive,
-        session,
-        observation.dom ?? "",
-      );
+      drive.boundFingerprint = driveProgressFingerprint(observation, rows, drive, session);
       drive.consumedActionKey = null;
       const applied = await applyDecision({
         kind: "act",
@@ -4372,13 +4348,7 @@ async function driveLoop(input: {
       !typeAttempts.has(typeAttemptKey)
     ) {
       typeAttempts.add(typeAttemptKey);
-      drive.boundFingerprint = progressFingerprint(
-        observation.url,
-        rows,
-        drive,
-        session,
-        observation.dom ?? "",
-      );
+      drive.boundFingerprint = driveProgressFingerprint(observation, rows, drive, session);
       drive.consumedActionKey = null;
       const applied = await applyDecision({
         kind: "act",
@@ -4428,7 +4398,12 @@ async function driveLoop(input: {
     }
     // Per page, and read before the settle branch below: dead actions recorded
     // on the page the model just left must not rule on the page it is on now.
-    const progressKey = pageProgressKey(pageUrl, rows, drive.filledRefs);
+    const progressKey = pageProgressKey(
+      pageUrl,
+      rows,
+      drive.filledRefs,
+      observation.semantic?.headings ?? [],
+    );
     if (drive.exhaustedProgressKey !== progressKey) {
       drive.exhaustedProgressKey = progressKey;
       drive.exhaustedActionKeys = [];
@@ -4518,13 +4493,7 @@ async function driveLoop(input: {
       // describes the preceding action; without rebinding, applyDecision's
       // consume-once gate returns "continue" forever and this branch spins
       // without acting until the time budget expires.
-      drive.boundFingerprint = progressFingerprint(
-        observation.url,
-        rows,
-        drive,
-        session,
-        observation.dom ?? "",
-      );
+      drive.boundFingerprint = driveProgressFingerprint(observation, rows, drive, session);
       drive.consumedActionKey = null;
       const applied = await applyDecision({
         kind: "act",
@@ -4566,13 +4535,7 @@ async function driveLoop(input: {
     if (drive.jevCalls >= DRIVE_MAX_JEV_CALLS) return finish("budget");
 
     const prepareStarted = Date.now();
-    const fingerprint = progressFingerprint(
-      observation.url,
-      rows,
-      drive,
-      session,
-      observation.dom ?? "",
-    );
+    const fingerprint = driveProgressFingerprint(observation, rows, drive, session);
     if (drive.lastFingerprint !== null && drive.lastFingerprint !== fingerprint) {
       drive.staleClickRefs = [];
     }
@@ -4738,6 +4701,7 @@ async function driveLoop(input: {
       remainingFills.length,
       observation.url,
       pageTextFromObservation(observation, [observation.dom ?? ""]),
+      drive.goal,
     );
     if (inboxPlan !== undefined) {
       const lastClick = [...drive.trajectory]
