@@ -288,6 +288,47 @@ async function waitForOverlayOptionsToChange(page: Page, before: string[]): Prom
   );
 }
 
+async function clickDriveCmdkItem(frame: Frame, ref: string): Promise<boolean> {
+  const label = await frame
+    .evaluate(
+      (input: { ref: string }) => {
+        type DriveCache = { nodes: Map<string, Element> };
+        const root = window as Window & { __tsDriveRegistry?: DriveCache };
+        const element = root.__tsDriveRegistry?.nodes.get(input.ref);
+        if (element === undefined || !element.isConnected) return null;
+        const inCmdk =
+          element.hasAttribute("cmdk-item") ||
+          element.closest("[cmdk-root],[cmdk-list],[cmdk-group]") !== null;
+        if (!inCmdk) return null;
+        const item = element.closest("[cmdk-item]") ?? element;
+        const text = (item.textContent ?? "").replace(/\s+/g, " ").trim();
+        return text.length === 0 ? null : text.slice(0, 80);
+      },
+      { ref },
+    )
+    .catch(() => null);
+  if (label === null || label.length === 0) return false;
+  const page = frame.page();
+  const option = page.getByRole("option", { name: label, exact: true }).first();
+  const fallback = page
+    .locator("[cmdk-item]:not([aria-disabled='true']):not([data-disabled='true'])")
+    .filter({ hasText: label })
+    .first();
+  const target = (await option.count().catch(() => 0)) > 0 ? option : fallback;
+  if ((await target.count().catch(() => 0)) === 0) return false;
+  try {
+    await target.scrollIntoViewIfNeeded().catch(() => undefined);
+    await target.click({ timeout: 5000 });
+    // cmdk onSelect also binds Enter on the highlighted item. A pointer
+    // click that only focuses still needs this to commit.
+    await page.keyboard.press("Enter");
+    await page.waitForTimeout(300);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function driveActOnPage(page: Page, action: ProvisionAction): Promise<DriveActResult> {
   if (action.kind === "scroll") {
     const direction = action.direction ?? "down";
@@ -348,6 +389,22 @@ export async function driveActOnPage(page: Page, action: ProvisionAction): Promi
   if (!guard.ok) return { kind: "stale", reason: guard.reason, ...timings };
   if (action.kind === "select")
     return { kind: "ok", combobox: false, searchSubmit: false, ...timings };
+  // Drive clicks use CDP at the guard's cached center. cmdk re-renders the
+  // list before that event lands, so onSelect never fires (Meilisearch
+  // /welcome-informations: Other clicked, trigger stayed "Select reasons...",
+  // Next stayed disabled). clickInner already routes these through
+  // locator.click(); operate_drive never calls clickInner.
+  if (action.kind === "click") {
+    const cmdkClicked = await clickDriveCmdkItem(frame, action.target);
+    if (cmdkClicked) {
+      return {
+        kind: "ok",
+        combobox: guard.combobox,
+        searchSubmit: guard.searchSubmit,
+        ...timings,
+      };
+    }
+  }
   // CDP mouse coordinates are main-viewport CSS px; the compositor routes
   // hits into OOPIFs. When the in-page walk could not reach window.top (a
   // cross-origin boundary), the guard's x/y are still relative to that

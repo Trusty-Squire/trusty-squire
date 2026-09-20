@@ -194,6 +194,9 @@ export interface SessionDriveState {
   lastFingerprint: string | null;
   jevCalls: number;
   staleNonWait: number;
+  staleClickRefs?: string[];
+  exhaustedProgressKey?: string | null;
+  exhaustedActionKeys?: string[];
   boundFingerprint: string | null;
   consumedActionKey: string | null;
   lastActProfile: DriveActProfile | null;

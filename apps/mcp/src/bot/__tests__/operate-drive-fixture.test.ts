@@ -59,6 +59,40 @@ const SIGNUP_HTML = `<!doctype html><meta charset="utf-8"><title>Signup fixture<
   </form>
 </main>`;
 
+const LINK_VERIFY_HTML = `<!doctype html><meta charset="utf-8"><title>Link verify</title>
+<main>
+  <h1>Create account</h1>
+  <form id="f">
+    <label>Email <input id="email" name="email" type="email"></label>
+    <button type="button" id="continue" onclick="
+      const email = document.querySelector('#email').value;
+      if (!email) return;
+      document.querySelector('main').innerHTML = '<p>Check your email</p><a id=home href=/ >Home</a>';
+    ">Continue</button>
+  </form>
+</main>`;
+
+const VERIFIED_HTML = `<!doctype html><meta charset="utf-8"><title>Verified</title>
+<main><p id="done">Email confirmed</p></main>`;
+
+const DISABLED_FORM_HTML = `<!doctype html><meta charset="utf-8"><title>Disabled form</title>
+<main>
+  <h1>Create account</h1>
+  <form id="f">
+    <label>Email <input id="email" name="email" type="email"></label>
+    <button type="button" id="continue" onclick="
+      const email = document.querySelector('#email');
+      const btn = document.getElementById('continue');
+      if (!email.value) return;
+      email.disabled = true;
+      btn.disabled = true;
+      setTimeout(() => {
+        document.querySelector('main').innerHTML = '<p>Check your email</p><a id=home href=/ >Home</a>';
+      }, 1800);
+    ">Continue</button>
+  </form>
+</main>`;
+
 const NOOP_HTML = `<!doctype html><meta charset="utf-8"><title>Noop fixture</title>
 <main><button id="noop">Do nothing</button><p id="status">idle</p></main>`;
 
@@ -103,6 +137,29 @@ const MULTI_STAGE_CHECKOUT_HTML = `<!doctype html><meta charset="utf-8"><title>C
     }, ${MULTI_STAGE_BLANK_MS});
   });
 </script>`;
+
+const STALLED_HTML = `<!doctype html><meta charset="utf-8"><title>Stalled form</title>
+<main>
+  <h1>Create account</h1>
+  <form id="f">
+    <label><input id="terms" type="checkbox" checked> I agree to the terms</label>
+    <button type="button" id="create" disabled>Create account</button>
+  </form>
+  <p id="status">Validating your workspace…</p>
+</main>`;
+
+// A submit that never leaves its in-flight state: every settle wait observes
+// the same disabled surface, so the settle budget is the only thing that ends
+// the wait.
+const NEVER_SETTLES_HTML = `<!doctype html><meta charset="utf-8"><title>Never settles</title>
+<main>
+  <h1>Create account</h1>
+  <form id="f"><button type="button" id="create" disabled>Creating…</button></form>
+</main>`;
+
+// A payment settling behind a blank processor screen: no rows, ever.
+const BLANK_PROCESSOR_HTML = `<!doctype html><meta charset="utf-8"><title>Processing</title>
+<main></main>`;
 
 const GROWING_HTML = `<!doctype html><meta charset="utf-8"><title>Growing</title>
 <main><a href="#keep">Keep</a><div id="sink"></div></main>
@@ -181,6 +238,10 @@ function jevFromQuestions(
     };
   }
   return { attempts: 1, elapsedMs: 12, result: { answers } };
+}
+
+function choiceCriteria(question: JevQuestion | undefined): Record<string, string> {
+  return question?.type === "choice" ? question.criteria : {};
 }
 
 function deps(ask: DriveDependencies["askJev"]): DriveDependencies {
@@ -1356,6 +1417,294 @@ describe("operate_drive real-browser fixture", () => {
     }
   }, 30_000);
 
+  it("follows a verification link after submit when no OTP field is listed", async () => {
+    const host = "link-verify.test";
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    const url = `https://${host}/`;
+    await page.route("**/*", (route) => {
+      const requested = route.request().url();
+      const body = requested.includes("/verified") ? VERIFIED_HTML : LINK_VERIFY_HTML;
+      return route.fulfill({ contentType: "text/html", body });
+    });
+    await page.goto(url);
+    const started = await startHarnessProvisionSession({
+      browser: BrowserController.fromHarnessPage(page),
+      serviceUrl: url,
+      format: "compact",
+      initialObservation: "standard",
+    });
+    try {
+      const dependencies = deps(async (_api, state, questions) => {
+        const pageUrl =
+          typeof state === "object" &&
+          state !== null &&
+          "page" in state &&
+          typeof (state as { page?: { url?: string } }).page?.url === "string"
+            ? (state as { page: { url: string } }).page.url
+            : "";
+        if (pageUrl.includes("/verified")) return jevFromQuestions(questions, true);
+        const typeKeys = Object.keys(choiceCriteria(questions.TYPE_TEXT_target));
+        if (typeKeys.length > 0) return jevFromQuestions(questions);
+        const clickCriteria = choiceCriteria(questions.CLICK_target);
+        const continueKey = Object.keys(clickCriteria).find((key) =>
+          (clickCriteria[key] ?? "").toLowerCase().includes("continue"),
+        );
+        const opKeys = Object.keys(choiceCriteria(questions.operation));
+        if (continueKey !== undefined) {
+          return {
+            attempts: 1,
+            elapsedMs: 12,
+            result: {
+              answers: {
+                operation: {
+                  choice: "CLICK",
+                  confidence: 0.93,
+                  probabilities: peaked(opKeys, "CLICK"),
+                },
+                CLICK_target: {
+                  choice: continueKey,
+                  confidence: 0.93,
+                  probabilities: peaked(Object.keys(clickCriteria), continueKey),
+                },
+              },
+            },
+          };
+        }
+        return {
+          attempts: 1,
+          elapsedMs: 12,
+          result: {
+            answers: {
+              operation: {
+                choice: "BLOCKED",
+                confidence: 0.7,
+                probabilities: peaked(opKeys, "BLOCKED", 0.7),
+              },
+            },
+          },
+        };
+      });
+      dependencies.awaitVerification = async (sessionId) => ({
+        session_id: sessionId,
+        found: true,
+        code: null,
+        link: `https://${host}/verified`,
+      });
+      const handoff = await runOperateDrive(
+        {
+          session_id: started.session_id,
+          goal: "create an account and confirm the email",
+          facts: { email: "ada@fixture.test" },
+        },
+        api(),
+        undefined,
+        dependencies,
+      );
+      expect(handoff.trajectory.some((step) => step.action === "goto_verify")).toBe(true);
+      expect(handoff.status).toBe("complete");
+      expect(await page.locator("#done").textContent()).toContain("Email confirmed");
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 60_000);
+
+  it("polls an empty inbox then follows the verification link", async () => {
+    const host = "inbox-poll.test";
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    const url = `https://${host}/`;
+    await page.route("**/*", (route) => {
+      const requested = route.request().url();
+      const body = requested.includes("/verified") ? VERIFIED_HTML : LINK_VERIFY_HTML;
+      return route.fulfill({ contentType: "text/html", body });
+    });
+    await page.goto(url);
+    const started = await startHarnessProvisionSession({
+      browser: BrowserController.fromHarnessPage(page),
+      serviceUrl: url,
+      format: "compact",
+      initialObservation: "standard",
+    });
+    try {
+      const dependencies = deps(async (_api, state, questions) => {
+        const pageUrl =
+          typeof state === "object" &&
+          state !== null &&
+          "page" in state &&
+          typeof (state as { page?: { url?: string } }).page?.url === "string"
+            ? (state as { page: { url: string } }).page.url
+            : "";
+        if (pageUrl.includes("/verified")) return jevFromQuestions(questions, true);
+        const typeKeys = Object.keys(choiceCriteria(questions.TYPE_TEXT_target));
+        if (typeKeys.length > 0) return jevFromQuestions(questions);
+        const clickCriteria = choiceCriteria(questions.CLICK_target);
+        const continueKey = Object.keys(clickCriteria).find((key) =>
+          (clickCriteria[key] ?? "").toLowerCase().includes("continue"),
+        );
+        const opKeys = Object.keys(choiceCriteria(questions.operation));
+        if (continueKey !== undefined) {
+          return {
+            attempts: 1,
+            elapsedMs: 12,
+            result: {
+              answers: {
+                operation: {
+                  choice: "CLICK",
+                  confidence: 0.93,
+                  probabilities: peaked(opKeys, "CLICK"),
+                },
+                CLICK_target: {
+                  choice: continueKey,
+                  confidence: 0.93,
+                  probabilities: peaked(Object.keys(clickCriteria), continueKey),
+                },
+              },
+            },
+          };
+        }
+        return {
+          attempts: 1,
+          elapsedMs: 12,
+          result: {
+            answers: {
+              operation: {
+                choice: "BLOCKED",
+                confidence: 0.7,
+                probabilities: peaked(opKeys, "BLOCKED", 0.7),
+              },
+            },
+          },
+        };
+      });
+      let inboxReads = 0;
+      dependencies.awaitVerification = async (sessionId) => {
+        inboxReads += 1;
+        if (inboxReads < 2) {
+          return { session_id: sessionId, found: false, code: null, link: null };
+        }
+        return {
+          session_id: sessionId,
+          found: true,
+          code: null,
+          link: `https://${host}/verified`,
+        };
+      };
+      const handoff = await runOperateDrive(
+        {
+          session_id: started.session_id,
+          goal: "create an account and confirm the email",
+          facts: { email: "ada@fixture.test" },
+        },
+        api(),
+        undefined,
+        dependencies,
+      );
+      expect(inboxReads).toBeGreaterThanOrEqual(2);
+      expect(handoff.status).not.toBe("needs_value");
+      expect(handoff.trajectory.some((step) => step.action === "goto_verify")).toBe(true);
+      expect(handoff.status).toBe("complete");
+      expect(await page.locator("#done").textContent()).toContain("Email confirmed");
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 60_000);
+
+  it("waits on a disabled post-submit form, then follows the verification link", async () => {
+    const host = "disabled-form.test";
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    const url = `https://${host}/`;
+    await page.route("**/*", (route) => {
+      const requested = route.request().url();
+      const body = requested.includes("/verified") ? VERIFIED_HTML : DISABLED_FORM_HTML;
+      return route.fulfill({ contentType: "text/html", body });
+    });
+    await page.goto(url);
+    const started = await startHarnessProvisionSession({
+      browser: BrowserController.fromHarnessPage(page),
+      serviceUrl: url,
+      format: "compact",
+      initialObservation: "standard",
+    });
+    try {
+      const dependencies = deps(async (_api, state, questions) => {
+        const pageUrl =
+          typeof state === "object" &&
+          state !== null &&
+          "page" in state &&
+          typeof (state as { page?: { url?: string } }).page?.url === "string"
+            ? (state as { page: { url: string } }).page.url
+            : "";
+        if (pageUrl.includes("/verified")) return jevFromQuestions(questions, true);
+        const typeKeys = Object.keys(choiceCriteria(questions.TYPE_TEXT_target));
+        if (typeKeys.length > 0) return jevFromQuestions(questions);
+        const clickCriteria = choiceCriteria(questions.CLICK_target);
+        const continueKey = Object.keys(clickCriteria).find((key) =>
+          (clickCriteria[key] ?? "").toLowerCase().includes("continue"),
+        );
+        const opKeys = Object.keys(choiceCriteria(questions.operation));
+        if (continueKey !== undefined) {
+          return {
+            attempts: 1,
+            elapsedMs: 12,
+            result: {
+              answers: {
+                operation: {
+                  choice: "CLICK",
+                  confidence: 0.93,
+                  probabilities: peaked(opKeys, "CLICK"),
+                },
+                CLICK_target: {
+                  choice: continueKey,
+                  confidence: 0.93,
+                  probabilities: peaked(Object.keys(clickCriteria), continueKey),
+                },
+              },
+            },
+          };
+        }
+        return {
+          attempts: 1,
+          elapsedMs: 12,
+          result: {
+            answers: {
+              operation: {
+                choice: "BLOCKED",
+                confidence: 0.7,
+                probabilities: peaked(opKeys, "BLOCKED", 0.7),
+              },
+            },
+          },
+        };
+      });
+      dependencies.awaitVerification = async (sessionId) => ({
+        session_id: sessionId,
+        found: true,
+        code: null,
+        link: `https://${host}/verified`,
+      });
+      const handoff = await runOperateDrive(
+        {
+          session_id: started.session_id,
+          goal: "create an account and confirm the email",
+          facts: { email: "ada@fixture.test" },
+        },
+        api(),
+        undefined,
+        dependencies,
+      );
+      expect(handoff.trajectory.some((step) => step.action === "wait")).toBe(true);
+      expect(handoff.trajectory.some((step) => step.action === "goto_verify")).toBe(true);
+      expect(handoff.status).toBe("complete");
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 60_000);
+
   it("returns needs_value naming a field with no matching fact, then resume completes", async () => {
     const { context, page, started } = await openFixture(SIGNUP_HTML, "signup-missing.test");
     try {
@@ -1412,6 +1761,135 @@ describe("operate_drive real-browser fixture", () => {
       );
       expect(handoff.status).toBe("no_progress");
       expect(handoff.trajectory.length).toBeGreaterThanOrEqual(1);
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 60_000);
+
+  it("never reports complete on a stalled form the planner cannot act on", async () => {
+    const { context, page, started } = await openFixture(STALLED_HTML, "signup-stalled.test");
+    try {
+      const offered: string[][] = [];
+      const handoff = await runOperateDrive(
+        {
+          session_id: started.session_id,
+          goal: "create an account",
+          max_steps: 4,
+        },
+        api(),
+        undefined,
+        deps(async (_api, _state, questions) => {
+          const operations = Object.keys(choiceCriteria(questions.operation));
+          offered.push(operations);
+          // A planner that would rather wait out the server than claim success.
+          const pick = operations.includes("WAIT") ? "WAIT" : operations[0]!;
+          return {
+            attempts: 1,
+            elapsedMs: 12,
+            result: {
+              answers: {
+                operation: {
+                  choice: pick,
+                  confidence: 0.93,
+                  probabilities: peaked(operations, pick),
+                },
+              },
+            },
+          };
+        }),
+      );
+      expect(offered.length).toBeGreaterThanOrEqual(1);
+      for (const operations of offered) expect(operations).not.toEqual(["DONE"]);
+      expect(handoff.status).not.toBe("complete");
+      expect(await page.locator("#create").isDisabled()).toBe(true);
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 60_000);
+
+  it("bounds the settle wait on a form that never settles", async () => {
+    const { context, started } = await openFixture(NEVER_SETTLES_HTML, "signup-never-settles.test");
+    try {
+      const offered: string[][] = [];
+      const handoff = await runOperateDrive(
+        {
+          session_id: started.session_id,
+          goal: "create an account",
+          max_steps: 8,
+        },
+        api(),
+        undefined,
+        deps(async (_api, _state, questions) => {
+          const operations = Object.keys(choiceCriteria(questions.operation));
+          offered.push(operations);
+          const pick = operations.includes("BLOCKED") ? "BLOCKED" : operations[0]!;
+          return {
+            attempts: 1,
+            elapsedMs: 12,
+            result: {
+              answers: {
+                operation: {
+                  choice: pick,
+                  confidence: 0.93,
+                  probabilities: peaked(operations, pick),
+                },
+              },
+            },
+          };
+        }),
+      );
+      const waits = handoff.trajectory.filter((step) => step.action === "wait");
+      expect(waits.length).toBeLessThanOrEqual(DRIVE_EMPTY_SNAPSHOT_WAITS);
+      expect(handoff.status).not.toBe("budget");
+      expect(handoff.status).not.toBe("complete");
+      expect(offered).toEqual([["DONE", "BLOCKED"]]);
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 60_000);
+
+  it("keeps offering WAIT on a blank page past the automatic empty-snapshot waits", async () => {
+    const { context, started } = await openFixture(
+      BLANK_PROCESSOR_HTML,
+      "blank-processor.test",
+      "standard",
+      "/checkouts/cn9",
+    );
+    try {
+      const offered: string[][] = [];
+      const handoff = await runOperateDrive(
+        {
+          session_id: started.session_id,
+          goal: "complete the purchase",
+          max_steps: 5,
+        },
+        api(),
+        undefined,
+        deps(async (_api, _state, questions) => {
+          const operations = Object.keys(choiceCriteria(questions.operation));
+          offered.push(operations);
+          const pick = operations.includes("WAIT") ? "WAIT" : operations[0]!;
+          return {
+            attempts: 1,
+            elapsedMs: 12,
+            result: {
+              answers: {
+                operation: {
+                  choice: pick,
+                  confidence: 0.93,
+                  probabilities: peaked(operations, pick),
+                },
+              },
+            },
+          };
+        }),
+      );
+      expect(offered.length).toBeGreaterThanOrEqual(1);
+      for (const operations of offered) expect(operations).toContain("WAIT");
+      expect(handoff.status).not.toBe("complete");
     } finally {
       await finishProvisionSession(started.session_id);
       await context.close();

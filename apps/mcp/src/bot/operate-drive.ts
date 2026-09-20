@@ -106,7 +106,9 @@ export const DRIVE_MAX_CANDIDATES = 250;
 export const DRIVE_MAX_CRITERIA = 128;
 export const DRIVE_WAIT_MS = 1500;
 export const DRIVE_EMPTY_SNAPSHOT_WAITS = 3;
+export const DRIVE_INBOX_POLL_MS = 45_000;
 export const DRIVE_STALE_LIMIT = 3;
+export const DRIVE_EXHAUSTED_ACTION_LIMIT = 5;
 export const DRIVE_IDENTICAL_RESNAP_MS = 200;
 export const DRIVE_FIXED_DONE = "DONE";
 export const DRIVE_FIXED_STUCK = "BLOCKED";
@@ -125,6 +127,7 @@ export const DRIVE_OPERATIONS = [
   "BLOCKED",
 ] as const;
 export type DriveOperation = (typeof DRIVE_OPERATIONS)[number];
+export const DRIVE_TERMINAL_OPERATIONS: readonly DriveOperation[] = ["DONE", "BLOCKED"];
 const REVERSIBLE_OPERATIONS = new Set<DriveOperation>([
   "CLICK",
   "TYPE_TEXT",
@@ -302,6 +305,9 @@ export function emptyDriveState(goal: string, facts: Record<string, string>): Se
     lastFingerprint: null,
     jevCalls: 0,
     staleNonWait: 0,
+    staleClickRefs: [],
+    exhaustedProgressKey: null,
+    exhaustedActionKeys: [],
     boundFingerprint: null,
     consumedActionKey: null,
     lastActProfile: null,
@@ -567,11 +573,67 @@ export function isClickableRow(row: WireRow): boolean {
   return CLICKABLE_ROLES.has(row[1]) || isPickerRow(row);
 }
 
-export function isSubmitLikeRow(row: WireRow): boolean {
+export function isConsentRow(row: WireRow): boolean {
   const label = readableLabel(row).toLowerCase();
-  return /submit|continue|create|sign[- ]?up|register|\bnext\b|pay[- ]?now|place[- ]?order/.test(
+  return /accept all|reject all|decline(?:\b|$)|necessary only|manage cookies|cookie settings/.test(
     label,
   );
+}
+
+export function pageProgressKey(
+  url: string,
+  rows: readonly WireRow[],
+  filledRefs: readonly string[] = [],
+): string {
+  const kept = rows.filter(
+    (row) => isConsentRow(row) || isFillableRow(row) || isSubmitLikeRow(row) || isChoiceRow(row),
+  );
+  const stable = kept.map((row) => `${row[0]}\t${row[1]}\t${row[2] ?? ""}`).sort();
+  return `${url}\n${stable.join("\n")}\nfilled:${[...filledRefs].sort().join(",")}`;
+}
+
+export function recordDeadAction(
+  drive: Pick<SessionDriveState, "exhaustedProgressKey" | "exhaustedActionKeys">,
+  progressKey: string,
+  actionKey: string,
+): "continue" | "stop" {
+  if (drive.exhaustedProgressKey !== progressKey) {
+    drive.exhaustedProgressKey = progressKey;
+    drive.exhaustedActionKeys = [];
+  }
+  drive.exhaustedActionKeys ??= [];
+  if (!drive.exhaustedActionKeys.includes(actionKey)) {
+    drive.exhaustedActionKeys.push(actionKey);
+  }
+  return drive.exhaustedActionKeys.length >= DRIVE_EXHAUSTED_ACTION_LIMIT ? "stop" : "continue";
+}
+
+export function deadActionReason(actionKeys: readonly string[], url: string): string {
+  return `no change after ${actionKeys.join(", ")} on ${url}`;
+}
+
+export function isSubmitLikeRow(row: WireRow): boolean {
+  const label = readableLabel(row).toLowerCase();
+  // Carousel chrome ("Next slide") is not a form submit. Treating it as one
+  // made Fireworks listedWork stay true after the passwords, so settle never
+  // waited on the still-disabled Create Account.
+  if (/\b(?:next|previous|prev)\s+slide\b/.test(label)) return false;
+  return /submit|continue|creat(?:e|ing)|loading|sign[- ]?up|register|\bnext\b|pay[- ]?now|place[- ]?order|get[- ]?started/.test(
+    label,
+  );
+}
+
+/** Fill, select, an enabled non-OAuth submit, or an enabled choice is still listed — WAIT and BLOCKED are not honest. */
+export function pageHasListedWork(
+  rows: readonly WireRow[],
+  typeTextCount: number,
+  selectCount: number,
+): boolean {
+  if (typeTextCount > 0 || selectCount > 0) return true;
+  return rows.some((row) => {
+    if (isDisabledRow(row) || isOauthChromeRow(row) || isOffscreenRow(row)) return false;
+    return isSubmitLikeRow(row) || isChoiceRow(row);
+  });
 }
 
 export function isCheckoutUrl(url: string): boolean {
@@ -738,6 +800,42 @@ export function isGoogleAuthRow(row: WireRow): boolean {
     /google/.test(label) &&
     (row[1] === "b" || row[1] === "l" || row[1] === "button" || row[1] === "link")
   );
+}
+
+export function isOauthChromeRow(row: WireRow): boolean {
+  if (isGoogleAuthRow(row)) return true;
+  const label = readableLabel(row).toLowerCase();
+  return /github|sso|\boauth\b/.test(label);
+}
+
+export function isChoiceRow(row: WireRow): boolean {
+  const role = row[1];
+  return role === "c" || role === "checkbox" || role === "combobox" || isPickerRow(row);
+}
+
+export function formSurfaceRows(rows: readonly WireRow[]): WireRow[] {
+  return rows.filter((row) => {
+    if (isOauthChromeRow(row) || isOffscreenRow(row)) return false;
+    return isFillableRow(row) || isSubmitLikeRow(row) || isChoiceRow(row);
+  });
+}
+
+/** Empty page, or a form whose only remaining surface is disabled — mid-transition, not blocked. */
+export function snapshotNeedsSettle(
+  rows: readonly WireRow[],
+  remainingFillCount: number = -1,
+): boolean {
+  if (rows.length === 0) return true;
+  const surface = formSurfaceRows(rows);
+  if (surface.length === 0) return false;
+  if (surface.every((row) => isDisabledRow(row))) return true;
+  // Submit in flight (AbstractAPI “Creating…”, OpenRouter “Loading Continue”):
+  // no fills left, no live choice, every submit disabled — wait for the hop.
+  if (remainingFillCount === 0 && !surface.some((row) => isChoiceRow(row) && !isDisabledRow(row))) {
+    const submits = surface.filter((row) => isSubmitLikeRow(row));
+    if (submits.length > 0 && submits.every((row) => isDisabledRow(row))) return true;
+  }
+  return false;
 }
 
 export function isOtpRow(row: WireRow): boolean {
@@ -1191,9 +1289,44 @@ export function driveCandidates(
 export function clickableCandidates(
   rows: readonly WireRow[],
   includePayment: boolean,
+  skippedRefs: readonly string[] = [],
 ): DriveCandidate[] {
+  const skipped = new Set(skippedRefs);
+  const formBusy = formSurfaceRows(rows).some((row) => !isDisabledRow(row));
   return driveCandidates(rows, includePayment)
-    .filter((candidate) => isClickableRow(candidate.row))
+    .filter((candidate) => {
+      if (skipped.has(candidate.ref)) return false;
+      if (!isClickableRow(candidate.row)) return false;
+      if (
+        formBusy &&
+        isSearchRow(candidate.row) &&
+        !isChoiceRow(candidate.row) &&
+        !isSubmitLikeRow(candidate.row) &&
+        rowListChoice(candidate.row) === undefined
+      ) {
+        return false;
+      }
+      if (
+        isPickerRow(candidate.row) &&
+        rows.some((row) => row[0] !== candidate.row[0] && rowListChoice(row) !== undefined)
+      ) {
+        return false;
+      }
+      if (
+        isDisabledRow(candidate.row) &&
+        isSubmitLikeRow(candidate.row) &&
+        formSurfaceRows(rows).some((row) => isChoiceRow(row) && !isDisabledRow(row))
+      ) {
+        return false;
+      }
+      if (
+        (candidate.row[1] === "c" || candidate.row[1] === "checkbox") &&
+        rowChecked(candidate.row) === true
+      ) {
+        return false;
+      }
+      return true;
+    })
     .map((candidate) => ({
       ...candidate,
       description: actionDescription(candidate.row, rows, "CLICK"),
@@ -1704,29 +1837,46 @@ export function driveTargetSets(
   pageUrl: string = "",
   pageOptions: ReadonlyMap<string, readonly string[]> = new Map(),
   maskText: (text: string) => string = (text) => text,
+  skippedClickRefs: readonly string[] = [],
 ): DriveTargetSets {
   const remaining = { n: DRIVE_MAX_CANDIDATES };
+  const skipped = new Set(skippedClickRefs);
   const typeText = takeCapped(
-    typeableCandidates(rows, facts, includePayment, filledRefs, pageUrl),
+    typeableCandidates(rows, facts, includePayment, filledRefs, pageUrl).filter(
+      (candidate) => !skipped.has(candidate.ref),
+    ),
     remaining,
   );
   const select = takeCapped(
     selectTargets(
-      selectCandidates(rows, facts, includePayment, filledRefs, pageUrl),
+      selectCandidates(rows, facts, includePayment, filledRefs, pageUrl).filter(
+        (candidate) => !skipped.has(candidate.ref),
+      ),
       facts,
       pageOptions,
       maskText,
     ),
     remaining,
   );
-  const click = takeCapped(clickableCandidates(rows, includePayment), remaining);
+  const click = takeCapped(clickableCandidates(rows, includePayment, skippedClickRefs), remaining);
   const scroll = takeCapped(scrollTargets(rows), remaining);
   const operations: DriveOperation[] = [];
   if (click.length > 0) operations.push("CLICK");
   if (typeText.length > 0) operations.push("TYPE_TEXT");
   if (select.length > 0) operations.push("SELECT");
   if (scroll.length > 0) operations.push("SCROLL");
-  operations.push("WAIT", "DONE", "BLOCKED");
+  // Listed work only counts while some of it is actually offered: when every
+  // candidate is suppressed, withholding WAIT and BLOCKED too would leave DONE
+  // as the only admissible answer and force a false "complete".
+  const listedWork =
+    operations.length > 0 && pageHasListedWork(rows, typeText.length, select.length);
+  // WAIT is withheld only where the repeat-cap recorded it as dead — a
+  // model-chosen wait that left a page with rows unchanged. An empty snapshot
+  // never records one, so a payment settling behind a blank processor screen
+  // keeps its wait for as long as the budgets allow.
+  if (!listedWork && !skipped.has("WAIT")) operations.push("WAIT");
+  operations.push("DONE");
+  if (!listedWork) operations.push("BLOCKED");
   return { operations, TYPE_TEXT: typeText, SELECT: select, CLICK: click, SCROLL: scroll };
 }
 
@@ -1945,6 +2095,75 @@ export function fillActionForCandidate(
 export function lastActionWasClick(trajectory: readonly DriveTrajectoryStep[]): boolean {
   const last = trajectory[trajectory.length - 1];
   return last !== undefined && (last.action === "click" || last.action === "oauth_login");
+}
+
+export function lastNonWaitWasClick(trajectory: readonly DriveTrajectoryStep[]): boolean {
+  for (let i = trajectory.length - 1; i >= 0; i -= 1) {
+    const step = trajectory[i];
+    if (step === undefined || step.action === "wait") continue;
+    return step.action === "click" || step.action === "oauth_login";
+  }
+  return false;
+}
+
+export type InboxSpecialPlan = { kind: "otp"; target: string } | { kind: "link" };
+
+/** After a submit click, read the inbox on wait/stuck even when no OTP field is listed. */
+export function pageSuggestsInboxWait(
+  rows: readonly WireRow[],
+  pageUrl: string = "",
+  pageText: string = "",
+): boolean {
+  if (rows.some((row) => isOtpRow(row) && isFillableRow(row))) return true;
+  const hay = `${pageUrl} ${rows.map((row) => row[2]).join(" ")} ${pageText}`.toLowerCase();
+  return /(?:check|confirm|verify) your e-?mail|verification (?:link|e-?mail|code)|we(?:'| ha)ve sent|sent you an? e-?mail|open gmail|\/(?:e-?mail\/)?verify(?:\/|\s|$)|#search\//.test(
+    hay,
+  );
+}
+
+export function inboxSpecialPlan(
+  rows: readonly WireRow[],
+  decisionKind: DriveDecision["kind"],
+  clicked: boolean,
+  remainingFillCount: number,
+  pageUrl: string = "",
+  pageText: string = "",
+): InboxSpecialPlan | undefined {
+  if (!clicked || remainingFillCount > 0) return undefined;
+  if (decisionKind !== "stuck" && decisionKind !== "wait") return undefined;
+  if (formSurfaceRows(rows).some((row) => isChoiceRow(row) && !isDisabledRow(row))) {
+    return undefined;
+  }
+  const otp = rows.find((row) => isOtpRow(row) && isFillableRow(row));
+  if (otp !== undefined) return { kind: "otp", target: otp[0] };
+  // Still looking at the signup form (Meilisearch /register after Register):
+  // wait for the SPA to leave. Inbox belongs on a check-email page, not here.
+  if (
+    rows.some(
+      (row) =>
+        isFillableRow(row) &&
+        !isDisabledRow(row) &&
+        !isOtpRow(row) &&
+        !isOauthChromeRow(row) &&
+        !isOffscreenRow(row),
+    )
+  ) {
+    return undefined;
+  }
+  // Logged-in chrome after a successful submit (Meilisearch /teams) is not
+  // a mailbox wait. Require check-email wording or a verify URL.
+  if (!pageSuggestsInboxWait(rows, pageUrl, pageText)) return undefined;
+  return { kind: "link" };
+}
+
+export function inboxVerificationDecision(
+  verification: { found: boolean; code: string | null; link: string | null },
+  planKind: InboxSpecialPlan["kind"],
+): "type_code" | "goto_link" | "retry" | "needs_code" {
+  if (planKind === "otp" && verification.found && verification.code !== null) return "type_code";
+  if (verification.found && verification.link !== null) return "goto_link";
+  if (verification.found && verification.code !== null) return "needs_code";
+  return "retry";
 }
 
 export function senderHost(url: string): string | undefined {
@@ -2912,6 +3131,9 @@ export async function runOperateDrive(
   if (!Array.isArray(drive.expiryShortWrittenRefs)) drive.expiryShortWrittenRefs = [];
   if (!Array.isArray(drive.expiryLongAttemptedRefs)) drive.expiryLongAttemptedRefs = [];
   if (typeof drive.staleNonWait !== "number") drive.staleNonWait = 0;
+  if (!Array.isArray(drive.staleClickRefs)) drive.staleClickRefs = [];
+  if (drive.exhaustedProgressKey === undefined) drive.exhaustedProgressKey = null;
+  if (!Array.isArray(drive.exhaustedActionKeys)) drive.exhaustedActionKeys = [];
   if (drive.boundFingerprint === undefined) drive.boundFingerprint = null;
   if (drive.consumedActionKey === undefined) drive.consumedActionKey = null;
   drive.running = true;
@@ -3000,6 +3222,7 @@ async function driveLoop(input: {
   const expiryRewriteAttempts = new Set<string>();
   let typeMustYield = false;
   let emptySnapshotWaits = 0;
+  let settleWaits = 0;
 
   const finish = (
     status: DriveStatus,
@@ -3056,6 +3279,7 @@ async function driveLoop(input: {
     fingerprint: string,
     nextFingerprint: string,
     actionKey: string,
+    deadKeyBaseline?: string,
   ): Promise<DriveHandoff | "continue"> => {
     let confirmed = nextFingerprint;
     if (confirmed === fingerprint) {
@@ -3067,13 +3291,36 @@ async function driveLoop(input: {
     drive.staleNonWait = confirmed === fingerprint ? drive.staleNonWait + 1 : 0;
     drive.lastFingerprint = confirmed;
     drive.lastActionKey = actionKey;
+    if (
+      deadKeyBaseline !== undefined &&
+      confirmed === fingerprint &&
+      pageProgressKey(observation.url, rows, drive.filledRefs) === deadKeyBaseline
+    ) {
+      const dead = markDead(actionKey);
+      if (dead !== "continue") return dead;
+    }
     if (drive.staleNonWait >= DRIVE_STALE_LIMIT) return finish("no_progress");
     return "continue";
   };
+  const markDead = (actionKey: string): DriveHandoff | "continue" => {
+    const key = pageProgressKey(observation.url, rows, drive.filledRefs);
+    if (recordDeadAction(drive, key, actionKey) === "stop") {
+      return finish("no_progress", {
+        reason: deadActionReason(drive.exhaustedActionKeys ?? [], observation.url),
+      });
+    }
+    return "continue";
+  };
 
+  // The repeat-cap is a model-facing budget: it withholds an operation the
+  // model already tried. The loop's own probes (combobox pre-fill, settle
+  // wait, inbox read) have their own guards, so recording them here both
+  // collapsed the settle budget to one wait and withdrew a probe the model
+  // had never been offered.
   const applyDecision = async (
     decision: DriveDecision,
     jevMs?: number,
+    modelChosen = false,
   ): Promise<DriveHandoff | "continue"> => {
     if (decision.kind === "complete") {
       const completeSnap = await snapshotOrTimeout(framesIfNeeded());
@@ -3092,6 +3339,7 @@ async function driveLoop(input: {
       return finish("complete");
     }
     if (decision.kind === "wait") {
+      const beforeKey = pageProgressKey(observation.url, rows, drive.filledRefs);
       await new Promise<void>((resolve, reject) => {
         const timer = setTimeout(resolve, DRIVE_WAIT_MS);
         const signal = context?.signal;
@@ -3130,6 +3378,14 @@ async function driveLoop(input: {
       );
       drive.lastActionKey = "WAIT";
       drive.consumedActionKey = null;
+      if (
+        modelChosen &&
+        rows.length > 0 &&
+        pageProgressKey(observation.url, rows, drive.filledRefs) === beforeKey
+      ) {
+        const dead = markDead("WAIT");
+        if (dead !== "continue") return dead;
+      }
       return "continue";
     }
     if (decision.kind === "stuck") {
@@ -3287,10 +3543,38 @@ async function driveLoop(input: {
 
     if (decision.special === "inbox") {
       const sender = senderHost(observation?.url ?? "");
-      const verification = await dependencies.awaitVerification(sessionId, {
+      const planKind = decision.action.kind === "type" ? "otp" : "link";
+      const clock = dependencies.now ?? Date.now;
+      const deadline = clock() + DRIVE_INBOX_POLL_MS;
+      let verification = await dependencies.awaitVerification(sessionId, {
         ...(sender === undefined ? {} : { sender }),
       });
-      if (verification.found && verification.code !== null && decision.action.kind === "type") {
+      let inboxNext = inboxVerificationDecision(verification, planKind);
+      while (inboxNext === "retry") {
+        if (clock() >= deadline || remainingMs() < DRIVE_WAIT_MS) {
+          return planKind === "otp"
+            ? finish("needs_value", { field: "verification_code" })
+            : finish("stuck", {
+                question: {
+                  question: nextActionInstructions(drive.goal),
+                  options: actionCriteria(rows, drive.facts.card_ref !== undefined),
+                },
+              });
+        }
+        await sleepDrive(DRIVE_WAIT_MS, context?.signal);
+        verification = await dependencies.awaitVerification(sessionId, {
+          ...(sender === undefined ? {} : { sender }),
+        });
+        inboxNext = inboxVerificationDecision(verification, planKind);
+      }
+      if (inboxNext === "needs_code") {
+        return finish("needs_value", { field: "verification_code" });
+      }
+      if (
+        inboxNext === "type_code" &&
+        verification.code !== null &&
+        decision.action.kind === "type"
+      ) {
         const typed: ProvisionAction = {
           kind: "type",
           target: decision.action.target,
@@ -3303,7 +3587,7 @@ async function driveLoop(input: {
           const page = session.browser.page;
           if (page !== null) await settleDriveStep(page, acted.combobox);
         }
-      } else if (verification.found && verification.link !== null) {
+      } else if (inboxNext === "goto_link" && verification.link !== null) {
         observation = await actSafely(dependencies, sessionId, {
           kind: "goto",
           url: verification.link,
@@ -3365,14 +3649,23 @@ async function driveLoop(input: {
     const beforePageFingerprint =
       session.browser.page === null ? "" : await pageFingerprintOf(session.browser.page);
     const actStarted = Date.now();
+    const beforeKey = pageProgressKey(observation.url, rows, drive.filledRefs);
     const acted = await actDriveSafely(session, sessionId, decision.action, dependencies);
     if (acted.kind === "stale") {
       comboboxMustYield = true;
       selectMustYield = true;
       typeMustYield = true;
       drive.consumedActionKey = null;
+      drive.staleClickRefs ??= [];
+      if (!drive.staleClickRefs.includes(decision.actionKey)) {
+        drive.staleClickRefs.push(decision.actionKey);
+      }
       const staleSnap = await snapshotOrTimeout(framesIfNeeded());
       if (staleSnap !== "ok") return staleSnap;
+      if (modelChosen) {
+        const dead = markDead(decision.actionKey);
+        if (dead !== "continue") return dead;
+      }
       return "continue";
     }
     let actMs = Date.now() - actStarted;
@@ -3460,7 +3753,12 @@ async function driveLoop(input: {
       fingerprint_after: nextFingerprint,
       ...(driveTraceEnabled() ? { native_selects_after: await nativeSelectSnapshot(session) } : {}),
     });
-    return await noteProgress(fingerprint, nextFingerprint, decision.actionKey);
+    return await noteProgress(
+      fingerprint,
+      nextFingerprint,
+      decision.actionKey,
+      modelChosen ? beforeKey : undefined,
+    );
   };
 
   if (args.answer !== undefined) {
@@ -3660,19 +3958,55 @@ async function driveLoop(input: {
       });
     }
 
+    const remainingFills = fillableCandidates(
+      rows,
+      drive.facts,
+      includePayment,
+      drive.filledRefs,
+      pageUrl,
+    );
+    let terminalOnly = false;
     // A same-document stage swap (Shopify one-page checkout) and a hydrating
     // checkout both leave the snapshot empty for a while, so spend the
     // re-observation budget before asking anything. Past it the ordinary
     // question already offers exactly WAIT/DONE/BLOCKED and no target, because
     // zero rows yield no action candidates — its WAIT keeps a payment settling
     // behind a blank processor screen for as long as the step and time budgets
-    // allow.
+    // allow. The signup repeat-cap must not exhaust that WAIT: an empty
+    // processor screen is not a no-op loop.
     if (rows.length === 0 && emptySnapshotWaits < DRIVE_EMPTY_SNAPSHOT_WAITS) {
       emptySnapshotWaits += 1;
       const applied = await applyDecision({ kind: "wait", confidence: 1 });
       if (applied !== "continue") return applied;
       steps += 1;
       continue;
+    }
+    // Per page, and read before the settle branch below: dead actions recorded
+    // on the page the model just left must not rule on the page it is on now.
+    const progressKey = pageProgressKey(pageUrl, rows, drive.filledRefs);
+    if (drive.exhaustedProgressKey !== progressKey) {
+      drive.exhaustedProgressKey = progressKey;
+      drive.exhaustedActionKeys = [];
+      settleWaits = 0;
+    }
+    // In-flight disabled submit while the form is still listed: settle, then
+    // a terminal-only question. Empty snapshots already took the path above.
+    // The settle budget is its own counter: emptySnapshotWaits is cleared on
+    // every non-empty snapshot, which is exactly when this branch runs, so
+    // sharing it left the bound permanently unreached and the loop waited out
+    // its whole budget on a form that never settles.
+    if (rows.length > 0 && snapshotNeedsSettle(rows, remainingFills.length)) {
+      if (
+        settleWaits < DRIVE_EMPTY_SNAPSHOT_WAITS &&
+        !(drive.exhaustedActionKeys ?? []).includes("WAIT")
+      ) {
+        settleWaits += 1;
+        const applied = await applyDecision({ kind: "wait", confidence: 1 });
+        if (applied !== "continue") return applied;
+        steps += 1;
+        continue;
+      }
+      terminalOnly = true;
     }
 
     const fields = paymentFields(rows);
@@ -3684,13 +4018,6 @@ async function driveLoop(input: {
     const alreadyCard = session.releasedPaymentCard !== null;
     const cardRetry = alreadyCard && drive.cardFillPending === true;
     const onCheckout = isCheckoutUrl(observation.url);
-    const remainingFills = fillableCandidates(
-      rows,
-      drive.facts,
-      includePayment,
-      drive.filledRefs,
-      pageUrl,
-    );
     // inject_card writes only pan/cvv. Expiry, cardholder name, and billing
     // are typed after release. The gate waits on every fill a fact backs,
     // dropdowns included: any address edit after the card is in makes the
@@ -3733,6 +4060,19 @@ async function driveLoop(input: {
     if (drive.jevCalls >= DRIVE_MAX_JEV_CALLS) return finish("budget");
 
     const prepareStarted = Date.now();
+    const fingerprint = progressFingerprint(
+      observation.url,
+      rows,
+      drive,
+      session,
+      observation.dom ?? "",
+    );
+    if (drive.lastFingerprint !== null && drive.lastFingerprint !== fingerprint) {
+      drive.staleClickRefs = [];
+    }
+    const skippedActions = [
+      ...new Set([...(drive.exhaustedActionKeys ?? []), ...(drive.staleClickRefs ?? [])]),
+    ];
     const sets = driveTargetSets(
       rows,
       drive.facts,
@@ -3741,7 +4081,16 @@ async function driveLoop(input: {
       pageUrl,
       pageOptions,
       (text) => maskDriveOutput(session, text),
+      skippedActions,
     );
+    const actionable = sets.operations.filter(
+      (op) => op !== "DONE" && op !== "BLOCKED" && op !== "WAIT",
+    );
+    if (!terminalOnly && (drive.exhaustedActionKeys ?? []).length > 0 && actionable.length === 0) {
+      return finish("no_progress", {
+        reason: deadActionReason(drive.exhaustedActionKeys ?? [], observation.url),
+      });
+    }
     const questions = buildDriveQuestions(
       rows,
       drive.facts,
@@ -3752,6 +4101,18 @@ async function driveLoop(input: {
       pageOptions,
       sets,
     );
+    if (terminalOnly) {
+      questions.operation = {
+        type: "choice",
+        instructions: nextActionInstructions(drive.goal),
+        criteria: operationCriteria(DRIVE_TERMINAL_OPERATIONS),
+      };
+      delete questions.CLICK_target;
+      delete questions.TYPE_TEXT_target;
+      delete questions.SELECT_target;
+      delete questions.SCROLL_target;
+      delete questions[DRIVE_VALUE_QUESTION];
+    }
     const stateSeenRefs = new Set<string>();
     const state = buildJevState(
       drive.goal,
@@ -3773,13 +4134,6 @@ async function driveLoop(input: {
     const prepareMs = Date.now() - prepareStarted;
     const questionCount = Object.keys(questions).length;
     const stateBytes = Buffer.byteLength(JSON.stringify(state));
-    const fingerprint = progressFingerprint(
-      observation.url,
-      rows,
-      drive,
-      session,
-      observation.dom ?? "",
-    );
     if (drive.boundFingerprint !== fingerprint) drive.consumedActionKey = null;
     drive.boundFingerprint = fingerprint;
     const decide = (answers: Record<string, JevAnswer>): DriveDecision =>
@@ -3865,26 +4219,36 @@ async function driveLoop(input: {
       jev_question_count: questionCount,
       jev_state_bytes: stateBytes,
     };
-    const includeEmailCheck = lastActionWasClick(drive.trajectory) && remainingFills.length === 0;
-    if (includeEmailCheck && (decision.kind === "stuck" || decision.kind === "wait")) {
-      const otp = rows.find((row) => isOtpRow(row) && isFillableRow(row));
-      if (otp !== undefined) {
-        const applied = await applyDecision(
-          {
-            kind: "act",
-            action: { kind: "type", target: otp[0], text: "" },
-            actionKey: otp[0],
-            confidence: 1,
-            special: "inbox",
-          },
-          jevMs,
-        );
-        if (applied !== "continue") return applied;
-        steps += 1;
-        continue;
-      }
+    const inboxPlan = inboxSpecialPlan(
+      rows,
+      decision.kind,
+      lastNonWaitWasClick(drive.trajectory),
+      remainingFills.length,
+      observation.url,
+      pageTextFromObservation(observation, [observation.dom ?? ""]),
+    );
+    if (inboxPlan !== undefined) {
+      const lastClick = [...drive.trajectory]
+        .reverse()
+        .find((step) => step.action === "click" || step.action === "oauth_login");
+      const applied = await applyDecision(
+        {
+          kind: "act",
+          action:
+            inboxPlan.kind === "otp"
+              ? { kind: "type", target: inboxPlan.target, text: "" }
+              : { kind: "click", target: lastClick?.target ?? "inbox_link" },
+          actionKey: inboxPlan.kind === "otp" ? inboxPlan.target : "inbox_link",
+          confidence: 1,
+          special: "inbox",
+        },
+        jevMs,
+      );
+      if (applied !== "continue") return applied;
+      steps += 1;
+      continue;
     }
-    const applied = await applyDecision(decision, jevMs);
+    const applied = await applyDecision(decision, jevMs, true);
     if (applied !== "continue") return applied;
     steps += 1;
   }

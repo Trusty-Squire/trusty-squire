@@ -18,6 +18,10 @@ import {
   goalValueCriteria,
   DRIVE_IDENTICAL_RESNAP_MS,
   DRIVE_STALE_LIMIT,
+  DRIVE_EXHAUSTED_ACTION_LIMIT,
+  pageProgressKey,
+  recordDeadAction,
+  deadActionReason,
   actionDescription,
   admitsChoice,
   isSuggestionRow,
@@ -31,6 +35,15 @@ import {
   fillableCandidates,
   isOtpRow,
   lastActionWasClick,
+  lastNonWaitWasClick,
+  inboxSpecialPlan,
+  pageSuggestsInboxWait,
+  inboxVerificationDecision,
+  snapshotNeedsSettle,
+  pageHasListedWork,
+  isSubmitLikeRow,
+  DRIVE_EMPTY_SNAPSHOT_WAITS,
+  DRIVE_TERMINAL_OPERATIONS,
   isPickerRow,
   matchingFactKeys,
   mergeCompactTable,
@@ -95,6 +108,7 @@ describe("operate_drive constants", () => {
     expect(DRIVE_MAX_JEV_CALLS).toBe(120);
     expect(DRIVE_MAX_CANDIDATES).toBe(250);
     expect(DRIVE_STALE_LIMIT).toBe(3);
+    expect(DRIVE_EXHAUSTED_ACTION_LIMIT).toBe(5);
     expect(DRIVE_IDENTICAL_RESNAP_MS).toBe(200);
   });
 });
@@ -110,8 +124,10 @@ describe("request building", () => {
     expect(operation?.type).toBe("choice");
     if (operation?.type !== "choice") return;
     expect(Object.keys(operation.criteria)).toEqual(
-      expect.arrayContaining(["CLICK", "TYPE_TEXT", "WAIT", "DONE", "BLOCKED"]),
+      expect.arrayContaining(["CLICK", "TYPE_TEXT", "DONE"]),
     );
+    expect(operation.criteria).not.toHaveProperty("WAIT");
+    expect(operation.criteria).not.toHaveProperty("BLOCKED");
     expect(operation.criteria).not.toHaveProperty("SELECT");
     expect(questions.goal_complete).toBeUndefined();
     expect(questions.next_action).toBeUndefined();
@@ -345,19 +361,37 @@ describe("decideAfterJev stop reasons", () => {
   });
 
   it("returns stuck when Jev picks BLOCKED, not needs_value", () => {
+    const nav: WireRow[] = [
+      ["@e:home", "l", "Home"],
+      ["@e:models", "l", "Models"],
+    ];
+    const navQuestions = buildDriveQuestions(nav, {}, "sign up");
+    const navOps = navQuestions.operation?.type === "choice" ? navQuestions.operation.criteria : {};
+    expect(navOps).toHaveProperty("BLOCKED");
     expect(
       decideAfterJev({
         ...base,
-        answers: { operation: valid("BLOCKED", operationCriteriaMap, 0.7) },
+        rows: nav,
+        facts: {},
+        answers: { operation: valid("BLOCKED", navOps, 0.7) },
       }),
     ).toEqual({ kind: "stuck", confidence: 0.7 });
   });
 
   it("returns wait when Jev picks WAIT", () => {
+    const nav: WireRow[] = [
+      ["@e:home", "l", "Home"],
+      ["@e:models", "l", "Models"],
+    ];
+    const navQuestions = buildDriveQuestions(nav, {}, "sign up");
+    const navOps = navQuestions.operation?.type === "choice" ? navQuestions.operation.criteria : {};
+    expect(navOps).toHaveProperty("WAIT");
     expect(
       decideAfterJev({
         ...base,
-        answers: { operation: valid("WAIT", operationCriteriaMap, 0.8) },
+        rows: nav,
+        facts: {},
+        answers: { operation: valid("WAIT", navOps, 0.8) },
       }),
     ).toEqual({ kind: "wait", confidence: 0.8 });
   });
@@ -964,14 +998,29 @@ describe("decideAfterJev stop reasons", () => {
 
   it("acts on a validated reversible pick below 0.3 and completes a validated DONE with no floor", () => {
     const go = slugFor(SUBMIT);
+    const fourOpKeys = ["CLICK", "TYPE_TEXT", "WAIT", "DONE"];
+    const fourOpQuestions = {
+      ...questions,
+      operation: {
+        type: "choice" as const,
+        instructions: nextActionInstructions("sign up"),
+        criteria: {
+          CLICK: "click a visible control",
+          TYPE_TEXT: "type a provided fact into a field",
+          WAIT: "wait only when the needed control is absent or disabled, or submitted results are still loading",
+          DONE: "the goal is already complete on visible evidence; stop",
+        },
+      },
+    };
     expect(
       decideAfterJev({
         ...base,
+        questions: fourOpQuestions,
         answers: {
           operation: {
             choice: "CLICK",
             confidence: 0.26,
-            probabilities: peakedProbabilities(Object.keys(operationCriteriaMap), "CLICK", 0.26),
+            probabilities: peakedProbabilities(fourOpKeys, "CLICK", 0.26),
           },
           CLICK_target: valid(go, clickCriteria),
         },
@@ -1044,13 +1093,13 @@ describe("decideAfterJev stop reasons", () => {
         answers: {
           operation: {
             choice: "CLICK",
-            confidence: 0.45,
-            probabilities: peakedProbabilities(Object.keys(ops), "CLICK", 0.45),
+            confidence: 0.55,
+            probabilities: peakedProbabilities(Object.keys(ops), "CLICK", 0.55),
           },
           CLICK_target: {
             choice: paySlug,
-            confidence: 0.45,
-            probabilities: peakedProbabilities(Object.keys(clicks), paySlug, 0.45),
+            confidence: 0.55,
+            probabilities: peakedProbabilities(Object.keys(clicks), paySlug, 0.55),
           },
         },
       }).kind,
@@ -1219,6 +1268,217 @@ describe("form-fill assignment helpers", () => {
       ]),
     ).toBe(false);
   });
+
+  it("treats waits after a click as still post-submit", () => {
+    expect(
+      lastNonWaitWasClick([
+        { action: "click", target: "@e:go", confidence: 0.9, url: "https://x.test" },
+        { action: "wait", target: "WAIT", confidence: 1, url: "https://x.test" },
+      ]),
+    ).toBe(true);
+    expect(
+      lastNonWaitWasClick([
+        { action: "type", target: "@e:email", confidence: 0.9, url: "https://x.test" },
+        { action: "wait", target: "WAIT", confidence: 1, url: "https://x.test" },
+      ]),
+    ).toBe(false);
+  });
+
+  it("settles an empty snapshot or a fully disabled form surface", () => {
+    expect(DRIVE_EMPTY_SNAPSHOT_WAITS).toBe(3);
+    expect(DRIVE_TERMINAL_OPERATIONS).toEqual(["DONE", "BLOCKED"]);
+    expect(snapshotNeedsSettle([])).toBe(true);
+    expect(snapshotNeedsSettle(ROWS)).toBe(false);
+    const disabledForm: WireRow[] = [
+      ["@e:email", "t", "Email|f=email|s=d"],
+      ["@e:go", "b", "Register|s=d"],
+      ["@e:g", "b", "Register with Google"],
+      ["@e:terms", "l", "Terms of Service"],
+    ];
+    expect(snapshotNeedsSettle(disabledForm)).toBe(true);
+    expect(
+      snapshotNeedsSettle([
+        ["@e:home", "l", "Home"],
+        ["@e:login", "b", "Go to login"],
+      ]),
+    ).toBe(false);
+    expect(
+      snapshotNeedsSettle([
+        ["@e:role", "combobox", "Founder/CTO|a=picker|n=Founder/CTO"],
+        ["@e:cb", "c", "checkbox|s=u"],
+        ["@e:next", "b", "Next|s=d"],
+      ]),
+    ).toBe(false);
+    const inFlight: WireRow[] = [
+      ["@e:email", "t", "Email|f=email|n=a@b.test"],
+      ["@e:go", "b", "Creating your account|s=d"],
+    ];
+    expect(snapshotNeedsSettle(inFlight, 0)).toBe(true);
+    expect(snapshotNeedsSettle(inFlight, 1)).toBe(false);
+    expect(snapshotNeedsSettle(inFlight)).toBe(false);
+    const fireworksInFlight: WireRow[] = [
+      ["@e:email", "t", "Email|f=email|s=d|n=a@b.test"],
+      ["@e:pw", "t", "Password|f=password"],
+      ["@e:slide", "b", "Next slide"],
+      ["@e:go", "b", "Create Account|s=d"],
+    ];
+    expect(isSubmitLikeRow(fireworksInFlight[2]!)).toBe(false);
+    expect(snapshotNeedsSettle(fireworksInFlight, 0)).toBe(true);
+    expect(pageHasListedWork(fireworksInFlight, 0, 0)).toBe(false);
+  });
+
+  it("omits BLOCKED while a listed fill or enabled submit remains", () => {
+    expect(pageHasListedWork(ROWS, 1, 0)).toBe(true);
+    expect(pageHasListedWork([["@e:go", "b", "Get started now"]], 0, 0)).toBe(true);
+    expect(
+      pageHasListedWork(
+        [
+          ["@e:home", "l", "Home"],
+          ["@e:models", "l", "Models"],
+        ],
+        0,
+        0,
+      ),
+    ).toBe(false);
+    const welcome: WireRow[] = [
+      ["@e:logo", "l", "Meilisearch logo Meilisearch|f=search"],
+      ["@e:role", "combobox", "Founder/CTO|a=picker|n=Founder/CTO"],
+      ["@e:reasons", "b", "Select reasons for using Meilisearch"],
+      ["@e:cb", "c", "checkbox|s=u"],
+      ["@e:next", "b", "Next|s=d"],
+    ];
+    expect(pageHasListedWork(welcome, 0, 0)).toBe(true);
+    const welcomeSets = driveTargetSets(welcome, {}, false);
+    expect(welcomeSets.operations).toContain("CLICK");
+    expect(welcomeSets.operations).not.toContain("WAIT");
+    expect(welcomeSets.operations).not.toContain("BLOCKED");
+    expect(welcomeSets.CLICK.map((c) => c.ref)).not.toContain("@e:logo");
+    expect(welcomeSets.CLICK.map((c) => c.ref)).not.toContain("@e:next");
+    expect(welcomeSets.CLICK.map((c) => c.ref)).toContain("@e:cb");
+    const checkedWelcome = welcome.map((row) =>
+      row[0] === "@e:cb" ? (["@e:cb", "c", "checkbox|s=c"] as WireRow) : row,
+    );
+    expect(driveTargetSets(checkedWelcome, {}, false).CLICK.map((c) => c.ref)).not.toContain(
+      "@e:cb",
+    );
+    const openReasons: WireRow[] = [
+      ["@e:reasons", "t", "Select reasons...|a=picker"],
+      ["@e:kw", "l", "Keyword Search|f=search|q=1/8"],
+      ["@e:other", "l", "Other|q=8/8"],
+    ];
+    const openClicks = driveTargetSets(openReasons, {}, false).CLICK.map((c) => c.ref);
+    expect(openClicks).not.toContain("@e:reasons");
+    expect(openClicks).toEqual(expect.arrayContaining(["@e:kw", "@e:other"]));
+    const signup = driveTargetSets(ROWS, { email: "a@b.test" }, false);
+    expect(signup.operations).toContain("TYPE_TEXT");
+    expect(signup.operations).not.toContain("WAIT");
+    expect(signup.operations).not.toContain("BLOCKED");
+    const nav = driveTargetSets(
+      [
+        ["@e:home", "l", "Home"],
+        ["@e:models", "l", "Models"],
+      ],
+      {},
+      false,
+    );
+    expect(nav.operations).toContain("WAIT");
+    expect(nav.operations).toContain("BLOCKED");
+  });
+
+  it("keeps a non-DONE answer when every listed control is suppressed", () => {
+    // A stalled form: consent already ticked, submit disabled while the server
+    // validates. Both rows are withheld from CLICK, so offering DONE alone
+    // would force a false "complete" on an unfinished signup.
+    const stalled: WireRow[] = [
+      ["@e:cb", "c", "I agree to the terms|s=c"],
+      ["@e:go", "b", "Create account|s=d"],
+    ];
+    const sets = driveTargetSets(stalled, {}, false);
+    expect(sets.CLICK).toEqual([]);
+    expect(sets.operations).toContain("WAIT");
+    expect(sets.operations).toContain("BLOCKED");
+  });
+
+  it("plans an inbox read after submit even when no OTP field is listed", () => {
+    const otp: WireRow = ["@e:code", "t", "@verification-code|f=otp"];
+    expect(inboxSpecialPlan(ROWS, "stuck", true, 0)).toBeUndefined();
+    expect(inboxSpecialPlan(ROWS, "wait", true, 0)).toBeUndefined();
+    expect(inboxSpecialPlan([["@e:login", "b", "Go to login"]], "stuck", true, 0)).toBeUndefined();
+    expect(
+      inboxSpecialPlan(
+        [
+          ["@e:hint", "l", "Check your email"],
+          ["@e:login", "b", "Go to login"],
+        ],
+        "stuck",
+        true,
+        0,
+      ),
+    ).toEqual({ kind: "link" });
+    expect(
+      inboxSpecialPlan(
+        [
+          ["@e:email", "t", "Email address|f=email|s=rd|n=a@b.test"],
+          ["@e:pw", "t", "Password|f=password|s=rd"],
+          ["@e:go", "b", "Continue|s=d"],
+          ["@e:gmail", "l", "Gmail Open Gmail"],
+        ],
+        "stuck",
+        true,
+        0,
+      ),
+    ).toEqual({ kind: "link" });
+    expect(
+      pageSuggestsInboxWait(
+        [
+          ["@e:logo", "l", "Meilisearch logo"],
+          ["@e:fb", "b", "Send feedback"],
+        ],
+        "https://cloud.meilisearch.com/teams",
+      ),
+    ).toBe(false);
+    expect(
+      pageSuggestsInboxWait(
+        [["@e:hint", "l", "Check your email"]],
+        "https://app.example.test/signup",
+      ),
+    ).toBe(true);
+    expect(pageSuggestsInboxWait([], "https://app.currencyapi.com/email/verify")).toBe(true);
+    expect(inboxSpecialPlan([...ROWS, otp], "stuck", true, 0)).toEqual({
+      kind: "otp",
+      target: "@e:code",
+    });
+    expect(inboxSpecialPlan(ROWS, "stuck", true, 1)).toBeUndefined();
+    expect(inboxSpecialPlan(ROWS, "stuck", false, 0)).toBeUndefined();
+    expect(inboxSpecialPlan(ROWS, "act", true, 0)).toBeUndefined();
+    expect(
+      inboxSpecialPlan(
+        [
+          ["@e:role", "combobox", "Founder/CTO|a=picker|n=Founder/CTO"],
+          ["@e:cb", "c", "checkbox|s=u"],
+          ["@e:next", "b", "Next|s=d"],
+        ],
+        "stuck",
+        true,
+        0,
+      ),
+    ).toBeUndefined();
+  });
+
+  it("follows a verify link and retries an empty inbox instead of asking for a code", () => {
+    expect(
+      inboxVerificationDecision({ found: true, code: null, link: "https://x.test/v" }, "link"),
+    ).toBe("goto_link");
+    expect(inboxVerificationDecision({ found: false, code: null, link: null }, "link")).toBe(
+      "retry",
+    );
+    expect(inboxVerificationDecision({ found: true, code: "123456", link: null }, "otp")).toBe(
+      "type_code",
+    );
+    expect(inboxVerificationDecision({ found: true, code: "123456", link: null }, "link")).toBe(
+      "needs_code",
+    );
+  });
 });
 
 describe("handoff shape", () => {
@@ -1349,6 +1609,68 @@ describe("facts, fingerprint, compact merge", () => {
   it("keeps a disabled continue/submit in the clickable set", () => {
     const cont: WireRow = ["@e:go", "b", "@continue|s=d"];
     expect(clickableCandidates([EMAIL, cont], false).map((c) => c.ref)).toEqual(["@e:go"]);
+  });
+
+  it("omits a click that just came back stale so the overlay can be chosen", () => {
+    const signUp: WireRow = ["@e:go", "b", "Sign Up"];
+    const accept: WireRow = ["@e:ok", "b", "Accept All"];
+    const page: WireRow[] = [EMAIL, signUp, accept];
+    expect(clickableCandidates(page, false).map((c) => c.ref)).toEqual(["@e:go", "@e:ok"]);
+    expect(clickableCandidates(page, false, ["@e:go"]).map((c) => c.ref)).toEqual(["@e:ok"]);
+  });
+
+  it("treats a no-op action as exhausted on the same progress key", () => {
+    const filled: WireRow[] = [
+      ["@e:email", "t", "Email|f=email|n=a@b.test"],
+      ["@e:go", "b", "Sign Up"],
+      ["@e:ok", "b", "Accept All"],
+      ["@e:ad", "l", "Own Your AI: Control your models"],
+    ];
+    const key = pageProgressKey("https://api-ninjas.com/register", filled, ["@e:email"]);
+    expect(
+      pageProgressKey("https://api-ninjas.com/register", filled, ["@e:email", "@e:pw"]),
+    ).not.toBe(key);
+    expect(
+      pageProgressKey(
+        "https://api-ninjas.com/register",
+        [...filled, ["@e:ad2", "l", "A different marketing line"]],
+        ["@e:email"],
+      ),
+    ).toBe(key);
+    expect(
+      pageProgressKey(
+        "https://api-ninjas.com/register",
+        filled.filter((row) => row[0] !== "@e:ok"),
+        ["@e:email"],
+      ),
+    ).not.toBe(key);
+    const drive = {
+      exhaustedProgressKey: null as string | null,
+      exhaustedActionKeys: [] as string[],
+    };
+    expect(recordDeadAction(drive, key, "@e:go")).toBe("continue");
+    expect(drive.exhaustedActionKeys).toEqual(["@e:go"]);
+    expect(recordDeadAction(drive, key, "@e:go")).toBe("continue");
+    expect(drive.exhaustedActionKeys).toEqual(["@e:go"]);
+    expect(recordDeadAction(drive, key, "WAIT")).toBe("continue");
+    expect(recordDeadAction(drive, key, "@e:ok")).toBe("continue");
+    expect(recordDeadAction(drive, key, "@e:x")).toBe("continue");
+    expect(recordDeadAction(drive, key, "@e:y")).toBe("stop");
+    expect(deadActionReason(drive.exhaustedActionKeys, "https://api-ninjas.com/register")).toBe(
+      "no change after @e:go, WAIT, @e:ok, @e:x, @e:y on https://api-ninjas.com/register",
+    );
+    const sets = driveTargetSets(
+      filled,
+      { email: "a@b.test" },
+      false,
+      ["@e:email"],
+      "https://api-ninjas.com/register",
+      new Map(),
+      (text) => text,
+      ["@e:go", "WAIT"],
+    );
+    expect(sets.CLICK.map((c) => c.ref)).toEqual(["@e:ok", "@e:ad"]);
+    expect(sets.operations).not.toContain("WAIT");
   });
 
   it("keeps acted markers and committed field state in the progress fingerprint", () => {
@@ -1670,11 +1992,11 @@ describe("drive outbound choice budgets", () => {
   it("reserves a usable search value when earlier click targets consume the budget", () => {
     const search: WireRow = ["@e:search", "t", "@search|f=query"];
     const rows: WireRow[] = [
-      ...Array.from({ length: 122 }, (_, i): WireRow => [`@e:link${i}`, "l", `@link-${i}`]),
+      ...Array.from({ length: 123 }, (_, i): WireRow => [`@e:link${i}`, "l", `@link-${i}`]),
       search,
     ];
     const sets = driveTargetSets(rows, {}, false);
-    expect(sets.CLICK).toHaveLength(122);
+    expect(sets.CLICK).toHaveLength(123);
     const questions = buildDriveQuestions(rows, {}, "widgets", false, [], "", new Map(), sets);
     expect(
       Object.values(questions).reduce(
@@ -1687,7 +2009,7 @@ describe("drive outbound choice budgets", () => {
     if (clickQuestion?.type !== "choice") throw new Error("missing click choices");
     const clickCount = Object.keys(clickQuestion.criteria).length;
     expect(clickCount).toBeGreaterThan(0);
-    expect(clickCount).toBeLessThan(122);
+    expect(clickCount).toBeLessThan(123);
     const valueQuestion = questions[DRIVE_VALUE_QUESTION];
     const operation = questions.operation;
     const target = questions.TYPE_TEXT_target;
