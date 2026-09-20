@@ -744,18 +744,20 @@ export function matchingFactKeys(
 ): string[] {
   const keys = Object.keys(facts);
   if (keys.length === 0) return [];
-  // The shipping name and the cardholder name are different values. A
-  // name-on-card control takes the released card's own name, never the
-  // `name` ensureGeneratedFacts synthesizes from the identity facts.
-  if (isCardholderNameRow(row)) {
-    return keys.filter((key) => normalizeKey(key) === CARD_NAME_FACT);
-  }
-  // Same separation for the expiry: the card's own value is the only thing a
-  // card expiry control takes, so a host-supplied travel `date` fact cannot
-  // outrank it on the control card_expiry exists for.
-  if (isExpiryRow(row, rows)) {
-    const wantedFact = cardExpiryFactFor(row);
-    return keys.filter((key) => normalizeKey(key) === wantedFact);
+  // Card controls take the released card's own values and nothing else — the
+  // shipping name and the cardholder name are different values, and a
+  // host-supplied travel `date` must not outrank the card expiry. Only on a
+  // payment drive, though: with no card to release these narrowings would
+  // leave a card control matching nothing at all, so a drive without a card
+  // keeps resolving them through the ordinary aliases.
+  if (facts.card_ref !== undefined) {
+    if (isCardholderNameRow(row)) {
+      return keys.filter((key) => normalizeKey(key) === CARD_NAME_FACT);
+    }
+    if (isExpiryRow(row, rows)) {
+      const wantedFact = cardExpiryFactFor(row);
+      return keys.filter((key) => normalizeKey(key) === wantedFact);
+    }
   }
   const wanted = new Set<string>([
     ...aliasKeysFor(fieldNameForRow(row)),
@@ -1310,7 +1312,6 @@ export function requiredFactComboboxAction(
 export function requiredFillableMissingFact(
   rows: readonly WireRow[],
   facts: Record<string, string>,
-  includePayment: boolean,
   filledRefs: readonly string[] = [],
   pageUrl: string = "",
 ): DriveCandidate | undefined {
@@ -1322,7 +1323,7 @@ export function requiredFillableMissingFact(
     if (isOffscreenRow(row) && !allowOffscreen) continue;
     if (isPaymentRow(row) || isCvvRow(row) || isOtpRow(row) || allowsGoalValueAssignment(row))
       continue;
-    if (includePayment && (isExpiryRow(row, rows) || isCardholderNameRow(row))) continue;
+    if (isExpiryRow(row, rows) || isCardholderNameRow(row)) continue;
     if (!isRequiredRow(row)) continue;
     if (matchingFactKeys(facts, row, rows).length > 0) continue;
     const role = ROLE_LETTERS[row[1]] ?? row[1];
@@ -3266,13 +3267,7 @@ async function driveLoop(input: {
       applyReleasedCardFacts(drive.facts, session.releasedPaymentCard?.card),
     );
     const pageUrl = observation.url;
-    const missing = requiredFillableMissingFact(
-      rows,
-      drive.facts,
-      includePayment,
-      drive.filledRefs,
-      pageUrl,
-    );
+    const missing = requiredFillableMissingFact(rows, drive.facts, drive.filledRefs, pageUrl);
     const pageOptions =
       lastSelectOptions.get(session) ?? selectOptionsFromElements(session.lastElements);
     const comboboxObservation = observationFingerprint(observation.url, rows);

@@ -362,30 +362,69 @@ describe("decideAfterJev stop reasons", () => {
 
   it("returns needs_value naming the field label when a required fillable has no matching fact", () => {
     const missingFacts = { first_name: "Ada" };
-    expect(requiredFillableMissingFact(ROWS, missingFacts, false)?.ref).toBe("@e:email");
+    expect(requiredFillableMissingFact(ROWS, missingFacts)?.ref).toBe("@e:email");
   });
 
-  it("does not treat a later-stage expiry field as a missing fact while card_ref is present", () => {
+  it("never halts on a card expiry control, with or without a card in play", () => {
     const expiry: WireRow = ["@e:exp", "t", "Expiration date (MM / YY)|s=r"];
     expect(isExpiryRow(expiry, [expiry, PAYMENT])).toBe(true);
     expect(
-      requiredFillableMissingFact(
-        [expiry, PAYMENT, EMAIL],
-        { email: "a@b.test", card_ref: "card-1" },
-        true,
-      )?.ref,
+      requiredFillableMissingFact([expiry, PAYMENT, EMAIL], {
+        email: "a@b.test",
+        card_ref: "card-1",
+      })?.ref,
     ).toBeUndefined();
-    expect(requiredFillableMissingFact([expiry, PAYMENT], {}, false)?.ref).toBe("@e:exp");
+    // No card_ref: the control can never be filled from a released card, so it
+    // must not be reported as a missing fact either.
+    expect(requiredFillableMissingFact([expiry, PAYMENT], {})?.ref).toBeUndefined();
+    expect(requiredFillableMissingFact([expiry, PAYMENT, EMAIL], {})?.ref).toBe("@e:email");
   });
 
-  it("does not treat a later-stage name-on-card field as a missing fact while card_ref is present", () => {
+  it("never halts on a name-on-card control, with or without a card in play", () => {
     const cardName: WireRow = ["@e:ncard", "t", "Name on card|s=r"];
     expect(isCardholderNameRow(cardName)).toBe(true);
     expect(
-      requiredFillableMissingFact([cardName, EMAIL], { email: "a@b.test", card_ref: "card-1" }, true)
+      requiredFillableMissingFact([cardName, EMAIL], { email: "a@b.test", card_ref: "card-1" })
         ?.ref,
     ).toBeUndefined();
-    expect(requiredFillableMissingFact([cardName], {}, false)?.ref).toBe("@e:ncard");
+    // "Name on card" matches no ordinary alias, so without the skip a drive
+    // carrying no card would stop on a field it can never fill.
+    expect(requiredFillableMissingFact([cardName], {})?.ref).toBeUndefined();
+    expect(requiredFillableMissingFact([cardName, EMAIL], {})?.ref).toBe("@e:email");
+  });
+
+  it("fills a cardholder-name control from the shipping name when the drive has no card", () => {
+    const cardholder: WireRow = ["@e:ch", "t", "Cardholder name|s=r"];
+    const rows = [cardholder, EMAIL];
+    const facts = ensureGeneratedFacts(rows, {
+      first_name: "Ada",
+      last_name: "Lovelace",
+      email: "a@b.test",
+    });
+    expect(isCardholderNameRow(cardholder)).toBe(true);
+    expect(facts.name).toBe("Ada Lovelace");
+    // A provisioning drive that meets an inline cardholder control resolves it
+    // through the ordinary name alias and carries on.
+    expect(matchingFactKeys(facts, cardholder, rows)).toEqual(["name"]);
+    expect(fillableCandidates(rows, facts, false).map((row) => row.ref)).toContain("@e:ch");
+    expect(requiredFillableMissingFact(rows, facts)?.ref).toBeUndefined();
+  });
+
+  it("still gives a cardholder-name control the released card name on a payment drive", () => {
+    const cardholder: WireRow = ["@e:ch", "t", "Cardholder name|s=r"];
+    const rows = [cardholder, PAYMENT];
+    const shipping = ensureGeneratedFacts(rows, {
+      first_name: "Ada",
+      last_name: "Lovelace",
+      card_ref: "card-1",
+    });
+    const released = applyReleasedCardFacts(shipping, {
+      exp_month: "12",
+      exp_year: "2030",
+      name: "A L Byron",
+    });
+    expect(matchingFactKeys(released, cardholder, rows)).toEqual(["card_name"]);
+    expect(released.card_name).toBe("A L Byron");
   });
 
   it("does not offer name-on-card as fillable until the card is released", () => {
@@ -480,7 +519,7 @@ describe("decideAfterJev stop reasons", () => {
     expect(isExpiryRow(passport, [passport])).toBe(false);
     expect(matchingFactKeys(facts, passport, [passport])).toEqual([]);
     // Not a deferred payment control, so it stays a reportable required field.
-    expect(requiredFillableMissingFact([passport], { card_ref: "card-1" }, true)?.ref).toBe(
+    expect(requiredFillableMissingFact([passport], { card_ref: "card-1" })?.ref).toBe(
       "@e:pp",
     );
   });
@@ -784,7 +823,7 @@ describe("form-fill assignment helpers", () => {
   });
 
   it("names a required fillable with no matching fact as needs_value", () => {
-    const missing = requiredFillableMissingFact(ROWS, { first_name: "Ada" }, false);
+    const missing = requiredFillableMissingFact(ROWS, { first_name: "Ada" });
     expect(missing?.ref).toBe("@e:email");
     expect(missing ? missing.row : undefined).toBe(EMAIL);
   });
@@ -1161,7 +1200,7 @@ describe("facts, fingerprint, compact merge", () => {
     expect(Object.values(goalValueCriteria(goal, {}))).toEqual(
       expect.arrayContaining(["Ada", "Lovelace"]),
     );
-    expect(requiredFillableMissingFact([email, SUBMIT], {}, false)?.ref).toBe("@e:email");
+    expect(requiredFillableMissingFact([email, SUBMIT], {})?.ref).toBe("@e:email");
   });
 
   it("merges a compact delta into the retained full map", () => {
