@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { chromium, type Browser } from "playwright";
 import type { ApiClient } from "../../api-client.js";
 import { BrowserController } from "../browser.js";
-import { JevUnavailableError, type JevCallOutcome } from "../jev-client.js";
+import { JevUnavailableError, type JevCallOutcome, type JevQuestion } from "../jev-client.js";
 import {
   DRIVE_CONFIDENCE_THRESHOLD,
   DRIVE_EMPTY_SNAPSHOT_WAITS,
@@ -45,7 +45,7 @@ const SIGNUP_HTML = `<!doctype html><meta charset="utf-8"><title>Signup fixture<
       const email = document.querySelector('#email').value;
       const company = document.querySelector('#company').value;
       if (!email || !company) return;
-      document.querySelector('main').innerHTML = '<p id=done>Account created for '+email+' at '+company+'</p><a id=dash href=#dashboard>Go to dashboard</a>';
+      document.querySelector('main').innerHTML = '<p id=done>Account created for '+email+' at '+company+'</p>';
     ">Continue</button>
   </form>
 </main>`;
@@ -401,7 +401,7 @@ describe("operate_drive real-browser fixture", () => {
       const atInject: Record<string, string> = {};
       dependencies.injectCard = async (_session, args) => {
         injections += 1;
-        for (const id of ["exp", "ncard", "when", "q"]) {
+        for (const id of ["exp", "ncard", "when", "q", "state2"]) {
           atInject[id] = await page.locator(`#${id}`).inputValue();
         }
         const fields = await injectCardIntoSessionTargets(started.session_id, card, args.fields);
@@ -447,11 +447,18 @@ describe("operate_drive real-browser fixture", () => {
       expect(waits).toBeGreaterThanOrEqual(Math.ceil(MULTI_STAGE_BLANK_MS / DRIVE_WAIT_MS));
       expect(await page.locator("#stage").textContent()).toBe("payment");
 
-      // The card is released once the typeable shipping/contact fills are done:
-      // neither the unfilled State select nor the site-search box may hold it,
-      // and expiry + name-on-card are still untouched at that point.
+      // The card is released once every typeable fill is done. A leftover
+      // State select does not hold it; the site-search extra does, so it is
+      // already handled by then. Expiry and name-on-card stay untouched until
+      // the card is released.
       expect(injections).toBe(1);
-      expect(atInject).toEqual({ exp: "", ncard: "", when: "", q: "" });
+      expect(atInject.state2).toBe("");
+      expect(atInject.q).not.toBe("");
+      expect({ exp: atInject.exp, ncard: atInject.ncard, when: atInject.when }).toEqual({
+        exp: "",
+        ncard: "",
+        when: "",
+      });
       expect(await page.locator("#pan").inputValue()).toBe(card.pan);
       expect(await page.locator("#cvv").inputValue()).toBe(card.cvv);
 
@@ -468,34 +475,54 @@ describe("operate_drive real-browser fixture", () => {
     }
   }, 60_000);
 
-  it("stops as stuck on a page that never renders a control, without consulting Jev", async () => {
-    const { context, started } = await openFixture(
-      `<!doctype html><meta charset="utf-8"><title>Blank</title><main><p>Loading…</p></main>`,
-      "blank-snapshot.test",
-    );
-    try {
-      let jevCalls = 0;
-      const result = await runOperateDrive(
-        { session_id: started.session_id, goal: "reach the checkout" },
-        api(),
-        undefined,
-        deps(async (_api, _state, questions) => {
-          jevCalls += 1;
-          return jevFromQuestions(questions);
-        }),
+  it.each([
+    { answer: "BLOCKED", status: "stuck" },
+    { answer: "DONE", status: "complete" },
+  ])(
+    "asks one terminal-only question on a control-free page and honours $answer",
+    async ({ answer, status }) => {
+      const { context, started } = await openFixture(
+        `<!doctype html><meta charset="utf-8"><title>Blank</title><main><p>Order confirmed.</p></main>`,
+        "blank-snapshot.test",
       );
-      expect(result.status).toBe("stuck");
-      // Zero rows offers no action to choose from, so the model is never paid
-      // to rule on the blank snapshot.
-      expect(jevCalls).toBe(0);
-      expect(result.trajectory.filter((step) => step.action === "wait")).toHaveLength(
-        DRIVE_EMPTY_SNAPSHOT_WAITS,
-      );
-    } finally {
-      await finishProvisionSession(started.session_id);
-      await context.close();
-    }
-  }, 30_000);
+      try {
+        const asked: Array<{ names: string[]; operationCriteria: string[] }> = [];
+        const criteriaOf = (question: JevQuestion | undefined): string[] =>
+          question?.type === "choice" ? Object.keys(question.criteria) : [];
+        const result = await runOperateDrive(
+          { session_id: started.session_id, goal: "buy one item" },
+          api(),
+          undefined,
+          deps(async (_api, _state, questions) => {
+            const keys = criteriaOf(questions.operation);
+            asked.push({ names: Object.keys(questions), operationCriteria: keys });
+            return {
+              attempts: 1,
+              elapsedMs: 5,
+              result: {
+                answers: {
+                  operation: { choice: answer, confidence: 0.9, probabilities: peaked(keys, answer) },
+                },
+              },
+            };
+          }),
+        );
+        expect(result.status).toBe(status);
+        // Exactly one question, carrying no action operation and no target to
+        // choose — there is nothing on the page to act on or name.
+        expect(asked).toHaveLength(1);
+        expect(asked[0]!.names).toEqual(["operation"]);
+        expect([...asked[0]!.operationCriteria].sort()).toEqual(["BLOCKED", "DONE"]);
+        expect(result.trajectory.filter((step) => step.action === "wait")).toHaveLength(
+          DRIVE_EMPTY_SNAPSHOT_WAITS,
+        );
+      } finally {
+        await finishProvisionSession(started.session_id);
+        await context.close();
+      }
+    },
+    30_000,
+  );
 
   it("checks DONE against a fresh snapshot even on an unchanged page", async () => {
     const { context, started } = await openFixture(NOOP_HTML, "done-unchanged.test");
@@ -648,10 +675,7 @@ describe("operate_drive real-browser fixture", () => {
     try {
       await context.route("**/destination", async (route) => {
         await new Promise((resolve) => setTimeout(resolve, 150));
-        await route.fulfill({
-          contentType: "text/html",
-          body: `<main>Destination ready<a href="#start">Start</a></main>`,
-        });
+        await route.fulfill({ contentType: "text/html", body: "<main>Destination ready</main>" });
       });
       let decisions = 0;
       const result = await runOperateDrive(

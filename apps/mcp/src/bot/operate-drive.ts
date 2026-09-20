@@ -23,6 +23,7 @@ import {
   askJev,
   type JevAnswer,
   type JevCallOutcome,
+  type JevChoiceQuestion,
   type JevQuestion,
 } from "./jev-client.js";
 import {
@@ -589,20 +590,32 @@ export function isCvvRow(row: WireRow): boolean {
 const CARD_EXPIRY_FACT = "card_expiry";
 const CARD_NAME_FACT = "card_name";
 
-// A card expiry control names its card context or its MM/YY shape. A bare
-// `expir` substring is a passport or licence expiry just as often, and that
-// field must stay an ordinary fillable the drive neither hides nor types a
-// card value into.
-const CARD_EXPIRY_ROW =
-  /cc_exp|(?:credit_)?card_\w*exp|exp_month|exp_year|exp_date|expiration_month|expiration_year|mm_yy/;
+function rowHay(row: WireRow): string {
+  return `${normalizeKey(fieldNameForRow(row))} ${normalizeKey(readableLabel(row))}`;
+}
 
-export function isExpiryRow(row: WireRow): boolean {
-  const hay = `${normalizeKey(fieldNameForRow(row))} ${normalizeKey(readableLabel(row))}`;
-  return CARD_EXPIRY_ROW.test(hay);
+function readsAsExpiry(row: WireRow): boolean {
+  return /expir|exp_month|exp_year|exp_date|cc_exp|mm_yy/.test(rowHay(row));
+}
+
+/** True when the row itself, or the snapshot it belongs to, is a card form.
+ *
+ * A "Passport expiry" reads exactly like a card expiry, so the label alone
+ * cannot decide it. The card number control is what makes the surrounding
+ * fields card fields, and `isPaymentRow` already owns recognizing it.
+ */
+function hasCardContext(row: WireRow, rows: readonly WireRow[]): boolean {
+  const facts = row[2] ?? "";
+  if (facts.includes("f=payment") || facts.includes("a=payment")) return true;
+  return rows.some((other) => other !== row && isPaymentRow(other));
+}
+
+export function isExpiryRow(row: WireRow, rows: readonly WireRow[] = []): boolean {
+  return readsAsExpiry(row) && hasCardContext(row, rows);
 }
 
 function cardExpiryFactFor(row: WireRow): string {
-  const hay = `${normalizeKey(fieldNameForRow(row))} ${normalizeKey(readableLabel(row))}`;
+  const hay = rowHay(row);
   const month = /month|mm/.test(hay);
   const year = /year|yy/.test(hay);
   if (month && !year) return "exp_month";
@@ -611,8 +624,7 @@ function cardExpiryFactFor(row: WireRow): string {
 }
 
 export function isCardholderNameRow(row: WireRow): boolean {
-  const hay = `${normalizeKey(fieldNameForRow(row))} ${normalizeKey(readableLabel(row))}`;
-  return /name_on_card|cardholder|cc_name|card_name|nameoncard/.test(hay);
+  return /name_on_card|cardholder|cc_name|card_name|nameoncard/.test(rowHay(row));
 }
 
 export function isGoogleAuthRow(row: WireRow): boolean {
@@ -720,7 +732,11 @@ function aliasKeysFor(token: string): string[] {
   return [field];
 }
 
-export function matchingFactKeys(facts: Record<string, string>, row: WireRow): string[] {
+export function matchingFactKeys(
+  facts: Record<string, string>,
+  row: WireRow,
+  rows: readonly WireRow[] = [],
+): string[] {
   const keys = Object.keys(facts);
   if (keys.length === 0) return [];
   // The shipping name and the cardholder name are different values. A
@@ -732,7 +748,7 @@ export function matchingFactKeys(facts: Record<string, string>, row: WireRow): s
   // Same separation for the expiry: the card's own value is the only thing a
   // card expiry control takes, so a host-supplied travel `date` fact cannot
   // outrank it on the control card_expiry exists for.
-  if (isExpiryRow(row)) {
+  if (isExpiryRow(row, rows)) {
     const wantedFact = cardExpiryFactFor(row);
     return keys.filter((key) => normalizeKey(key) === wantedFact);
   }
@@ -823,7 +839,7 @@ export function ensureGeneratedFacts(
   }
   for (const row of rows) {
     if (!isFillableRow(row) || isActedRow(row) || isPaymentRow(row) || isCvvRow(row)) continue;
-    if (isPasswordRow(row) && matchingFactKeys(next, row).length === 0) {
+    if (isPasswordRow(row) && matchingFactKeys(next, row, rows).length === 0) {
       next.password = generatePassword();
     }
   }
@@ -1084,12 +1100,12 @@ export function fillableCandidates(
     if (
       includePayment &&
       facts.exp_month === undefined &&
-      (isExpiryRow(row) || isCardholderNameRow(row))
+      (isExpiryRow(row, rows) || isCardholderNameRow(row))
     ) {
       continue;
     }
-    if (isOtpRow(row) && matchingFactKeys(facts, row).length === 0) continue;
-    if (matchingFactKeys(facts, row).length === 0) continue;
+    if (isOtpRow(row) && matchingFactKeys(facts, row, rows).length === 0) continue;
+    if (matchingFactKeys(facts, row, rows).length === 0) continue;
     const role = ROLE_LETTERS[row[1]] ?? row[1];
     const seed = `${row[2] ?? readableLabel(row)}_${role}`;
     const slug = uniqueCriteriaSlug(seed, used);
@@ -1181,6 +1197,7 @@ export function selectTargets(
   facts: Record<string, string>,
   pageOptions: ReadonlyMap<string, readonly string[]> = new Map(),
   maskText: (text: string) => string = (text) => text,
+  rows: readonly WireRow[] = [],
 ): DriveCandidate[] {
   const targets: DriveCandidate[] = [];
   for (const candidate of candidates) {
@@ -1201,7 +1218,7 @@ export function selectTargets(
         optionLabel: label,
       });
     };
-    for (const key of matchingFactKeys(facts, candidate.row)) {
+    for (const key of matchingFactKeys(facts, candidate.row, rows)) {
       const text = facts[key];
       if (text === undefined || text.length === 0) continue;
       addOption(text);
@@ -1262,7 +1279,7 @@ export function requiredFactComboboxAction(
     if (row[1] !== "combobox" || isDisabledRow(row) || isActedRow(row) || filled.has(row[0])) {
       continue;
     }
-    const key = matchingFactKeys(facts, row)[0];
+    const key = matchingFactKeys(facts, row, rows)[0];
     if (key === undefined) continue;
     const fact = facts[key];
     if (fact === undefined || fact.length === 0) continue;
@@ -1300,9 +1317,9 @@ export function requiredFillableMissingFact(
     if (isOffscreenRow(row) && !allowOffscreen) continue;
     if (isPaymentRow(row) || isCvvRow(row) || isOtpRow(row) || allowsGoalValueAssignment(row))
       continue;
-    if (includePayment && (isExpiryRow(row) || isCardholderNameRow(row))) continue;
+    if (includePayment && (isExpiryRow(row, rows) || isCardholderNameRow(row))) continue;
     if (!isRequiredRow(row)) continue;
-    if (matchingFactKeys(facts, row).length > 0) continue;
+    if (matchingFactKeys(facts, row, rows).length > 0) continue;
     const role = ROLE_LETTERS[row[1]] ?? row[1];
     return {
       ref: row[0],
@@ -1322,6 +1339,24 @@ export function compactRowsText(
 ): string {
   const header = stage === undefined ? url : `${url} stage=${stage}`;
   return `${header}\n${JSON.stringify(rows)}`;
+}
+
+/** The only question a zero-row snapshot can answer: did the goal land or not.
+ *
+ * No action operation is offered and no target is asked for, because there is
+ * nothing on the page to act on or name. Judgment comes from the page text.
+ */
+export function terminalOnlyQuestion(goal: string): { operation: JevChoiceQuestion } {
+  return {
+    operation: {
+      type: "choice",
+      instructions:
+        `You are driving a browser to: ${goal}. The page lists no control to act on. ` +
+        "Judge from the page text alone: pick DONE if the goal is already complete, " +
+        "otherwise pick BLOCKED.",
+      criteria: operationCriteria(["DONE", "BLOCKED"]),
+    },
+  };
 }
 
 export function nextActionInstructions(goal: string): string {
@@ -1448,8 +1483,9 @@ export function operationCriteria(operations: readonly DriveOperation[]): Record
 export function valueCriteria(
   facts: Record<string, string>,
   row?: WireRow,
+  rows: readonly WireRow[] = [],
 ): Record<string, string> {
-  const keys = row === undefined ? Object.keys(facts) : matchingFactKeys(facts, row);
+  const keys = row === undefined ? Object.keys(facts) : matchingFactKeys(facts, row, rows);
   const from = keys.length > 0 ? keys : Object.keys(facts);
   const criteria: Record<string, string> = {};
   for (const key of from) {
@@ -1510,6 +1546,7 @@ export function driveTargetSets(
       facts,
       pageOptions,
       maskText,
+      rows,
     ),
     remaining,
   );
@@ -1579,7 +1616,7 @@ export function buildDriveQuestions(
     sets.TYPE_TEXT.some(
       (candidate) =>
         allowsGoalValueAssignment(candidate.row) &&
-        matchingFactKeys(facts, candidate.row).length === 0,
+        matchingFactKeys(facts, candidate.row, rows).length === 0,
     )
   ) {
     questions[DRIVE_VALUE_QUESTION] = {
@@ -1919,7 +1956,7 @@ export function decideAfterJev(input: {
       // An explicitly supplied matching fact wins over the inbox path: a
       // resumed drive carrying the OTP must type it, not re-read the inbox
       // (which returns the same needs_value handoff when Gmail lags).
-      const matched = matchingFactKeys(input.facts, row);
+      const matched = matchingFactKeys(input.facts, row, input.rows);
       if (matched.length > 0) {
         const filled = fillActionForCandidate(candidate, input.facts, matched[0]!, confidence);
         return filled ?? { kind: "needs_value", field: fieldLabelForRow(row) };
@@ -1969,7 +2006,7 @@ export function decideAfterJev(input: {
       return { kind: "needs_value", field: fieldLabelForRow(row) };
     }
     if (choice === "SELECT") {
-      const key = matchingFactKeys(input.facts, row)[0];
+      const key = matchingFactKeys(input.facts, row, input.rows)[0];
       let text = candidate.option ?? (key === undefined ? undefined : input.facts[key]);
       if (text === undefined && !isIdentityOrPaymentRow(row)) {
         const pageOptions = input.pageOptions ?? new Map();
@@ -3286,14 +3323,30 @@ async function driveLoop(input: {
 
     // A same-document stage swap (Shopify one-page checkout) and a hydrating
     // checkout both leave the snapshot empty for a while. Re-observe on the
-    // whole budget, then stop: there is no action to choose from zero rows, so
-    // Jev is never asked to rule on an empty snapshot.
+    // whole budget first. A snapshot still empty afterwards carries no action
+    // to choose, but the page text still says whether the goal landed — an
+    // order confirmation renders as prose — so the only question asked is the
+    // terminal one, never an action with no target.
     if (rows.length === 0) {
       if (emptySnapshotWaits >= DRIVE_EMPTY_SNAPSHOT_WAITS) {
+        const terminalQuestion = terminalOnlyQuestion(drive.goal);
+        const terminalState = buildJevState(
+          drive.goal,
+          Object.keys(drive.facts),
+          drive.history,
+          observation.url,
+          observation.semantic?.title,
+          [],
+          pageTextFromObservation(observation),
+        );
+        const terminal = await ask(terminalState, terminalQuestion);
+        if (!("result" in terminal)) return terminal;
+        const answered = terminal.result.answers.operation?.choice;
+        if (answered === DRIVE_FIXED_DONE) return finish("complete");
         return finish("stuck", {
           question: {
-            question: nextActionInstructions(drive.goal),
-            options: actionCriteria(rows, includePayment),
+            question: terminalQuestion.operation.instructions,
+            options: terminalQuestion.operation.criteria,
           },
         });
       }
@@ -3322,10 +3375,17 @@ async function driveLoop(input: {
       pageUrl,
     );
     // inject_card writes only pan/cvv. Expiry, cardholder name, and billing
-    // are typed after release. A leftover state/country SELECT must not
-    // block that split: Jev then clicks the expiry picker (a date field)
-    // instead of naming the card number.
-    const remainingTypes = remainingFills.filter((candidate) => !isSelectRow(candidate.row));
+    // are typed after release. This list excludes SELECT rows only — a
+    // leftover state/country dropdown must not hold the card back. An
+    // unfilled OTP or site-search row stays in it and does hold the gate, so
+    // an outstanding email verification is settled before the PAN is released.
+    const remainingTypes = typeableCandidates(
+      rows,
+      drive.facts,
+      includePayment,
+      drive.filledRefs,
+      pageUrl,
+    );
     if (
       includePayment &&
       (!alreadyCard || cardRetry) &&
