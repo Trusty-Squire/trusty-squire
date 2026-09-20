@@ -203,9 +203,12 @@ describe("drive snapshot conversion", () => {
     expect(rows[0]?.[2]).toContain("pt=\\d{2}/\\d{4}");
     expect(rows[0]?.[2]).toContain("im=numeric");
     expect(rows[0]?.[2]).toMatch(/(?:^|\|)s=[^|]*i/);
-    expect(matchingFactKeys({ card_ref: "card-1", card_expiry_long: "12/2030", card_expiry: "12/30" }, rows[0]!)).toEqual([
-      "card_expiry_long",
-    ]);
+    expect(
+      matchingFactKeys(
+        { card_ref: "card-1", card_expiry_long: "12/2030", card_expiry: "12/30" },
+        rows[0]!,
+      ),
+    ).toEqual(["card_expiry_long"]);
   });
 
   it("maps a fillable combobox to a text field, not a select", () => {

@@ -596,8 +596,8 @@ const CARD_EXPIRY_FACT = "card_expiry";
 const CARD_EXPIRY_LONG_FACT = "card_expiry_long";
 const CARD_NAME_FACT = "card_name";
 const EXP_YEAR_SHORT_FACT = "exp_year_short";
-/** Facts only a card release may write. A host cannot supply them and they
- * never outlive the release that produced them. */
+/** Facts a card release owns. A release rebuilds every one of them, so a value
+ * an earlier release or the caller left behind never outlives it. */
 const CARD_DERIVED_FACTS = new Set([
   CARD_EXPIRY_FACT,
   CARD_EXPIRY_LONG_FACT,
@@ -679,11 +679,7 @@ function expiryDigits(value: string): string {
   return value.replace(/\D/g, "");
 }
 
-function expiryWriteRejectedOrTruncated(
-  row: WireRow,
-  written: string,
-  long: string,
-): boolean {
+function expiryWriteRejectedOrTruncated(row: WireRow, written: string, long: string): boolean {
   const current = rowCurrentValue(row);
   if (current === undefined || current.length === 0) return true;
   if (factValuesMatch(current, long) || factValuesMatch(current, written)) {
@@ -3056,7 +3052,13 @@ async function driveLoop(input: {
     if (decision.kind === "complete") {
       const completeSnap = await snapshotOrTimeout(framesIfNeeded());
       if (completeSnap !== "ok") return completeSnap;
-      const fresh = progressFingerprint(observation.url, rows, drive, session, observation.dom ?? "");
+      const fresh = progressFingerprint(
+        observation.url,
+        rows,
+        drive,
+        session,
+        observation.dom ?? "",
+      );
       if (drive.boundFingerprint !== null && fresh !== drive.boundFingerprint) {
         drive.consumedActionKey = null;
         return "continue";
@@ -3093,7 +3095,13 @@ async function driveLoop(input: {
         ...(jevMs === undefined ? {} : { jev_ms: jevMs }),
       });
       drive.history.push("wait");
-      drive.lastFingerprint = progressFingerprint(observation.url, rows, drive, session, observation.dom ?? "");
+      drive.lastFingerprint = progressFingerprint(
+        observation.url,
+        rows,
+        drive,
+        session,
+        observation.dom ?? "",
+      );
       drive.lastActionKey = "WAIT";
       drive.consumedActionKey = null;
       return "continue";
@@ -3132,7 +3140,13 @@ async function driveLoop(input: {
         reason: decision.reason,
       });
     }
-    const fingerprint = progressFingerprint(observation?.url ?? "", rows, drive, session, observation?.dom ?? "");
+    const fingerprint = progressFingerprint(
+      observation?.url ?? "",
+      rows,
+      drive,
+      session,
+      observation?.dom ?? "",
+    );
     if (drive.boundFingerprint !== null && fingerprint !== drive.boundFingerprint) {
       drive.consumedActionKey = null;
       return "continue";
@@ -3235,7 +3249,13 @@ async function driveLoop(input: {
         ...takeActProfile(drive),
       });
       drive.history.push("inject card");
-      const nextFingerprint = progressFingerprint(observation.url, rows, drive, session, observation.dom ?? "");
+      const nextFingerprint = progressFingerprint(
+        observation.url,
+        rows,
+        drive,
+        session,
+        observation.dom ?? "",
+      );
       return await noteProgress(fingerprint, nextFingerprint, decision.actionKey);
     }
 
@@ -3287,7 +3307,13 @@ async function driveLoop(input: {
       drive.history.push(
         verification.code !== null ? "type verification code" : "open verification link",
       );
-      const nextFingerprint = progressFingerprint(observation.url, rows, drive, session, observation.dom ?? "");
+      const nextFingerprint = progressFingerprint(
+        observation.url,
+        rows,
+        drive,
+        session,
+        observation.dom ?? "",
+      );
       return await noteProgress(fingerprint, nextFingerprint, decision.actionKey);
     }
 
@@ -3384,7 +3410,13 @@ async function driveLoop(input: {
         drive.filledRefs.push(decision.actionKey);
       }
     }
-    const nextFingerprint = progressFingerprint(observation.url, rows, drive, session, observation.dom ?? "");
+    const nextFingerprint = progressFingerprint(
+      observation.url,
+      rows,
+      drive,
+      session,
+      observation.dom ?? "",
+    );
     appendDriveTrace(session, {
       at: "after_act",
       step: drive.trajectory.length,
@@ -3404,7 +3436,13 @@ async function driveLoop(input: {
     // approval that completed on the phone) must pass the consume-once gate
     // on its first post-resume attempt instead of bouncing off a
     // boundFingerprint left over from the previous drive call.
-    drive.boundFingerprint = progressFingerprint(observation.url, rows, drive, session, observation.dom ?? "");
+    drive.boundFingerprint = progressFingerprint(
+      observation.url,
+      rows,
+      drive,
+      session,
+      observation.dom ?? "",
+    );
     drive.consumedActionKey = null;
     const resumed = await applyDecision(
       resumeAction(answer, rows, drive.facts, drive.goal, drive.facts.card_ref),
@@ -3462,7 +3500,13 @@ async function driveLoop(input: {
     comboboxMustYield = false;
     if (comboboxFill !== undefined) {
       comboboxAttempts.add(comboboxObservation);
-      drive.boundFingerprint = progressFingerprint(observation.url, rows, drive, session, observation.dom ?? "");
+      drive.boundFingerprint = progressFingerprint(
+        observation.url,
+        rows,
+        drive,
+        session,
+        observation.dom ?? "",
+      );
       drive.consumedActionKey = null;
       const applied = await applyDecision({
         kind: "act",
@@ -3541,7 +3585,11 @@ async function driveLoop(input: {
     }
     const typeAttemptKey =
       typeFill === undefined ? undefined : `${comboboxObservation}\t${typeFill.target}`;
-    if (typeFill !== undefined && typeAttemptKey !== undefined && !typeAttempts.has(typeAttemptKey)) {
+    if (
+      typeFill !== undefined &&
+      typeAttemptKey !== undefined &&
+      !typeAttempts.has(typeAttemptKey)
+    ) {
       typeAttempts.add(typeAttemptKey);
       if (typeFill.text === drive.facts[CARD_EXPIRY_FACT]) {
         expiryShortWrittenRefs.add(typeFill.target);
@@ -3627,7 +3675,13 @@ async function driveLoop(input: {
       // describes the preceding action; without rebinding, applyDecision's
       // consume-once gate returns "continue" forever and this branch spins
       // without acting until the time budget expires.
-      drive.boundFingerprint = progressFingerprint(observation.url, rows, drive, session, observation.dom ?? "");
+      drive.boundFingerprint = progressFingerprint(
+        observation.url,
+        rows,
+        drive,
+        session,
+        observation.dom ?? "",
+      );
       drive.consumedActionKey = null;
       const applied = await applyDecision({
         kind: "act",
@@ -3684,7 +3738,13 @@ async function driveLoop(input: {
     const prepareMs = Date.now() - prepareStarted;
     const questionCount = Object.keys(questions).length;
     const stateBytes = Buffer.byteLength(JSON.stringify(state));
-    const fingerprint = progressFingerprint(observation.url, rows, drive, session, observation.dom ?? "");
+    const fingerprint = progressFingerprint(
+      observation.url,
+      rows,
+      drive,
+      session,
+      observation.dom ?? "",
+    );
     if (drive.boundFingerprint !== fingerprint) drive.consumedActionKey = null;
     drive.boundFingerprint = fingerprint;
     const decide = (answers: Record<string, JevAnswer>): DriveDecision =>

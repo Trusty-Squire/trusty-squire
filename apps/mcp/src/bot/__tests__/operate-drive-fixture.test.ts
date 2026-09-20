@@ -428,8 +428,7 @@ describe("operate_drive real-browser fixture", () => {
       const result = await runOperateDrive(
         {
           session_id: started.session_id,
-          goal:
-            "Buy one item: fill the contact and shipping details, pay with the saved card, and stop when the order is confirmed",
+          goal: "Buy one item: fill the contact and shipping details, pay with the saved card, and stop when the order is confirmed",
           facts: {
             email: "ada@fixture.test",
             first_name: "Ada",
@@ -540,9 +539,9 @@ describe("operate_drive real-browser fixture", () => {
       // "stuck".
       expect(result.status).toBe("complete");
       expect(result.trajectory.filter((step) => step.action === "type")).toHaveLength(1);
-      expect(
-        result.trajectory.filter((step) => step.action === "wait").length,
-      ).toBeGreaterThan(DRIVE_EMPTY_SNAPSHOT_WAITS);
+      expect(result.trajectory.filter((step) => step.action === "wait").length).toBeGreaterThan(
+        DRIVE_EMPTY_SNAPSHOT_WAITS,
+      );
     } finally {
       await finishProvisionSession(started.session_id);
       await context.close();
@@ -576,7 +575,11 @@ describe("operate_drive real-browser fixture", () => {
               elapsedMs: 5,
               result: {
                 answers: {
-                  operation: { choice: answer, confidence: 0.9, probabilities: peaked(keys, answer) },
+                  operation: {
+                    choice: answer,
+                    confidence: 0.9,
+                    probabilities: peaked(keys, answer),
+                  },
                 },
               },
             };
@@ -1340,75 +1343,73 @@ describe("operate_drive real-browser fixture", () => {
 </main>
 <div id="cover" style="position:absolute;top:0;left:0;width:220px;height:60px"></div>
 <button style="margin-top:80px" onclick="document.querySelector('#cover').remove();this.remove()">Dismiss</button>`;
-      const { context, page, started } = await openFixture(html, "country-occluded.test");
-      const outcomes: string[] = [];
-      let modelCalls = 0;
-      try {
-        const dependencies = deps(async (_api, _state, questions) => {
-          modelCalls += 1;
-          if (modelCalls > 2) return jevFromQuestions(questions, true);
-          if (modelCalls === 1) {
-            expect(outcomes).toEqual(["stale"]);
-            expect(await page.locator("#options").isVisible()).toBe(false);
-          } else {
-            expect(outcomes).toEqual(["stale", "ok", "ok"]);
-            expect(await page.locator("#options").isVisible()).toBe(true);
-          }
-          const head = questions.CLICK_target;
-          if (head?.type !== "choice") throw new Error("missing CLICK recovery");
-          const target = Object.keys(head.criteria).find(
-            (key) => head.criteria[key] === (modelCalls === 1 ? "Dismiss" : "Canada"),
-          );
-          if (target === undefined) throw new Error("missing recovery target");
-          const result = jevFromQuestions(questions);
-          for (const [name, pick] of [
-            ["operation", "CLICK"],
-            ["CLICK_target", target],
-          ] as const) {
-            const question = questions[name];
-            if (question?.type !== "choice") throw new Error(`missing ${name}`);
-            result.result.answers[name] = {
-              choice: pick,
-              confidence: 0.93,
-              probabilities: peaked(Object.keys(question.criteria), pick),
-            };
-          }
-          return result;
-        });
-        dependencies.driveAct = async (_sessionId, action) => {
-          const result = await driveActOnPage(page, action);
-          outcomes.push(result.kind);
-          if (outcomes.length === 1) {
-            expect(result.kind).toBe("stale");
-            await page.locator("#country").evaluate((element) => {
-              element.setAttribute("aria-label", "Country choice");
-            });
-          }
-          return result;
-        };
-        const handoff = await runOperateDrive(
-          {
-            session_id: started.session_id,
-            goal: "Choose Canada as the country",
-            facts: { country: "Canada" },
-            max_steps: 8,
-          },
-          api(),
-          undefined,
-          dependencies,
+    const { context, page, started } = await openFixture(html, "country-occluded.test");
+    const outcomes: string[] = [];
+    let modelCalls = 0;
+    try {
+      const dependencies = deps(async (_api, _state, questions) => {
+        modelCalls += 1;
+        if (modelCalls > 2) return jevFromQuestions(questions, true);
+        if (modelCalls === 1) {
+          expect(outcomes).toEqual(["stale"]);
+          expect(await page.locator("#options").isVisible()).toBe(false);
+        } else {
+          expect(outcomes).toEqual(["stale", "ok", "ok"]);
+          expect(await page.locator("#options").isVisible()).toBe(true);
+        }
+        const head = questions.CLICK_target;
+        if (head?.type !== "choice") throw new Error("missing CLICK recovery");
+        const target = Object.keys(head.criteria).find(
+          (key) => head.criteria[key] === (modelCalls === 1 ? "Dismiss" : "Canada"),
         );
-        expect(handoff.status).toBe("complete");
-        expect(modelCalls).toBe(3);
-        expect(outcomes).toEqual(["stale", "ok", "ok", "ok"]);
-        expect(await page.locator("#country").textContent()).toBe("Canada");
-        expect(handoff.trajectory[0]?.action).toBe("click");
-      } finally {
-        await finishProvisionSession(started.session_id);
-        await context.close();
-      }
-    },
-    30_000,
-  );
+        if (target === undefined) throw new Error("missing recovery target");
+        const result = jevFromQuestions(questions);
+        for (const [name, pick] of [
+          ["operation", "CLICK"],
+          ["CLICK_target", target],
+        ] as const) {
+          const question = questions[name];
+          if (question?.type !== "choice") throw new Error(`missing ${name}`);
+          result.result.answers[name] = {
+            choice: pick,
+            confidence: 0.93,
+            probabilities: peaked(Object.keys(question.criteria), pick),
+          };
+        }
+        return result;
+      });
+      dependencies.driveAct = async (_sessionId, action) => {
+        const result = await driveActOnPage(page, action);
+        outcomes.push(result.kind);
+        if (outcomes.length === 1) {
+          expect(result.kind).toBe("stale");
+          await page.locator("#country").evaluate((element) => {
+            element.setAttribute("aria-label", "Country choice");
+          });
+        }
+        return result;
+      };
+      const handoff = await runOperateDrive(
+        {
+          session_id: started.session_id,
+          goal: "Choose Canada as the country",
+          facts: { country: "Canada" },
+          max_steps: 8,
+        },
+        api(),
+        undefined,
+        dependencies,
+      );
+      expect(handoff.status).toBe("complete");
+      expect(modelCalls).toBe(3);
+      expect(outcomes).toEqual(["stale", "ok", "ok", "ok"]);
+      expect(await page.locator("#country").textContent()).toBe("Canada");
+      expect(handoff.trajectory[0]?.action).toBe("click");
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
 
   it.each(["button", "option"])(
     "yields Billing Country's Canada %s without marking Shipping Country filled",

@@ -37,7 +37,6 @@ import {
   operationsForRow,
   mergeFacts,
   nextActionInstructions,
-  operationCriteria,
   observationFingerprint,
   pageTextFromObservation,
   peakedProbabilities,
@@ -51,7 +50,6 @@ import {
   ensureGeneratedFacts,
   isExpiryRow,
   isCardholderNameRow,
-  isSelectRow,
   selectTargetKey,
   selectTargets,
   selectCandidates,
@@ -454,10 +452,11 @@ describe("decideAfterJev stop reasons", () => {
     const fullName: WireRow = ["@e:full", "t", "Full name|s=r"];
     // ensureGeneratedFacts has already synthesized the shipping name by the
     // time the card is released, many steps into the drive.
-    const shipping = ensureGeneratedFacts(
-      [fullName],
-      { first_name: "Ada", last_name: "Lovelace", card_ref: "card-1" },
-    );
+    const shipping = ensureGeneratedFacts([fullName], {
+      first_name: "Ada",
+      last_name: "Lovelace",
+      card_ref: "card-1",
+    });
     expect(shipping.name).toBe("Ada Lovelace");
     const facts = applyReleasedCardFacts(shipping, {
       exp_month: "12",
@@ -646,7 +645,10 @@ describe("decideAfterJev stop reasons", () => {
 
   it("copies released card public fields so expiry can be typed after inject", () => {
     expect(
-      applyReleasedCardFacts({ email: "a@b.test" }, { exp_month: "12", exp_year: "2030", name: "Ada" }),
+      applyReleasedCardFacts(
+        { email: "a@b.test" },
+        { exp_month: "12", exp_year: "2030", name: "Ada" },
+      ),
     ).toEqual({
       email: "a@b.test",
       exp_month: "12",
@@ -900,15 +902,12 @@ describe("decideAfterJev stop reasons", () => {
     expect(isExpiryRow(passport)).toBe(false);
     expect(matchingFactKeys(facts, passport)).toEqual([]);
     // Not a deferred payment control, so it stays a reportable required field.
-    expect(requiredFillableMissingFact([passport], { card_ref: "card-1" })?.ref).toBe(
-      "@e:pp",
-    );
+    expect(requiredFillableMissingFact([passport], { card_ref: "card-1" })?.ref).toBe("@e:pp");
   });
 
   it("gives the card expiry control the card value even when a travel date fact exists", () => {
     const cardExpiry: WireRow = ["@e:exp", "t", "Expiration date (MM / YY)|f=date|s=r"];
     const departure: WireRow = ["@e:dep", "t", "Departure date|f=date"];
-    const rows = [cardExpiry, departure, PAYMENT];
     const facts = applyReleasedCardFacts(
       { date: "2026-12-01", card_ref: "card-1" },
       { exp_month: "12", exp_year: "2030", name: "Ada" },
@@ -923,7 +922,6 @@ describe("decideAfterJev stop reasons", () => {
   it("sends split month and year controls their own released card fields", () => {
     const month: WireRow = ["@e:m", "t", "Expiration month|f=date"];
     const year: WireRow = ["@e:y", "t", "Expiration year|f=date"];
-    const rows = [month, year, PAYMENT];
     const facts = applyReleasedCardFacts(
       { card_ref: "card-1" },
       { exp_month: "12", exp_year: "2030", name: "Ada" },
