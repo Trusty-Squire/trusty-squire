@@ -119,6 +119,7 @@ import {
   isGoalDestinationRow,
   isSectionNavRow,
   unvisitedSectionNavRows,
+  nextExploreRow,
   sectionIdentity,
   isEligibleSectionNavRow,
   isSamePageAnchorRow,
@@ -1906,6 +1907,10 @@ describe("form-fill assignment helpers", () => {
         "stuck",
         true,
         0,
+        "",
+        "",
+        "",
+        true,
       ),
     ).toEqual({ kind: "link" });
     expect(
@@ -1919,6 +1924,10 @@ describe("form-fill assignment helpers", () => {
         "stuck",
         true,
         0,
+        "",
+        "",
+        "",
+        true,
       ),
     ).toEqual({ kind: "link" });
     expect(
@@ -1937,6 +1946,7 @@ describe("form-fill assignment helpers", () => {
       ),
     ).toBe(true);
     expect(pageSuggestsInboxWait([], "https://app.example.test/email/verify")).toBe(true);
+    expect(pageSuggestsInboxWait([], "https://app.example.test/verifications")).toBe(true);
     expect(pageSuggestsInboxWait([], "https://app.example.test/signup/confirm")).toBe(true);
     expect(inboxSpecialPlan([...ROWS, otp], "stuck", true, 0)).toEqual({
       kind: "otp",
@@ -1953,6 +1963,8 @@ describe("form-fill assignment helpers", () => {
         0,
         "https://app.example.test/signup",
         "Check your email",
+        "",
+        true,
       ),
     ).toEqual({ kind: "link" });
     expect(
@@ -1968,6 +1980,8 @@ describe("form-fill assignment helpers", () => {
         2,
         "https://app.example.test/signup",
         "Check your email",
+        "",
+        true,
       ),
     ).toEqual({ kind: "link" });
     expect(
@@ -2002,7 +2016,7 @@ describe("form-fill assignment helpers", () => {
         "",
         "complete email verification and create an API key",
       ),
-    ).toEqual({ kind: "link" });
+    ).toBeUndefined();
     expect(
       inboxSpecialPlan(
         [
@@ -2017,6 +2031,7 @@ describe("form-fill assignment helpers", () => {
         "https://app.example.test/signup/confirm",
         "",
         "complete email verification and create an API key",
+        true,
       ),
     ).toEqual({ kind: "link" });
     expect(
@@ -2032,6 +2047,7 @@ describe("form-fill assignment helpers", () => {
         "https://app.example.test/signup",
         "",
         "complete email verification and create an API key",
+        true,
       ),
     ).toEqual({ kind: "link" });
     expect(
@@ -2048,6 +2064,19 @@ describe("form-fill assignment helpers", () => {
       ),
     ).toBeUndefined();
     const checkEmail: WireRow[] = [["@e:h", "h1", "Check your email"]];
+    const verifyAtStart = driveTargetSets(
+      checkEmail,
+      {},
+      false,
+      [],
+      "https://app.example.test/verifications",
+      new Map(),
+      (text) => text,
+      [],
+      { headings: ["Check your email"], goal: "complete email verification" },
+    );
+    expect(verifyAtStart.operations).not.toContain("INBOX");
+    expect(pageSuggestsInboxWait(checkEmail, "https://app.example.test/verifications")).toBe(true);
     const inboxSets = driveTargetSets(
       checkEmail,
       {},
@@ -2057,7 +2086,11 @@ describe("form-fill assignment helpers", () => {
       new Map(),
       (text) => text,
       [],
-      { headings: ["Check your email"], goal: "complete email verification" },
+      {
+        headings: ["Check your email"],
+        goal: "complete email verification",
+        submittedThisDrive: true,
+      },
     );
     expect(inboxSets.operations).toContain("INBOX");
     expect(inboxSets.operations).not.toContain("BLOCKED");
@@ -2103,6 +2136,7 @@ describe("form-fill assignment helpers", () => {
         "https://app.example.test/signup",
         "",
         "sign up and complete email verification",
+        true,
       ),
     ).toEqual({ kind: "link" });
     expect(
@@ -3118,9 +3152,20 @@ describe("post-confirmation navigation", () => {
   it("identifies a section by destination and label, not by reminted ref or current path", () => {
     const fromDash: WireRow = ["@e:f0d3", "l", "Emails|u=https://app.example.test/emails"];
     const reminted: WireRow = ["@e:f0d11", "l", "Emails|u=https://app.example.test/emails"];
+    const tab: WireRow = ["@e:rep", "tb", "Reputation"];
+    expect(sectionIdentity(tab, "https://app.example.test/settings")).toBe(
+      sectionIdentity(tab, "https://app.example.test/reputation"),
+    );
     expect(sectionIdentity(fromDash, "https://app.example.test/dashboard")).toBe(
       sectionIdentity(reminted, "https://app.example.test/console"),
     );
+    expect(
+      nextExploreRow(
+        [reminted],
+        [sectionIdentity(fromDash, "https://app.example.test/dashboard")],
+        "https://app.example.test/console",
+      ),
+    ).toBeUndefined();
     expect(
       unvisitedSectionNavRows(
         [reminted],
