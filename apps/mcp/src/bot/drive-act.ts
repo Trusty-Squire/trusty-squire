@@ -1,8 +1,8 @@
-// Drive-loop act: one registry lookup + occlusion guard, then one CDP click
-// or insertText (native select sets value in that same evaluate). No Playwright
-// locator actionability polling and no resolveFreshActTarget re-extraction.
+// Drive-loop act: registry lookup + occlusion guard, then a Playwright
+// locator click/type (actionability) unless the target is a cross-origin
+// OOPIF the locator cannot reach — that case keeps CDP coordinates.
 
-import type { Frame, Page } from "playwright";
+import type { ElementHandle, Frame, Page } from "playwright";
 import { evaluateBound } from "./drive-evaluate.js";
 import type { ProvisionAction } from "./provision-session.js";
 
@@ -52,6 +52,67 @@ export function resolveDriveFrame(page: Page, ref: string): Frame {
   const ordinal = frameOrdinalOf(ref);
   const frames = page.frames();
   return frames[ordinal] ?? page.mainFrame();
+}
+
+/** CDP coordinates are only for a cross-origin child frame a locator cannot reach. */
+export function drivePointerUsesCdp(reachedTop: boolean, frameIsMain: boolean): boolean {
+  return !reachedTop && !frameIsMain;
+}
+
+const LOCATOR_ACT_TIMEOUT_MS = 5000;
+
+async function resolveDriveElement(
+  frame: Frame,
+  ref: string,
+): Promise<ElementHandle<Element> | null> {
+  const handle = await frame.evaluateHandle(
+    (input: { ref: string }) => {
+      type DriveCache = { nodes: Map<string, Element> };
+      const root = window as Window & { __tsDriveRegistry?: DriveCache };
+      return root.__tsDriveRegistry?.nodes.get(input.ref) ?? null;
+    },
+    { ref },
+  );
+  const element = handle.asElement();
+  if (element === null) {
+    await handle.dispose().catch(() => undefined);
+    return null;
+  }
+  return element;
+}
+
+async function clickDriveElement(frame: Frame, ref: string): Promise<boolean> {
+  const element = await resolveDriveElement(frame, ref);
+  if (element === null) return false;
+  try {
+    await element.scrollIntoViewIfNeeded().catch(() => undefined);
+    await element.click({ timeout: LOCATOR_ACT_TIMEOUT_MS });
+    return true;
+  } catch {
+    return false;
+  } finally {
+    await element.dispose().catch(() => undefined);
+  }
+}
+
+async function typeDriveElement(frame: Frame, ref: string, text: string): Promise<boolean> {
+  const element = await resolveDriveElement(frame, ref);
+  if (element === null) return false;
+  try {
+    await element.scrollIntoViewIfNeeded().catch(() => undefined);
+    await element.click({ timeout: LOCATOR_ACT_TIMEOUT_MS });
+    const isField = await element.evaluate(
+      (node) => node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement,
+    );
+    if (!isField) return false;
+    await element.fill("");
+    await element.type(text, { delay: 20 });
+    return true;
+  } catch {
+    return false;
+  } finally {
+    await element.dispose().catch(() => undefined);
+  }
 }
 
 function inPageGuard(input: {
@@ -448,14 +509,40 @@ export async function driveActOnPage(page: Page, action: ProvisionAction): Promi
   if (!guard.ok) return { kind: "stale", reason: guard.reason, ...timings };
   if (action.kind === "select")
     return { kind: "ok", combobox: false, searchSubmit: false, ...timings };
-  // Drive clicks use CDP at the guard's cached center. Listbox/combobox
-  // widgets often re-render the list before that event lands, so the
-  // option's select handler never fires. A fresh role=option locator,
-  // then Enter, then a filter input event, is the family commit — not
-  // coordinates.
+  // Listbox/combobox options: fresh role locator, then Enter, then filter.
+  // Ordinary same-document clicks: Playwright actionability. CDP coordinates
+  // stay only for a cross-origin OOPIF the locator cannot reach.
   if (action.kind === "click") {
     const listClicked = await clickDriveListOption(frame, action.target);
     if (listClicked) {
+      return {
+        kind: "ok",
+        combobox: guard.combobox,
+        searchSubmit: guard.searchSubmit,
+        ...timings,
+      };
+    }
+    if (!drivePointerUsesCdp(guard.reachedTop, frame === page.mainFrame())) {
+      const clicked = await clickDriveElement(frame, action.target);
+      if (!clicked) {
+        return { kind: "stale", reason: "locator_click_failed", ...timings };
+      }
+      return {
+        kind: "ok",
+        combobox: guard.combobox,
+        searchSubmit: guard.searchSubmit,
+        ...timings,
+      };
+    }
+  }
+  if (
+    action.kind === "type" &&
+    !guard.combobox &&
+    !drivePointerUsesCdp(guard.reachedTop, frame === page.mainFrame())
+  ) {
+    const typed = await typeDriveElement(frame, action.target, action.text ?? "");
+    if (typed) {
+      if (guard.searchSubmit) await page.keyboard.press("Enter").catch(() => undefined);
       return {
         kind: "ok",
         combobox: guard.combobox,
