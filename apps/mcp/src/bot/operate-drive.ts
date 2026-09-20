@@ -1192,6 +1192,31 @@ export function isListFilterRow(row: WireRow): boolean {
   );
 }
 
+const CONTEXT_PICKER_LABEL =
+  /^(?:environment|plan|workspace|project|region|organization|org|team)s?\b/;
+const CONTEXT_PICKER_VALUE = /^(?:production|sandbox|staging|live|test)\b/;
+
+export function isContextPickerRow(row: WireRow): boolean {
+  if (isListFilterRow(row)) return true;
+  const label = readableLabel(row).toLowerCase().trim();
+  const contextNoun =
+    CONTEXT_PICKER_LABEL.test(label) ||
+    CONTEXT_PICKER_VALUE.test(label) ||
+    /\b(?:environment|plan)\b/.test(label);
+  if (!contextNoun) return false;
+  return (
+    row[1] === "c" ||
+    row[1] === "combobox" ||
+    row[1] === "s" ||
+    row[1] === "select" ||
+    row[1] === "b" ||
+    row[1] === "button" ||
+    row[1] === "tb" ||
+    row[1] === "tab" ||
+    isPickerRow(row)
+  );
+}
+
 export function rowHref(row: WireRow): string | undefined {
   const match = /(?:^|\|)u=([^|]+)/.exec(row[2] ?? "");
   return match?.[1];
@@ -1224,7 +1249,13 @@ export function isOffProductNavRow(row: WireRow, pageUrl: string): boolean {
 }
 
 export function isGoalDestinationRow(row: WireRow): boolean {
-  if (isListFilterRow(row) || isFillableRow(row) || isConsentRow(row) || isCodeSampleRow(row)) {
+  if (
+    isListFilterRow(row) ||
+    isContextPickerRow(row) ||
+    isFillableRow(row) ||
+    isConsentRow(row) ||
+    isCodeSampleRow(row)
+  ) {
     return false;
   }
   return (
@@ -1243,10 +1274,13 @@ const SECTION_NAV_NOTICE =
   /more information|reactivat|provide more|complete your|verify your identity/;
 const PAGE_LEVEL_ANSWER =
   /more information|reactivat|provide more|account (?:is |has been )?(?:suspend|restrict|locked|disabled|on hold)|needs (?:more )?(?:information|attention)|complete (?:your )?(?:profile|verification|account)/i;
+const SECTION_TAB_WORDS =
+  /^(?:account|apps?|billing|profile|general|team|members?|security|notifications?|integrations?|overview|usage|audit|keys|settings|reputation|emails?|domains?|webhooks?|logs?|activity|analytics|reports?|developers?|api|dashboard|console)$/;
 
 export function isSectionNavRow(row: WireRow): boolean {
   if (
     isListFilterRow(row) ||
+    isContextPickerRow(row) ||
     isFillableRow(row) ||
     isSubmitLikeRow(row) ||
     isOauthChromeRow(row) ||
@@ -1257,7 +1291,10 @@ export function isSectionNavRow(row: WireRow): boolean {
   const label = readableLabel(row).toLowerCase();
   if (SECTION_NAV_SKIP.test(label)) return false;
   if (row[1] === "tb" || row[1] === "tab") return true;
-  return row[1] === "l" || row[1] === "link";
+  const isLink = row[1] === "l" || row[1] === "link";
+  const isButton = row[1] === "b" || row[1] === "button";
+  if (!isLink && !isButton) return false;
+  return SECTION_TAB_WORDS.test(label);
 }
 
 export function isCompactSectionLabel(label: string): boolean {
@@ -1338,6 +1375,12 @@ export function isDeeperDestination(href: string | undefined, pageUrl: string): 
   }
 }
 
+export function isListedEntityRow(row: WireRow): boolean {
+  const match = /(?:^|\|)q=(\d+)\/(\d+)/.exec(row[2] ?? "");
+  if (match === null) return false;
+  return Number(match[2]) >= 3;
+}
+
 export function listedItemRows(rows: readonly WireRow[], pageUrl: string): WireRow[] {
   const hasCreate = rows.some((row) => isCreateEntryRow(row));
   return rows.filter((row) => {
@@ -1351,7 +1394,8 @@ export function listedItemRows(rows: readonly WireRow[], pageUrl: string): WireR
     if (isAlreadyHereNav(row, pageUrl)) return false;
     if (SECTION_NAV_SKIP.test(readableLabel(row).toLowerCase())) return false;
     if (isDeeperDestination(rowHref(row), pageUrl)) return true;
-    return hasCreate;
+    if (isListedEntityRow(row)) return true;
+    return hasCreate && !isEligibleSectionNavRow(row, pageUrl);
   });
 }
 
@@ -1690,9 +1734,11 @@ export function nextExploreRow(
 }
 
 function shouldRecordVisit(row: WireRow, pageUrl: string): boolean {
-  if (isOffProductNavRow(row, pageUrl) || isAppRootOrLogoRow(row, pageUrl)) return false;
+  if (isFillableRow(row) || isConsentRow(row) || isSubmitLikeRow(row) || isContextPickerRow(row)) {
+    return false;
+  }
   if (isSamePageAnchorRow(row, pageUrl)) return false;
-  if (isEligibleSectionNavRow(row, pageUrl)) return true;
+  if (isEligibleSectionNavRow(row, pageUrl) || isOffProductNavRow(row, pageUrl)) return true;
   const kind = row[1];
   return kind === "l" || kind === "link" || kind === "tb" || kind === "tab";
 }
@@ -1704,7 +1750,7 @@ function decisionIsActionable(
 }
 
 export function rowCarriesGoalNoun(row: WireRow, goal: string): boolean {
-  if (!goalSeeksKey(goal) || isConsentRow(row) || isListFilterRow(row)) return false;
+  if (!goalSeeksKey(goal) || isConsentRow(row) || isContextPickerRow(row)) return false;
   const label = readableLabel(row).toLowerCase();
   return /api\s*key|access\s*token|create\s+(?:a\s+)?(?:key|token)|credentials?|\b(?:api[-_]?keys?|tokens?)\b/.test(
     label,
@@ -1713,7 +1759,7 @@ export function rowCarriesGoalNoun(row: WireRow, goal: string): boolean {
 
 export function rowMatchesGoalSeek(row: WireRow, goal: string): boolean {
   if (rowCarriesGoalNoun(row, goal)) return true;
-  if (!goalSeeksKey(goal) || isConsentRow(row) || isListFilterRow(row)) return false;
+  if (!goalSeeksKey(goal) || isConsentRow(row) || isContextPickerRow(row)) return false;
   return /\bsettings\b/.test(readableLabel(row).toLowerCase());
 }
 
@@ -1732,11 +1778,15 @@ export function clickGoalSeekScore(row: WireRow, goal: string, pageUrl: string):
   const onSetup = pageIsPostAuthSetup(pageUrl);
   const onKeys = pageLooksLikeKeyDestination(pageUrl);
   if (!onSetup && !onKeys) return 0;
-  if (isListFilterRow(row) || isAlreadyHereNav(row, pageUrl) || isOffProductNavRow(row, pageUrl)) {
+  if (
+    isContextPickerRow(row) ||
+    isAlreadyHereNav(row, pageUrl) ||
+    isOffProductNavRow(row, pageUrl)
+  ) {
     return 0;
   }
   if (isRevealOrCopyRow(row)) return 3;
-  if (isDeeperDestination(rowHref(row), pageUrl)) return 2;
+  if (isDeeperDestination(rowHref(row), pageUrl) || isListedEntityRow(row)) return 2;
   if (rowMatchesGoalSeek(row, goal) && isGoalDestinationRow(row)) return 2;
   if (rowMatchesGoalSeek(row, goal)) return 1;
   if (onSetup && isSubmitLikeRow(row) && !isDisabledRow(row)) return 1;
@@ -3212,29 +3262,23 @@ export function driveTargetSets(
   const remaining = { n: DRIVE_MAX_CANDIDATES };
   const skipped = new Set(skippedClickRefs);
   const hideFilters = goalSeeksKey(aim.goal ?? "");
-  const hasInAppNoun = rows.some(
+  const hasInAppWork = rows.some(
     (row) =>
-      rowCarriesGoalNoun(row, aim.goal ?? "") &&
       isGoalDestinationRow(row) &&
-      !isOffProductNavRow(row, pageUrl),
+      !isOffProductNavRow(row, pageUrl) &&
+      !isAppRootOrLogoRow(row, pageUrl) &&
+      !isContextPickerRow(row),
   );
   const visited = aim.visitedSectionKeys ?? [];
   const untriedEntries = hideFilters ? untriedListedItemRows(rows, visited, pageUrl) : [];
   const keepRow = (row: WireRow): boolean => {
     if (isCodeSampleRow(row)) return false;
-    if (hideFilters && isListFilterRow(row)) return false;
-    if (hasInAppNoun && isOffProductNavRow(row, pageUrl)) return false;
+    if (hideFilters && isContextPickerRow(row)) return false;
+    if (hasInAppWork && isOffProductNavRow(row, pageUrl)) return false;
     if (isAppRootOrLogoRow(row, pageUrl) || isSamePageAnchorRow(row, pageUrl)) return false;
+    if (visited.includes(sectionIdentity(row, pageUrl))) return false;
     if (isCreateEntryRow(row) && listedItemRows(rows, pageUrl).length > 0) return false;
-    if (hideFilters && isSiblingSectionNavRow(row, pageUrl, rows)) {
-      if (visited.includes(sectionIdentity(row, pageUrl))) return false;
-      if (untriedEntries.length > 0) return false;
-    }
-    if (
-      hideFilters &&
-      listedItemRows(rows, pageUrl).some((entry) => entry[0] === row[0]) &&
-      visited.includes(sectionIdentity(row, pageUrl))
-    ) {
+    if (hideFilters && untriedEntries.length > 0 && isSiblingSectionNavRow(row, pageUrl, rows)) {
       return false;
     }
     return true;
