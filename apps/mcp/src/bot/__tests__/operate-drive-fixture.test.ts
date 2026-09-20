@@ -1008,12 +1008,24 @@ describe("operate_drive real-browser fixture", () => {
   }, 60_000);
 
   it("rewrites a rejected two-digit expiry with the four-digit year", async () => {
+    // The control states no year length anywhere the drive can read, so the
+    // first write is the two-digit form. It then refuses that value, which is
+    // the only thing that can escalate to the four-digit year.
     const html = `<!doctype html><meta charset="utf-8"><title>Long expiry</title>
 <main>
   <label>Card number <input id="pan" autocomplete="cc-number"></label>
   <label>CVV <input id="cvv" autocomplete="cc-csc"></label>
-  <label>Expiration date <input id="exp" required pattern="\\d{2}/\\d{4}"></label>
-</main>`;
+  <label>Expiration date <input id="exp" required></label>
+  <p id="writes" hidden></p>
+</main>
+<script>
+  const exp = document.getElementById("exp");
+  const writes = document.getElementById("writes");
+  exp.addEventListener("input", () => {
+    writes.textContent = writes.textContent + exp.value + ";";
+    if (!/^\\d{2}\\/\\d{4}$/.test(exp.value)) exp.value = "";
+  });
+</script>`;
     const { context, page, started } = await openFixture(html, "expiry-rewrite.test");
     try {
       const session = sessionForCall(started.session_id)!;
@@ -1051,6 +1063,7 @@ describe("operate_drive real-browser fixture", () => {
         deps(async (_api, _state, questions) => jevFromQuestions(questions, true)),
       );
       expect(result.status).not.toBe("stuck");
+      expect(await page.locator("#writes").textContent()).toBe("12/30;12/2030;");
       expect(await page.locator("#exp").inputValue()).toBe("12/2030");
     } finally {
       await finishProvisionSession(started.session_id);
