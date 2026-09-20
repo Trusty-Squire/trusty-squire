@@ -1431,6 +1431,94 @@ describe("operate_drive real-browser fixture", () => {
     }
   }, 30_000);
 
+  it("opens a listed entry before a second tab and captures the revealed key", async () => {
+    const settingsHtml = `<!doctype html><meta charset="utf-8"><title>Settings</title>
+<div role="tablist">
+  <button type="button" role="tab" id="apps">Apps</button>
+  <button type="button" role="tab" id="billing">Billing</button>
+  <button type="button" role="tab" id="account">Account</button>
+</div>
+<section id="panel">
+  <a id="one" href="/settings/apps/one">payments-api</a>
+  <a id="two" href="/settings/apps/two">billing-api</a>
+  <a id="three" href="/settings/apps/three">alerts-api</a>
+  <a id="four" href="/settings/apps/four">usage-api</a>
+  <a id="five" href="/settings/apps/five">audit-api</a>
+  <a id="new" href="/settings/apps/new">+ New app</a>
+</section>
+<script>
+  const panel = document.getElementById("panel");
+  const appsHtml = panel.innerHTML;
+  const noteTab = (name) => {
+    const prev = JSON.parse(sessionStorage.getItem("tabClicks") || "[]");
+    prev.push(name);
+    sessionStorage.setItem("tabClicks", JSON.stringify(prev));
+  };
+  document.getElementById("account").onclick = () => {
+    noteTab("account");
+    panel.innerHTML = '<label>Name <input id="name" value="Ada"></label><p id="billing-email">billing@example.test</p>';
+  };
+  document.getElementById("billing").onclick = () => {
+    noteTab("billing");
+    panel.innerHTML = "<p>Plan</p>";
+  };
+  document.getElementById("apps").onclick = () => {
+    noteTab("apps");
+    panel.innerHTML = appsHtml;
+  };
+</script>`;
+    const entryHtml = `<!doctype html><meta charset="utf-8"><title>payments-api</title>
+<main>
+  <h1>payments-api</h1>
+  <p id="secret">••••••••••••</p>
+  <button type="button" id="reveal">Reveal</button>
+</main>
+<script>
+  document.getElementById("reveal").onclick = () => {
+    document.getElementById("secret").textContent = "sk_live_fixturekey01";
+    document.getElementById("reveal").remove();
+  };
+</script>`;
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await page.route("**/*", (route) => {
+      const url = route.request().url();
+      route.fulfill({
+        contentType: "text/html",
+        body: url.includes("/settings/apps/") ? entryHtml : settingsHtml,
+      });
+    });
+    const startUrl = "https://entries-before-tabs.test/settings";
+    await page.goto(startUrl);
+    const started = await startHarnessProvisionSession({
+      browser: BrowserController.fromHarnessPage(page),
+      serviceUrl: startUrl,
+      format: "compact",
+      initialObservation: "standard",
+    });
+    try {
+      const dependencies = deps(async (_api, _state, questions) => jevFromQuestions(questions));
+      const result = await runOperateDrive(
+        { session_id: started.session_id, goal: "extract an API key", max_steps: 8 },
+        api(),
+        undefined,
+        dependencies,
+      );
+      const tabClicks = await page.evaluate(
+        () => JSON.parse(sessionStorage.getItem("tabClicks") || "[]") as string[],
+      );
+      expect(tabClicks.length).toBeLessThan(2);
+      expect(page.url()).toMatch(/\/settings\/apps\//);
+      expect(await page.locator("#secret").innerText()).toBe("sk_live_fixturekey01");
+      expect(result.status).toBe("complete");
+      expect(JSON.stringify(result)).not.toContain("sk_live_fixturekey01");
+      expect(JSON.stringify(result.observation?.safe_table)).toMatch(/@key-value\|secret=1\|len=/);
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
   it("does not treat a signed-in /verifications product page as a pre-existing session", async () => {
     const html = `<!doctype html><meta charset="utf-8"><title>Verifications</title>
 <nav>

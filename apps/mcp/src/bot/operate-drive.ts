@@ -757,6 +757,7 @@ export interface DriveAimContext {
   failedKeys?: readonly string[];
   goal?: string;
   submittedThisDrive?: boolean;
+  visitedSectionKeys?: readonly string[];
 }
 
 export function rowFormId(row: WireRow): string | undefined {
@@ -1354,6 +1355,27 @@ export function listedItemRows(rows: readonly WireRow[], pageUrl: string): WireR
   });
 }
 
+export function untriedListedItemRows(
+  rows: readonly WireRow[],
+  visitedKeys: readonly string[],
+  pageUrl: string,
+): WireRow[] {
+  return listedItemRows(rows, pageUrl).filter(
+    (row) => !visitedKeys.includes(sectionIdentity(row, pageUrl)),
+  );
+}
+
+export function isSiblingSectionNavRow(
+  row: WireRow,
+  pageUrl: string,
+  rows: readonly WireRow[] = [],
+): boolean {
+  if (!isEligibleSectionNavRow(row, pageUrl)) return false;
+  if (isDeeperDestination(rowHref(row), pageUrl)) return false;
+  if (listedItemRows(rows, pageUrl).some((entry) => entry[0] === row[0])) return false;
+  return true;
+}
+
 export function isRevealOrCopyRow(row: WireRow): boolean {
   const label = readableLabel(row).toLowerCase().trim();
   return /^(?:reveal|show|unmask|view|copy)(?:\s+(?:the\s+)?(?:api[- ]?key|key|token|secret|value))?s?$/.test(
@@ -1663,9 +1685,7 @@ export function nextExploreRow(
   visitedKeys: readonly string[],
   pageUrl: string,
 ): WireRow | undefined {
-  const nextEntry = listedItemRows(rows, pageUrl).find(
-    (row) => !visitedKeys.includes(sectionIdentity(row, pageUrl)),
-  );
+  const nextEntry = untriedListedItemRows(rows, visitedKeys, pageUrl)[0];
   return nextEntry ?? unvisitedSectionNavRows(rows, visitedKeys, pageUrl)[0];
 }
 
@@ -1677,7 +1697,9 @@ function shouldRecordVisit(row: WireRow, pageUrl: string): boolean {
   return kind === "l" || kind === "link" || kind === "tb" || kind === "tab";
 }
 
-function decisionIsActionable(decision: DriveDecision): boolean {
+function decisionIsActionable(
+  decision: DriveDecision,
+): decision is Extract<DriveDecision, { kind: "act" }> {
   return decision.kind === "act";
 }
 
@@ -3196,12 +3218,25 @@ export function driveTargetSets(
       isGoalDestinationRow(row) &&
       !isOffProductNavRow(row, pageUrl),
   );
+  const visited = aim.visitedSectionKeys ?? [];
+  const untriedEntries = hideFilters ? untriedListedItemRows(rows, visited, pageUrl) : [];
   const keepRow = (row: WireRow): boolean => {
     if (isCodeSampleRow(row)) return false;
     if (hideFilters && isListFilterRow(row)) return false;
     if (hasInAppNoun && isOffProductNavRow(row, pageUrl)) return false;
     if (isAppRootOrLogoRow(row, pageUrl) || isSamePageAnchorRow(row, pageUrl)) return false;
     if (isCreateEntryRow(row) && listedItemRows(rows, pageUrl).length > 0) return false;
+    if (hideFilters && isSiblingSectionNavRow(row, pageUrl, rows)) {
+      if (visited.includes(sectionIdentity(row, pageUrl))) return false;
+      if (untriedEntries.length > 0) return false;
+    }
+    if (
+      hideFilters &&
+      listedItemRows(rows, pageUrl).some((entry) => entry[0] === row[0]) &&
+      visited.includes(sectionIdentity(row, pageUrl))
+    ) {
+      return false;
+    }
     return true;
   };
   const aimInput = {
@@ -4818,16 +4853,15 @@ async function driveLoop(input: {
       observation.semantic?.headings ?? [],
     );
     if (recordDestinationAlternation(drive, pagePathKey(observation.url)) === "cycle") {
+      if (
+        nextExploreRow(rows, drive.visitedSectionKeys ?? [], observation.url) !== undefined
+      ) {
+        return "continue";
+      }
       return finish("no_progress", { reason: cycleReason(observation.url) });
     }
     if (recordProgressCycle(drive, nextProgress) === "cycle") {
-      if (
-        unvisitedSectionNavRows(
-          rows,
-          drive.visitedSectionKeys ?? [],
-          observation.url,
-        ).length > 0
-      ) {
+      if (nextExploreRow(rows, drive.visitedSectionKeys ?? [], observation.url) !== undefined) {
         return "continue";
       }
       return finish("no_progress", { reason: cycleReason(observation.url) });
@@ -4841,13 +4875,7 @@ async function driveLoop(input: {
       if (dead !== "continue") return dead;
     }
     if (drive.staleNonWait >= DRIVE_STALE_LIMIT) {
-      if (
-        unvisitedSectionNavRows(
-          rows,
-          drive.visitedSectionKeys ?? [],
-          observation.url,
-        ).length > 0
-      ) {
+      if (nextExploreRow(rows, drive.visitedSectionKeys ?? [], observation.url) !== undefined) {
         return "continue";
       }
       return finish("no_progress");
@@ -4860,6 +4888,9 @@ async function driveLoop(input: {
     const row = findRow(rows, actionKey, observation.url);
     const deadKey = row === undefined ? actionKey : stableControlKey(row, observation.url);
     if (recordDeadAction(drive, key, deadKey) === "stop") {
+      if (nextExploreRow(rows, drive.visitedSectionKeys ?? [], observation.url) !== undefined) {
+        return "continue";
+      }
       return finish("no_progress", {
         reason: deadActionReason(drive.exhaustedActionKeys ?? [], observation.url),
       });
@@ -4974,13 +5005,7 @@ async function driveLoop(input: {
       return "continue";
     }
     if (drive.boundFingerprint === fingerprint && drive.consumedActionKey === decision.actionKey) {
-      if (
-        unvisitedSectionNavRows(
-          rows,
-          drive.visitedSectionKeys ?? [],
-          observation.url,
-        ).length > 0
-      ) {
+      if (nextExploreRow(rows, drive.visitedSectionKeys ?? [], observation.url) !== undefined) {
         return "continue";
       }
       const tried = drive.visitedSectionKeys ?? [];
@@ -5937,15 +5962,18 @@ async function driveLoop(input: {
         failedKeys: drive.failedActionKeys ?? [],
         goal: drive.goal,
         submittedThisDrive: drive.submittedThisDrive === true,
+        visitedSectionKeys: drive.visitedSectionKeys ?? [],
       },
     );
     const actionable = sets.operations.filter(
       (op) => op !== "DONE" && op !== "BLOCKED" && op !== "WAIT",
     );
     if (!terminalOnly && (drive.exhaustedActionKeys ?? []).length > 0 && actionable.length === 0) {
-      return finish("no_progress", {
-        reason: deadActionReason(drive.exhaustedActionKeys ?? [], observation.url),
-      });
+      if (nextExploreRow(rows, drive.visitedSectionKeys ?? [], pageUrl) === undefined) {
+        return finish("no_progress", {
+          reason: deadActionReason(drive.exhaustedActionKeys ?? [], observation.url),
+        });
+      }
     }
     const questions = buildDriveQuestions(
       rows,
@@ -6107,14 +6135,26 @@ async function driveLoop(input: {
       steps += 1;
       continue;
     }
-    if (
-      !decisionIsActionable(decision) &&
-      goalSeeksKey(args.goal) &&
-      !hasGoalDestination &&
-      !pageShowsRevealedKey(rows)
-    ) {
-      const nextSection = nextExploreRow(rows, drive.visitedSectionKeys ?? [], pageUrl);
-      if (nextSection !== undefined) {
+    if (goalSeeksKey(args.goal) && !pageShowsRevealedKey(rows)) {
+      const visited = drive.visitedSectionKeys ?? [];
+      const untriedEntries = untriedListedItemRows(rows, visited, pageUrl);
+      const nextSection = nextExploreRow(rows, visited, pageUrl);
+      const picked = decisionIsActionable(decision)
+        ? findRow(rows, decision.actionKey, pageUrl)
+        : undefined;
+      const pickedIsReveal = picked !== undefined && isRevealOrCopyRow(picked);
+      const pickedIsUntriedEntry =
+        picked !== undefined && untriedEntries.some((entry) => entry[0] === picked[0]);
+      const pickedVisitedTab =
+        picked !== undefined &&
+        isSiblingSectionNavRow(picked, pageUrl, rows) &&
+        visited.includes(sectionIdentity(picked, pageUrl));
+      const takeExplore =
+        nextSection !== undefined &&
+        ((untriedEntries.length > 0 && !pickedIsUntriedEntry && !pickedIsReveal) ||
+          pickedVisitedTab ||
+          (!decisionIsActionable(decision) && !hasGoalDestination));
+      if (takeExplore && nextSection !== undefined) {
         const applied = await applyDecision({
           kind: "act",
           action: { kind: "click", target: nextSection[0] },
@@ -6127,9 +6167,8 @@ async function driveLoop(input: {
         steps += 1;
         continue;
       }
-      const tried = drive.visitedSectionKeys ?? [];
-      if (tried.length > 0) {
-        return finish("no_progress", { reason: sectionsTriedReason(tried) });
+      if (!decisionIsActionable(decision) && !hasGoalDestination && visited.length > 0) {
+        return finish("no_progress", { reason: sectionsTriedReason(visited) });
       }
     }
     const applied = await applyDecision(decision, jevMs, true);
