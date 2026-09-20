@@ -10,7 +10,12 @@ import { join } from "node:path";
 import { chromium, type Browser } from "playwright";
 import type { ApiClient } from "../../api-client.js";
 import { BrowserController } from "../browser.js";
-import { JevUnavailableError, type JevCallOutcome, type JevQuestion } from "../jev-client.js";
+import {
+  JevUnavailableError,
+  type JevAnswer,
+  type JevCallOutcome,
+  type JevQuestion,
+} from "../jev-client.js";
 import {
   DRIVE_CONFIDENCE_THRESHOLD,
   DRIVE_EMPTY_SNAPSHOT_WAITS,
@@ -1066,6 +1071,102 @@ describe("operate_drive real-browser fixture", () => {
         deps(async (_api, _state, questions) => jevFromQuestions(questions, true)),
       );
       expect(result.status).not.toBe("stuck");
+      expect(await page.locator("#writes").textContent()).toBe("12/30;12/2030;");
+      expect(await page.locator("#exp").inputValue()).toBe("12/2030");
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
+  it("keeps the four-digit expiry rewrite available after a stale act typed nothing", async () => {
+    // A rewrite the act never performed must not consume the one-shot: the
+    // remounted-frame stale result used to leave the control empty for the
+    // rest of the session with no path back.
+    const html = `<!doctype html><meta charset="utf-8"><title>Long expiry stale</title>
+<main>
+  <label>Card number <input id="pan" autocomplete="cc-number"></label>
+  <label>CVV <input id="cvv" autocomplete="cc-csc"></label>
+  <label>Expiration date <input id="exp" required></label>
+  <p id="writes" hidden></p>
+</main>
+<script>
+  const exp = document.getElementById("exp");
+  const writes = document.getElementById("writes");
+  exp.addEventListener("input", () => {
+    writes.textContent = writes.textContent + exp.value + ";";
+    if (!/^\\d{2}\\/\\d{4}$/.test(exp.value)) exp.value = "";
+  });
+</script>`;
+    const { context, page, started } = await openFixture(html, "expiry-rewrite-stale.test");
+    try {
+      const session = sessionForCall(started.session_id)!;
+      session.releasedPaymentCard = {
+        approvalId: "approved",
+        approvalUrl: "https://approval.test",
+        checkout: {
+          merchant: "fixture.test",
+          checkout_origin: "https://expiry-rewrite-stale.test",
+          amount_cents: 100,
+          currency: "USD",
+        },
+        cardRef: "card-1",
+        last4: "1111",
+        deadline: Date.now() + 60_000,
+        card: {
+          pan: "4111111111111111",
+          cvv: "739",
+          exp_month: "12",
+          exp_year: "2030",
+          name: "Ada",
+          billing: { line1: "1 Main St", city: "Boston", postal_code: "02110", country: "US" },
+        },
+      };
+      // Jev only ever fills the iteration the stale act yields; every write
+      // under test comes from the drive's own expiry handling.
+      const dependencies = deps(async (_api, _state, questions) => {
+        const answers: Record<string, JevAnswer> = {};
+        for (const [name, question] of Object.entries(questions)) {
+          if (question.type !== "choice") continue;
+          const keys = Object.keys(question.criteria);
+          if (keys.length === 0) continue;
+          const pick = name === "operation" && keys.includes("WAIT") ? "WAIT" : keys[0]!;
+          answers[name] = { choice: pick, confidence: 0.93, probabilities: peaked(keys, pick) };
+        }
+        return { attempts: 1, elapsedMs: 12, result: { answers } };
+      });
+      let staled = 0;
+      dependencies.driveAct = async (_sessionId, action) => {
+        if (action.kind === "type" && action.text === "12/2030" && staled === 0) {
+          staled += 1;
+          return {
+            kind: "stale",
+            reason: "card frame remounted",
+            guardScriptMs: 0,
+            guardWallMs: 0,
+            cdpMs: 0,
+          };
+        }
+        return await driveActOnPage(page, action);
+      };
+      const drive = async (maxSteps: number) =>
+        await runOperateDrive(
+          {
+            session_id: started.session_id,
+            goal: "fill the card expiry",
+            facts: { card_ref: "card-1" },
+            max_steps: maxSteps,
+          },
+          api(),
+          undefined,
+          dependencies,
+        );
+      await drive(3);
+      expect(staled).toBe(1);
+      expect(await page.locator("#writes").textContent()).toBe("12/30;");
+      expect(await page.locator("#exp").inputValue()).toBe("");
+
+      await drive(2);
       expect(await page.locator("#writes").textContent()).toBe("12/30;12/2030;");
       expect(await page.locator("#exp").inputValue()).toBe("12/2030");
     } finally {

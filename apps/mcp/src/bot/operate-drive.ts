@@ -716,6 +716,17 @@ export function requiredExpiryLongRewriteAction(
   return undefined;
 }
 
+function recordLandedExpiryWrite(drive: SessionDriveState, target: string, text: string): void {
+  const short = drive.facts[CARD_EXPIRY_FACT];
+  const long = drive.facts[CARD_EXPIRY_LONG_FACT];
+  if (short !== undefined && text === short && !drive.expiryShortWrittenRefs.includes(target)) {
+    drive.expiryShortWrittenRefs.push(target);
+  }
+  if (long !== undefined && text === long && !drive.expiryLongAttemptedRefs.includes(target)) {
+    drive.expiryLongAttemptedRefs.push(target);
+  }
+}
+
 export function isCardholderNameRow(row: WireRow): boolean {
   return /name_on_card|cardholder|cc_name|card_name|nameoncard/.test(rowHay(row));
 }
@@ -2985,6 +2996,7 @@ async function driveLoop(input: {
   const selectAttempts = new Set<string>();
   let selectMustYield = false;
   const typeAttempts = new Set<string>();
+  const expiryRewriteAttempts = new Set<string>();
   let typeMustYield = false;
   let emptySnapshotWaits = 0;
 
@@ -3408,10 +3420,14 @@ async function driveLoop(input: {
       if (
         beforeEpoch.length > 0 &&
         completionEpoch.length > 0 &&
-        documentOriginOf(beforeEpoch) === documentOriginOf(completionEpoch) &&
-        !drive.filledRefs.includes(decision.actionKey)
+        documentOriginOf(beforeEpoch) === documentOriginOf(completionEpoch)
       ) {
-        drive.filledRefs.push(decision.actionKey);
+        if (!drive.filledRefs.includes(decision.actionKey)) {
+          drive.filledRefs.push(decision.actionKey);
+        }
+        if (decision.action.kind === "type") {
+          recordLandedExpiryWrite(drive, decision.actionKey, decision.action.text ?? "");
+        }
       }
     }
     const nextFingerprint = progressFingerprint(
@@ -3563,12 +3579,16 @@ async function driveLoop(input: {
       : requiredFactTypeAction(rows, drive.facts, drive.filledRefs, pageUrl);
     typeMustYield = false;
     const rewriteTarget = expiryRewrite?.target;
+    const rewriteAttemptKey =
+      rewriteTarget === undefined ? undefined : `${comboboxObservation}\t${rewriteTarget}`;
     if (
       expiryRewrite !== undefined &&
       rewriteTarget !== undefined &&
+      rewriteAttemptKey !== undefined &&
+      !expiryRewriteAttempts.has(rewriteAttemptKey) &&
       !drive.expiryLongAttemptedRefs.includes(rewriteTarget)
     ) {
-      drive.expiryLongAttemptedRefs.push(rewriteTarget);
+      expiryRewriteAttempts.add(rewriteAttemptKey);
       drive.boundFingerprint = progressFingerprint(
         observation.url,
         rows,
@@ -3595,12 +3615,6 @@ async function driveLoop(input: {
       !typeAttempts.has(typeAttemptKey)
     ) {
       typeAttempts.add(typeAttemptKey);
-      if (
-        typeFill.text === drive.facts[CARD_EXPIRY_FACT] &&
-        !drive.expiryShortWrittenRefs.includes(typeFill.target)
-      ) {
-        drive.expiryShortWrittenRefs.push(typeFill.target);
-      }
       drive.boundFingerprint = progressFingerprint(
         observation.url,
         rows,
