@@ -36,6 +36,7 @@ import {
   type Observation,
   type ProvisionAction,
 } from "./provision-session.js";
+import { resolveInboxSearch } from "./capture/verification.js";
 import { audit, sessionForCall } from "./session/lifecycle.js";
 import { registrableHost } from "./session/hosts.js";
 import { observedThreeDsChallenge, rememberCompactV2SourcePage } from "./observe/observe.js";
@@ -112,6 +113,16 @@ export const DRIVE_WIDGET_UNREADY_WAITS = 1;
 export const DRIVE_WIDGET_UNREADY_REASON =
   "submit stayed disabled; a required gate widget did not become ready";
 export const DRIVE_INBOX_POLL_MS = 45_000;
+export function inboxPollMissReason(search: {
+  query: string;
+  recipient?: string;
+  sender?: string;
+}): string {
+  const bits = [`query=${search.query}`];
+  if (search.recipient !== undefined) bits.push(`to=${search.recipient}`);
+  if (search.sender !== undefined) bits.push(`host=${search.sender}`);
+  return `inbox poll found nothing (${bits.join(" ")})`;
+}
 export const DRIVE_PAY_SUBMIT_WAITS = 3;
 export const DRIVE_STALE_LIMIT = 3;
 export const DRIVE_EXHAUSTED_ACTION_LIMIT = 5;
@@ -4083,19 +4094,32 @@ async function driveLoop(input: {
     }
 
     if (decision.special === "inbox") {
-      const sender = senderHost(observation?.url ?? "");
+      const search = resolveInboxSearch(session);
       const planKind = decision.action.kind === "type" ? "otp" : "link";
       const clock = dependencies.now ?? Date.now;
       const deadline = clock() + DRIVE_INBOX_POLL_MS;
-      let verification = await dependencies.awaitVerification(sessionId, {
-        ...(sender === undefined ? {} : { sender }),
-      });
+      const inboxArgs = {
+        ...(search.sender === undefined ? {} : { sender: search.sender }),
+        ...(search.recipient === undefined ? {} : { recipient: search.recipient }),
+      };
+      let verification = await dependencies.awaitVerification(sessionId, inboxArgs);
       let inboxNext = inboxVerificationDecision(verification, planKind);
       while (inboxNext === "retry") {
         if (clock() >= deadline || remainingMs() < DRIVE_WAIT_MS) {
+          drive.trajectory.push({
+            action: "inbox",
+            target: "inbox_link",
+            confidence: decision.confidence,
+            url: observation.url,
+          });
+          drive.history.push(inboxPollMissReason(search));
           return planKind === "otp"
-            ? finish("needs_value", { field: "verification_code" })
+            ? finish("needs_value", {
+                field: "verification_code",
+                reason: inboxPollMissReason(search),
+              })
             : finish("stuck", {
+                reason: inboxPollMissReason(search),
                 question: {
                   question: nextActionInstructions(drive.goal),
                   options: actionCriteria(rows, drive.facts.card_ref !== undefined),
@@ -4103,9 +4127,7 @@ async function driveLoop(input: {
               });
         }
         await sleepDrive(DRIVE_WAIT_MS, context?.signal);
-        verification = await dependencies.awaitVerification(sessionId, {
-          ...(sender === undefined ? {} : { sender }),
-        });
+        verification = await dependencies.awaitVerification(sessionId, inboxArgs);
         inboxNext = inboxVerificationDecision(verification, planKind);
       }
       if (inboxNext === "needs_code") {
