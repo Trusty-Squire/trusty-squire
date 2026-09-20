@@ -211,7 +211,7 @@ describe("request building", () => {
     expect(isCandidateRow(localized, true, checkout)).toBe(true);
     expect(isCandidateRow(radio, true, checkout)).toBe(false);
     expect(
-      clickableCandidates([pay, localized, back, radio], true, checkout).map((c) => c.ref),
+      clickableCandidates([pay, localized, back, radio], true, [], checkout).map((c) => c.ref),
     ).toEqual(["@e:pay", "@e:fr", "@e:back"]);
   });
 
@@ -219,11 +219,11 @@ describe("request building", () => {
     const buy: WireRow = ["@e:buy", "b", "Buy now|v=offscreen"];
     const product = "https://whitejade.xyz/products/jade-lamp";
     expect(isCandidateRow(buy, true, product)).toBe(false);
-    expect(clickableCandidates([buy], true, product)).toEqual([]);
+    expect(clickableCandidates([buy], true, [], product)).toEqual([]);
     expect(isCandidateRow(buy, true, "")).toBe(false);
     expect(clickableCandidates([buy], true)).toEqual([]);
     expect(
-      clickableCandidates([buy], true, "https://whitejade.xyz/checkouts/cn/token").map(
+      clickableCandidates([buy], true, [], "https://whitejade.xyz/checkouts/cn/token").map(
         (c) => c.ref,
       ),
     ).toEqual(["@e:buy"]);
