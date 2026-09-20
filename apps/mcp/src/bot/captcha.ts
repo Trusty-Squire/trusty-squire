@@ -14,7 +14,7 @@
 // solve lives in captcha-solve.ts: the vault-backed transport both callers
 // share, plus the operate-path auto-solve.
 
-import type { Page } from "playwright";
+import type { CDPSession, Page } from "playwright";
 
 import type { BrowserController } from "./browser.js";
 
@@ -753,25 +753,217 @@ export async function extractRecaptchaSitekey(
 
 export type RecaptchaInjectDiag = {
   ok: boolean;
+  world: "main" | "isolated";
   textareas: number;
+  clients: number;
+  isolatedClients: number;
+  callbacksFunction: number;
+  callbacksString: number;
+  callbacksFired: number;
+  dataCallbackHosts: number;
+  dataCallbackFired: number;
+  requestSubmit: boolean;
+  error: string | null;
+};
+
+const GRECAPTCHA_CLIENTS_COUNT =
+  "(() => { const c = window.___grecaptcha_cfg && window.___grecaptcha_cfg.clients; return c && typeof c === 'object' ? Object.keys(c).length : 0; })()";
+
+/** Page-side callback walk. Source is serialized into the MAIN world. */
+export function recaptchaMainWorldFire(tok: string): {
   clients: number;
   callbacksFunction: number;
   callbacksString: number;
   callbacksFired: number;
   dataCallbackHosts: number;
   dataCallbackFired: number;
-  submitClicked: boolean;
+  error: string | null;
+} {
+  const out = {
+    clients: 0,
+    callbacksFunction: 0,
+    callbacksString: 0,
+    callbacksFired: 0,
+    dataCallbackHosts: 0,
+    dataCallbackFired: 0,
+    error: null as string | null,
+  };
+  const win = window as unknown as Record<string, unknown>;
+  const resolvePath = (path: string): unknown => {
+    let cur: unknown = win;
+    for (const part of path.split(".")) {
+      if (part.length === 0) return undefined;
+      if (cur === null || typeof cur !== "object") return undefined;
+      cur = (cur as Record<string, unknown>)[part];
+    }
+    return cur;
+  };
+  const invoke = (fn: unknown): boolean => {
+    if (typeof fn !== "function") return false;
+    try {
+      (fn as (t: string) => void)(tok);
+      out.callbacksFired += 1;
+      return true;
+    } catch (err) {
+      out.error = err instanceof Error ? err.message : String(err);
+      return false;
+    }
+  };
+  const invokeNamed = (name: string): boolean => {
+    out.callbacksString += 1;
+    return invoke(resolvePath(name));
+  };
+  try {
+    const cfg = win.___grecaptcha_cfg as { clients?: Record<string, unknown> } | undefined;
+    const clients = cfg?.clients;
+    if (clients !== undefined) {
+      out.clients = Object.keys(clients).length;
+      const walk = (obj: unknown, depth: number): void => {
+        if (obj === null || typeof obj !== "object" || depth > 8) return;
+        for (const [key, v] of Object.entries(obj as Record<string, unknown>)) {
+          const normalized = key.toLowerCase();
+          if (
+            normalized === "callback" ||
+            normalized === "success-callback" ||
+            normalized === "successcallback"
+          ) {
+            if (typeof v === "function") {
+              out.callbacksFunction += 1;
+              invoke(v);
+            } else if (typeof v === "string" && v.length > 0) {
+              invokeNamed(v);
+            }
+            continue;
+          }
+          if (v !== null && typeof v === "object") walk(v, depth + 1);
+        }
+      };
+      walk(clients, 0);
+    }
+  } catch (err) {
+    out.error = err instanceof Error ? err.message : String(err);
+  }
+  if (out.callbacksFired === 0) {
+    const hosts = Array.from(document.querySelectorAll("[data-callback]"));
+    out.dataCallbackHosts = hosts.length;
+    for (const host of hosts) {
+      const name = host.getAttribute("data-callback");
+      if (name !== null && name.length > 0 && invokeNamed(name)) {
+        out.dataCallbackFired += 1;
+      }
+    }
+  }
+  return out;
+}
+
+async function withRuntimeMainWorlds<T>(
+  page: Page,
+  run: (input: {
+    client: CDPSession;
+    mainFrameId: string;
+    mainWorlds: Map<string, number>;
+  }) => Promise<T>,
+): Promise<T> {
+  const client = await page.context().newCDPSession(page);
+  const mainWorlds = new Map<string, number>();
+  const onCreated = (event: {
+    context: { id: number; auxData?: { frameId?: string; isDefault?: boolean } };
+  }): void => {
+    const { frameId, isDefault } = event.context.auxData ?? {};
+    if (frameId && isDefault) mainWorlds.set(frameId, event.context.id);
+  };
+  client.on("Runtime.executionContextCreated", onCreated);
+  try {
+    await client.send("Runtime.enable");
+    const tree = await client.send("Page.getFrameTree");
+    return await run({ client, mainFrameId: tree.frameTree.frame.id, mainWorlds });
+  } finally {
+    await client.detach().catch(() => undefined);
+  }
+}
+
+async function runtimeEvaluateNumber(
+  client: CDPSession,
+  contextId: number,
+  expression: string,
+): Promise<number> {
+  const res = await client.send("Runtime.evaluate", {
+    expression,
+    contextId,
+    returnByValue: true,
+  });
+  return typeof res.result.value === "number" ? res.result.value : 0;
+}
+
+type RecaptchaFireCounts = {
+  clients: number;
+  callbacksFunction: number;
+  callbacksString: number;
+  callbacksFired: number;
+  dataCallbackHosts: number;
+  dataCallbackFired: number;
   error: string | null;
 };
+
+function emptyFire(error: string | null = null): RecaptchaFireCounts {
+  return {
+    clients: 0,
+    callbacksFunction: 0,
+    callbacksString: 0,
+    callbacksFired: 0,
+    dataCallbackHosts: 0,
+    dataCallbackFired: 0,
+    error,
+  };
+}
+
+function fireFromValue(value: unknown, fallbackError: string | null): RecaptchaFireCounts {
+  if (value === null || typeof value !== "object") return emptyFire(fallbackError);
+  const num = (key: string): number => {
+    const raw = Reflect.get(value, key);
+    return typeof raw === "number" ? raw : 0;
+  };
+  const err = Reflect.get(value, "error");
+  return {
+    clients: num("clients"),
+    callbacksFunction: num("callbacksFunction"),
+    callbacksString: num("callbacksString"),
+    callbacksFired: num("callbacksFired"),
+    dataCallbackHosts: num("dataCallbackHosts"),
+    dataCallbackFired: num("dataCallbackFired"),
+    error: typeof err === "string" ? err : fallbackError,
+  };
+}
+
+/** Client count as seen from the page main world or a fresh isolated world. */
+export async function grecaptchaClientCountInWorld(
+  page: Page,
+  world: "main" | "isolated",
+): Promise<number> {
+  return await withRuntimeMainWorlds(page, async ({ client, mainFrameId, mainWorlds }) => {
+    if (world === "isolated") {
+      const isolated = await client.send("Page.createIsolatedWorld", {
+        frameId: mainFrameId,
+        worldName: "ts-recaptcha-probe",
+      });
+      return runtimeEvaluateNumber(client, isolated.executionContextId, GRECAPTCHA_CLIENTS_COUNT);
+    }
+    const contextId = mainWorlds.get(mainFrameId);
+    if (contextId === undefined) return 0;
+    return runtimeEvaluateNumber(client, contextId, GRECAPTCHA_CLIENTS_COUNT);
+  });
+}
 
 // Inject a 2Captcha-resolved token into the page's hidden
 // g-recaptcha-response textarea AND fire any onSuccess callback
 // the widget registered with grecaptcha.render(). Sites commonly
 // register that callback as a STRING name (`data-callback="onSubmit"`,
 // `{ callback: "onSubmit" }`); a function-only walk skips those
-// silently and the submit never enables. Resolve the name on window
-// (dotted paths included). If nothing fired, click the submit once
-// so a page that only reads the textarea at submit time can proceed.
+// silently and the submit never enables. The walk runs in the page
+// MAIN world (patchright's page.evaluate cannot see JS globals).
+// If nothing fired and submit is still disabled, requestSubmit() on
+// the textarea's form so a page that only reads the field at submit
+// time can proceed.
 //
 // Returns true when a response textarea was populated.
 export async function injectRecaptchaToken(
@@ -781,27 +973,13 @@ export async function injectRecaptchaToken(
 ): Promise<boolean> {
   if (!page) throw new Error("Browser not started");
   try {
-    const diag = await page.evaluate((tok: string): RecaptchaInjectDiag => {
-      const empty: RecaptchaInjectDiag = {
-        ok: false,
-        textareas: 0,
-        clients: 0,
-        callbacksFunction: 0,
-        callbacksString: 0,
-        callbacksFired: 0,
-        dataCallbackHosts: 0,
-        dataCallbackFired: 0,
-        submitClicked: false,
-        error: null,
-      };
+    const filled = await page.evaluate((tok: string) => {
       const inputs = Array.from(
         document.querySelectorAll<HTMLTextAreaElement>(
           'textarea[name="g-recaptcha-response"], textarea[id^="g-recaptcha-response"]',
         ),
       );
-      if (inputs.length === 0) return empty;
-      empty.textareas = inputs.length;
-      empty.ok = true;
+      if (inputs.length === 0) return { ok: false, textareas: 0 };
       for (const input of inputs) {
         input.value = tok;
         input.dispatchEvent(new Event("input", { bubbles: true }));
@@ -817,91 +995,88 @@ export async function injectRecaptchaToken(
       const form = inputs[0]?.closest("form");
       form?.dispatchEvent(new Event("input", { bubbles: true }));
       form?.dispatchEvent(new Event("change", { bubbles: true }));
-
-      const win = window as unknown as Record<string, unknown>;
-      const resolvePath = (path: string): unknown => {
-        let cur: unknown = win;
-        for (const part of path.split(".")) {
-          if (part.length === 0) return undefined;
-          if (cur === null || typeof cur !== "object") return undefined;
-          cur = (cur as Record<string, unknown>)[part];
-        }
-        return cur;
-      };
-      const invoke = (fn: unknown): boolean => {
-        if (typeof fn !== "function") return false;
-        try {
-          (fn as (t: string) => void)(tok);
-          empty.callbacksFired += 1;
-          return true;
-        } catch (err) {
-          empty.error = err instanceof Error ? err.message : String(err);
-          return false;
-        }
-      };
-      const invokeNamed = (name: string): boolean => {
-        empty.callbacksString += 1;
-        return invoke(resolvePath(name));
-      };
-
+      return { ok: true, textareas: inputs.length };
+    }, token);
+    let world: "main" | "isolated" = "isolated";
+    let isolatedClients = 0;
+    let fire = emptyFire();
+    if (filled.ok) {
       try {
-        const cfg = (win.___grecaptcha_cfg ?? undefined) as
-          | { clients?: Record<string, unknown> }
-          | undefined;
-        const clients = cfg?.clients;
-        if (clients !== undefined) {
-          empty.clients = Object.keys(clients).length;
-          const walk = (obj: unknown, depth: number): void => {
-            if (obj === null || typeof obj !== "object" || depth > 8) return;
-            for (const [key, v] of Object.entries(obj as Record<string, unknown>)) {
-              const normalized = key.toLowerCase();
-              if (
-                normalized === "callback" ||
-                normalized === "success-callback" ||
-                normalized === "successcallback"
-              ) {
-                if (typeof v === "function") {
-                  empty.callbacksFunction += 1;
-                  invoke(v);
-                } else if (typeof v === "string" && v.length > 0) {
-                  invokeNamed(v);
+        const worlds = await withRuntimeMainWorlds(
+          page,
+          async ({ client, mainFrameId, mainWorlds }) => {
+            const isolated = await client.send("Page.createIsolatedWorld", {
+              frameId: mainFrameId,
+              worldName: "ts-recaptcha-probe",
+            });
+            const isolatedCount = await runtimeEvaluateNumber(
+              client,
+              isolated.executionContextId,
+              GRECAPTCHA_CLIENTS_COUNT,
+            );
+            const expression = `(${recaptchaMainWorldFire.toString()})(${JSON.stringify(token)})`;
+            const tryContext = async (contextId: number): Promise<RecaptchaFireCounts> => {
+              const res = await client.send("Runtime.evaluate", {
+                expression,
+                contextId,
+                returnByValue: true,
+              });
+              return fireFromValue(res.result.value, res.exceptionDetails?.text ?? null);
+            };
+            const preferred = mainWorlds.get(mainFrameId);
+            let best = preferred === undefined ? emptyFire("no_main_world") : await tryContext(preferred);
+            if (best.clients === 0 && best.callbacksFired === 0) {
+              for (const [frameId, contextId] of mainWorlds) {
+                if (frameId === mainFrameId) continue;
+                const alt = await tryContext(contextId);
+                if (alt.clients > 0 || alt.callbacksFired > 0) {
+                  best = alt;
+                  break;
                 }
-                continue;
               }
-              if (v !== null && typeof v === "object") walk(v, depth + 1);
             }
-          };
-          walk(clients, 0);
-        }
+            return { isolatedCount, best, usedMain: preferred !== undefined || mainWorlds.size > 0 };
+          },
+        );
+        isolatedClients = worlds.isolatedCount;
+        fire = worlds.best;
+        if (worlds.usedMain) world = "main";
       } catch (err) {
-        empty.error = err instanceof Error ? err.message : String(err);
+        fire = emptyFire(err instanceof Error ? err.message : String(err));
       }
-
-      if (empty.callbacksFired === 0) {
-        const hosts = Array.from(document.querySelectorAll<HTMLElement>("[data-callback]"));
-        empty.dataCallbackHosts = hosts.length;
-        for (const host of hosts) {
-          const name = host.getAttribute("data-callback");
-          if (name !== null && name.length > 0 && invokeNamed(name)) {
-            empty.dataCallbackFired += 1;
-          }
-        }
-      }
-
-      if (empty.callbacksFired === 0) {
-        const scoped = form ?? document;
-        const submit = scoped.querySelector<HTMLButtonElement | HTMLInputElement>(
+    }
+    let requestSubmit = false;
+    if (filled.ok && fire.callbacksFired === 0) {
+      requestSubmit = await page.evaluate(() => {
+        const submit = document.querySelector<HTMLButtonElement | HTMLInputElement>(
           'button[type="submit"], input[type="submit"], button:not([type])',
         );
-        if (submit !== null) {
-          submit.click();
-          empty.submitClicked = true;
-        }
-      }
-      return empty;
-    }, token);
+        if (submit !== null && !submit.disabled) return false;
+        const input = document.querySelector<HTMLTextAreaElement>(
+          'textarea[name="g-recaptcha-response"], textarea[id^="g-recaptcha-response"]',
+        );
+        const form = input?.closest("form");
+        if (form === null || form === undefined) return false;
+        form.requestSubmit();
+        return true;
+      });
+    }
+    const diag: RecaptchaInjectDiag = {
+      ok: filled.ok,
+      world,
+      textareas: filled.textareas,
+      clients: fire.clients,
+      isolatedClients,
+      callbacksFunction: fire.callbacksFunction,
+      callbacksString: fire.callbacksString,
+      callbacksFired: fire.callbacksFired,
+      dataCallbackHosts: fire.dataCallbackHosts,
+      dataCallbackFired: fire.dataCallbackFired,
+      requestSubmit,
+      error: fire.error,
+    };
     console.error(
-      `[captcha-inject-diag] textareas=${diag.textareas} clients=${diag.clients} callbacks_function=${diag.callbacksFunction} callbacks_string=${diag.callbacksString} callbacks_fired=${diag.callbacksFired} data_callback_hosts=${diag.dataCallbackHosts} data_callback_fired=${diag.dataCallbackFired} submit_clicked=${diag.submitClicked} error=${diag.error ?? "none"}`,
+      `[captcha-inject-diag] world=${diag.world} textareas=${diag.textareas} clients=${diag.clients} isolated_clients=${diag.isolatedClients} callbacks_function=${diag.callbacksFunction} callbacks_string=${diag.callbacksString} callbacks_fired=${diag.callbacksFired} data_callback_hosts=${diag.dataCallbackHosts} data_callback_fired=${diag.dataCallbackFired} request_submit=${diag.requestSubmit} error=${diag.error ?? "none"}`,
     );
     return diag.ok;
   } catch {
