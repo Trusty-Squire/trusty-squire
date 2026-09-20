@@ -2189,7 +2189,7 @@ export function driveTargetSets(
     pageUrl,
     headings: aim.headings ?? [],
     failedKeys: aim.failedKeys ?? [],
-    goal: aim.goal,
+    ...(aim.goal === undefined ? {} : { goal: aim.goal }),
   };
   const typeText = takeCapped(
     rankDriveCandidates(
