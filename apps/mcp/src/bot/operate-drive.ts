@@ -629,45 +629,47 @@ export function isSubmitLikeRow(row: WireRow): boolean {
 const PAYMENT_SUBMIT_LABEL =
   /pay[- ]?now|place[- ]?order|complete[- ]?(?:order|purchase|payment)|submit[- ]?payment|buy[- ]?now/;
 
-/** Roles a checkout's submit control can carry.
+/** A row that can carry a checkout's submit control.
  *
- * A radio or checkbox spelled "Pay now" is a payment-METHOD option, not a
- * submit. Clicking one after release switches method and remounts the card
- * frames, and counting one as a submit would silence the missing-control
- * report while no submit exists.
+ * `<input type="submit">` already reports role button. A radio or checkbox is
+ * a payment-METHOD option: clicking one after release switches method and
+ * remounts the card frames.
  */
-const PAYMENT_SUBMIT_ROLES = new Set(["b", "button", "l", "link"]);
+const BUTTON_LIKE_ROLES = new Set(["b", "button"]);
 
-export function isPaymentSubmitRow(row: WireRow): boolean {
-  if (!PAYMENT_SUBMIT_ROLES.has(row[1])) return false;
-  return PAYMENT_SUBMIT_LABEL.test(readableLabel(row).toLowerCase());
+export function isButtonLikeRow(row: WireRow): boolean {
+  return BUTTON_LIKE_ROLES.has(row[1]);
 }
 
 /** Whether an offscreen row is still worth offering.
  *
  * Shopify parks "Pay now" below the fold (LIVE #6, top≈1458 in a 720px
- * viewport) and the act path scrolls, so a payment submit stays reachable on a
- * checkout. Off a checkout the same spellings belong to a product page's own
- * "Buy now" / "Place order", which no drive should be able to shrug-click into
- * a purchase it was never asked to make.
+ * viewport) and the act path scrolls, so a checkout's buttons stay reachable.
+ * The page, not the label, is the test: a label allowlist would drop a
+ * localized "Payer maintenant". Off a checkout no offscreen button is offered,
+ * so a product page's own "Buy now" stays unclickable.
  */
 export function offscreenRowStaysOffered(row: WireRow, pageUrl: string): boolean {
-  return isPaymentSubmitRow(row) && isCheckoutUrl(pageUrl);
+  return isButtonLikeRow(row) && isCheckoutUrl(pageUrl);
 }
 
 /** Whether the drive already asked to pay since the card went in.
  *
  * The pay control is replaced by the processor's own screen, so "no pay row"
- * after a dispatched pay click means submitted, not stuck. Without a recorded
- * release the drive cannot place a click relative to one, so an earlier
- * storefront "Buy now" never counts.
+ * after a dispatched pay click means submitted, not stuck. The line must name
+ * a button: a click on a radio spelled "Buy now, pay later" chose a method.
+ * Without a recorded release the drive cannot place a click relative to one,
+ * so an earlier storefront "Buy now" never counts.
  */
 export function paymentSubmitDispatched(history: readonly string[]): boolean {
   const released = history.lastIndexOf(DRIVE_INJECT_CARD_HISTORY);
   if (released === -1) return false;
   return history
     .slice(released + 1)
-    .some((line) => /^click /i.test(line) && PAYMENT_SUBMIT_LABEL.test(line.toLowerCase()));
+    .some(
+      (line) =>
+        /^click the button labeled /i.test(line) && PAYMENT_SUBMIT_LABEL.test(line.toLowerCase()),
+    );
 }
 
 /** Whether the checkout has moved off its payment form.
@@ -711,7 +713,7 @@ export function paymentSubmitControlMissing(input: {
     input.remainingFills > 0 ||
     checkoutPastPaymentForm(input.pageUrl) ||
     paymentSubmitDispatched(input.history) ||
-    input.rows.some((row) => isPaymentSubmitRow(row))
+    input.rows.some((row) => isButtonLikeRow(row))
   ) {
     return undefined;
   }
@@ -2962,7 +2964,8 @@ async function snapshotDriveSession(
   }
   ensureFrameCacheInvalidation(session);
   const omit = maskedRefsOf(drive);
-  const main = await captureFrameSnapshot(page, omit, 0);
+  const keepOffscreenButtons = isCheckoutUrl(page.url());
+  const main = await captureFrameSnapshot(page, omit, 0, keepOffscreenButtons);
   if (main === null) {
     const observation = await deps.observe(sessionId, "compact");
     const compactRows = mergeCompactTable([], observation);
@@ -2985,13 +2988,13 @@ async function snapshotDriveSession(
     for (let index = 1; index < frames.length; index += 1) {
       const frame = frames[index]!;
       const signature = await frameDynamicsSignature(frame);
-      const key = `${index}:${frame.url()}`;
+      const key = `${index}:${frame.url()}:${keepOffscreenButtons}`;
       const cached = cache.get(key);
       if (cached !== undefined && cached.signature === signature) {
         parts.push(cached.snapshot);
         continue;
       }
-      const child = await captureFrameSnapshot(frame, omit, index);
+      const child = await captureFrameSnapshot(frame, omit, index, keepOffscreenButtons);
       if (child === null) continue;
       cache.set(key, { signature, snapshot: child });
       parts.push(child);

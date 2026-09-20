@@ -33,7 +33,7 @@ import {
   decideAfterJev,
   driveCandidates,
   isCandidateRow,
-  isPaymentSubmitRow,
+  isButtonLikeRow,
   paymentSubmitControlMissing,
   paymentSubmitDispatched,
   checkoutPastPaymentForm,
@@ -202,19 +202,18 @@ describe("request building", () => {
     expect(driveCandidates(mixed, true).map((c) => c.ref)).toContain("@e:pan");
   });
 
-  it("keeps an offscreen Pay now as a click candidate and drops other offscreen buttons", () => {
+  it("offers every offscreen checkout button, localized labels included", () => {
     const pay: WireRow = ["@e:pay", "b", "Pay now$68.00|v=offscreen"];
+    const localized: WireRow = ["@e:fr", "b", "Payer maintenant|v=offscreen"];
     const back: WireRow = ["@e:back", "b", "Back to finalize order"];
-    const chrome: WireRow = ["@e:x", "b", "button|v=offscreen"];
+    const radio: WireRow = ["@e:method", "r", "Pay now|v=offscreen"];
     const checkout = "https://whitejade.xyz/checkouts/cn/token/en-us";
-    expect(isPaymentSubmitRow(pay)).toBe(true);
-    expect(isPaymentSubmitRow(back)).toBe(false);
     expect(isCandidateRow(pay, true, checkout)).toBe(true);
-    expect(isCandidateRow(chrome, true, checkout)).toBe(false);
-    expect(clickableCandidates([pay, back, chrome], true, checkout).map((c) => c.ref)).toEqual([
-      "@e:pay",
-      "@e:back",
-    ]);
+    expect(isCandidateRow(localized, true, checkout)).toBe(true);
+    expect(isCandidateRow(radio, true, checkout)).toBe(false);
+    expect(
+      clickableCandidates([pay, localized, back, radio], true, checkout).map((c) => c.ref),
+    ).toEqual(["@e:pay", "@e:fr", "@e:back"]);
   });
 
   it("drops an offscreen Buy now off a checkout page", () => {
@@ -231,26 +230,34 @@ describe("request building", () => {
     ).toEqual(["@e:buy"]);
   });
 
-  it("does not treat a payment-method radio spelled Pay now as a submit control", () => {
-    const radio: WireRow = ["@e:method", "r", "Pay now|v=offscreen"];
-    const checkout = "https://whitejade.xyz/checkouts/cn/token/en-us";
-    expect(isPaymentSubmitRow(radio)).toBe(false);
-    expect(isCandidateRow(radio, true, checkout)).toBe(false);
+  it("does not report a localized submit button as a missing pay control", () => {
+    const checkout = "https://shop.example/checkouts/cn/hWNH38PujD9hoKo3tgk00iw6/fr";
+    const gate = {
+      includePayment: true,
+      alreadyCard: true,
+      cardRetry: false,
+      pageUrl: checkout,
+      remainingFills: 0,
+      history: [],
+    };
+    for (const label of ["Payer maintenant", "Subscribe now", "Confirm and pay", "Pay $68.00"]) {
+      expect(
+        paymentSubmitControlMissing({ ...gate, rows: [["@e:submit", "b", label]] }),
+      ).toBeUndefined();
+    }
     expect(
       paymentSubmitControlMissing({
-        rows: [radio, ["@e:back", "b", "Back to finalize order"]],
-        includePayment: true,
-        alreadyCard: true,
-        cardRetry: false,
-        pageUrl: checkout,
-        remainingFills: 0,
-        history: [],
+        ...gate,
+        rows: [
+          ["@e:method", "r", "Pay now"],
+          ["@e:email", "t", "Email"],
+        ],
       }),
-    ).toMatch(/the control for this operation is not present/);
+    ).toMatch(/the control for this operation is not present \(CLICK pay\/place-order\)/);
   });
 
-  it("reports a missing Pay control instead of clicking Back to finalize order", () => {
-    const back: WireRow = ["@e:back", "b", "Back to finalize order"];
+  it("reports a missing Pay control when the checkout shows no button at all", () => {
+    const link: WireRow = ["@e:back", "l", "Back to finalize order"];
     const pay: WireRow = ["@e:pay", "b", "Pay now$68.00|v=offscreen"];
     const gate = {
       includePayment: true,
@@ -260,14 +267,14 @@ describe("request building", () => {
       remainingFills: 0,
       history: [],
     };
-    expect(paymentSubmitControlMissing({ ...gate, rows: [back] })).toMatch(
-      /the control for this operation is not present \(CLICK pay\/place-order\)/,
+    expect(paymentSubmitControlMissing({ ...gate, rows: [link] })).toMatch(
+      /the control for this operation is not present \(CLICK pay\/place-order\)\. visible: Back to finalize order/,
     );
-    expect(paymentSubmitControlMissing({ ...gate, rows: [back, pay] })).toBeUndefined();
+    expect(paymentSubmitControlMissing({ ...gate, rows: [link, pay] })).toBeUndefined();
   });
 
   it("does not call a dispatched or completed payment stuck", () => {
-    const processing: WireRow = ["@e:back", "b", "Back to finalize order"];
+    const processing: WireRow = ["@e:back", "l", "Back to finalize order"];
     const gate = {
       rows: [processing],
       includePayment: true,
@@ -300,7 +307,7 @@ describe("request building", () => {
     ).toBe(false);
     expect(
       paymentSubmitControlMissing({
-        rows: [["@e:back", "b", "Back to finalize order"]],
+        rows: [["@e:back", "l", "Back to finalize order"]],
         includePayment: true,
         alreadyCard: true,
         cardRetry: false,
@@ -328,6 +335,13 @@ describe("request building", () => {
     ).toBe(true);
   });
 
+  it("does not latch a payment-method radio click as a dispatched payment", () => {
+    const radio: WireRow = ["@e:method", "r", "Buy now, pay later"];
+    const line = actionHistoryLine({ kind: "click", target: "@e:method" }, radio, [radio]);
+    expect(line).toBe('click the radio labeled "Buy now, pay later"');
+    expect(paymentSubmitDispatched([DRIVE_INJECT_CARD_HISTORY, line])).toBe(false);
+  });
+
   it("does not treat a scroll onto Pay now as a dispatched payment", () => {
     const pay: WireRow = ["@e:pay", "b", "Pay now$68.00|v=offscreen"];
     const scrolled = actionHistoryLine({ kind: "scroll", direction: "down" }, pay, [pay]);
@@ -337,7 +351,7 @@ describe("request building", () => {
     expect(paymentSubmitDispatched([DRIVE_INJECT_CARD_HISTORY, clicked])).toBe(true);
     expect(
       paymentSubmitControlMissing({
-        rows: [["@e:back", "b", "Back to finalize order"]],
+        rows: [["@e:back", "l", "Back to finalize order"]],
         includePayment: true,
         alreadyCard: true,
         cardRetry: false,

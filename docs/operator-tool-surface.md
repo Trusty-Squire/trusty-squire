@@ -166,13 +166,14 @@ omitted siblings carry `options_elided` in planner state. The allocator reserves
 a usable goal-value choice alongside `none` when available. Omitted choices
 cannot be selected in that batch.
 
-The drive snapshot retains offscreen buttons alongside offscreen form controls
-and controls in header, navigation, and footer regions. Retention is not an
-offer: an offscreen row becomes a click candidate only when it is a
-payment-submit control on a checkout URL, so an offscreen "Buy now" on an
-ordinary product page stays unclickable. Jev's visible element state includes
-each ref once even when it supports both typing and clicking; the
-operation-specific choices remain separate.
+The drive snapshot retains offscreen form controls and controls in header,
+navigation, and footer regions. It retains offscreen buttons only on a checkout
+URL, where they become click candidates too — no label test, so a localized
+submit such as "Payer maintenant" is kept. Elsewhere ordinary offscreen buttons
+are excluded, which limits calendar-button floods and keeps an offscreen "Buy
+now" on a product page unclickable. Jev's visible element state includes each
+ref once even when it supports both typing and clicking; the operation-specific
+choices remain separate.
 
 `operate_read_inbox` reads the session's signed-in Gmail inbox for a
 verification email in dedicated utility tabs that are closed when the read
