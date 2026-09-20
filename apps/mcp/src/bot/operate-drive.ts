@@ -129,6 +129,7 @@ export const DRIVE_OPERATIONS = [
   "TYPE_TEXT",
   "SELECT",
   "SCROLL",
+  "INBOX",
   "WAIT",
   "DONE",
   "BLOCKED",
@@ -153,7 +154,8 @@ export const DRIVE_RULES: readonly string[] = [
   "WAIT only when the needed control is absent or disabled, or submitted results are still loading.",
   "Recent WAIT actions are not evidence of loading. Prefer a useful visible control over WAIT.",
   "DONE requires visible evidence that ALL requirements are satisfied. If asked to open a result, a matching link is not enough.",
-  "BLOCKED means no supported operation can make progress.",
+  "BLOCKED means no supported operation can make progress, including reading the inbox.",
+  "When the page says to check email, or the goal needs verification and no useful control is listed, pick INBOX.",
   "Do not choose a field that already contains the requested value.",
   "Identifying values come only from the provided facts; never invent them.",
   "A search or query field may receive a phrase assigned from the goal or facts; pick none rather than composing one.",
@@ -2142,7 +2144,8 @@ export function compactRowsText(
 export function nextActionInstructions(goal: string): string {
   return (
     `You are driving a browser to: ${goal}. Pick the single next operation that advances it. ` +
-    "Pick DONE if it is already complete; pick BLOCKED if no listed element advances it."
+    "Pick DONE if it is already complete. Pick INBOX when a verification email must be read and no on-page control does that. " +
+    "Pick BLOCKED only when no supported operation advances it."
   );
 }
 
@@ -2250,6 +2253,8 @@ export function operationCriteria(operations: readonly DriveOperation[]): Record
     else if (operation === "TYPE_TEXT") criteria.TYPE_TEXT = "type a provided fact into a field";
     else if (operation === "SELECT") criteria.SELECT = "choose an option in a dropdown";
     else if (operation === "SCROLL") criteria.SCROLL = "scroll to reveal an offscreen control";
+    else if (operation === "INBOX")
+      criteria.INBOX = "read the inbox for a verification link or code";
     else if (operation === "WAIT")
       criteria.WAIT =
         "wait only when the needed control is absent or disabled, or submitted results are still loading";
@@ -2384,13 +2389,19 @@ export function driveTargetSets(
   const listedWork =
     operations.length > 0 &&
     (pageHasListedWork(rows, typeText.length, select.length) || goalWork);
+  const pageText = (aim.headings ?? []).join(" ");
+  const inboxReady =
+    !skipped.has("INBOX") &&
+    (pageSuggestsInboxWait(rows, pageUrl, pageText) ||
+      (goalSeeksVerification(aim.goal ?? "") && !listedWork));
+  if (inboxReady) operations.push("INBOX");
   // WAIT is withheld only where the repeat-cap recorded it as dead — a
   // model-chosen wait that left a page with rows unchanged. An empty snapshot
   // never records one, so a payment settling behind a blank processor screen
   // keeps its wait for as long as the budgets allow.
-  if (!listedWork && !skipped.has("WAIT")) operations.push("WAIT");
+  if (!listedWork && !inboxReady && !skipped.has("WAIT")) operations.push("WAIT");
   operations.push("DONE");
-  if (!listedWork) operations.push("BLOCKED");
+  if (!listedWork && !inboxReady) operations.push("BLOCKED");
   return { operations, TYPE_TEXT: typeText, SELECT: select, CLICK: click, SCROLL: scroll };
 }
 
@@ -2633,7 +2644,7 @@ export function pageSuggestsInboxWait(
 ): boolean {
   if (rows.some((row) => isOtpRow(row) && isFillableRow(row))) return true;
   const hay = `${pageUrl} ${rows.map((row) => row[2]).join(" ")} ${pageText}`.toLowerCase();
-  return /(?:check|confirm|verify) your e-?mail|verification (?:link|e-?mail|code)|we(?:'| ha)ve sent|sent you an? e-?mail|open gmail|\/(?:e-?mail\/)?verify(?:\/|\s|$)|#search\//.test(
+  return /(?:check|confirm|verify) your e-?mail|verification (?:link|e-?mail|code)|we(?:'| ha)ve sent|sent you an? e-?mail|open gmail|\/(?:e-?mail\/)?(?:verify|confirm)(?:\/|\?|#|\s|$)|#search\//.test(
     hay,
   );
 }
@@ -2647,21 +2658,23 @@ export function goalSeeksVerification(goal: string): boolean {
 export function inboxSpecialPlan(
   rows: readonly WireRow[],
   decisionKind: DriveDecision["kind"],
-  clicked: boolean,
+  _clicked: boolean,
   remainingFillCount: number,
   pageUrl: string = "",
   pageText: string = "",
   goal: string = "",
 ): InboxSpecialPlan | undefined {
-  if (!clicked || remainingFillCount > 0) return undefined;
   if (decisionKind !== "stuck" && decisionKind !== "wait") return undefined;
   if (formSurfaceRows(rows).some((row) => isChoiceRow(row) && !isDisabledRow(row))) {
     return undefined;
   }
   const otp = rows.find((row) => isOtpRow(row) && isFillableRow(row));
   if (otp !== undefined) return { kind: "otp", target: otp[0] };
-  // A check-email heading is success even when the signup form is still listed.
+  // A check-email heading or confirm URL is the next act even with no click
+  // in this drive (a resumed session) and even when leftover signup fields
+  // still count as empty.
   if (pageSuggestsInboxWait(rows, pageUrl, pageText)) return { kind: "link" };
+  if (remainingFillCount > 0) return undefined;
   // Still looking at the signup form with no confirm text: wait for the SPA.
   if (
     rows.some(
@@ -2792,6 +2805,15 @@ export function decideAfterJev(input: {
     if (choice === "DONE") return { kind: "complete", confidence };
     if (choice === "BLOCKED") return { kind: "stuck", confidence };
     if (choice === "WAIT") return { kind: "wait", confidence };
+    if (choice === "INBOX") {
+      return {
+        kind: "act",
+        action: { kind: "click", target: "inbox_link" },
+        actionKey: "inbox_link",
+        confidence,
+        special: "inbox",
+      };
+    }
 
     const targetName = targetQuestionName(choice);
     const targetQuestion = questions[targetName];

@@ -1774,7 +1774,8 @@ describe("form-fill assignment helpers", () => {
         "https://app.example.test/signup",
       ),
     ).toBe(true);
-    expect(pageSuggestsInboxWait([], "https://app.currencyapi.com/email/verify")).toBe(true);
+    expect(pageSuggestsInboxWait([], "https://app.example.test/email/verify")).toBe(true);
+    expect(pageSuggestsInboxWait([], "https://app.example.test/signup/confirm")).toBe(true);
     expect(inboxSpecialPlan([...ROWS, otp], "stuck", true, 0)).toEqual({
       kind: "otp",
       target: "@e:code",
@@ -1792,6 +1793,89 @@ describe("form-fill assignment helpers", () => {
         "Check your email",
       ),
     ).toEqual({ kind: "link" });
+    expect(
+      inboxSpecialPlan(
+        [
+          ["@e:email", "t", "Email|f=email"],
+          ["@e:pw", "t", "Password|f=password"],
+          ["@e:go", "b", "Create account"],
+          ["@e:h", "h1", "Check your email"],
+        ],
+        "stuck",
+        true,
+        2,
+        "https://app.example.test/signup",
+        "Check your email",
+      ),
+    ).toEqual({ kind: "link" });
+    expect(
+      inboxSpecialPlan(
+        [["@e:h", "h1", "Check your email"]],
+        "stuck",
+        false,
+        0,
+        "https://app.example.test/signup",
+        "Check your email",
+      ),
+    ).toEqual({ kind: "link" });
+    expect(
+      inboxSpecialPlan(
+        [["@e:home", "l", "Home"]],
+        "stuck",
+        false,
+        0,
+        "https://app.example.test/signup",
+        "",
+        "complete email verification and create an API key",
+      ),
+    ).toEqual({ kind: "link" });
+    const checkEmail: WireRow[] = [["@e:h", "h1", "Check your email"]];
+    const inboxSets = driveTargetSets(
+      checkEmail,
+      {},
+      false,
+      [],
+      "https://app.example.test/signup",
+      new Map(),
+      (text) => text,
+      [],
+      { headings: ["Check your email"], goal: "complete email verification" },
+    );
+    expect(inboxSets.operations).toContain("INBOX");
+    expect(inboxSets.operations).not.toContain("BLOCKED");
+    const inboxQuestions = buildDriveQuestions(
+      checkEmail,
+      {},
+      "complete email verification",
+      false,
+      [],
+      "https://app.example.test/signup",
+      new Map(),
+      inboxSets,
+    );
+    const inboxOps =
+      inboxQuestions.operation?.type === "choice" ? inboxQuestions.operation.criteria : {};
+    expect(inboxOps).toHaveProperty("INBOX");
+    expect(inboxOps).not.toHaveProperty("BLOCKED");
+    expect(
+      decideAfterJev({
+        answers: { operation: valid("INBOX", inboxOps, 0.91) },
+        rows: checkEmail,
+        facts: {},
+        lastFingerprint: null,
+        lastActionKey: null,
+        fingerprint: "check-email",
+        goal: "complete email verification",
+        sets: inboxSets,
+        questions: inboxQuestions,
+      }),
+    ).toEqual({
+      kind: "act",
+      action: { kind: "click", target: "inbox_link" },
+      actionKey: "inbox_link",
+      confidence: 0.91,
+      special: "inbox",
+    });
     expect(
       inboxSpecialPlan(
         [["@e:home", "l", "Home"]],
