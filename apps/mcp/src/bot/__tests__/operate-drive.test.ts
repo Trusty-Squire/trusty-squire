@@ -126,6 +126,14 @@ import {
   isPageLevelSiteAnswer,
   sectionsTriedReason,
   recordDestinationAlternation,
+  decisionTargetBinding,
+  rowMatchesDecisionBinding,
+  isReissuedRef,
+  isCreateEntryRow,
+  listedItemRows,
+  isEntityNameRow,
+  isLogoutRow,
+  alreadySignedInReason,
   rowLooksLikeEmail,
   rowCarriesGoalNoun,
   isOffProductNavRow,
@@ -1971,6 +1979,18 @@ describe("form-fill assignment helpers", () => {
         "https://app.example.test/signup",
         "Check your email",
       ),
+    ).toBeUndefined();
+    expect(
+      inboxSpecialPlan(
+        [["@e:h", "h1", "Check your email"]],
+        "stuck",
+        false,
+        0,
+        "https://app.example.test/signup",
+        "Check your email",
+        "",
+        true,
+      ),
     ).toEqual({ kind: "link" });
     expect(
       inboxSpecialPlan(
@@ -3134,6 +3154,64 @@ describe("post-confirmation navigation", () => {
     expect(unvisitedSectionNavRows([logo, anchor, hashOnly, notice, emails], [], url).map((row) => row[0])).toEqual([
       "@e:mail",
     ]);
+  });
+
+  it("binds an action to label and destination, not a reminted ordinal", () => {
+    const urlA = "https://app.example.test/dash";
+    const urlB = "https://app.example.test/next";
+    const reputation: WireRow = ["@e:f0d6", "l", "Reputation|u=https://app.example.test/reputation"];
+    const trap: WireRow = ["@e:f0d6", "l", "Create app|u=https://app.example.test/new"];
+    const binding = decisionTargetBinding(reputation, urlA);
+    expect(rowMatchesDecisionBinding(reputation, binding, urlA)).toBe(true);
+    expect(rowMatchesDecisionBinding(trap, binding, urlB)).toBe(false);
+    expect(
+      isReissuedRef(trap[0], trap, urlB, { ref: reputation[0], binding, url: urlA }),
+    ).toBe(true);
+    expect(
+      isReissuedRef(trap[0], trap, urlA, { ref: reputation[0], binding, url: urlA }),
+    ).toBe(false);
+  });
+
+  it("opens listed entries before create and fills an entity name from facts", () => {
+    const url = "https://app.example.test/settings/apps";
+    const app: WireRow = ["@e:one", "l", "payments-api|u=https://app.example.test/apps/one"];
+    const create: WireRow = ["@e:new", "l", "+ New app|u=https://app.example.test/apps/new"];
+    const name: WireRow = ["@e:name", "t", "App name|f=name|s=r"];
+    const submit: WireRow = ["@e:go", "b", "Create"];
+    expect(isCreateEntryRow(create)).toBe(true);
+    expect(isCreateEntryRow(app)).toBe(false);
+    expect(listedItemRows([app, create], url).map((row) => row[0])).toEqual(["@e:one"]);
+    expect(isEntityNameRow(name)).toBe(true);
+    expect(matchingFactKeys({ company: "Acme" }, name)).toContain("company");
+    const sets = driveTargetSets(
+      [create, app, name, submit],
+      { company: "Acme" },
+      false,
+      [],
+      url,
+      new Map(),
+      (text) => text,
+      [],
+      { goal: "extract an API key" },
+    );
+    expect(sets.CLICK.map((entry) => entry.ref)[0]).toBe("@e:one");
+    expect(sets.CLICK.map((entry) => entry.ref)).not.toContain("@e:new");
+    expect(sets.TYPE_TEXT.map((entry) => entry.ref)).toEqual(["@e:name"]);
+  });
+
+  it("names a pre-existing session instead of waiting on verification", () => {
+    expect(isLogoutRow(["@e:out", "l", "Log out"])).toBe(true);
+    expect(alreadySignedInReason()).toMatch(/already signed in/i);
+    expect(
+      inboxSpecialPlan(
+        [["@e:h", "h1", "Check your email"]],
+        "wait",
+        false,
+        0,
+        "https://app.example.test/register",
+        "Check your email",
+      ),
+    ).toBeUndefined();
   });
 
   it("finishes after A-B-A-B destination alternation regardless of refs", () => {
