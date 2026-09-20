@@ -49,7 +49,12 @@ import {
   snapshotNeedsSettle,
   pageHasListedWork,
   isSubmitLikeRow,
+  isProgressSubmitRow,
+  disabledSubmitKind,
+  outstandingRequiredFill,
   DRIVE_EMPTY_SNAPSHOT_WAITS,
+  DRIVE_WIDGET_UNREADY_WAITS,
+  DRIVE_WIDGET_UNREADY_REASON,
   DRIVE_TERMINAL_OPERATIONS,
   isPickerRow,
   matchingFactKeys,
@@ -1516,8 +1521,57 @@ describe("form-fill assignment helpers", () => {
       ["@e:go", "b", "Create Account|s=d"],
     ];
     expect(isSubmitLikeRow(fireworksInFlight[2]!)).toBe(false);
-    expect(snapshotNeedsSettle(fireworksInFlight, 0)).toBe(true);
+    expect(isProgressSubmitRow(fireworksInFlight[3]!)).toBe(false);
+    expect(snapshotNeedsSettle(fireworksInFlight, 0)).toBe(false);
+    expect(disabledSubmitKind(fireworksInFlight, 0)).toBe("widget_unready");
     expect(pageHasListedWork(fireworksInFlight, 0, 0)).toBe(false);
+  });
+
+  it("splits a disabled submit into in-flight, needs-fill, and widget-unready", () => {
+    expect(DRIVE_WIDGET_UNREADY_WAITS).toBe(1);
+    expect(DRIVE_WIDGET_UNREADY_REASON).toMatch(/gate widget/);
+    expect(isProgressSubmitRow(["@e:go", "b", "Creating your account|s=d"])).toBe(true);
+    expect(isProgressSubmitRow(["@e:go", "b", "Loading Continue|s=d"])).toBe(true);
+    expect(isProgressSubmitRow(["@e:go", "b", "Create Account|s=d"])).toBe(false);
+    expect(
+      disabledSubmitKind(
+        [
+          ["@e:email", "t", "Email|f=email|n=a@b.test"],
+          ["@e:go", "b", "Creating your account|s=d"],
+        ],
+        0,
+      ),
+    ).toBe("in_flight");
+    const emptyRequired: WireRow[] = [
+      ["@e:email", "t", "Email|f=email|s=r"],
+      ["@e:go", "b", "Sign Up|s=d"],
+    ];
+    expect(outstandingRequiredFill(emptyRequired)?.[0]).toBe("@e:email");
+    expect(disabledSubmitKind(emptyRequired, 0)).toBe("needs_fill");
+    expect(snapshotNeedsSettle(emptyRequired, 0)).toBe(false);
+    const invalid: WireRow[] = [
+      ["@e:email", "t", "Email|f=email|s=ri|n=nope"],
+      ["@e:go", "b", "Continue|s=d"],
+    ];
+    expect(disabledSubmitKind(invalid, 0)).toBe("needs_fill");
+    expect(
+      fillableCandidates(invalid, { email: "a@b.test" }, false, ["@e:email"]).map((c) => c.ref),
+    ).toEqual(["@e:email"]);
+    const staticDisabled: WireRow[] = [
+      ["@e:email", "t", "Email|f=email|n=a@b.test"],
+      ["@e:go", "b", "Sign Up|s=d"],
+    ];
+    expect(disabledSubmitKind(staticDisabled, 0)).toBe("widget_unready");
+    expect(snapshotNeedsSettle(staticDisabled, 0)).toBe(false);
+    expect(
+      disabledSubmitKind(
+        [
+          ["@e:cb", "c", "checkbox|s=u"],
+          ["@e:next", "b", "Next|s=d"],
+        ],
+        0,
+      ),
+    ).toBe("none");
   });
 
   it("omits BLOCKED while a listed fill or enabled submit remains", () => {

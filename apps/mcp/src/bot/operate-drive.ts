@@ -107,6 +107,10 @@ export const DRIVE_MAX_CANDIDATES = 250;
 export const DRIVE_MAX_CRITERIA = 128;
 export const DRIVE_WAIT_MS = 1500;
 export const DRIVE_EMPTY_SNAPSHOT_WAITS = 3;
+/** One re-observe for a static disabled submit, then report — do not keep waiting. */
+export const DRIVE_WIDGET_UNREADY_WAITS = 1;
+export const DRIVE_WIDGET_UNREADY_REASON =
+  "submit stayed disabled; a required gate widget did not become ready";
 export const DRIVE_INBOX_POLL_MS = 45_000;
 export const DRIVE_PAY_SUBMIT_WAITS = 3;
 export const DRIVE_STALE_LIMIT = 3;
@@ -1131,22 +1135,65 @@ export function formSurfaceRows(rows: readonly WireRow[]): WireRow[] {
   });
 }
 
+/** A submit whose label is the page working, not a static Create/Sign up. */
+export function isProgressSubmitRow(row: WireRow): boolean {
+  return /\b(?:creating|loading|submitting|processing|saving|sending|please\s+wait)\b/.test(
+    readableLabel(row).toLowerCase(),
+  );
+}
+
+export function isInvalidRow(row: WireRow): boolean {
+  return /(?:^|\|)s=[^|]*i/.test(row[2] ?? "");
+}
+
+function rowValueMissing(row: WireRow): boolean {
+  // Password values are omitted from the wire; emptiness is not observable.
+  if (isPasswordRow(row)) return false;
+  const match = /(?:^|\|)n=([^|]*)/.exec(row[2] ?? "");
+  return match === null || match[1] === undefined || match[1].length === 0;
+}
+
+/** An enabled required-empty or invalid field — fill it, do not treat disable as a stop. */
+export function outstandingRequiredFill(rows: readonly WireRow[]): WireRow | undefined {
+  return rows.find((row) => {
+    if (!isFillableRow(row) || isDisabledRow(row) || isActedRow(row)) return false;
+    if (isInvalidRow(row)) return true;
+    return isRequiredRow(row) && rowValueMissing(row);
+  });
+}
+
+export type DisabledSubmitKind = "in_flight" | "needs_fill" | "widget_unready" | "none";
+
+/**
+ * A disabled submit is three states, not one dead end.
+ * in_flight: wait and re-observe. needs_fill: go fill. widget_unready: report.
+ */
+export function disabledSubmitKind(
+  rows: readonly WireRow[],
+  remainingFillCount: number = -1,
+): DisabledSubmitKind {
+  if (rows.length === 0) return "in_flight";
+  const surface = formSurfaceRows(rows);
+  if (surface.length === 0) return "none";
+  if (outstandingRequiredFill(rows) !== undefined) return "needs_fill";
+  const liveChoice = surface.some((row) => isChoiceRow(row) && !isDisabledRow(row));
+  if (liveChoice) return "none";
+  const submits = surface.filter((row) => isSubmitLikeRow(row));
+  if (submits.length === 0 || !submits.every((row) => isDisabledRow(row))) return "none";
+  const formLocked = surface.every((row) => isDisabledRow(row));
+  if (remainingFillCount > 0 && !formLocked) return "needs_fill";
+  if (formLocked) return "in_flight";
+  if (remainingFillCount !== 0) return "none";
+  if (submits.some((row) => isProgressSubmitRow(row))) return "in_flight";
+  return "widget_unready";
+}
+
 /** Empty page, or a form whose only remaining surface is disabled — mid-transition, not blocked. */
 export function snapshotNeedsSettle(
   rows: readonly WireRow[],
   remainingFillCount: number = -1,
 ): boolean {
-  if (rows.length === 0) return true;
-  const surface = formSurfaceRows(rows);
-  if (surface.length === 0) return false;
-  if (surface.every((row) => isDisabledRow(row))) return true;
-  // Submit in flight (AbstractAPI “Creating…”, OpenRouter “Loading Continue”):
-  // no fills left, no live choice, every submit disabled — wait for the hop.
-  if (remainingFillCount === 0 && !surface.some((row) => isChoiceRow(row) && !isDisabledRow(row))) {
-    const submits = surface.filter((row) => isSubmitLikeRow(row));
-    if (submits.length > 0 && submits.every((row) => isDisabledRow(row))) return true;
-  }
-  return false;
+  return disabledSubmitKind(rows, remainingFillCount) === "in_flight";
 }
 
 export function isOtpRow(row: WireRow): boolean {
@@ -1658,8 +1705,9 @@ export function fillableCandidates(
   const candidates: DriveCandidate[] = [];
   const allowOffscreen = pageUrl.length === 0 || isCheckoutUrl(pageUrl);
   for (const row of rows) {
-    if (!isFillableRow(row) || isDisabledRow(row) || isActedRow(row) || filled.has(row[0]))
-      continue;
+    if (!isFillableRow(row) || isDisabledRow(row) || isActedRow(row)) continue;
+    // An invalid field is not done even if we already typed it.
+    if (filled.has(row[0]) && !isInvalidRow(row)) continue;
     if (isOffscreenRow(row) && !allowOffscreen) continue;
     if (!includePayment && (isPaymentRow(row) || isCvvRow(row))) continue;
     if (isPaymentRow(row) || isCvvRow(row)) continue;
@@ -3596,6 +3644,7 @@ async function driveLoop(input: {
   let typeMustYield = false;
   let emptySnapshotWaits = 0;
   let settleWaits = 0;
+  let widgetWaits = 0;
   let paySubmitWaits = 0;
 
   const finish = (
@@ -4356,14 +4405,13 @@ async function driveLoop(input: {
       drive.exhaustedProgressKey = progressKey;
       drive.exhaustedActionKeys = [];
       settleWaits = 0;
+      widgetWaits = 0;
     }
-    // In-flight disabled submit while the form is still listed: settle, then
-    // a terminal-only question. Empty snapshots already took the path above.
-    // The settle budget is its own counter: emptySnapshotWaits is cleared on
-    // every non-empty snapshot, which is exactly when this branch runs, so
-    // sharing it left the bound permanently unreached and the loop waited out
-    // its whole budget on a form that never settles.
-    if (rows.length > 0 && snapshotNeedsSettle(rows, remainingFills.length)) {
+    // Disabled submit is three states. in_flight waits; needs_fill falls
+    // through to type/select; widget_unready gets one re-observe then a
+    // named stop so a gate that never mounted cannot burn the budget.
+    const disableKind = disabledSubmitKind(rows, remainingFills.length);
+    if (rows.length > 0 && disableKind === "in_flight") {
       if (
         settleWaits < DRIVE_EMPTY_SNAPSHOT_WAITS &&
         !(drive.exhaustedActionKeys ?? []).includes("WAIT")
@@ -4375,6 +4423,18 @@ async function driveLoop(input: {
         continue;
       }
       terminalOnly = true;
+    } else if (rows.length > 0 && disableKind === "widget_unready") {
+      if (
+        widgetWaits < DRIVE_WIDGET_UNREADY_WAITS &&
+        !(drive.exhaustedActionKeys ?? []).includes("WAIT")
+      ) {
+        widgetWaits += 1;
+        const applied = await applyDecision({ kind: "wait", confidence: 1 });
+        if (applied !== "continue") return applied;
+        steps += 1;
+        continue;
+      }
+      return finish("stuck", { reason: DRIVE_WIDGET_UNREADY_REASON });
     }
 
     const fields = paymentFields(rows);
