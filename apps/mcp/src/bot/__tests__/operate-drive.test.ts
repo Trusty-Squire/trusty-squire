@@ -52,6 +52,9 @@ import {
   isSubmitLikeRow,
   isProgressSubmitRow,
   disabledSubmitKind,
+  submitResponseText,
+  SUBMIT_RESPONSE_REASON_MAX,
+  attachObservationNotice,
   outstandingRequiredFill,
   DRIVE_EMPTY_SNAPSHOT_WAITS,
   DRIVE_WIDGET_UNREADY_WAITS,
@@ -101,6 +104,7 @@ import {
 } from "../operate-drive.js";
 import { operateDriveTool } from "../../tools/provision-drive.js";
 import type { JevAnswer } from "../jev-client.js";
+import { captchaInjectSettled } from "../captcha-solve.js";
 
 const EMAIL: WireRow = ["@e:email", "t", "@email|f=email|s=r"];
 const NAME: WireRow = ["@e:name", "t", "@first-name|f=first_name"];
@@ -1620,6 +1624,72 @@ describe("form-fill assignment helpers", () => {
         0,
       ),
     ).toBe("none");
+    expect(disabledSubmitKind(captchaGate, 0, [], false, true)).toBe("in_flight");
+    expect(
+      disabledSubmitKind(
+        [
+          ["@e:email", "t", "Email|f=email|n=a@b.test"],
+          ["@e:go", "b", "Sign Up|s=d"],
+          ["@e:img", "b", "image challenge|x=x"],
+        ],
+        0,
+        [],
+        false,
+        true,
+      ),
+    ).toBe("in_flight");
+  });
+
+  it("treats new visible text after submit as the page's verbatim answer", () => {
+    expect(
+      submitResponseText(
+        "Create account\nEmail\nContinue",
+        "Create account\nEmail\nContinue\nThis email address has been used to sign up too recently.",
+        ["This email address has been used to sign up too recently."],
+        ["Continue"],
+      ),
+    ).toBe("This email address has been used to sign up too recently.");
+    expect(
+      submitResponseText("Create account\nLoading Continue", "Create account\nLoading Continue", [], [
+        "Loading Continue",
+      ]),
+    ).toBeUndefined();
+    const long = "x".repeat(SUBMIT_RESPONSE_REASON_MAX + 20);
+    expect(submitResponseText("", long)?.length).toBe(SUBMIT_RESPONSE_REASON_MAX);
+    const observation = attachObservationNotice(
+      { session_id: "s", url: "https://x.test/", semantic: { title: "Sign up" } },
+      "This email address has been used to sign up too recently.",
+    );
+    expect(observation.semantic?.blockers).toEqual([
+      { kind: "validation", text: "This email address has been used to sign up too recently." },
+    ]);
+  });
+
+  it("treats a leftover painted challenge as settled after a delivered token", () => {
+    expect(
+      captchaInjectSettled({
+        challengeRendered: true,
+        callbacksFired: 1,
+        tokenPresent: true,
+        pageReacted: false,
+      }),
+    ).toEqual({ solved: true, outcome: "ok" });
+    expect(
+      captchaInjectSettled({
+        challengeRendered: true,
+        callbacksFired: 0,
+        tokenPresent: true,
+        pageReacted: true,
+      }),
+    ).toEqual({ solved: true, outcome: "ok" });
+    expect(
+      captchaInjectSettled({
+        challengeRendered: true,
+        callbacksFired: 0,
+        tokenPresent: true,
+        pageReacted: false,
+      }),
+    ).toEqual({ solved: false, outcome: "challenge_still_rendered" });
   });
 
   it("omits BLOCKED while a listed fill or enabled submit remains", () => {

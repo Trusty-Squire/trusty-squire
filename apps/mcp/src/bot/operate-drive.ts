@@ -1303,8 +1303,9 @@ export function disabledSubmitKind(
   remainingFillCount: number = -1,
   filledRefs: readonly string[] = [],
   inboxSilent: boolean = false,
+  captchaConsumed: boolean = false,
 ): DisabledSubmitKind {
-  if (pageHasRenderedCaptcha(rows)) return "widget_unready";
+  if (pageHasRenderedCaptcha(rows) && !captchaConsumed) return "widget_unready";
   if (rows.length === 0) return "in_flight";
   const surface = formSurfaceRows(rows);
   if (surface.length === 0) return "none";
@@ -1318,6 +1319,7 @@ export function disabledSubmitKind(
   if (formLocked) return "in_flight";
   if (remainingFillCount !== 0) return "none";
   if (submits.some((row) => isProgressSubmitRow(row))) return "in_flight";
+  if (captchaConsumed) return "in_flight";
   return inboxSilent ? "widget_unready" : "none";
 }
 
@@ -2216,6 +2218,60 @@ export interface DriveJevState {
   recent_actions: string[];
   instructions: { goal: string; rules: readonly string[] };
   facts: string[];
+}
+
+export const SUBMIT_RESPONSE_REASON_MAX = 300;
+
+export function observationNoticeTexts(observation: {
+  semantic?: { blockers?: Array<{ text: string }> };
+}): string[] {
+  return (observation.semantic?.blockers ?? [])
+    .map((blocker) => blocker.text)
+    .filter((text) => text.length > 0);
+}
+
+export function attachObservationNotice(
+  observation: Observation,
+  text: string,
+): Observation {
+  const existing = observation.semantic?.blockers ?? [];
+  if (text.length === 0 || existing.some((blocker) => blocker.text === text)) return observation;
+  return {
+    ...observation,
+    semantic: {
+      ...observation.semantic,
+      blockers: [...existing, { kind: "validation", text }],
+    },
+  };
+}
+
+export function submitResponseText(
+  beforeText: string,
+  afterText: string,
+  notices: readonly string[] = [],
+  excludeLabels: readonly string[] = [],
+): string | undefined {
+  const normalize = (text: string): string[] =>
+    text
+      .split(/\n+/)
+      .map((line) => line.replace(/\s+/g, " ").trim())
+      .filter((line) => line.length > 0);
+  const before = new Set(normalize(beforeText).map((line) => line.toLowerCase()));
+  const exclude = new Set(
+    excludeLabels
+      .map((label) => label.replace(/\s+/g, " ").trim().toLowerCase())
+      .filter((label) => label.length > 0),
+  );
+  const fresh: string[] = [];
+  const seen = new Set<string>();
+  for (const line of [...normalize(afterText), ...notices.flatMap((notice) => normalize(notice))]) {
+    const key = line.toLowerCase();
+    if (before.has(key) || exclude.has(key) || seen.has(key)) continue;
+    seen.add(key);
+    fresh.push(line);
+  }
+  if (fresh.length === 0) return undefined;
+  return fresh.join(" ").replace(/\s+/g, " ").trim().slice(0, SUBMIT_RESPONSE_REASON_MAX);
 }
 
 export function pageTextFromObservation(
@@ -3490,6 +3546,10 @@ async function snapshotDriveSession(
     drive.expiryShortWrittenRefs = [];
     drive.expiryLongAttemptedRefs = [];
     drive.consumedActionKey = null;
+    drive.captchaDeliveredProgressKey = null;
+    drive.submitBeforeText = null;
+    drive.submitExcludeLabels = [];
+    drive.lastSubmitResponse = null;
   }
   drive.lastDocumentEpoch = snapshot.documentEpoch;
   const finalized = await finalizeSnapshotOutputs(
@@ -3883,14 +3943,41 @@ async function driveLoop(input: {
       session.browser.page ?? undefined,
     );
 
+  const rememberSubmitResponse = (): void => {
+    if (typeof drive.submitBeforeText !== "string") return;
+    drive.lastSubmitResponse =
+      submitResponseText(
+        drive.submitBeforeText,
+        observation.dom ?? "",
+        observationNoticeTexts(observation),
+        drive.submitExcludeLabels ?? [],
+      ) ?? null;
+    if (typeof drive.lastSubmitResponse === "string") {
+      observation = attachObservationNotice(observation, drive.lastSubmitResponse);
+    }
+  };
+  const markCaptchaDelivered = (outcome: string): void => {
+    if (outcome !== "injected" && outcome !== "already_settled" && outcome !== "ok") return;
+    drive.captchaDeliveredProgressKey = pageProgressKey(
+      observation.url,
+      rows,
+      drive.filledRefs,
+      observation.semantic?.headings ?? [],
+    );
+  };
   const refreshSnapshot = async (needFrames: boolean) => {
+    let deliveredOutcome: string | undefined;
     if (captchaAfterSubmit) {
       captchaAfterSubmit = false;
-      await solveCaptcha();
+      const outcome = await solveCaptcha();
+      lastCaptchaOutcome = outcome;
+      deliveredOutcome = outcome;
     }
     const snap = await snapshotDriveSession(session, sessionId, drive, dependencies, needFrames);
     observation = snap.observation;
     rows = snap.rows;
+    rememberSubmitResponse();
+    if (deliveredOutcome !== undefined) markCaptchaDelivered(deliveredOutcome);
     return snap;
   };
   const snapshotOrTimeout = async (needFrames: boolean): Promise<DriveHandoff | "ok"> => {
@@ -4255,6 +4342,8 @@ async function driveLoop(input: {
       session.browser.page === null ? "" : await pageFingerprintOf(session.browser.page);
     const actStarted = Date.now();
     const beforeKey = pageProgressKey(observation.url, rows, drive.filledRefs, observation.semantic?.headings ?? []);
+    const textBeforeClick = observation.dom ?? "";
+    const excludeBeforeClick = rows.filter((row) => isSubmitLikeRow(row)).map((row) => readableLabel(row));
     const acted = await actDriveSafely(session, sessionId, decision.action, dependencies);
     if (acted.kind === "stale") {
       comboboxMustYield = true;
@@ -4296,7 +4385,11 @@ async function driveLoop(input: {
       }
       if (decision.action.kind === "click") {
         const clicked = findRow(rows, decision.actionKey, observation.url);
-        if (clicked !== undefined && isSubmitLikeRow(clicked)) captchaAfterSubmit = true;
+        if (clicked !== undefined && isSubmitLikeRow(clicked)) {
+          captchaAfterSubmit = true;
+          drive.submitBeforeText = textBeforeClick;
+          drive.submitExcludeLabels = excludeBeforeClick;
+        }
       }
       const snap = await refreshSnapshot(framesIfNeeded());
       if (snap.timedOut)
@@ -4571,12 +4664,19 @@ async function driveLoop(input: {
     }
     // Disabled submit: needs_fill first, in_flight waits, widget_unready on a
     // rendered challenge or after the inbox is silent.
+    const captchaConsumed = drive.captchaDeliveredProgressKey === progressKey;
     const disableKind = disabledSubmitKind(
       rows,
       remainingFills.length,
       drive.filledRefs,
       inboxSilent,
+      captchaConsumed,
     );
+    const finishWithSubmitResponse = (): DriveHandoff | undefined => {
+      const reason = drive.lastSubmitResponse;
+      if (reason === undefined || reason === null || reason.length === 0) return undefined;
+      return finish("stuck", { reason });
+    };
     if (rows.length > 0 && disableKind === "in_flight") {
       if (
         settleWaits < DRIVE_EMPTY_SNAPSHOT_WAITS &&
@@ -4588,6 +4688,8 @@ async function driveLoop(input: {
         steps += 1;
         continue;
       }
+      const answered = finishWithSubmitResponse();
+      if (answered !== undefined) return answered;
       terminalOnly = true;
     } else if (rows.length > 0 && disableKind === "widget_unready") {
       // One re-observe only for an ambiguous disabled submit. A rendered
@@ -4611,25 +4713,33 @@ async function driveLoop(input: {
       }
       const solvedSnap = await snapshotOrTimeout(framesIfNeeded());
       if (solvedSnap !== "ok") return solvedSnap;
+      markCaptchaDelivered(outcome);
       const afterSolve = disabledSubmitKind(
         rows,
         remainingFills.length,
         drive.filledRefs,
         inboxSilent,
+        drive.captchaDeliveredProgressKey ===
+          pageProgressKey(
+            observation.url,
+            rows,
+            drive.filledRefs,
+            observation.semantic?.headings ?? [],
+          ),
       );
       if (afterSolve !== "widget_unready") continue;
       if (captchaSolveStillWorking(outcome)) {
         if (now() - captchaSolveStartedAt >= RES_TIMEOUT_MS) {
-          return finish("stuck", { reason: widgetUnreadySolveReason(outcome) });
+          return finishWithSubmitResponse() ?? finish("stuck", { reason: widgetUnreadySolveReason(outcome) });
         }
         if (remainingMs() <= RES_POLL_INTERVAL_MS) {
-          return finish("budget", { reason: widgetUnreadySolveReason(outcome) });
+          return finishWithSubmitResponse() ?? finish("budget", { reason: widgetUnreadySolveReason(outcome) });
         }
         await sleepDrive(RES_POLL_INTERVAL_MS, context?.signal);
         steps += 1;
         continue;
       }
-      return finish("stuck", { reason: widgetUnreadySolveReason(outcome) });
+      return finishWithSubmitResponse() ?? finish("stuck", { reason: widgetUnreadySolveReason(outcome) });
     } else if (
       rows.length > 0 &&
       !inboxSilent &&
@@ -4928,6 +5038,10 @@ async function driveLoop(input: {
     steps += 1;
   }
 
+  const budgetReason = drive.lastSubmitResponse;
+  if (typeof budgetReason === "string" && budgetReason.length > 0) {
+    return finish("stuck", { reason: budgetReason });
+  }
   return finish(
     "budget",
     lastCaptchaOutcome === undefined ? {} : { reason: widgetUnreadySolveReason(lastCaptchaOutcome) },

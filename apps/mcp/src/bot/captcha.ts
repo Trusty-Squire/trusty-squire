@@ -971,6 +971,28 @@ export async function injectRecaptchaToken(
   token: string,
   page: Page | null = browser.page,
 ): Promise<boolean> {
+  return (await injectRecaptchaTokenDetail(browser, token, page)).ok;
+}
+
+export async function injectRecaptchaTokenDetail(
+  browser: BrowserController,
+  token: string,
+  page: Page | null = browser.page,
+): Promise<RecaptchaInjectDiag> {
+  const failed = (error: string | null = null): RecaptchaInjectDiag => ({
+    ok: false,
+    world: "isolated",
+    textareas: 0,
+    clients: 0,
+    isolatedClients: 0,
+    callbacksFunction: 0,
+    callbacksString: 0,
+    callbacksFired: 0,
+    dataCallbackHosts: 0,
+    dataCallbackFired: 0,
+    requestSubmit: false,
+    error,
+  });
   if (!page) throw new Error("Browser not started");
   try {
     const filled = await page.evaluate((tok: string) => {
@@ -1078,9 +1100,9 @@ export async function injectRecaptchaToken(
     console.error(
       `[captcha-inject-diag] world=${diag.world} textareas=${diag.textareas} clients=${diag.clients} isolated_clients=${diag.isolatedClients} callbacks_function=${diag.callbacksFunction} callbacks_string=${diag.callbacksString} callbacks_fired=${diag.callbacksFired} data_callback_hosts=${diag.dataCallbackHosts} data_callback_fired=${diag.dataCallbackFired} request_submit=${diag.requestSubmit} error=${diag.error ?? "none"}`,
     );
-    return diag.ok;
-  } catch {
-    return false;
+    return diag;
+  } catch (err) {
+    return failed(err instanceof Error ? err.message : String(err));
   }
 }
 
@@ -1099,6 +1121,39 @@ export async function recaptchaPageProceeded(
         ),
       );
       return nodes.some((el) => !el.disabled);
+    });
+  } catch {
+    return false;
+  }
+}
+
+/** The page consumed a token without unlocking submit or navigating. */
+export async function recaptchaPageReacted(
+  page: Page | undefined,
+  urlBefore: string,
+): Promise<boolean> {
+  if (page === undefined) return false;
+  if (await recaptchaPageProceeded(page, urlBefore)) return true;
+  try {
+    return await page.evaluate(() => {
+      const submits = Array.from(
+        document.querySelectorAll<HTMLButtonElement | HTMLInputElement>(
+          'button[type="submit"], input[type="submit"], button:not([type])',
+        ),
+      );
+      const busy = submits.some((el) => {
+        if (!el.disabled) return false;
+        const label = `${el.textContent ?? ""} ${el.value ?? ""}`.toLowerCase();
+        return /\b(?:creating|loading|submitting|processing|saving|sending|please\s+wait)\b/.test(
+          label,
+        );
+      });
+      if (busy) return true;
+      return Array.from(
+        document.querySelectorAll(
+          '[role="alert"],[role="status"],[aria-live]:not([aria-live="off"])',
+        ),
+      ).some((el) => (el.textContent ?? "").trim().length > 0);
     });
   } catch {
     return false;

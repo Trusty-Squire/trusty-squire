@@ -206,6 +206,12 @@ export interface SessionDriveState {
   lastDocumentEpoch?: string | null;
   resumeCompactRows?: Array<[string, string, string?]>;
   cardFillPending?: boolean;
+  /** Progress key that already received a delivered captcha token this drive. */
+  captchaDeliveredProgressKey?: string | null;
+  /** Visible text kept from the last submit-like click, for the page's answer. */
+  submitBeforeText?: string | null;
+  submitExcludeLabels?: string[];
+  lastSubmitResponse?: string | null;
 }
 
 // The last extracted elements are resealed on every retain so each retained

@@ -11,6 +11,7 @@ import {
   driveRowsFromSnapshot,
   inferFieldFromLabel,
   snapshotSelectOptions,
+  snapshotToObservation,
   type DriveSnapshot,
 } from "../drive-snapshot.js";
 
@@ -264,6 +265,21 @@ describe("drive snapshot conversion", () => {
     );
     expect(rows[0]?.[1]).toBe("t");
     expect(rows[0]?.[2]).toContain("f=search");
+  });
+});
+
+describe("snapshot notices", () => {
+  it("surfaces live-region text as observation blockers", () => {
+    const observation = snapshotToObservation(
+      snapshot({
+        notices: ["This email address has been used to sign up too recently."],
+      }),
+      "sess",
+      [],
+    );
+    expect(observation.semantic?.blockers).toEqual([
+      { kind: "validation", text: "This email address has been used to sign up too recently." },
+    ]);
   });
 });
 

@@ -19,7 +19,8 @@ import {
   type TwoCaptchaVaultProxy,
   detectCaptchaVariant,
   recaptchaEvidenceDiag,
-  recaptchaPageProceeded,
+  recaptchaPageReacted,
+  injectRecaptchaTokenDetail,
   extractHcaptchaResponseKeyFromToken,
   extractHcaptchaSitekey,
   extractRecaptchaSitekey,
@@ -30,7 +31,6 @@ import {
   hasHcaptchaResponseTokenWithCompat,
   hcaptchaInjectScript,
   injectHcaptchaToken,
-  injectRecaptchaToken,
   injectTurnstileToken,
   waitForCaptchaResponseToken,
   withTimeout,
@@ -177,37 +177,53 @@ function nonOkReason(res: Exclude<TwoCaptchaResult, { kind: "ok" }>): string | u
 // a real page mutation — injectHcaptchaToken fires the site's own
 // success/verify callbacks, which on an ordinary integration submits the form
 // — so it belongs inside the caller's action boundary.
+export function captchaInjectSettled(input: {
+  challengeRendered: boolean;
+  callbacksFired: number;
+  tokenPresent: boolean;
+  pageReacted: boolean;
+}): { solved: boolean; outcome: string } {
+  if (input.callbacksFired > 0) return { solved: true, outcome: "ok" };
+  if (input.tokenPresent && input.pageReacted) return { solved: true, outcome: "ok" };
+  if (input.challengeRendered) return { solved: false, outcome: "challenge_still_rendered" };
+  return { solved: input.tokenPresent, outcome: "ok" };
+}
+
 export async function injectCaptchaToken(
   browser: BrowserController,
   variant: string,
   token: string,
   page?: Page,
 ): Promise<{ solved: boolean; outcome: string }> {
+  const recaptcha = variant === "recaptcha_v2" || variant === "recaptcha_v3";
   const inject =
     variant === "hcaptcha"
       ? injectHcaptchaToken
       : variant === "turnstile"
         ? injectTurnstileToken
-        : variant === "recaptcha_v2" || variant === "recaptcha_v3"
-          ? injectRecaptchaToken
-          : null;
-  if (inject === null) return { solved: false, outcome: "unsupported_variant" };
+        : null;
+  if (!recaptcha && inject === null) return { solved: false, outcome: "unsupported_variant" };
   const urlBefore = page?.url() ?? browser.currentUrl();
-  if (!(await inject(browser, token, page))) return { solved: false, outcome: "inject_failed" };
-  const solved = await waitForCaptchaResponseToken(browser, 2_000, page);
-  if (solved) {
-    const after = await detectCaptchaVariant(browser, page);
-    // A visible challenge frame is not a failed solve when the page
-    // proceeded (submit enabled or navigated). Keep the failure only
-    // when the submit is still locked and nothing moved.
-    const proceeded =
-      (variant === "recaptcha_v2" || variant === "recaptcha_v3") &&
-      (await recaptchaPageProceeded(page, urlBefore));
-    if (after.challengeRendered && !proceeded) {
-      return { solved: false, outcome: "challenge_still_rendered" };
-    }
+  let callbacksFired = 0;
+  if (recaptcha) {
+    const diag = await injectRecaptchaTokenDetail(browser, token, page ?? null);
+    if (!diag.ok) return { solved: false, outcome: "inject_failed" };
+    callbacksFired = diag.callbacksFired;
+  } else if (inject === null || !(await inject(browser, token, page))) {
+    return { solved: false, outcome: "inject_failed" };
   }
-  return { solved, outcome: "ok" };
+  const tokenPresent = await waitForCaptchaResponseToken(browser, 2_000, page);
+  const pageReacted = recaptcha ? await recaptchaPageReacted(page, urlBefore) : false;
+  const after =
+    tokenPresent && callbacksFired === 0 && !pageReacted
+      ? await detectCaptchaVariant(browser, page)
+      : { challengeRendered: false };
+  return captchaInjectSettled({
+    challengeRendered: after.challengeRendered,
+    callbacksFired,
+    tokenPresent,
+    pageReacted,
+  });
 }
 
 export async function solveCaptchaWithTokenSolver(
