@@ -122,14 +122,54 @@ export function isRecaptchaCheckboxFrameUrl(rawUrl: string): boolean {
 
 export type CaptchaKind = "turnstile" | "recaptcha" | "hcaptcha";
 
-// Finer-grained captcha classification for spike telemetry (T3.2).
-// `recaptcha_v3` covers any score-mode reCAPTCHA with no clickable
-// checkbox (true v3 and v2-invisible behave the same to the bot:
-// nothing to solve). Static-vs-dynamic of a v2 grid is intentionally
-// not split here — reliable pre-solve classification needs the grid
-// inspection that T3.4 (Module A) builds; the spike's question is
-// answered by family + challenge_rendered.
+// Finer-grained captcha classification. recaptcha_v2 is the checkbox
+// widget AND v2-invisible that can pop an image grid (render=explicit,
+// type=image, or a visible api2/bframe). recaptcha_v3 is the score API
+// only (api.js?render=<sitekey>, no image anchor). size=invisible alone
+// is not v3 — that flag is how v2-invisible hides its checkbox.
 export type CaptchaVariant = "turnstile" | "recaptcha_v2" | "recaptcha_v3" | "hcaptcha" | "unknown";
+
+export type RecaptchaDetectEvidence = {
+  challengeFrameVisible: boolean;
+  anchorType: string | null;
+  anchorSize: string | null;
+  apiRender: string | null;
+  sitekey: string | null;
+  hasVisibleCheckboxAnchor: boolean;
+  hasInvisibleAnchor: boolean;
+  hasBadge: boolean;
+};
+
+export function classifyRecaptchaVariant(
+  ev: RecaptchaDetectEvidence,
+): "recaptcha_v2" | "recaptcha_v3" | null {
+  if (
+    ev.challengeFrameVisible ||
+    ev.anchorType === "image" ||
+    ev.apiRender === "explicit" ||
+    ev.hasVisibleCheckboxAnchor
+  ) {
+    return "recaptcha_v2";
+  }
+  if (
+    ev.hasBadge ||
+    ev.hasInvisibleAnchor ||
+    (ev.apiRender !== null && ev.apiRender !== "explicit" && /^6L/.test(ev.apiRender))
+  ) {
+    return "recaptcha_v3";
+  }
+  return null;
+}
+
+export function recaptchaEvidenceDiag(ev: RecaptchaDetectEvidence): string {
+  return [
+    `anchor_type=${ev.anchorType ?? "none"}`,
+    `anchor_size=${ev.anchorSize ?? "none"}`,
+    `api_render=${ev.apiRender ?? "none"}`,
+    `challenge_frame=${ev.challengeFrameVisible ? "visible" : "hidden"}`,
+    `sitekey=${ev.sitekey ?? "none"}`,
+  ].join(" ");
+}
 
 function isCaptchaVariant(v: string): v is CaptchaVariant {
   return (
@@ -527,6 +567,7 @@ export async function detectCaptchaVariant(
 ): Promise<{
   variant: CaptchaVariant;
   challengeRendered: boolean;
+  recaptcha?: RecaptchaDetectEvidence;
 }> {
   if (!page) throw new Error("Browser not started");
   try {
@@ -546,12 +587,54 @@ export async function detectCaptchaVariant(
           r.bottom > 0 && r.right > 0 && r.top < window.innerHeight && r.left < window.innerWidth
         );
       };
+      const challengeFrameVisible = visible('iframe[src*="recaptcha/api2/bframe"]');
       // The image-grid challenge frame: reCAPTCHA's `bframe`, or
       // hCaptcha's challenge frame. Turnstile and score-mode
       // reCAPTCHA never render a grid.
       const challengeRendered =
-        visible('iframe[src*="recaptcha/api2/bframe"]') ||
-        visible('iframe[src*="hcaptcha.com"][src*="challenge"]');
+        challengeFrameVisible || visible('iframe[src*="hcaptcha.com"][src*="challenge"]');
+      let anchorType: string | null = null;
+      let anchorSize: string | null = null;
+      let sitekey: string | null = null;
+      for (const ifr of Array.from(
+        document.querySelectorAll<HTMLIFrameElement>(
+          'iframe[src*="recaptcha/api2/anchor"], iframe[src*="recaptcha/enterprise/anchor"]',
+        ),
+      )) {
+        try {
+          const url = new URL(ifr.src);
+          if (anchorType === null) anchorType = url.searchParams.get("type");
+          if (anchorSize === null) anchorSize = url.searchParams.get("size");
+          const k = url.searchParams.get("k");
+          if (k !== null && /^6L/.test(k) && k.length > 30) sitekey = k;
+        } catch {
+          /* relative/blank src */
+        }
+      }
+      let apiRender: string | null = null;
+      for (const script of Array.from(document.querySelectorAll("script[src]"))) {
+        const src = script.getAttribute("src") ?? "";
+        if (!/recaptcha\/(?:api|enterprise)\.js/.test(src)) continue;
+        try {
+          apiRender = new URL(src, location.href).searchParams.get("render");
+        } catch {
+          /* relative/blank src */
+        }
+      }
+      const recaptcha = {
+        challengeFrameVisible,
+        anchorType,
+        anchorSize,
+        apiRender,
+        sitekey,
+        hasVisibleCheckboxAnchor: present(
+          'iframe[src*="recaptcha/api2/anchor"]:not([src*="size=invisible"])',
+        ),
+        hasInvisibleAnchor: present(
+          'iframe[src*="recaptcha/api2/anchor"][src*="size=invisible"]',
+        ),
+        hasBadge: present(".grecaptcha-badge"),
+      };
       let variant = "unknown";
       // Turnstile: modern Cloudflare renders its iframe inside a SHADOW
       // DOM, so `querySelector('iframe[src*=challenges.cloudflare.com]')`
@@ -567,18 +650,8 @@ export async function detectCaptchaVariant(
         variant = "turnstile";
       } else if (present('iframe[src*="hcaptcha.com"]')) {
         variant = "hcaptcha";
-      } else if (present('iframe[src*="recaptcha/api2/anchor"]:not([src*="size=invisible"])')) {
-        // VISIBLE checkbox anchor (size=normal) → clickable v2.
-        variant = "recaptcha_v2";
-      } else if (
-        present(".grecaptcha-badge") ||
-        present('iframe[src*="recaptcha/api2/anchor"][src*="size=invisible"]')
-      ) {
-        // Badge / size=invisible anchor and no clickable checkbox →
-        // score-mode reCAPTCHA (passes on submit, nothing to click).
-        variant = "recaptcha_v3";
       }
-      return { variant, challengeRendered };
+      return { variant, challengeRendered, recaptcha };
     });
     // hCaptcha's checkbox and challenge iframes are CHILDREN of the
     // cross-origin hcaptcha.html frame host, and Bluesky renders that host
@@ -590,6 +663,11 @@ export async function detectCaptchaVariant(
     // pattern, so a mere checkbox still reads as no rendered challenge —
     // the solver only escalates once the image grid exists.
     let variant = isCaptchaVariant(raw.variant) ? raw.variant : "unknown";
+    const recaptcha = raw.recaptcha;
+    if (variant === "unknown") {
+      const classified = classifyRecaptchaVariant(recaptcha);
+      if (classified !== null) variant = classified;
+    }
     let hcaptchaChallengeFrameRendered = false;
     if (variant === "unknown" || !raw.challengeRendered) {
       for (const frame of page.frames()) {
@@ -611,6 +689,7 @@ export async function detectCaptchaVariant(
     return {
       variant,
       challengeRendered: raw.challengeRendered || hcaptchaChallengeFrameRendered,
+      recaptcha,
     };
   } catch {
     return { variant: "unknown", challengeRendered: false };
@@ -1558,8 +1637,8 @@ const TWOCAPTCHA_API_BASE = "https://api.2captcha.com";
 // submission is just queued). The RES polling can take 60-120s on
 // busy days; we cap at 180s to keep the bot's overall budget bounded.
 const IN_TIMEOUT_MS = 10_000;
-const RES_POLL_INTERVAL_MS = 5_000;
-const RES_TIMEOUT_MS = 180_000;
+export const RES_POLL_INTERVAL_MS = 5_000;
+export const RES_TIMEOUT_MS = 180_000;
 
 // A single authenticated 2Captcha request, with the API key NOT yet attached —
 // the transport (direct or vault-proxy) injects it. `keyInjection` says where:

@@ -73,6 +73,7 @@ import {
 } from "./drive-act.js";
 import { provisionElementRefs } from "./observe/refs.js";
 import { attemptOperateCaptchaAutoSolve } from "./captcha-solve.js";
+import { RES_POLL_INTERVAL_MS, RES_TIMEOUT_MS } from "./captcha.js";
 
 export interface DriveCallContext {
   notifyUser?: (message: string, data?: Record<string, unknown>) => Promise<void>;
@@ -1279,9 +1280,23 @@ export function outstandingRequiredFill(
 
 export type DisabledSubmitKind = "in_flight" | "needs_fill" | "widget_unready" | "none";
 
+/** A rendered image/audio challenge in a cross-origin frame. */
+export function isRenderedCaptchaRow(row: WireRow): boolean {
+  if (!/(?:^|\|)x=x(?:\||$)/.test(row[2] ?? "")) return false;
+  return /\b(?:image[- ]?challenge|audio[- ]?challenge|verify|skip)\b/.test(
+    readableLabel(row).toLowerCase(),
+  );
+}
+
+export function pageHasRenderedCaptcha(rows: readonly WireRow[]): boolean {
+  return rows.some((row) => isRenderedCaptchaRow(row));
+}
+
 /**
  * A disabled submit is three states, not one dead end.
- * needs_fill is first. widget_unready is last resort after the inbox is silent.
+ * A rendered challenge is widget_unready on sight — before the spinner
+ * check, and without waiting for an inbox poll. inboxSilent remains
+ * only for a disabled submit with no visible challenge.
  */
 export function disabledSubmitKind(
   rows: readonly WireRow[],
@@ -1289,6 +1304,7 @@ export function disabledSubmitKind(
   filledRefs: readonly string[] = [],
   inboxSilent: boolean = false,
 ): DisabledSubmitKind {
+  if (pageHasRenderedCaptcha(rows)) return "widget_unready";
   if (rows.length === 0) return "in_flight";
   const surface = formSurfaceRows(rows);
   if (surface.length === 0) return "none";
@@ -3769,6 +3785,7 @@ async function driveLoop(input: {
 }): Promise<DriveHandoff> {
   const { session, sessionId, args, api, context, dependencies, maxSteps, elapsed, remainingMs } =
     input;
+  const now = dependencies.now ?? Date.now;
   const driveState = session.drive;
   if (driveState === null) throw new Error("drive state missing");
   const drive = driveState;
@@ -3822,6 +3839,8 @@ async function driveLoop(input: {
   let inboxSilent = false;
   let paySubmitWaits = 0;
   let captchaAfterSubmit = false;
+  let lastCaptchaOutcome: string | undefined;
+  let captchaSolveStartedAt = 0;
 
   const finish = (
     status: DriveStatus,
@@ -4550,8 +4569,8 @@ async function driveLoop(input: {
       settleWaits = 0;
       widgetWaits = 0;
     }
-    // Disabled submit: needs_fill first, in_flight waits, widget_unready only
-    // after the inbox has already been asked and said nothing.
+    // Disabled submit: needs_fill first, in_flight waits, widget_unready on a
+    // rendered challenge or after the inbox is silent.
     const disableKind = disabledSubmitKind(
       rows,
       remainingFills.length,
@@ -4571,7 +4590,11 @@ async function driveLoop(input: {
       }
       terminalOnly = true;
     } else if (rows.length > 0 && disableKind === "widget_unready") {
+      // One re-observe only for an ambiguous disabled submit. A rendered
+      // challenge goes to the solver immediately — and we never reset this
+      // counter, so an in-progress solve cannot fall back into a bare wait.
       if (
+        !pageHasRenderedCaptcha(rows) &&
         widgetWaits < DRIVE_WIDGET_UNREADY_WAITS &&
         !(drive.exhaustedActionKeys ?? []).includes("WAIT")
       ) {
@@ -4582,6 +4605,10 @@ async function driveLoop(input: {
         continue;
       }
       const outcome = await solveCaptcha();
+      lastCaptchaOutcome = outcome;
+      if (captchaSolveStartedAt === 0 && captchaSolveStillWorking(outcome)) {
+        captchaSolveStartedAt = now();
+      }
       const solvedSnap = await snapshotOrTimeout(framesIfNeeded());
       if (solvedSnap !== "ok") return solvedSnap;
       const afterSolve = disabledSubmitKind(
@@ -4592,9 +4619,13 @@ async function driveLoop(input: {
       );
       if (afterSolve !== "widget_unready") continue;
       if (captchaSolveStillWorking(outcome)) {
-        widgetWaits = 0;
-        const applied = await applyDecision({ kind: "wait", confidence: 1 });
-        if (applied !== "continue") return applied;
+        if (now() - captchaSolveStartedAt >= RES_TIMEOUT_MS) {
+          return finish("stuck", { reason: widgetUnreadySolveReason(outcome) });
+        }
+        if (remainingMs() <= RES_POLL_INTERVAL_MS) {
+          return finish("budget", { reason: widgetUnreadySolveReason(outcome) });
+        }
+        await sleepDrive(RES_POLL_INTERVAL_MS, context?.signal);
         steps += 1;
         continue;
       }
@@ -4695,7 +4726,12 @@ async function driveLoop(input: {
       return finish("stuck", { reason: missingPay });
     }
 
-    if (drive.jevCalls >= DRIVE_MAX_JEV_CALLS) return finish("budget");
+    if (drive.jevCalls >= DRIVE_MAX_JEV_CALLS) {
+      return finish(
+        "budget",
+        lastCaptchaOutcome === undefined ? {} : { reason: widgetUnreadySolveReason(lastCaptchaOutcome) },
+      );
+    }
 
     const prepareStarted = Date.now();
     const fingerprint = driveProgressFingerprint(observation, rows, drive, session);
@@ -4892,5 +4928,8 @@ async function driveLoop(input: {
     steps += 1;
   }
 
-  return finish("budget");
+  return finish(
+    "budget",
+    lastCaptchaOutcome === undefined ? {} : { reason: widgetUnreadySolveReason(lastCaptchaOutcome) },
+  );
 }

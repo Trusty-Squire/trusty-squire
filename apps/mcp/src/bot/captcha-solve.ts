@@ -18,6 +18,7 @@ import {
   TwoCaptchaSolver,
   type TwoCaptchaVaultProxy,
   detectCaptchaVariant,
+  recaptchaEvidenceDiag,
   extractHcaptchaResponseKeyFromToken,
   extractHcaptchaSitekey,
   extractRecaptchaSitekey,
@@ -191,10 +192,14 @@ export async function injectCaptchaToken(
           : null;
   if (inject === null) return { solved: false, outcome: "unsupported_variant" };
   if (!(await inject(browser, token, page))) return { solved: false, outcome: "inject_failed" };
-  return {
-    solved: await waitForCaptchaResponseToken(browser, 2_000, page),
-    outcome: "ok",
-  };
+  const solved = await waitForCaptchaResponseToken(browser, 2_000, page);
+  if (solved) {
+    const after = await detectCaptchaVariant(browser, page);
+    if (after.challengeRendered) {
+      return { solved: false, outcome: "challenge_still_rendered" };
+    }
+  }
+  return { solved, outcome: "ok" };
 }
 
 export async function solveCaptchaWithTokenSolver(
@@ -451,13 +456,19 @@ async function injectPendingCaptchaToken(
     // this variant's token actually belongs, so a token that landed nowhere
     // backs off instead of suppressing the next attempt.
     const confirmed = res.solved && (await variantTokenPresent(session, pending.variant, page));
+    const outcome =
+      confirmed
+        ? res.outcome
+        : res.outcome === "ok"
+          ? "token_not_confirmed"
+          : res.outcome;
     audit(session.id, "captcha_autosolve", {
       variant: pending.variant,
-      outcome: res.solved && !confirmed ? "token_not_confirmed" : res.outcome,
+      outcome,
       solved: confirmed,
     });
     console.error(
-      `[captcha-autosolve-diag] session=${session.id} variant=${pending.variant} outcome=${res.solved && !confirmed ? "token_not_confirmed" : res.outcome} confirmed=${confirmed} age_ms=${Date.now() - pending.fetchedAt}`,
+      `[captcha-autosolve-diag] session=${session.id} variant=${pending.variant} outcome=${outcome} confirmed=${confirmed} age_ms=${Date.now() - pending.fetchedAt}`,
     );
     if (!confirmed) state.lastFinishedAt = Date.now();
     // Gate handoff: the fill POSTs the challenge form into a hidden frame and
@@ -469,7 +480,7 @@ async function injectPendingCaptchaToken(
     if (page) {
       void deliverGateHandoff(page, pending.variant);
     }
-    return confirmed ? "injected" : "token_not_confirmed";
+    return confirmed ? "injected" : outcome;
   } catch (error) {
     audit(session.id, "captcha_autosolve", {
       variant: pending.variant,
@@ -631,6 +642,9 @@ async function startDetachedTokenFetch(session: Session, page?: Page): Promise<s
   const state = autoSolveState(session);
   if (state.inFlight) {
     audit(session.id, "captcha_autosolve", { outcome: "fetch_skipped", reason: "in_flight" });
+    console.error(
+      `[captcha-autosolve-diag] session=${session.id} outcome=fetch_skipped reason=in_flight`,
+    );
     return "in_flight";
   }
   if (
@@ -638,6 +652,9 @@ async function startDetachedTokenFetch(session: Session, page?: Page): Promise<s
     Date.now() - state.lastFinishedAt < CAPTCHA_AUTOSOLVE_RETRY_COOLDOWN_MS
   ) {
     audit(session.id, "captcha_autosolve", { outcome: "fetch_skipped", reason: "cooldown" });
+    console.error(
+      `[captcha-autosolve-diag] session=${session.id} outcome=fetch_skipped reason=cooldown`,
+    );
     return "cooldown";
   }
   if (Date.now() < state.expiryBackoffUntil) {
@@ -672,8 +689,10 @@ async function runDetachedTokenFetch(session: Session, page?: Page): Promise<str
     // sealed value, so without this there is NO readable record of whether
     // detection saw a rendered challenge — making a silent early return
     // indistinguishable from the auto-solve never running at all.
+    const evidence =
+      det.recaptcha === undefined ? "" : ` ${recaptchaEvidenceDiag(det.recaptcha)}`;
     console.error(
-      `[captcha-autosolve-diag] session=${session.id} variant=${det.variant} outcome=detect challenge_rendered=${det.challengeRendered}`,
+      `[captcha-autosolve-diag] session=${session.id} variant=${det.variant} outcome=detect challenge_rendered=${det.challengeRendered}${evidence}`,
     );
     // Only a RENDERED challenge escalates to the solver. A mere checkbox
     // (or a settled widget) with a response token needs nothing, and a
