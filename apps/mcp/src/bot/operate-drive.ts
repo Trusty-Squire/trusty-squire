@@ -70,12 +70,14 @@ import {
   reenterDriveField,
   resolveDriveFrame,
   settleDriveStep,
+  waitForInPageChange,
   waitForNavigationIdle,
   type DriveActResult,
 } from "./drive-act.js";
 import { provisionElementRefs } from "./observe/refs.js";
 import { attemptOperateCaptchaAutoSolve } from "./captcha-solve.js";
 import { RES_POLL_INTERVAL_MS, RES_TIMEOUT_MS } from "./captcha.js";
+import { findCredentialTokens } from "./credential-shape.js";
 
 export interface DriveCallContext {
   notifyUser?: (message: string, data?: Record<string, unknown>) => Promise<void>;
@@ -358,6 +360,7 @@ export function resetDriveGoalMemory(drive: SessionDriveState): void {
   drive.lastActBinding = null;
   drive.submittedThisDrive = false;
   drive.preexistingRestarted = false;
+  drive.pendingRevealScan = false;
 }
 
 export function emptyDriveState(goal: string, facts: Record<string, string>): SessionDriveState {
@@ -390,6 +393,7 @@ export function emptyDriveState(goal: string, facts: Record<string, string>): Se
     lastActBinding: null,
     submittedThisDrive: false,
     preexistingRestarted: false,
+    pendingRevealScan: false,
   };
 }
 
@@ -998,8 +1002,9 @@ export function candidateAimScore(
     score -= 50;
   }
   if (listedItemRows(input.rows, input.pageUrl ?? "").some((entry) => entry[0] === row[0])) {
-    score += 50;
+    score += 70;
   }
+  if (isRevealOrCopyRow(row) && goalWantsKey(input.goal)) score += 80;
   if (isListFilterRow(row) && goalWantsKey(input.goal)) score -= 50;
   if (
     goalWantsKey(input.goal) &&
@@ -1007,7 +1012,7 @@ export function candidateAimScore(
     !isAlreadyHereNav(row, input.pageUrl ?? "") &&
     !rowMatchesGoalSeek(row, input.goal ?? "")
   ) {
-    score += 40;
+    score += listedItemRows(input.rows, input.pageUrl ?? "").length > 0 ? -20 : 40;
   }
   return score;
 }
@@ -1318,8 +1323,22 @@ export function isCreateEntryRow(row: WireRow): boolean {
   );
 }
 
+export function isDeeperDestination(href: string | undefined, pageUrl: string): boolean {
+  if (href === undefined || href.length === 0 || href.startsWith("#")) return false;
+  try {
+    const target = new URL(href, pageUrl);
+    const page = new URL(pageUrl);
+    if (target.origin !== page.origin) return false;
+    const from = (page.pathname.replace(/\/$/, "") || "/") + "/";
+    const dest = target.pathname.replace(/\/$/, "") || "/";
+    return dest !== from.slice(0, -1) && (dest + "/").startsWith(from);
+  } catch {
+    return false;
+  }
+}
+
 export function listedItemRows(rows: readonly WireRow[], pageUrl: string): WireRow[] {
-  if (!rows.some((row) => isCreateEntryRow(row))) return [];
+  const hasCreate = rows.some((row) => isCreateEntryRow(row));
   return rows.filter((row) => {
     if (isCreateEntryRow(row)) return false;
     if (isFillableRow(row) || isSubmitLikeRow(row) || isConsentRow(row) || isOauthChromeRow(row)) {
@@ -1330,8 +1349,114 @@ export function listedItemRows(rows: readonly WireRow[], pageUrl: string): WireR
     if (isSamePageAnchorRow(row, pageUrl)) return false;
     if (isAlreadyHereNav(row, pageUrl)) return false;
     if (SECTION_NAV_SKIP.test(readableLabel(row).toLowerCase())) return false;
-    return true;
+    if (isDeeperDestination(rowHref(row), pageUrl)) return true;
+    return hasCreate;
   });
+}
+
+export function isRevealOrCopyRow(row: WireRow): boolean {
+  const label = readableLabel(row).toLowerCase().trim();
+  return /^(?:reveal|show|unmask|view|copy)(?:\s+(?:the\s+)?(?:api[- ]?key|key|token|secret|value))?s?$/.test(
+    label,
+  );
+}
+
+export const REVEALED_SECRET_REF = "@key-value";
+
+export function revealedSecretMarkerRow(length: number): WireRow {
+  return [REVEALED_SECRET_REF, "h1", `@key-value|secret=1|len=${length}`];
+}
+
+export function pageShowsRevealedKey(
+  rows: readonly WireRow[],
+  _pageText: string = "",
+): boolean {
+  return rows.some(
+    (row) =>
+      row[0] === REVEALED_SECRET_REF || /(?:^|\|)secret=1(?:\||$)/.test(row[2] ?? ""),
+  );
+}
+
+function headingCopy(rows: readonly WireRow[]): string {
+  return rows
+    .filter((row) => /^(?:h[1-6]|heading)$/i.test(row[1]))
+    .map((row) => readableLabel(row))
+    .join(" ");
+}
+
+const EMAIL_VERIFY_COPY =
+  /(?:check|confirm|verify) your e-?mail|verification (?:link|e-?mail|code)|we(?:'| ha)ve sent|sent you an? e-?mail/;
+
+export function emailVerificationCopy(text: string): boolean {
+  return EMAIL_VERIFY_COPY.test(text.toLowerCase());
+}
+
+export function redactSecretShapedTokens(text: string): { text: string; lengths: number[] } {
+  const tokens = findCredentialTokens(text);
+  if (tokens.length === 0) return { text, lengths: [] };
+  let next = text;
+  const lengths: number[] = [];
+  for (const token of tokens) {
+    lengths.push(token.length);
+    next = next.split(token).join(REVEALED_SECRET_REF);
+  }
+  return { text: next, lengths };
+}
+
+export function attachRevealedSecretMarker(
+  observation: Observation,
+  rows: readonly WireRow[],
+): { observation: Observation; rows: WireRow[]; attached: boolean } {
+  const blobs = [
+    observation.dom ?? "",
+    observation.semantic?.title ?? "",
+    ...(observation.semantic?.headings ?? []),
+    ...(observation.semantic?.blockers ?? []).map((blocker) => blocker.text),
+    ...rows.map((row) => row[2] ?? ""),
+  ];
+  const lengths: number[] = [];
+  for (const blob of blobs) {
+    for (const token of findCredentialTokens(blob)) lengths.push(token.length);
+  }
+  if (lengths.length === 0) return { observation, rows: [...rows], attached: false };
+  const length = Math.max(...lengths);
+  const redact = (text: string): string => redactSecretShapedTokens(text).text;
+  const nextRows = rows.map((row) => {
+    if (row[2] === undefined) return row;
+    const facts = redact(row[2]);
+    return facts === row[2] ? row : ([row[0], row[1], facts] as WireRow);
+  });
+  if (!nextRows.some((row) => row[0] === REVEALED_SECRET_REF)) {
+    nextRows.push(revealedSecretMarkerRow(length));
+  }
+  const headings = [
+    ...(observation.semantic?.headings ?? []).map(redact),
+    `@key-value|secret=1|len=${length}`,
+  ];
+  return {
+    observation: {
+      ...observation,
+      ...(observation.dom === undefined ? {} : { dom: redact(observation.dom) }),
+      safe_table: nextRows as unknown as NonNullable<Observation["safe_table"]>,
+      semantic: {
+        ...observation.semantic,
+        ...(observation.semantic?.title === undefined
+          ? {}
+          : { title: redact(observation.semantic.title) }),
+        headings,
+        ...(observation.semantic?.blockers === undefined
+          ? {}
+          : {
+              blockers: observation.semantic.blockers.map((blocker) => ({
+                ...blocker,
+                text: redact(blocker.text),
+              })),
+            }),
+      },
+    },
+    rows: nextRows,
+    attached: true,
+  };
 }
 
 export function isEntityNameRow(row: WireRow): boolean {
@@ -1379,19 +1504,17 @@ export function goalSeeksThirdPartySignin(goal: string): boolean {
 }
 
 /**
- * A check-your-email / verify page — current URL and visible copy only.
- * Hrefs on other controls must not count: a dashboard often links to verify.
+ * A check-your-email / verify page — visible copy and OTP fields only.
+ * The word "verif" in a URL or link label is not this: product sections
+ * about identity verifications are ordinary signed-in pages.
  */
 export function pageLooksLikeEmailVerification(
   rows: readonly WireRow[],
-  pageUrl: string = "",
+  _pageUrl: string = "",
   pageText: string = "",
 ): boolean {
   if (rows.some((row) => isOtpRow(row) && isFillableRow(row))) return true;
-  const hay = `${pageUrl} ${pageText}`.toLowerCase();
-  return /(?:check|confirm|verify) your e-?mail|verification (?:link|e-?mail|code)|we(?:'| ha)ve sent|sent you an? e-?mail|\/(?:e-?mail\/)?(?:verif(?:y|ication)s?|confirm)(?:\/|\?|#|\s|$)/.test(
-    hay,
-  );
+  return emailVerificationCopy(`${pageText} ${headingCopy(rows)}`);
 }
 
 /** Page copy names an email the goal did not. Unknown or matching identity is not this. */
@@ -1590,6 +1713,8 @@ export function clickGoalSeekScore(row: WireRow, goal: string, pageUrl: string):
   if (isListFilterRow(row) || isAlreadyHereNav(row, pageUrl) || isOffProductNavRow(row, pageUrl)) {
     return 0;
   }
+  if (isRevealOrCopyRow(row)) return 3;
+  if (isDeeperDestination(rowHref(row), pageUrl)) return 2;
   if (rowMatchesGoalSeek(row, goal) && isGoalDestinationRow(row)) return 2;
   if (rowMatchesGoalSeek(row, goal)) return 1;
   if (onSetup && isSubmitLikeRow(row) && !isDisabledRow(row)) return 1;
@@ -3398,14 +3523,12 @@ export type InboxSpecialPlan = { kind: "otp"; target: string } | { kind: "link" 
 /** After a submit click, read the inbox on wait/stuck even when no OTP field is listed. */
 export function pageSuggestsInboxWait(
   rows: readonly WireRow[],
-  pageUrl: string = "",
+  _pageUrl: string = "",
   pageText: string = "",
 ): boolean {
   if (rows.some((row) => isOtpRow(row) && isFillableRow(row))) return true;
-  const hay = `${pageUrl} ${rows.map((row) => row[2]).join(" ")} ${pageText}`.toLowerCase();
-  return /(?:check|confirm|verify) your e-?mail|verification (?:link|e-?mail|code)|we(?:'| ha)ve sent|sent you an? e-?mail|open gmail|\/(?:e-?mail\/)?(?:verif(?:y|ication)s?|confirm)(?:\/|\?|#|\s|$)|#search\//.test(
-    hay,
-  );
+  const hay = `${pageText} ${headingCopy(rows)} ${rows.map((row) => readableLabel(row)).join(" ")}`.toLowerCase();
+  return emailVerificationCopy(hay) || /open gmail|#search\//.test(hay);
 }
 
 export function goalSeeksVerification(goal: string): boolean {
@@ -4652,6 +4775,12 @@ async function driveLoop(input: {
     const snap = await snapshotDriveSession(session, sessionId, drive, dependencies, needFrames);
     observation = snap.observation;
     rows = snap.rows;
+    if (drive.pendingRevealScan === true) {
+      drive.pendingRevealScan = false;
+      const attached = attachRevealedSecretMarker(observation, rows);
+      observation = attached.observation;
+      rows = attached.rows;
+    }
     rememberSubmitResponse();
     if (deliveredOutcome !== undefined) markCaptchaDelivered(deliveredOutcome);
     return snap;
@@ -5110,6 +5239,9 @@ async function driveLoop(input: {
       decision.action.kind === "click" || decision.action.kind === "oauth_login"
         ? findRow(rows, decision.actionKey, observation.url)
         : undefined;
+    if (clickedBefore !== undefined && isRevealOrCopyRow(clickedBefore)) {
+      drive.pendingRevealScan = true;
+    }
     const acted = await actDriveSafely(session, sessionId, decision.action, dependencies);
     if (acted.kind === "stale") {
       comboboxMustYield = true;
@@ -5136,7 +5268,16 @@ async function driveLoop(input: {
       observation = await actSafely(dependencies, sessionId, decision.action);
       if (observation.needs_user !== undefined) return finishOnWall(observation.needs_user);
       rows = mergeCompactTable(rows, observation);
+      if (drive.pendingRevealScan === true) {
+        drive.pendingRevealScan = false;
+        const attached = attachRevealedSecretMarker(observation, rows);
+        observation = attached.observation;
+        rows = attached.rows;
+      }
       actMs = Date.now() - actStarted;
+      if (pageShowsRevealedKey(rows) && goalSeeksKey(drive.goal)) {
+        return finish("complete");
+      }
     } else {
       if (page !== null) {
         settleMs = await settleDriveStep(page, acted.combobox);
@@ -5147,6 +5288,11 @@ async function driveLoop(input: {
           documentOriginOf(beforeEpoch) !== documentOriginOf(afterEpoch)
         ) {
           await waitForNavigationIdle(page, beforePageFingerprint);
+        } else if (
+          (decision.action.kind === "click" || decision.action.kind === "oauth_login") &&
+          beforePageFingerprint.length > 0
+        ) {
+          await waitForInPageChange(page, beforePageFingerprint);
         }
       }
       if (decision.action.kind === "click") {
@@ -5160,6 +5306,9 @@ async function driveLoop(input: {
       const snap = await refreshSnapshot(framesIfNeeded());
       if (snap.timedOut)
         return finish("evaluate_timeout", { reason: "in-page evaluate exceeded budget" });
+      if (pageShowsRevealedKey(rows) && goalSeeksKey(drive.goal)) {
+        return finish("complete");
+      }
       if (pagePathKey(observation.url) !== pagePathKey(urlBeforeClick)) {
         const fresh = submitResponseText(
           textBeforeClick,
@@ -5958,7 +6107,12 @@ async function driveLoop(input: {
       steps += 1;
       continue;
     }
-    if (!decisionIsActionable(decision) && goalSeeksKey(args.goal) && !hasGoalDestination) {
+    if (
+      !decisionIsActionable(decision) &&
+      goalSeeksKey(args.goal) &&
+      !hasGoalDestination &&
+      !pageShowsRevealedKey(rows)
+    ) {
       const nextSection = nextExploreRow(rows, drive.visitedSectionKeys ?? [], pageUrl);
       if (nextSection !== undefined) {
         const applied = await applyDecision({

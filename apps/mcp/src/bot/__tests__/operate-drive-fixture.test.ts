@@ -1335,6 +1335,151 @@ describe("operate_drive real-browser fixture", () => {
     }
   }, 30_000);
 
+  it("re-snapshots after a same-URL tab click swaps the panel", async () => {
+    const html = `<!doctype html><meta charset="utf-8"><title>Settings</title>
+<div role="tablist">
+  <button type="button" role="tab" id="account">Account</button>
+  <button type="button" role="tab" id="apps">Apps</button>
+</div>
+<section id="panel"><p id="apps-panel">payments-api</p></section>
+<script>
+  document.getElementById("account").onclick = () => {
+    setTimeout(() => {
+      document.getElementById("panel").innerHTML =
+        '<label>Name <input id="name" value="Ada"></label><p id="billing-email">billing@example.test</p>';
+    }, 120);
+  };
+</script>`;
+    const { context, page, started } = await openFixture(html, "tab-swap.test", "standard", "/settings");
+    try {
+      const seen: string[] = [];
+      const dependencies = deps(async (_api, state, questions) => {
+        seen.push(JSON.stringify(state));
+        return jevFromQuestions(questions);
+      });
+      await runOperateDrive(
+        { session_id: started.session_id, goal: "open the account section", max_steps: 4 },
+        api(),
+        undefined,
+        dependencies,
+      );
+      expect(await page.locator("#billing-email").count()).toBe(1);
+      expect(seen.some((text) => /Name|Ada|billing@example\.test/i.test(text))).toBe(true);
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
+  it("opens a listed entry and clicks reveal to capture the key", async () => {
+    const settingsHtml = `<!doctype html><meta charset="utf-8"><title>Settings</title>
+<div role="tablist">
+  <button type="button" role="tab" id="apps">Apps</button>
+  <button type="button" role="tab" id="account">Account</button>
+</div>
+<section>
+  <a id="one" href="/settings/apps/one">payments-api</a>
+  <a id="two" href="/settings/apps/two">billing-api</a>
+  <a id="new" href="/settings/apps/new">+ New app</a>
+</section>`;
+    const entryHtml = `<!doctype html><meta charset="utf-8"><title>payments-api</title>
+<main>
+  <h1>payments-api</h1>
+  <p id="secret">••••••••••••</p>
+  <button type="button" id="reveal">Reveal</button>
+</main>
+<script>
+  document.getElementById("reveal").onclick = () => {
+    document.getElementById("secret").textContent = "sk_live_fixturekey01";
+    document.getElementById("reveal").remove();
+  };
+</script>`;
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await page.route("**/*", (route) => {
+      const url = route.request().url();
+      route.fulfill({
+        contentType: "text/html",
+        body: url.includes("/settings/apps/") ? entryHtml : settingsHtml,
+      });
+    });
+    const startUrl = "https://reveal-entry.test/settings";
+    await page.goto(startUrl);
+    const started = await startHarnessProvisionSession({
+      browser: BrowserController.fromHarnessPage(page),
+      serviceUrl: startUrl,
+      format: "compact",
+      initialObservation: "standard",
+    });
+    try {
+      const dependencies = deps(async (_api, _state, questions) => jevFromQuestions(questions));
+      const result = await runOperateDrive(
+        { session_id: started.session_id, goal: "extract an API key", max_steps: 8 },
+        api(),
+        undefined,
+        dependencies,
+      );
+      expect(page.url()).toMatch(/\/settings\/apps\//);
+      expect(await page.locator("#secret").innerText()).toBe("sk_live_fixturekey01");
+      expect(result.trajectory.some((step) => step.action === "click")).toBe(true);
+      expect(result.status).toBe("complete");
+      expect(JSON.stringify(result)).not.toContain("sk_live_fixturekey01");
+      expect(JSON.stringify(result.observation?.safe_table)).toMatch(/@key-value\|secret=1\|len=/);
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
+  it("does not treat a signed-in /verifications product page as a pre-existing session", async () => {
+    const html = `<!doctype html><meta charset="utf-8"><title>Verifications</title>
+<nav>
+  <a id="keys" href="/keys">API Keys</a>
+  <a id="logout" href="/logged-out">Log out</a>
+</nav>
+<main>
+  <h1>Identity verifications</h1>
+  <p>Review verification requests for this app.</p>
+</main>`;
+    const keysHtml = `<!doctype html><meta charset="utf-8"><title>API Keys</title>
+<main><h1>API Keys</h1><p id="key">ready</p></main>`;
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await page.route("**/*", (route) => {
+      const url = route.request().url();
+      route.fulfill({
+        contentType: "text/html",
+        body: url.includes("/keys") ? keysHtml : html,
+      });
+    });
+    const startUrl = "https://verifications-section.test/verifications";
+    await page.goto(startUrl);
+    const started = await startHarnessProvisionSession({
+      browser: BrowserController.fromHarnessPage(page),
+      serviceUrl: startUrl,
+      format: "compact",
+      initialObservation: "standard",
+    });
+    try {
+      const dependencies = deps(async (_api, _state, questions) => jevFromQuestions(questions));
+      const result = await runOperateDrive(
+        {
+          session_id: started.session_id,
+          goal: "extract an API key",
+          max_steps: 4,
+        },
+        api(),
+        undefined,
+        dependencies,
+      );
+      expect(result.reason ?? "").not.toMatch(/already signed in as another account/i);
+      expect(result.status).not.toBe("stuck");
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
   it("starts a new goal on the same session without inheriting cycle memory", async () => {
     const html = `<!doctype html><meta charset="utf-8"><title>Settings</title>
 <nav><a id="settings" href="/settings">Settings</a></nav>
