@@ -5071,6 +5071,24 @@ describe("operate session — await_verification into_slot (T3 fix: OTP never ro
     expect(res.code).toBe("481920");
   });
 
+  it("detects the live identity once per session, not once per gated operation", async () => {
+    h.providers = ["google"];
+    h.liveGoogleEmail = "captain@example.test";
+    h.visibleText = "Your verification code is 481920.";
+    const first = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
+
+    expect((await awaitVerification(first.session_id, {})).found).toBe(true);
+    expect((await awaitVerification(first.session_id, {})).found).toBe(true);
+    expect(h.identityProbeCalls).toBe(1);
+
+    const second = await startProvisionSession({ serviceUrl: "https://app.example.com/two" });
+    expect((await awaitVerification(second.session_id, {})).found).toBe(true);
+    expect(h.identityProbeCalls).toBe(2);
+
+    await finishProvisionSession(second.session_id);
+    await finishProvisionSession(first.session_id);
+  });
+
   it("emits the captured identity email on a later observation, never at start", async () => {
     h.providers = ["google"];
     h.liveGoogleEmail = "captain@example.test";

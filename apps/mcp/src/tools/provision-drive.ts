@@ -1503,7 +1503,10 @@ export const operateReadInboxTool: Tool<z.infer<typeof readInboxSchema>> = {
     "seals a found OTP into a session slot so it is typed with operate_type slot and " +
     "never crosses the MCP boundary; `grant_inbox_consent` overrides the session's " +
     "inbox-read consent for this call. Returns needs_user when nothing is found yet " +
-    "— retry after a few seconds or ask the user (the session stays live).",
+    "— retry after a few seconds or ask the user (the session stays live). A " +
+    "needs_user carrying wall:google_session is the opposite case: the operator " +
+    "cannot read the inbox until the user runs `connect`, so retrying cannot clear " +
+    "it — don't poll and don't ask the user for a code.",
   inputSchema: readInboxSchema,
   jsonInputSchema: {
     type: "object",

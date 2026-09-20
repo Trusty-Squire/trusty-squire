@@ -56,8 +56,12 @@ export interface VerificationResult {
   // A verification/confirm link if present, else null. The host decides whether
   // to navigate to it.
   link: string | null;
-  // Set when found=false: the code wasn't auto-retrievable from the inbox. The
-  // session is alive — ASK THE USER for the code and type it, don't abandon.
+  // Set when found=false, in two kinds that need opposite responses. A
+  // `verification_code` wall means the code wasn't auto-retrievable from the
+  // inbox: the session is alive — ASK THE USER for the code and type it, don't
+  // abandon. A `google_session` wall means the inbox cannot be read at all
+  // until the user runs `connect`: retrying cannot clear it, so don't poll and
+  // don't ask the user for a code.
   needs_user?: NeedsUserCode | NeedsUserLogin;
   // Set when into_slot was requested AND a code was found: the OTP was sealed
   // into a session slot (host gets only the masked handle) so it never round-
