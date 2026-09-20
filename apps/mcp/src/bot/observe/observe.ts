@@ -136,7 +136,6 @@ export type ObserveDetail = "none" | "compact" | "full";
 
 export interface CompactV2StartMetadata {
   hintPages?: string[];
-  userEmail?: string;
 }
 
 /**
@@ -187,21 +186,25 @@ function splitUtf8Pages(value: string, maxBytes: number): string[] {
 export function compactV2StartMetadata(
   registryHint: string | undefined,
   loginHint: string,
-  userEmail: string | null,
 ): CompactV2StartMetadata {
   const hint = [loginHint, registryHint]
     .filter((part): part is string => part !== undefined && part.length > 0)
     .join("\n");
-  const validEmail =
-    userEmail !== null &&
-    Buffer.byteLength(userEmail, "utf8") <= 254 &&
-    /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(userEmail)
-      ? userEmail
-      : undefined;
-  return {
-    ...(hint.length === 0 ? {} : { hintPages: splitUtf8Pages(hint, 384) }),
-    ...(validEmail === undefined ? {} : { userEmail: validEmail }),
-  };
+  return hint.length === 0 ? {} : { hintPages: splitUtf8Pages(hint, 384) };
+}
+
+/** The user's own Google identity, once a Google-dependent operation has
+ * captured it (no start probes for it). Emitted on every observation from
+ * then on, so the host can fill it as the signup email without re-deriving
+ * it. Scraped from the account surface, so it is validated before it is
+ * handed to the agent. */
+function sessionIdentityEmail(session: Session): string | undefined {
+  const email = session.userEmail;
+  return email !== null &&
+    Buffer.byteLength(email, "utf8") <= 254 &&
+    /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)
+    ? email
+    : undefined;
 }
 
 /**
@@ -663,6 +666,24 @@ function compactV2Observation(
           }
         : {}),
   };
+  const identityEmail = sessionIdentityEmail(session);
+  const startPayloadMetadata =
+    startMetadata === undefined && identityEmail === undefined
+      ? undefined
+      : {
+          ...(startMetadata?.hintPages?.[0] === undefined
+            ? {}
+            : { hint: startMetadata.hintPages[0] }),
+          ...(identityEmail === undefined ? {} : { userEmail: identityEmail }),
+          ...(startMetadata === undefined || session.compactV2HintPages.length <= 1
+            ? {}
+            : {
+                hintOverflow: {
+                  remaining: session.compactV2HintPages.length - 1,
+                  next_cursor: compactV2Cursor(session, hintSnapshot!, 1),
+                },
+              }),
+        };
   if (outputFormat === "compact") {
     const encodePage = (delta: boolean) =>
       encodeV2QueryPage({
@@ -673,26 +694,7 @@ function compactV2Observation(
         rows: delta ? compactRows : safe.rows,
         ...(delta ? { delta: true as const, removed: compactRemoved } : {}),
         cursorFor: (next) => compactV2Cursor(session, controlSnapshot, next),
-        ...(startMetadata === undefined
-          ? {}
-          : {
-              startMetadata: {
-                ...(startMetadata.hintPages?.[0] === undefined
-                  ? {}
-                  : { hint: startMetadata.hintPages[0] }),
-                ...(startMetadata.userEmail === undefined
-                  ? {}
-                  : { userEmail: startMetadata.userEmail }),
-                ...(session.compactV2HintPages.length <= 1
-                  ? {}
-                  : {
-                      hintOverflow: {
-                        remaining: session.compactV2HintPages.length - 1,
-                        next_cursor: compactV2Cursor(session, hintSnapshot!, 1),
-                      },
-                    }),
-              },
-            }),
+        ...(startPayloadMetadata === undefined ? {} : { startMetadata: startPayloadMetadata }),
       });
     let page;
     try {
@@ -735,7 +737,7 @@ function compactV2Observation(
     more_below: capture.moreBelow,
     ...(capture.omissions.length === 0 ? {} : { capture_omissions: capture.omissions }),
     ...(startMetadata?.hintPages?.[0] ? { hint: startMetadata.hintPages[0] } : {}),
-    ...(startMetadata?.userEmail ? { user_email: startMetadata.userEmail } : {}),
+    ...(identityEmail === undefined ? {} : { user_email: identityEmail }),
     ...(session.compactV2HintPages.length > 1 && startMetadata
       ? {
           hint_overflow: {

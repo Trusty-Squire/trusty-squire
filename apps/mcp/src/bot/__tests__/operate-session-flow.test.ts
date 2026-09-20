@@ -1264,7 +1264,6 @@ import {
   activeSessionCount,
   formSelectMany,
   googleSessionGate,
-  withCeremonyStartAdmission,
   captureScreenshot,
   observeQuery,
 } from "../provision-session.js";
@@ -4910,25 +4909,6 @@ describe("operate session — operation-scoped Google gate", () => {
     await finishProvisionSession(obs.session_id);
     expect(h.destroyedProfiles).toEqual([]);
   });
-
-  it("the connect ceremony's own start passes the gate — the ceremony is what creates the session", async () => {
-    // The round-12 review-1 deadlock: the gate's own remedy (`connect
-    // --force-relogin=google`) is the ceremony itself, so gating the
-    // ceremony start refused every enrolled machine whose profile had no
-    // live Google session — self-referentially, forever. The bypass is
-    // scoped to `withCeremonyStartAdmission`, which only the broker's
-    // ceremony open (`open` with `ceremony: true`) enters; an agent-facing
-    // operate_start never reaches it.
-    h.providers = []; // no live session
-    h.liveGoogleEmail = null;
-    const obs = await withCeremonyStartAdmission(() =>
-      startProvisionSession({ serviceUrl: "https://app.example.com/" }),
-    );
-    expect(obs.needs_user).toBeUndefined();
-    expect(h.started).toBe(1); // a real session, on the shared browser
-    await finishProvisionSession(obs.session_id);
-    expect(h.destroyedProfiles).toEqual([]);
-  });
 });
 
 // Physical profile election, launch failure and sibling custody are tested in
@@ -5089,6 +5069,20 @@ describe("operate session — await_verification into_slot (T3 fix: OTP never ro
     const res = await awaitVerification(obs.session_id, {});
     expect(res.found).toBe(true);
     expect(res.code).toBe("481920");
+  });
+
+  it("emits the captured identity email on a later observation, never at start", async () => {
+    h.providers = ["google"];
+    h.liveGoogleEmail = "captain@example.test";
+    const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+    expect(obs).not.toHaveProperty("user_email");
+
+    h.visibleText = "Your verification code is 481920.";
+    const res = await awaitVerification(obs.session_id, {});
+    expect(res.found).toBe(true);
+
+    expect(await observe(obs.session_id)).toMatchObject({ user_email: "captain@example.test" });
+    await finishProvisionSession(obs.session_id);
   });
 
   it("returns the unchanged google_session wall before a Gmail read without a live session", async () => {

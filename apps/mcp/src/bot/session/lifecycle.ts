@@ -29,7 +29,6 @@ import { brokerBrowserCustody } from "../broker/custody.js";
 // runtime import cycle, exactly as session/model.ts does with its type-only
 // back-reference.
 import { randomUUID } from "node:crypto";
-import { AsyncLocalStorage } from "node:async_hooks";
 import type { BrowserController } from "../browser.js";
 import { detectGoogleAccountEmail, detectSessionProviders } from "../oauth-login.js";
 import { waitForCaptchaChallengeToSettle } from "../captcha.js";
@@ -62,7 +61,6 @@ export interface SessionStartPorts {
   compactV2StartMetadata: (
     registryHint: string | undefined,
     loginHint: string,
-    userEmail: string | null,
   ) => CompactV2StartMetadata;
 }
 
@@ -507,23 +505,6 @@ export interface NeedsUserLogin {
   // command to users. Keep it pointing at `connect`.
   resume: "connect";
 }
-/** Preserve the connect re-auth ceremony's admission context. Ordinary starts
- * no longer have a Google gate, but the ceremony remains explicitly marked
- * because it is what CREATES the live Google session and must never inherit a
- * Google-dependent operation gate. The context below is entered ONLY by the
- * broker's ceremony open (an `open` request carrying `ceremony: true`), which
- * the agent-facing `operate_start` surface cannot reach.
- */
-const ceremonyStartAdmissionContext = new AsyncLocalStorage<true>();
-
-export async function withCeremonyStartAdmission<T>(operation: () => Promise<T>): Promise<T> {
-  return await ceremonyStartAdmissionContext.run(true, operation);
-}
-
-/** True only inside a `withCeremonyStartAdmission` scope. */
-export function ceremonyStartAdmission(): boolean {
-  return ceremonyStartAdmissionContext.getStore() === true;
-}
 
 export function googleSessionGate(
   liveProviders: readonly OAuthProviderId[],
@@ -644,7 +625,7 @@ export async function startProvisionSession(
     }
     // Provider detection is intentionally lazy: ordinary starts pay no Google
     // identity probe and receive provider-neutral login guidance.
-    const loginHint = loginSessionGuidance([]);
+    const loginHint = loginSessionGuidance();
     if (opts.initialObservation === "drive") {
       session.initializing = false;
       session.lastActivityAt = Date.now();
@@ -652,13 +633,12 @@ export async function startProvisionSession(
         session_id: session.id,
         url: session.browser.currentUrl(),
         hint: loginHint,
-        ...(session.userEmail !== null ? { user_email: session.userEmail } : {}),
       };
     }
     const observation = await ports.observeSession(
       session,
       requestedFormat,
-      ports.compactV2StartMetadata(undefined, loginHint, session.userEmail),
+      ports.compactV2StartMetadata(undefined, loginHint),
     );
     session.initializing = false;
     session.lastActivityAt = Date.now();
@@ -670,7 +650,6 @@ export async function startProvisionSession(
     return {
       ...observation,
       hint: loginHint,
-      ...(session.userEmail !== null ? { user_email: session.userEmail } : {}),
     };
   } catch (err) {
     deregisterProvisionSession(session);
@@ -719,7 +698,7 @@ export async function startHarnessProvisionSession(
     const observation = await ports.observeSession(
       session,
       requestedFormat,
-      ports.compactV2StartMetadata(undefined, "", null),
+      ports.compactV2StartMetadata(undefined, ""),
     );
     session.initializing = false;
     session.lastActivityAt = Date.now();

@@ -257,7 +257,6 @@ import {
   startProvisionSession as startProvisionSessionInternal,
   startHarnessProvisionSession as startHarnessProvisionSessionInternal,
   UnknownProvisionSessionError,
-  withCeremonyStartAdmission,
   withPaymentSessionCall,
   withProvisionSessionCall,
   type HarnessStartOptions,
@@ -275,7 +274,6 @@ export {
   googleSessionGate,
   paymentSession,
   UnknownProvisionSessionError,
-  withCeremonyStartAdmission,
   withPaymentSessionCall,
   withProvisionSessionCall,
 };
@@ -341,8 +339,8 @@ export {
 const sessionStartPorts: SessionStartPorts = {
   observeSession: async (session, format, startMetadata) =>
     await observeSession(session, format, startMetadata, undefined, false, format),
-  compactV2StartMetadata: (registryHint, loginHint, userEmail) =>
-    compactV2StartMetadata(registryHint, loginHint, userEmail),
+  compactV2StartMetadata: (registryHint, loginHint) =>
+    compactV2StartMetadata(registryHint, loginHint),
 };
 
 export async function startProvisionSession(opts: StartOptions): Promise<Observation> {
