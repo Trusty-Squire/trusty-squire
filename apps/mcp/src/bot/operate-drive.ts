@@ -1341,10 +1341,13 @@ export function compactRowsText(
   return `${header}\n${JSON.stringify(rows)}`;
 }
 
-/** The only question a zero-row snapshot can answer: did the goal land or not.
+/** The only question a zero-row snapshot can answer: has the goal landed, is it
+ * blocked, or is the page still settling.
  *
  * No action operation is offered and no target is asked for, because there is
  * nothing on the page to act on or name. Judgment comes from the page text.
+ * WAIT is offered because a submitted payment, a processor redirect and a bank
+ * page all render control-free for longer than the re-observation budget.
  */
 export function terminalOnlyQuestion(goal: string): { operation: JevChoiceQuestion } {
   return {
@@ -1353,8 +1356,9 @@ export function terminalOnlyQuestion(goal: string): { operation: JevChoiceQuesti
       instructions:
         `You are driving a browser to: ${goal}. The page lists no control to act on. ` +
         "Judge from the page text alone: pick DONE if the goal is already complete, " +
+        "WAIT if the page is still loading or a submitted result has not settled yet, " +
         "otherwise pick BLOCKED.",
-      criteria: operationCriteria(["DONE", "BLOCKED"]),
+      criteria: operationCriteria(["WAIT", "DONE", "BLOCKED"]),
     },
   };
 }
@@ -3326,44 +3330,62 @@ async function driveLoop(input: {
     // whole budget first. A snapshot still empty afterwards carries no action
     // to choose, but the page text still says whether the goal landed — an
     // order confirmation renders as prose — so the only question asked is the
-    // terminal one, never an action with no target.
+    // terminal one, never an action with no target. Its WAIT keeps the loop
+    // re-observing for as long as the ordinary step and time budgets allow, so
+    // a payment left settling behind a blank processor screen is not forced to
+    // a verdict at 4.5s.
     if (rows.length === 0) {
-      if (emptySnapshotWaits >= DRIVE_EMPTY_SNAPSHOT_WAITS) {
-        const terminalQuestion = terminalOnlyQuestion(drive.goal);
-        const criteria = terminalQuestion.operation.criteria;
-        // The confirmation evidence on a control-free page is prose, and the
-        // ordinary page text carries only title and headings. The body text
-        // goes into this question's state alone.
-        const terminalState = buildJevState(
-          drive.goal,
-          Object.keys(drive.facts),
-          drive.history,
-          observation.url,
-          observation.semantic?.title,
-          [],
-          pageTextFromObservation(observation, [observation.dom ?? ""]),
-        );
-        let answer: JevAnswer | undefined;
-        for (let attempt = 0; attempt < 2; attempt += 1) {
-          const terminal = await ask(terminalState, terminalQuestion);
-          if (!("result" in terminal)) return terminal;
-          answer = terminal.result.answers.operation;
-          if (validateChoice(criteria, answer)) break;
-          answer = undefined;
-        }
-        if (answer?.choice === DRIVE_FIXED_DONE) return finish("complete");
-        return finish("stuck", {
-          question: {
-            question: terminalQuestion.operation.instructions,
-            options: criteria,
-          },
-        });
+      if (emptySnapshotWaits < DRIVE_EMPTY_SNAPSHOT_WAITS) {
+        emptySnapshotWaits += 1;
+        const applied = await applyDecision({ kind: "wait", confidence: 1 });
+        if (applied !== "continue") return applied;
+        steps += 1;
+        continue;
       }
-      emptySnapshotWaits += 1;
-      const applied = await applyDecision({ kind: "wait", confidence: 1 });
-      if (applied !== "continue") return applied;
-      steps += 1;
-      continue;
+      const terminalQuestion = terminalOnlyQuestion(drive.goal);
+      const criteria = terminalQuestion.operation.criteria;
+      // The confirmation evidence on a control-free page is prose, and the
+      // ordinary page text carries only title and headings. The body text
+      // goes into this question's state alone.
+      const terminalState = buildJevState(
+        drive.goal,
+        Object.keys(drive.facts),
+        drive.history,
+        observation.url,
+        observation.semantic?.title,
+        [],
+        pageTextFromObservation(observation, [observation.dom ?? ""]),
+      );
+      drive.boundFingerprint = progressFingerprint(observation.url, rows, drive, session);
+      drive.consumedActionKey = null;
+      let answer: JevAnswer | undefined;
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const terminal = await ask(terminalState, terminalQuestion);
+        if (!("result" in terminal)) return terminal;
+        answer = terminal.result.answers.operation;
+        if (validateChoice(criteria, answer)) break;
+        answer = undefined;
+      }
+      const choice = answer?.choice;
+      if (choice === DRIVE_FIXED_DONE || choice === "WAIT") {
+        // A DONE goes through the same post-decision re-snapshot every other
+        // completion does: a page that moved while the answer was in flight
+        // continues the loop instead of reporting the stale blank snapshot.
+        const applied = await applyDecision(
+          choice === DRIVE_FIXED_DONE
+            ? { kind: "complete", confidence: confidenceOf(answer) }
+            : { kind: "wait", confidence: confidenceOf(answer) },
+        );
+        if (applied !== "continue") return applied;
+        steps += 1;
+        continue;
+      }
+      return finish("stuck", {
+        question: {
+          question: terminalQuestion.operation.instructions,
+          options: criteria,
+        },
+      });
     }
     emptySnapshotWaits = 0;
 

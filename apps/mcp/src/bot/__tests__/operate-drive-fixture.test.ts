@@ -516,7 +516,7 @@ describe("operate_drive real-browser fixture", () => {
         // choose — there is nothing on the page to act on or name.
         expect(asked).toHaveLength(1);
         expect(asked[0]!.names).toEqual(["operation"]);
-        expect([...asked[0]!.operationCriteria].sort()).toEqual(["BLOCKED", "DONE"]);
+        expect([...asked[0]!.operationCriteria].sort()).toEqual(["BLOCKED", "DONE", "WAIT"]);
         // The question says to judge from the page text, so the prose that
         // carries the only confirmation evidence has to be in it. The document
         // has no heading — title and headings alone would say nothing.
@@ -531,6 +531,102 @@ describe("operate_drive real-browser fixture", () => {
     },
     30_000,
   );
+
+  it("keeps re-observing a control-free page while the terminal answer is WAIT", async () => {
+    // A processor/3-D Secure screen stays blank well past the three-wait
+    // budget, then settles into the order confirmation.
+    const SETTLING_HTML = `<!doctype html><meta charset="utf-8"><title>Blank</title>
+<main><p id="body">Processing…</p></main>
+<script>
+  setTimeout(() => {
+    document.querySelector("#body").textContent = "Your order is confirmed. #1042";
+  }, 6000);
+</script>`;
+    const { context, started } = await openFixture(SETTLING_HTML, "settling.test");
+    try {
+      const seen: string[] = [];
+      const criteriaOf = (question: JevQuestion | undefined): string[] =>
+        question?.type === "choice" ? Object.keys(question.criteria) : [];
+      const result = await runOperateDrive(
+        { session_id: started.session_id, goal: "buy one item", max_seconds: 40 },
+        api(),
+        undefined,
+        deps(async (_api, state, questions) => {
+          const keys = criteriaOf(questions.operation);
+          const text = (state as { page?: { text?: string } }).page?.text ?? "";
+          seen.push(text);
+          const pick = text.includes("Your order is confirmed") ? "DONE" : "WAIT";
+          return {
+            attempts: 1,
+            elapsedMs: 5,
+            result: {
+              answers: {
+                operation: { choice: pick, confidence: 0.9, probabilities: peaked(keys, pick) },
+              },
+            },
+          };
+        }),
+      );
+      // The drive kept settling past the 4.5s re-observation budget instead of
+      // forcing a verdict, and completed once the confirmation rendered.
+      expect(result.status).toBe("complete");
+      expect(seen.length).toBeGreaterThan(1);
+      expect(seen[0]).toContain("Processing…");
+      expect(seen.at(-1)).toContain("Your order is confirmed. #1042");
+      expect(result.trajectory.filter((step) => step.action === "wait").length).toBeGreaterThan(
+        DRIVE_EMPTY_SNAPSHOT_WAITS,
+      );
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 60_000);
+
+  it("does not accept a terminal DONE once the page moved under the decision", async () => {
+    // The thank-you page renders while the terminal answer is in flight, so
+    // the blank snapshot the answer was formed against is already stale.
+    const LATE_HTML = `<!doctype html><meta charset="utf-8"><title>Blank</title>
+<main><p id="body">Processing…</p></main>`;
+    const { context, page, started } = await openFixture(LATE_HTML, "late-swap.test");
+    try {
+      let calls = 0;
+      const criteriaOf = (question: JevQuestion | undefined): string[] =>
+        question?.type === "choice" ? Object.keys(question.criteria) : [];
+      const result = await runOperateDrive(
+        { session_id: started.session_id, goal: "buy one item", max_seconds: 30 },
+        api(),
+        undefined,
+        deps(async (_api, _state, questions) => {
+          calls += 1;
+          const keys = criteriaOf(questions.operation);
+          if (calls === 1) {
+            await page.evaluate(() => {
+              document.querySelector("main")!.innerHTML =
+                '<p id="body">Your order is confirmed. #1042</p><button id="again">Buy again</button>';
+            });
+          }
+          const pick = "DONE";
+          return {
+            attempts: 1,
+            elapsedMs: 5,
+            result: {
+              answers: {
+                operation: { choice: pick, confidence: 0.9, probabilities: peaked(keys, pick) },
+              },
+            },
+          };
+        }),
+      );
+      expect(result.status).toBe("complete");
+      // The first DONE was refused against the fresh snapshot, so the drive
+      // asked again rather than reporting the stale control-free page.
+      expect(calls).toBeGreaterThan(1);
+      expect(result.observation?.safe_table?.length ?? 0).toBeGreaterThan(0);
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 60_000);
 
   it("refuses a terminal DONE whose probabilities do not back it", async () => {
     const { context, started } = await openFixture(CONFIRMATION_HTML, "blank-unbacked.test");
