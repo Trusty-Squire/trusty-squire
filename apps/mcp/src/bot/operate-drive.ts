@@ -339,6 +339,22 @@ const defaultDependencies: DriveDependencies = {
   injectCard: defaultInjectCard,
 };
 
+export function resetDriveGoalMemory(drive: SessionDriveState): void {
+  drive.seenProgressKeys = [];
+  drive.leftProgressKeys = [];
+  drive.progressReturnCounts = {};
+  drive.exhaustedProgressKey = null;
+  drive.exhaustedActionKeys = [];
+  drive.failedActionKeys = [];
+  drive.staleClickRefs = [];
+  drive.staleNonWait = 0;
+  drive.consumedActionKey = null;
+  drive.boundFingerprint = null;
+  drive.lastFingerprint = null;
+  drive.lastActionKey = null;
+  drive.visitedSectionKeys = [];
+}
+
 export function emptyDriveState(goal: string, facts: Record<string, string>): SessionDriveState {
   return {
     running: false,
@@ -1129,8 +1145,41 @@ export function isListFilterRow(row: WireRow): boolean {
   );
 }
 
+export function rowHref(row: WireRow): string | undefined {
+  const match = /(?:^|\|)u=([^|]+)/.exec(row[2] ?? "");
+  return match?.[1];
+}
+
+export function isCodeSampleRow(row: WireRow): boolean {
+  const label = readableLabel(row);
+  return (
+    /^(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\b/.test(label) ||
+    /\b(?:curl|endpoint)\b/i.test(label)
+  );
+}
+
+export function isOffProductNavRow(row: WireRow, pageUrl: string): boolean {
+  if (isCodeSampleRow(row)) return true;
+  const label = readableLabel(row).toLowerCase();
+  if (/\b(?:docs?|documentation|api[- ]?reference|reference|help|blog|guide|tutorial)\b/.test(label)) {
+    return true;
+  }
+  const href = rowHref(row);
+  if (href === undefined) return false;
+  try {
+    const target = new URL(href, pageUrl);
+    const page = new URL(pageUrl);
+    if (target.origin !== page.origin) return true;
+    return /\/(?:docs?|documentation|reference|help|blog|guides?)(?:\/|$)/.test(target.pathname);
+  } catch {
+    return /\/(?:docs?|documentation|reference|help|blog|guides?)(?:\/|$)/.test(href);
+  }
+}
+
 export function isGoalDestinationRow(row: WireRow): boolean {
-  if (isListFilterRow(row) || isFillableRow(row) || isConsentRow(row)) return false;
+  if (isListFilterRow(row) || isFillableRow(row) || isConsentRow(row) || isCodeSampleRow(row)) {
+    return false;
+  }
   return (
     row[1] === "l" ||
     row[1] === "link" ||
@@ -1213,7 +1262,9 @@ export function clickGoalSeekScore(row: WireRow, goal: string, pageUrl: string):
   const onSetup = pageIsPostAuthSetup(pageUrl);
   const onKeys = pageLooksLikeKeyDestination(pageUrl);
   if (!onSetup && !onKeys) return 0;
-  if (isListFilterRow(row) || isAlreadyHereNav(row, pageUrl)) return 0;
+  if (isListFilterRow(row) || isAlreadyHereNav(row, pageUrl) || isOffProductNavRow(row, pageUrl)) {
+    return 0;
+  }
   if (rowMatchesGoalSeek(row, goal) && isGoalDestinationRow(row)) return 2;
   if (rowMatchesGoalSeek(row, goal)) return 1;
   if (onSetup && isSubmitLikeRow(row) && !isDisabledRow(row)) return 1;
@@ -2680,7 +2731,18 @@ export function driveTargetSets(
   const remaining = { n: DRIVE_MAX_CANDIDATES };
   const skipped = new Set(skippedClickRefs);
   const hideFilters = goalSeeksKey(aim.goal ?? "");
-  const keepRow = (row: WireRow): boolean => !hideFilters || !isListFilterRow(row);
+  const hasInAppNoun = rows.some(
+    (row) =>
+      rowCarriesGoalNoun(row, aim.goal ?? "") &&
+      isGoalDestinationRow(row) &&
+      !isOffProductNavRow(row, pageUrl),
+  );
+  const keepRow = (row: WireRow): boolean => {
+    if (isCodeSampleRow(row)) return false;
+    if (hideFilters && isListFilterRow(row)) return false;
+    if (hasInAppNoun && isOffProductNavRow(row, pageUrl)) return false;
+    return true;
+  };
   const aimInput = {
     rows,
     filledRefs,
@@ -4081,6 +4143,7 @@ export async function runOperateDrive(
   if (!Array.isArray(drive.visitedSectionKeys)) drive.visitedSectionKeys = [];
   if (drive.boundFingerprint === undefined) drive.boundFingerprint = null;
   if (drive.consumedActionKey === undefined) drive.consumedActionKey = null;
+  if (drive.goal !== args.goal) resetDriveGoalMemory(drive);
   drive.running = true;
   drive.goal = args.goal;
   drive.facts = facts;
@@ -5220,7 +5283,10 @@ async function driveLoop(input: {
     }
 
     const hasGoalDestination = rows.some(
-      (row) => rowCarriesGoalNoun(row, args.goal) && isGoalDestinationRow(row),
+      (row) =>
+        rowCarriesGoalNoun(row, args.goal) &&
+        isGoalDestinationRow(row) &&
+        !isOffProductNavRow(row, pageUrl),
     );
     if (goalSeeksKey(args.goal) && !hasGoalDestination) {
       const nextSection = unvisitedSectionNavRows(

@@ -37,6 +37,8 @@ export interface DriveSnapshotElement {
   name?: string;
   /** The input `type` (`email`, `text`, …), when the node is an input. */
   inputType?: string;
+  /** Resolved href for a link, used to prefer in-app paths over docs. */
+  href?: string;
   pattern?: string;
   inputMode?: string;
   invalid?: boolean;
@@ -198,6 +200,9 @@ export function driveRowsFromSnapshot(snapshot: DriveSnapshot): SnapshotRow[] {
     if (element.width !== undefined) facts.push(`w=${element.width}`);
     if (element.placeholder !== undefined && element.placeholder.length > 0) {
       facts.push(`ph=${element.placeholder.replace(/\|/g, " ").slice(0, 40)}`);
+    }
+    if (element.href !== undefined && element.href.length > 0) {
+      facts.push(`u=${element.href.replace(/\|/g, " ").slice(0, 120)}`);
     }
     if (element.pattern !== undefined && element.pattern.length > 0) {
       facts.push(`pt=${element.pattern.replace(/\|/g, " ").slice(0, 40)}`);
@@ -565,6 +570,8 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
       element.maxLength > 0
         ? element.maxLength
         : undefined;
+    const href =
+      element instanceof HTMLAnchorElement && element.href.length > 0 ? element.href : "";
     const placeholder = element.getAttribute("placeholder")?.trim() ?? "";
     const inputName =
       element instanceof HTMLInputElement ||
@@ -606,6 +613,7 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
       ...(picker ? { picker: true } : {}),
       ...(width === undefined ? {} : { width }),
       ...(placeholder.length > 0 ? { placeholder } : {}),
+      ...(href.length > 0 ? { href } : {}),
       ...(inputName.length > 0 ? { name: inputName } : {}),
       ...(inputType.length > 0 ? { inputType } : {}),
       ...(pattern.length > 0 ? { pattern } : {}),

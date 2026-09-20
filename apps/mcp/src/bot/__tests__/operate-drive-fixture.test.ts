@@ -805,6 +805,93 @@ describe("operate_drive real-browser fixture", () => {
     }
   }, 30_000);
 
+  it("chooses the in-app API Keys link over a docs link with the same noun", async () => {
+    const html = `<!doctype html><meta charset="utf-8"><title>Dashboard</title>
+<nav><a id="keys" href="/keys">API Keys</a></nav>
+<aside><a id="docs" href="/docs/api-keys">API keys</a></aside>`;
+    const keysHtml = `<!doctype html><meta charset="utf-8"><title>API Keys</title>
+<main><h1>API Keys</h1><p id="key">sk_live_fixture</p></main>`;
+    const docsHtml = `<!doctype html><meta charset="utf-8"><title>Docs</title>
+<main><button type="button" id="sample">POST Create API key</button></main>`;
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await page.route("**/*", (route) => {
+      const url = route.request().url();
+      const body = url.includes("/docs/") ? docsHtml : url.includes("/keys") ? keysHtml : html;
+      route.fulfill({ contentType: "text/html", body });
+    });
+    const startUrl = "https://in-app-keys.test/dashboard";
+    await page.goto(startUrl);
+    const started = await startHarnessProvisionSession({
+      browser: BrowserController.fromHarnessPage(page),
+      serviceUrl: startUrl,
+      format: "compact",
+      initialObservation: "standard",
+    });
+    try {
+      const dependencies = deps(async (_api, _state, questions) => jevFromQuestions(questions));
+      await runOperateDrive(
+        {
+          session_id: started.session_id,
+          goal: "open the API Keys page from the left navigation, create an API key",
+          max_steps: 6,
+        },
+        api(),
+        undefined,
+        dependencies,
+      );
+      expect(page.url()).toMatch(/\/keys/);
+      expect(page.url()).not.toMatch(/\/docs\//);
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
+  it("starts a new goal on the same session without inheriting cycle memory", async () => {
+    const html = `<!doctype html><meta charset="utf-8"><title>Settings</title>
+<nav><a id="settings" href="/settings">Settings</a></nav>
+<div role="tablist">
+  <button type="button" role="tab" id="billing">billing</button>
+  <button type="button" role="tab" id="account">account</button>
+  <button type="button" role="tab" id="apps">apps</button>
+</div>
+<section id="panel"></section>
+<script>
+  const panels = {
+    billing: "<p>Plan</p>",
+    account: "<p>Profile</p>",
+    apps: '<p id="apps-panel">Your apps</p>',
+  };
+  const show = (name) => { document.getElementById("panel").innerHTML = panels[name]; };
+  document.getElementById("billing").onclick = () => show("billing");
+  document.getElementById("account").onclick = () => show("account");
+  document.getElementById("apps").onclick = () => show("apps");
+</script>`;
+    const { context, page, started } = await openFixture(html, "goal-reset.test", "standard", "/settings");
+    try {
+      const dependencies = deps(async (_api, _state, questions) => jevFromQuestions(questions));
+      const first = await runOperateDrive(
+        { session_id: started.session_id, goal: "extract an API key", max_steps: 2 },
+        api(),
+        undefined,
+        dependencies,
+      );
+      expect(first.trajectory.length).toBeGreaterThan(0);
+      const second = await runOperateDrive(
+        { session_id: started.session_id, goal: "open the apps section", max_steps: 4 },
+        api(),
+        undefined,
+        dependencies,
+      );
+      expect(second.trajectory.length).toBeGreaterThan(0);
+      expect(second.steps).toBeGreaterThan(0);
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
   it("does not write a company fact into an email field named by its placeholder", async () => {
     const html = `<!doctype html><meta charset="utf-8"><title>Billing</title>
 <main>

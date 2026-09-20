@@ -121,6 +121,10 @@ import {
   unvisitedSectionNavRows,
   rowLooksLikeEmail,
   rowCarriesGoalNoun,
+  isOffProductNavRow,
+  isCodeSampleRow,
+  resetDriveGoalMemory,
+  emptyDriveState,
 } from "../operate-drive.js";
 import { operateDriveTool } from "../../tools/provision-drive.js";
 import type { JevAnswer } from "../jev-client.js";
@@ -3090,5 +3094,44 @@ describe("post-confirmation navigation", () => {
     expect(matchingFactKeys({ company: "Acme", email: "ada@example.test" }, email)).toEqual([
       "email",
     ]);
+  });
+
+  it("keeps an in-app goal-noun link and drops docs, help, and code-sample controls", () => {
+    const inApp: WireRow = ["@e:keys", "l", "API Keys|u=https://app.example.test/keys"];
+    const docs: WireRow = ["@e:docs", "l", "API keys|u=https://app.example.test/docs/api-keys"];
+    const sample: WireRow = ["@e:post", "b", "POST Create API key"];
+    const url = "https://app.example.test/dashboard";
+    expect(isOffProductNavRow(inApp, url)).toBe(false);
+    expect(isOffProductNavRow(docs, url)).toBe(true);
+    expect(isCodeSampleRow(sample)).toBe(true);
+    const sets = driveTargetSets(
+      [docs, sample, inApp],
+      {},
+      false,
+      [],
+      url,
+      new Map(),
+      (text) => text,
+      [],
+      { goal: "open the API Keys page and create an API key" },
+    );
+    expect(sets.CLICK.map((entry) => entry.ref)).toEqual(["@e:keys"]);
+  });
+
+  it("clears cycle and dead-action memory when the goal text changes", () => {
+    const drive = emptyDriveState("extract an API key", {});
+    drive.leftProgressKeys = ["https://example.test/settings"];
+    drive.progressReturnCounts = { "https://example.test/settings": 2 };
+    drive.exhaustedActionKeys = ["@e:set"];
+    drive.visitedSectionKeys = ["tb\tbilling\t"];
+    drive.filledRefs = ["@e:email"];
+    drive.silentSubmitKeys = ["pay"];
+    resetDriveGoalMemory(drive);
+    expect(drive.leftProgressKeys).toEqual([]);
+    expect(drive.progressReturnCounts).toEqual({});
+    expect(drive.exhaustedActionKeys).toEqual([]);
+    expect(drive.visitedSectionKeys).toEqual([]);
+    expect(drive.filledRefs).toEqual(["@e:email"]);
+    expect(drive.silentSubmitKeys).toEqual(["pay"]);
   });
 });
