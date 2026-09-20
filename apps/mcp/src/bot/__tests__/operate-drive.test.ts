@@ -144,6 +144,16 @@ import {
   revealedSecretMarkerRow,
   attachRevealedSecretMarker,
   redactSecretShapedTokens,
+  looksLikeMaskedSecretDisplay,
+  rowShowsSecretEvidence,
+  pageOcclusionLayer,
+  isLayerCandidateRow,
+  recordUndeliveredDecision,
+  oauthHandoffReturnedToStart,
+  oauthReturnedToLoginReason,
+  stablePageUrl,
+  isPendingPageAction,
+  pageHasUntriedPendingAction,
   isEntityNameRow,
   isLogoutRow,
   alreadySignedInReason,
@@ -3317,6 +3327,9 @@ describe("post-confirmation navigation", () => {
     const marker = revealedSecretMarkerRow(20);
     expect(pageShowsRevealedKey([marker])).toBe(true);
     expect(pageShowsRevealedKey([["@e:show", "b", "Reveal"]], "••••••••••••")).toBe(false);
+    expect(looksLikeMaskedSecretDisplay("tvly-dev-****abcd")).toBe(true);
+    expect(rowShowsSecretEvidence(["@e:key", "t", "API key|n=tvly-dev-****abcd"])).toBe(true);
+    expect(pageShowsRevealedKey([["@e:key", "t", "API key|n=tvly-dev-****abcd"]])).toBe(true);
     expect(redactSecretShapedTokens("prefix sk_live_fixturekey01 suffix").text).toBe(
       "prefix @key-value suffix",
     );
@@ -3707,5 +3720,144 @@ describe("drive approval page texts", () => {
       ),
     ).resolves.toEqual(["<dom/>"]);
     expect(awaiting.reads()).toBe(0);
+  });
+});
+
+describe("dialog overlay secret and oauth bounce rules", () => {
+  it("drops occluded controls and keeps the layer's own dismiss", () => {
+    const key: WireRow = ["@e:key", "t", "API key|n=tvly-dev-****abcd|oc=dialog"];
+    const create: WireRow = ["@e:new", "b", "Create API key|oc=dialog"];
+    const close: WireRow = ["@e:x", "b", "Close"];
+    const copy: WireRow = ["@e:copy", "b", "Copy"];
+    expect(pageOcclusionLayer([key, create, close, copy])).toBe("dialog");
+    expect(isLayerCandidateRow(create, [key, create, close, copy], "dialog")).toBe(false);
+    expect(isLayerCandidateRow(close, [key, create, close, copy], "dialog")).toBe(true);
+    expect(isLayerCandidateRow(copy, [key, create, close, copy], "dialog")).toBe(true);
+    const sets = driveTargetSets(
+      [key, create, close, copy],
+      {},
+      false,
+      [],
+      "https://app.example.test/home",
+      new Map(),
+      (text) => text,
+      [],
+      { goal: "extract an API key" },
+    );
+    expect(sets.CLICK.map((entry) => entry.ref)).toEqual(["@e:copy", "@e:x"]);
+    expect(sets.CLICK.map((entry) => entry.ref)).not.toContain("@e:new");
+  });
+
+  it("keeps overlay dismiss when every row is marked oc=overlay", () => {
+    const terms: WireRow = ["@e:terms", "c", "I agree to the terms|oc=overlay"];
+    const accept: WireRow = ["@e:ok", "b", "Accept all|oc=overlay"];
+    expect(pageOcclusionLayer([terms, accept])).toBe("overlay");
+    const sets = driveTargetSets(
+      [terms, accept],
+      {},
+      false,
+      [],
+      "https://app.example.test/signup",
+      new Map(),
+      (text) => text,
+      [],
+      { goal: "create an account" },
+    );
+    expect(sets.CLICK.map((entry) => entry.ref)).toEqual(["@e:ok"]);
+  });
+
+  it("records an undelivered decision and removes that control next time", () => {
+    const create: WireRow = ["@e:new", "b", "Create API key"];
+    const close: WireRow = ["@e:x", "b", "Close"];
+    const drive = emptyDriveState("extract an API key", {});
+    recordUndeliveredDecision(
+      drive,
+      [create, close],
+      { action: { kind: "click" }, actionKey: "@e:new", confidence: 0.55 },
+      "https://app.example.test/home",
+      "decided submit was not executed because a required field is still empty",
+    );
+    expect(drive.trajectory).toHaveLength(1);
+    expect(drive.trajectory[0]?.reason).toMatch(/required field is still empty/);
+    expect(drive.failedActionKeys?.length).toBeGreaterThan(0);
+    const sets = driveTargetSets(
+      [create, close],
+      {},
+      false,
+      [],
+      "https://app.example.test/home",
+      new Map(),
+      (text) => text,
+      [],
+      { goal: "extract an API key", failedKeys: drive.failedActionKeys ?? [] },
+    );
+    expect(sets.CLICK.map((entry) => entry.ref)).not.toContain("@e:new");
+    expect(sets.CLICK.map((entry) => entry.ref)).toContain("@e:x");
+  });
+
+  it("masks a secret-shaped select option label", () => {
+    const select: WireRow = ["@e:tok", "s", "Token"];
+    const targets = selectTargets(
+      [
+        {
+          ref: "@e:tok",
+          role: "s",
+          slug: "token",
+          description: "Token",
+          row: select,
+        },
+      ],
+      {},
+      new Map([["@e:tok", ["sk_live_fixturekey01"]]]),
+    );
+    expect(JSON.stringify(targets.map((entry) => entry.optionLabel ?? ""))).not.toContain(
+      "sk_live_fixturekey01",
+    );
+    expect(targets.some((entry) => entry.option === "sk_live_fixturekey01")).toBe(true);
+    const attached = attachRevealedSecretMarker(
+      {
+        session_id: "s",
+        url: "https://app.example.test/keys",
+        dom: "choose sk_live_fixturekey01",
+        semantic: { title: "Keys", headings: ["Keys"] },
+      },
+      [select],
+    );
+    expect(JSON.stringify(attached.observation)).not.toContain("sk_live_fixturekey01");
+  });
+
+  it("does not treat re-entering a keys page as a cycle while Create key is untried", () => {
+    const create: WireRow = ["@e:new", "b", "Create key"];
+    const general: WireRow = ["@e:gen", "tb", "General"];
+    const keys: WireRow = ["@e:keys", "tb", "API Keys"];
+    const drive = emptyDriveState("extract an API key", {});
+    expect(isPendingPageAction(create, "extract an API key")).toBe(true);
+    expect(
+      pageHasUntriedPendingAction(
+        [create, general, keys],
+        drive,
+        "https://app.example.test/settings/keys",
+        "extract an API key",
+      ),
+    ).toBe(true);
+    expect(
+      cycleReason("https://app.example.test/settings/keys", ["click", "click"]),
+    ).toBe("cycling through click, click");
+  });
+
+  it("treats the same path with a new state query as the same page", () => {
+    expect(stablePageUrl("https://app.example.test/login?state=aaa&next=/app")).toBe(
+      stablePageUrl("https://app.example.test/login?state=bbb&next=/app"),
+    );
+    expect(
+      oauthHandoffReturnedToStart({
+        beforeUrl: "https://app.example.test/login?state=aaa",
+        afterUrl: "https://app.example.test/login?state=bbb",
+        rows: [["@e:g", "b", "Continue with Google"]],
+      }),
+    ).toBe(true);
+    expect(oauthReturnedToLoginReason("Account restricted")).toMatch(
+      /sign-in hand-off returned to the login page: Account restricted/,
+    );
   });
 });

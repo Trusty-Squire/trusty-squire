@@ -82,7 +82,7 @@ import {
 } from "./checkout-total.js";
 import { attemptOperateCaptchaAutoSolve } from "./captcha-solve.js";
 import { RES_POLL_INTERVAL_MS, RES_TIMEOUT_MS } from "./captcha.js";
-import { findCredentialTokens } from "./credential-shape.js";
+import { findCredentialTokens, isMaskedDisplay } from "./credential-shape.js";
 
 export interface DriveCallContext {
   notifyUser?: (message: string, data?: Record<string, unknown>) => Promise<void>;
@@ -366,6 +366,7 @@ export function resetDriveGoalMemory(drive: SessionDriveState): void {
   drive.submittedThisDrive = false;
   drive.preexistingRestarted = false;
   drive.pendingRevealScan = false;
+  drive.oauthReturnAttempts = 0;
 }
 
 export function emptyDriveState(goal: string, facts: Record<string, string>): SessionDriveState {
@@ -399,6 +400,7 @@ export function emptyDriveState(goal: string, facts: Record<string, string>): Se
     submittedThisDrive: false,
     preexistingRestarted: false,
     pendingRevealScan: false,
+    oauthReturnAttempts: 0,
   };
 }
 
@@ -472,6 +474,22 @@ export function mergeCompactTable(
   return [...byRef.values()];
 }
 
+const VOLATILE_QUERY_KEY =
+  /^(?:state|nonce|code|ts|t|timestamp|session(?:_?id)?|sid|request_id|rid|csrf|xsrf|authuser)$/i;
+
+export function stablePageUrl(url: string): string {
+  try {
+    const parsed = new URL(url);
+    const kept = [...parsed.searchParams.entries()].filter(([key]) => !VOLATILE_QUERY_KEY.test(key));
+    kept.sort(([left], [right]) => left.localeCompare(right) || left.length - right.length);
+    parsed.search = "";
+    for (const [key, value] of kept) parsed.searchParams.append(key, value);
+    return `${parsed.origin}${parsed.pathname}${parsed.search}`;
+  } catch {
+    return url;
+  }
+}
+
 export function observationFingerprint(
   url: string,
   rows: readonly WireRow[],
@@ -479,7 +497,7 @@ export function observationFingerprint(
 ): string {
   const stable = rows.map(([ref, role, facts]) => `${ref}\t${role}\t${facts ?? ""}`);
   const fields = [...fieldState].sort();
-  return `${url}\n${stable.join("\n")}\n${fields.join("\n")}`;
+  return `${stablePageUrl(url)}\n${stable.join("\n")}\n${fields.join("\n")}`;
 }
 
 function progressFingerprint(
@@ -546,10 +564,25 @@ function driveTraceEnabled(): boolean {
   return path !== undefined && path.length > 0;
 }
 
+function redactSecretShapedValue<T>(value: T): T {
+  if (typeof value === "string") return redactSecretShapedTokens(value).text as T;
+  if (Array.isArray(value)) return value.map((entry) => redactSecretShapedValue(entry)) as T;
+  if (value !== null && typeof value === "object") {
+    const next: Record<string, unknown> = {};
+    for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+      next[key] = redactSecretShapedValue(entry);
+    }
+    return next as T;
+  }
+  return value;
+}
+
 function maskDriveOutput<T>(session: Session, value: T): T {
-  return typeof session.browser.maskOperatorOutput === "function"
-    ? session.browser.maskOperatorOutput(value)
-    : value;
+  const cardMasked =
+    typeof session.browser.maskOperatorOutput === "function"
+      ? session.browser.maskOperatorOutput(value)
+      : value;
+  return redactSecretShapedValue(cardMasked);
 }
 
 function appendDriveTrace(session: Session, entry: Record<string, unknown>): void {
@@ -683,9 +716,37 @@ export function isClickableRow(row: WireRow): boolean {
 
 export function isConsentRow(row: WireRow): boolean {
   const label = readableLabel(row).toLowerCase();
-  return /accept all|reject all|decline(?:\b|$)|necessary only|manage cookies|cookie settings/.test(
+  return /accept all|reject all|decline(?:\b|$)|necessary only|manage cookies|cookie settings|got it|allow(?:\s+all|\s+cookies)/.test(
     label,
   );
+}
+
+const LAYER_CONTROL_LABEL =
+  /^(?:close|dismiss|accept(?:\s+(?:all|cookies?))?|allow(?:\s+(?:all|cookies?))?|got it|ok|copy|done|reject(?:\s+all)?|decline|necessary only)(?:[.…])?$/;
+
+export function pageOcclusionLayer(
+  rows: readonly WireRow[],
+): "dialog" | "overlay" | undefined {
+  if (rows.some((row) => rowOccluder(row) === "dialog")) return "dialog";
+  if (rows.some((row) => rowOccluder(row) === "overlay")) return "overlay";
+  return undefined;
+}
+
+export function isLayerControlRow(row: WireRow, layer: "dialog" | "overlay"): boolean {
+  if (isConsentRow(row)) return true;
+  if (LAYER_CONTROL_LABEL.test(readableLabel(row).toLowerCase().trim())) return true;
+  return layer === "dialog" && isRevealOrCopyRow(row);
+}
+
+export function isLayerCandidateRow(
+  row: WireRow,
+  rows: readonly WireRow[],
+  layer: "dialog" | "overlay",
+): boolean {
+  const occluder = rowOccluder(row);
+  if (isLayerControlRow(row, layer)) return true;
+  if (occluder === layer) return false;
+  return rows.some((other) => other[0] !== row[0] && rowOccluder(other) === row[0]);
 }
 
 export function pagePathKey(url: string): string {
@@ -791,6 +852,32 @@ export function rememberFailedAction(
   if (!drive.failedActionKeys.includes(key)) drive.failedActionKeys.push(key);
 }
 
+export function recordUndeliveredDecision(
+  drive: Pick<
+    SessionDriveState,
+    "failedActionKeys" | "staleClickRefs" | "trajectory" | "history" | "consumedActionKey"
+  >,
+  rows: readonly WireRow[],
+  decision: { action: { kind: string }; actionKey: string; confidence: number },
+  url: string,
+  reason: string,
+): void {
+  rememberFailedAction(drive, rows, decision.actionKey, url);
+  drive.staleClickRefs ??= [];
+  if (!drive.staleClickRefs.includes(decision.actionKey)) {
+    drive.staleClickRefs.push(decision.actionKey);
+  }
+  drive.trajectory.push({
+    action: decision.action.kind,
+    target: decision.actionKey,
+    confidence: decision.confidence,
+    url,
+    reason,
+  });
+  drive.history.push(reason);
+  drive.consumedActionKey = null;
+}
+
 export function recordDestinationAlternation(
   drive: Pick<SessionDriveState, "seenDestinations">,
   dest: string,
@@ -828,8 +915,47 @@ export function recordProgressCycle(
   return result;
 }
 
-export function cycleReason(url: string): string {
+export function cycleReason(url: string, repeated: readonly string[] = []): string {
+  if (repeated.length > 0) return `cycling through ${repeated.join(", ")}`;
   return `cycling through ${pagePathKey(url)}`;
+}
+
+export function isPendingPageAction(row: WireRow, goal: string = ""): boolean {
+  if (isRevealOrCopyRow(row) || isCreateEntryRow(row)) return true;
+  if (isSubmitLikeRow(row) && !isProgressSubmitRow(row) && !isOauthChromeRow(row)) return true;
+  return goal.length > 0 && rowCarriesGoalNoun(row, goal) && isClickableRow(row) && !isSectionNavRow(row);
+}
+
+export function pageHasUntriedPendingAction(
+  rows: readonly WireRow[],
+  drive: Pick<SessionDriveState, "failedActionKeys" | "exhaustedActionKeys">,
+  pageUrl: string,
+  goal: string,
+): boolean {
+  const failed = new Set(drive.failedActionKeys ?? []);
+  const exhausted = new Set(drive.exhaustedActionKeys ?? []);
+  return rows.some((row) => {
+    if (!isPendingPageAction(row, goal)) return false;
+    if (failed.has(actionFailureKey(row, pageUrl)) || failed.has(row[0])) return false;
+    if (exhausted.has(stableControlKey(row, pageUrl)) || exhausted.has(row[0])) return false;
+    return true;
+  });
+}
+
+export function oauthHandoffReturnedToStart(input: {
+  beforeUrl: string;
+  afterUrl: string;
+  rows: readonly WireRow[];
+}): boolean {
+  if (pagePathKey(input.beforeUrl) !== pagePathKey(input.afterUrl)) return false;
+  return input.rows.some((row) => isOauthChromeRow(row)) && !input.rows.some((row) => isLogoutRow(row));
+}
+
+export function oauthReturnedToLoginReason(notice?: string): string {
+  if (notice !== undefined && notice.length > 0) {
+    return `sign-in hand-off returned to the login page: ${notice}`;
+  }
+  return "sign-in hand-off returned to the login page";
 }
 
 export function controlDisabledSignature(rows: readonly WireRow[], url: string = ""): string {
@@ -1438,14 +1564,27 @@ export function revealedSecretMarkerRow(length: number): WireRow {
   return [REVEALED_SECRET_REF, "h1", `@key-value|secret=1|len=${length}`];
 }
 
+const MASKED_SECRET_DISPLAY =
+  /(?:^|[\s=|"'])[A-Za-z][A-Za-z0-9]{1,12}[_-][A-Za-z0-9_-]*[•●⬤*]{3,}/;
+
+export function looksLikeMaskedSecretDisplay(text: string): boolean {
+  return MASKED_SECRET_DISPLAY.test(text) || (isMaskedDisplay(text) && /[_-]/.test(text));
+}
+
+export function rowShowsSecretEvidence(row: WireRow): boolean {
+  const facts = `${row[1]}\t${row[2] ?? ""}`;
+  if (row[0] === REVEALED_SECRET_REF || /(?:^|\|)secret=1(?:\||$)/.test(row[2] ?? "")) {
+    return true;
+  }
+  if (findCredentialTokens(facts).length > 0) return true;
+  return looksLikeMaskedSecretDisplay(facts);
+}
+
 export function pageShowsRevealedKey(
   rows: readonly WireRow[],
   _pageText: string = "",
 ): boolean {
-  return rows.some(
-    (row) =>
-      row[0] === REVEALED_SECRET_REF || /(?:^|\|)secret=1(?:\||$)/.test(row[2] ?? ""),
-  );
+  return rows.some((row) => rowShowsSecretEvidence(row));
 }
 
 function headingCopy(rows: readonly WireRow[]): string {
@@ -1489,13 +1628,17 @@ export function attachRevealedSecretMarker(
   for (const blob of blobs) {
     for (const token of findCredentialTokens(blob)) lengths.push(token.length);
   }
-  if (lengths.length === 0) return { observation, rows: [...rows], attached: false };
-  const length = Math.max(...lengths);
+  const maskedEvidence = rows.some((row) => rowShowsSecretEvidence(row));
+  if (lengths.length === 0 && !maskedEvidence) {
+    return { observation, rows: [...rows], attached: false };
+  }
+  const length = lengths.length > 0 ? Math.max(...lengths) : 16;
   const redact = (text: string): string => redactSecretShapedTokens(text).text;
   const nextRows = rows.map((row) => {
-    if (row[2] === undefined) return row;
-    const facts = redact(row[2]);
-    return facts === row[2] ? row : ([row[0], row[1], facts] as WireRow);
+    const role = redact(row[1]);
+    const facts = row[2] === undefined ? undefined : redact(row[2]);
+    if (role === row[1] && facts === row[2]) return row;
+    return (facts === undefined ? [row[0], role] : [row[0], role, facts]) as WireRow;
   });
   if (!nextRows.some((row) => row[0] === REVEALED_SECRET_REF)) {
     nextRows.push(revealedSecretMarkerRow(length));
@@ -2778,7 +2921,7 @@ export function selectTargets(
     const addOption = (text: string) => {
       if (texts.has(text)) return;
       texts.add(text);
-      const label = maskText(text);
+      const label = redactSecretShapedTokens(maskText(text)).text;
       const optionSlug = uniqueCriteriaSlug(label, used);
       used.add(optionSlug);
       targets.push({
@@ -3202,7 +3345,8 @@ export function operationCriteria(operations: readonly DriveOperation[]): Record
       criteria.WAIT =
         "wait only when the needed control is absent or disabled, or submitted results are still loading";
     else if (operation === "DONE")
-      criteria.DONE = "the goal is already complete on visible evidence; stop";
+      criteria.DONE =
+        "the goal is already complete on visible evidence, including a masked or revealed secret-shaped value in a field or dialog; stop";
     else criteria.BLOCKED = "no listed element advances the goal; stop";
   }
   return criteria;
@@ -3276,8 +3420,12 @@ export function driveTargetSets(
   );
   const visited = aim.visitedSectionKeys ?? [];
   const untriedEntries = hideFilters ? untriedListedItemRows(rows, visited, pageUrl) : [];
+  const layer = pageOcclusionLayer(rows);
+  const failed = new Set(aim.failedKeys ?? []);
   const keepRow = (row: WireRow): boolean => {
     if (isCodeSampleRow(row)) return false;
+    if (failed.has(actionFailureKey(row, pageUrl)) || failed.has(row[0])) return false;
+    if (layer !== undefined && !isLayerCandidateRow(row, rows, layer)) return false;
     if (hideFilters && isContextPickerRow(row)) return false;
     if (hasInAppWork && isOffProductNavRow(row, pageUrl)) return false;
     if (isAppRootOrLogoRow(row, pageUrl) || isSamePageAnchorRow(row, pageUrl)) return false;
@@ -4769,6 +4917,11 @@ async function driveLoop(input: {
   );
   let observation: Observation = firstSnap.observation;
   let rows = firstSnap.rows;
+  {
+    const attached = attachRevealedSecretMarker(observation, rows);
+    observation = attached.observation;
+    rows = attached.rows;
+  }
   if (firstSnap.timedOut) {
     return buildHandoff({
       status: "evaluate_timeout",
@@ -4880,12 +5033,10 @@ async function driveLoop(input: {
     const snap = await snapshotDriveSession(session, sessionId, drive, dependencies, needFrames);
     observation = snap.observation;
     rows = snap.rows;
-    if (drive.pendingRevealScan === true) {
-      drive.pendingRevealScan = false;
-      const attached = attachRevealedSecretMarker(observation, rows);
-      observation = attached.observation;
-      rows = attached.rows;
-    }
+    drive.pendingRevealScan = false;
+    const attached = attachRevealedSecretMarker(observation, rows);
+    observation = attached.observation;
+    rows = attached.rows;
     rememberSubmitResponse();
     if (deliveredOutcome !== undefined) markCaptchaDelivered(deliveredOutcome);
     return snap;
@@ -4924,23 +5075,45 @@ async function driveLoop(input: {
     );
     if (recordDestinationAlternation(drive, pagePathKey(observation.url)) === "cycle") {
       if (
-        nextExploreRow(rows, drive.visitedSectionKeys ?? [], observation.url) !== undefined
+        nextExploreRow(rows, drive.visitedSectionKeys ?? [], observation.url) !== undefined ||
+        pageHasUntriedPendingAction(rows, drive, observation.url, drive.goal)
       ) {
         return "continue";
       }
-      return finish("no_progress", { reason: cycleReason(observation.url) });
+      return finish("no_progress", {
+        reason: cycleReason(
+          observation.url,
+          drive.trajectory.slice(-3).map((step) => step.action),
+        ),
+      });
     }
     if (recordProgressCycle(drive, nextProgress) === "cycle") {
-      if (nextExploreRow(rows, drive.visitedSectionKeys ?? [], observation.url) !== undefined) {
+      if (
+        nextExploreRow(rows, drive.visitedSectionKeys ?? [], observation.url) !== undefined ||
+        pageHasUntriedPendingAction(rows, drive, observation.url, drive.goal)
+      ) {
         return "continue";
       }
-      return finish("no_progress", { reason: cycleReason(observation.url) });
+      return finish("no_progress", {
+        reason: cycleReason(
+          observation.url,
+          drive.trajectory.slice(-3).map((step) => step.action),
+        ),
+      });
     }
     if (
       deadKeyBaseline !== undefined &&
       confirmed === fingerprint &&
       nextProgress === deadKeyBaseline
     ) {
+      const occluded = findRow(rows, actionKey, observation.url);
+      const occluder = occluded === undefined ? undefined : rowOccluder(occluded);
+      if (occluder === "overlay" || occluder === "dialog") {
+        rememberFailedAction(drive, rows, actionKey, observation.url);
+        drive.history.push(`click swallowed by ${occluder}`);
+        drive.staleNonWait = 0;
+        return "continue";
+      }
       const dead = markDead(actionKey);
       if (dead !== "continue") return dead;
     }
@@ -5075,7 +5248,11 @@ async function driveLoop(input: {
       return "continue";
     }
     if (drive.boundFingerprint === fingerprint && drive.consumedActionKey === decision.actionKey) {
-      if (nextExploreRow(rows, drive.visitedSectionKeys ?? [], observation.url) !== undefined) {
+      if (
+        nextExploreRow(rows, drive.visitedSectionKeys ?? [], observation.url) !== undefined ||
+        pageHasUntriedPendingAction(rows, drive, observation.url, drive.goal)
+      ) {
+        drive.consumedActionKey = null;
         return "continue";
       }
       const tried = drive.visitedSectionKeys ?? [];
@@ -5106,11 +5283,13 @@ async function driveLoop(input: {
       targetBinding.length > 0 &&
       !rowMatchesDecisionBinding(liveRow, targetBinding, observation.url)
     ) {
-      drive.staleClickRefs ??= [];
-      if (!drive.staleClickRefs.includes(decision.actionKey)) {
-        drive.staleClickRefs.push(decision.actionKey);
-      }
-      drive.consumedActionKey = null;
+      recordUndeliveredDecision(
+        drive,
+        rows,
+        decision,
+        observation.url,
+        "decided control was no longer bound to this snapshot",
+      );
       return "continue";
     }
     if (
@@ -5119,7 +5298,13 @@ async function driveLoop(input: {
       isSubmitLikeRow(liveRow) &&
       outstandingEmptyFill(rows, drive.filledRefs) !== undefined
     ) {
-      drive.consumedActionKey = null;
+      recordUndeliveredDecision(
+        drive,
+        rows,
+        decision,
+        observation.url,
+        "decided submit was not executed because a required field is still empty",
+      );
       return "continue";
     }
 
@@ -5345,6 +5530,30 @@ async function driveLoop(input: {
     if (clickedBefore !== undefined && isRevealOrCopyRow(clickedBefore)) {
       drive.pendingRevealScan = true;
     }
+    const finishIfOauthBounced = (): DriveHandoff | undefined => {
+      if (
+        (decision.action.kind === "oauth_login" ||
+          (clickedBefore !== undefined && isOauthChromeRow(clickedBefore))) &&
+        oauthHandoffReturnedToStart({
+          beforeUrl: urlBeforeClick,
+          afterUrl: observation.url,
+          rows,
+        })
+      ) {
+        drive.oauthReturnAttempts = (drive.oauthReturnAttempts ?? 0) + 1;
+        const notice = submitResponseText(
+          textBeforeClick,
+          observation.dom ?? "",
+          observationNoticeTexts(observation),
+        );
+        if (drive.oauthReturnAttempts >= 2) {
+          return finish("stuck", { reason: oauthReturnedToLoginReason(notice) });
+        }
+        drive.consumedActionKey = null;
+        drive.history.push(oauthReturnedToLoginReason(notice));
+      }
+      return undefined;
+    };
     const acted = await actDriveSafely(session, sessionId, decision.action, dependencies);
     if (acted.kind === "stale") {
       comboboxMustYield = true;
@@ -5371,16 +5580,16 @@ async function driveLoop(input: {
       observation = await actSafely(dependencies, sessionId, decision.action);
       if (observation.needs_user !== undefined) return finishOnWall(observation.needs_user);
       rows = mergeCompactTable(rows, observation);
-      if (drive.pendingRevealScan === true) {
-        drive.pendingRevealScan = false;
-        const attached = attachRevealedSecretMarker(observation, rows);
-        observation = attached.observation;
-        rows = attached.rows;
-      }
+      drive.pendingRevealScan = false;
+      const attached = attachRevealedSecretMarker(observation, rows);
+      observation = attached.observation;
+      rows = attached.rows;
       actMs = Date.now() - actStarted;
       if (pageShowsRevealedKey(rows) && goalSeeksKey(drive.goal)) {
         return finish("complete");
       }
+      const bounced = finishIfOauthBounced();
+      if (bounced !== undefined) return bounced;
     } else {
       if (page !== null) {
         settleMs = await settleDriveStep(page, acted.combobox);
@@ -5412,6 +5621,8 @@ async function driveLoop(input: {
       if (pageShowsRevealedKey(rows) && goalSeeksKey(drive.goal)) {
         return finish("complete");
       }
+      const bounced = finishIfOauthBounced();
+      if (bounced !== undefined) return bounced;
       if (pagePathKey(observation.url) !== pagePathKey(urlBeforeClick)) {
         const fresh = submitResponseText(
           textBeforeClick,
@@ -6026,6 +6237,12 @@ async function driveLoop(input: {
     const skippedActions = [
       ...new Set([...(drive.exhaustedActionKeys ?? []), ...(drive.staleClickRefs ?? [])]),
     ];
+    if (goalSeeksKey(drive.goal) && pageShowsRevealedKey(rows)) {
+      const applied = await applyDecision({ kind: "complete", confidence: 1 });
+      if (applied !== "continue") return applied;
+      steps += 1;
+      continue;
+    }
     const sets = driveTargetSets(
       rows,
       drive.facts,
@@ -6221,6 +6438,8 @@ async function driveLoop(input: {
         ? findRow(rows, decision.actionKey, pageUrl)
         : undefined;
       const pickedIsReveal = picked !== undefined && isRevealOrCopyRow(picked);
+      const pickedIsPending =
+        picked !== undefined && isPendingPageAction(picked, args.goal);
       const pickedIsUntriedEntry =
         picked !== undefined && untriedEntries.some((entry) => entry[0] === picked[0]);
       const pickedVisitedTab =
@@ -6229,6 +6448,7 @@ async function driveLoop(input: {
         visited.includes(sectionIdentity(picked, pageUrl));
       const takeExplore =
         nextSection !== undefined &&
+        !pickedIsPending &&
         ((untriedEntries.length > 0 && !pickedIsUntriedEntry && !pickedIsReveal) ||
           pickedVisitedTab ||
           (!decisionIsActionable(decision) && !hasGoalDestination));

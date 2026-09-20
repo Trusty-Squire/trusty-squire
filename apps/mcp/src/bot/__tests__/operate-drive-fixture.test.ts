@@ -3899,6 +3899,205 @@ describe("operate_drive real-browser fixture", () => {
       await context.close();
     }
   }, 30_000);
+
+  it("finishes complete on a dialog that already shows a masked secret and never repeats Create API key", async () => {
+    const html = `<!doctype html><meta charset="utf-8"><title>Keys</title>
+<main>
+  <button type="button" id="create">Create API key</button>
+  <dialog id="dlg" open>
+    <label>API key <input id="key" value="tvly-dev-****abcd"></label>
+    <button type="button" id="copy">Copy</button>
+    <button type="button" id="close">Close</button>
+  </dialog>
+</main>
+<script>
+  window.createClicks = 0;
+  document.getElementById("create").onclick = () => { window.createClicks += 1; };
+</script>`;
+    const { context, page, started } = await openFixture(html, "dialog-key.test", "drive");
+    try {
+      const dependencies = deps(async (_api, _state, questions) => jevFromQuestions(questions));
+      const result = await runOperateDrive(
+        { session_id: started.session_id, goal: "extract an API key", max_steps: 6 },
+        api(),
+        undefined,
+        dependencies,
+      );
+      expect(await page.evaluate(() => (window as unknown as { createClicks: number }).createClicks)).toBe(0);
+      expect(result.status).toBe("complete");
+      const creates = result.trajectory.filter((step) => step.target.includes("Create") || /create/i.test(step.reason ?? ""));
+      expect(creates.filter((step) => step.action === "click" && step.reason === undefined).length).toBe(0);
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
+  it("dismisses a fixed consent overlay before checking the box under it", async () => {
+    const html = `<!doctype html><meta charset="utf-8"><title>Signup</title>
+<main>
+  <form>
+    <label><input type="checkbox" id="terms"> I agree to the terms</label>
+    <button type="button" id="join">Create account</button>
+  </form>
+</main>
+<div id="overlay" style="position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:40;display:flex;align-items:center;justify-content:center">
+  <div style="background:#fff;padding:24px">
+    <p>We use cookies</p>
+    <button type="button" id="accept">Accept all</button>
+  </div>
+</div>
+<script>
+  document.getElementById("accept").onclick = () => document.getElementById("overlay").remove();
+  document.getElementById("join").onclick = () => {
+    if (!document.getElementById("terms").checked) return;
+    document.querySelector("main").innerHTML = "<p id=done>Account created</p>";
+  };
+</script>`;
+    const { context, page, started } = await openFixture(html, "overlay-consent.test", "drive");
+    try {
+      const dependencies = deps(async (_api, _state, questions) => jevFromQuestions(questions));
+      const result = await runOperateDrive(
+        { session_id: started.session_id, goal: "create an account", max_steps: 8 },
+        api(),
+        undefined,
+        dependencies,
+      );
+      expect(await page.locator("#overlay").count()).toBe(0);
+      expect(await page.locator("#done").count()).toBe(1);
+      expect(result.status).not.toBe("no_progress");
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
+  it("masks a secret-shaped value in a select option", async () => {
+    const html = `<!doctype html><meta charset="utf-8"><title>Tokens</title>
+<label>Token <select id="tok"><option>choose</option><option>sk_live_fixturekey01</option></select></label>`;
+    const { context, started } = await openFixture(html, "secret-option.test", "drive");
+    try {
+      let leaked = false;
+      const dependencies = deps(async (_api, state, questions) => {
+        if (JSON.stringify({ state, questions }).includes("sk_live_fixturekey01")) leaked = true;
+        return jevFromQuestions(questions, true);
+      });
+      const result = await runOperateDrive(
+        { session_id: started.session_id, goal: "extract an API key", max_steps: 3 },
+        api(),
+        undefined,
+        dependencies,
+      );
+      expect(leaked).toBe(false);
+      expect(JSON.stringify(result)).not.toContain("sk_live_fixturekey01");
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
+  it("clicks Create key after leaving and re-entering the keys page", async () => {
+    const dash = `<!doctype html><meta charset="utf-8"><title>Dashboard</title>
+<nav><a id="keys" href="/settings/keys">API Keys</a></nav>
+<p>Dashboard</p>`;
+    const keys = `<!doctype html><meta charset="utf-8"><title>API Keys</title>
+<div role="tablist">
+  <button type="button" role="tab" id="keys">API Keys</button>
+  <button type="button" role="tab" id="general">General</button>
+</div>
+<section id="panel">
+  <button type="button" id="create">Create key</button>
+</section>
+<script>
+  document.getElementById("general").onclick = () => {
+    document.getElementById("panel").innerHTML = "<p>Profile</p>";
+  };
+  document.getElementById("keys").onclick = () => {
+    document.getElementById("panel").innerHTML =
+      '<button type="button" id="create">Create key</button>';
+    document.getElementById("create").onclick = () => {
+      document.getElementById("panel").innerHTML = '<p id="secret">sk_live_fixturekey01</p>';
+    };
+  };
+  document.getElementById("create").onclick = () => {
+    document.getElementById("panel").innerHTML = '<p id="secret">sk_live_fixturekey01</p>';
+  };
+</script>`;
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await page.route("**/*", (route) => {
+      const url = route.request().url();
+      route.fulfill({
+        contentType: "text/html",
+        body: url.includes("/settings/keys") ? keys : dash,
+      });
+    });
+    await page.goto("https://reenter-keys.test/dashboard");
+    const started = await startHarnessProvisionSession({
+      browser: BrowserController.fromHarnessPage(page),
+      serviceUrl: "https://reenter-keys.test/dashboard",
+      format: "compact",
+      initialObservation: "drive",
+    });
+    try {
+      const dependencies = deps(async (_api, _state, questions) => jevFromQuestions(questions));
+      const result = await runOperateDrive(
+        { session_id: started.session_id, goal: "extract an API key", max_steps: 10 },
+        api(),
+        undefined,
+        dependencies,
+      );
+      expect(result.status).not.toBe("no_progress");
+      expect(result.reason ?? "").not.toMatch(/^API Keys$/);
+      expect(await page.locator("#secret").count()).toBe(1);
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
+  it("stops after one retry when OAuth returns to the same login page", async () => {
+    const html = `<!doctype html><meta charset="utf-8"><title>Login</title>
+<main>
+  <h1>Sign in</h1>
+  <button type="button" id="google">Continue with Google</button>
+</main>
+<script>
+  document.getElementById("google").onclick = () => {
+    history.replaceState({}, "", "/login?state=" + Math.random().toString(36).slice(2));
+  };
+</script>`;
+    const { context, page, started } = await openFixture(html, "oauth-bounce.test", "drive", "/login");
+    try {
+      const dependencies = deps(async (_api, _state, questions) => jevFromQuestions(questions));
+      dependencies.act = async (sessionId, action) => {
+        if (action.kind === "oauth_login") {
+          await page.evaluate(() => {
+            history.replaceState({}, "", `/login?state=${Math.random().toString(36).slice(2)}`);
+          });
+          return observe(sessionId);
+        }
+        return act(sessionId, action);
+      };
+      const result = await runOperateDrive(
+        {
+          session_id: started.session_id,
+          goal: "sign up with Google using the account already signed in to this browser",
+          max_steps: 8,
+        },
+        api(),
+        undefined,
+        dependencies,
+      );
+      const oauthSteps = result.trajectory.filter((step) => step.action === "oauth_login");
+      expect(oauthSteps.length).toBeLessThanOrEqual(2);
+      expect(result.status).toBe("stuck");
+      expect(result.reason ?? "").toMatch(/sign-in hand-off returned to the login page/);
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
 });
 
 describe("coverage-matrix constant", () => {
