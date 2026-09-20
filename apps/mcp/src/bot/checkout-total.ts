@@ -53,23 +53,12 @@ export function currencyMinorDigits(currency: string): number {
 }
 
 /** Apostrophes and the space family group digits in every locale that uses
- * them and never mark a fraction, so they can be dropped — but only from a
- * number whose groups are well formed. Anything else the capture swept up is
- * an unreadable total, not a figure to guess the grouping of. */
+ * them and never mark a fraction, so they are read as a group separator only
+ * where they sit in front of exactly three digits. A digit run that follows an
+ * amount across a space — an item count — is a separate token, not part of it. */
 const CHECKOUT_GROUP_SEPARATORS = String.raw`\u0020\u00a0\u2009\u202f'\u2019`;
 const checkoutGroupSeparatorPattern = new RegExp(`[${CHECKOUT_GROUP_SEPARATORS}]`, "gu");
-const checkoutGroupedNumberPattern = new RegExp(
-  String.raw`^[0-9]{1,3}(?:[${CHECKOUT_GROUP_SEPARATORS}][0-9]{3})+(?:[.,][0-9]+)?$`,
-  "u",
-);
-
-function withoutGroupSeparators(raw: string): string | null {
-  checkoutGroupSeparatorPattern.lastIndex = 0;
-  if (!checkoutGroupSeparatorPattern.test(raw)) return raw;
-  return checkoutGroupedNumberPattern.test(raw)
-    ? raw.replaceAll(checkoutGroupSeparatorPattern, "")
-    : null;
-}
+const checkoutGroupedNumber = String.raw`[0-9]{1,3}(?:[${CHECKOUT_GROUP_SEPARATORS}][0-9]{3})+(?:[.,][0-9]+)?`;
 
 function parseDisplayedNumber(value: string, minorDigits: number): number | null {
   const comma = value.lastIndexOf(",");
@@ -111,7 +100,7 @@ const checkoutTotalLabel =
   String.raw`|税込(?:み)?(?:合計|総額|金額|価格)?|総合計|総計|総額|合計金額|合計|小計|注文合計|注文金額|支払い金額|支払金額|請求金額|請求額)(?![${cjkLetter}]))`;
 const checkoutTotalPattern = new RegExp(
   checkoutTotalLabel +
-    String.raw`(?:\s*[（(]税込み?[）)])?\s*[:：]?\s*(?:(\p{L}{1,4}\p{Sc}?)\s*)?(\p{Sc})?\s*([0-9](?:[0-9.,${CHECKOUT_GROUP_SEPARATORS}]*[0-9])?)(?![0-9.,'’])(?:[^\S\r\n]*(\p{L}{1,4}\p{Sc}?|\p{Sc})(?=\s|$|[.,;:!?)（）(。、]))?(?![${cjkLetter}])`,
+    String.raw`(?:\s*[（(]税込み?[）)])?\s*[:：]?\s*(?:(\p{L}{1,4}\p{Sc}?)\s*)?(\p{Sc})?\s*(${checkoutGroupedNumber}|[0-9](?:[0-9.,]*[0-9])?)(?![0-9.,'’])(?:[^\S\r\n]*(\p{L}{1,4}\p{Sc}?|\p{Sc})(?=\s|$|[.,;:!?)（）(。、]))?(?![${cjkLetter}])`,
   "giu",
 );
 
@@ -186,11 +175,13 @@ function checkoutTextHasFreeShipping(text: string): boolean {
   return /(?:送料|配送料)\s*[:：]?\s*送料無料/u.test(text);
 }
 
-function parseCheckoutAmountMatch(
+/** Null means the match is not a payable total line at all — a running or
+ * tax-exclusive figure, a counted quantity, or a number carrying no currency. */
+function payableTotalCurrency(
   text: string,
   match: RegExpMatchArray,
   factCurrency?: string,
-): CheckoutAmount | null {
+): string | null {
   const matchEnd = (match.index ?? 0) + match[0].length;
   const trailingLine = text.slice(matchEnd).split(/\r?\n/u, 1)[0] ?? "";
   if (
@@ -206,18 +197,21 @@ function parseCheckoutAmountMatch(
   const suffix = resolveCheckoutCurrencyToken(match[4]);
   const pageCurrency = prefix ?? suffix ?? symbol;
   if (pageCurrency === undefined) return null;
-  const currency =
-    !pageCurrency.unique && factCurrency !== undefined ? factCurrency : pageCurrency.code;
+  return !pageCurrency.unique && factCurrency !== undefined ? factCurrency : pageCurrency.code;
+}
+
+/** Null here means the opposite: this IS the payable total and its number
+ * cannot be read, so the caller owes the human an unknown total rather than a
+ * running figure from higher up the summary. */
+function payableTotalCents(displayed: string, currency: string): number | null {
   const minorDigits = currencyMinorDigits(currency);
-  const displayed = withoutGroupSeparators(match[3] ?? "");
-  if (displayed === null) return null;
-  if (displayedScaleMismatches(displayed, minorDigits)) return null;
-  const amount = parseDisplayedNumber(displayed, minorDigits);
+  const value = displayed.replaceAll(checkoutGroupSeparatorPattern, "");
+  if (displayedScaleMismatches(value, minorDigits)) return null;
+  const amount = parseDisplayedNumber(value, minorDigits);
   if (amount === null) return null;
   const scale = 10 ** minorDigits;
   const minor = Math.round(amount * scale);
-  if (Math.abs(amount * scale - minor) > 1e-6) return null;
-  return { amount_cents: minor, currency };
+  return Math.abs(amount * scale - minor) > 1e-6 ? null : minor;
 }
 
 /** The payable total is the summary line, so the LAST labelled total in a
@@ -229,11 +223,21 @@ export function parseCheckoutAmount(
   for (const text of texts) {
     checkoutTotalPattern.lastIndex = 0;
     let payable: CheckoutAmount | null = null;
+    let unreadable = false;
     for (const match of text.matchAll(checkoutTotalPattern)) {
       if (match[0].startsWith("小計") && !checkoutTextHasFreeShipping(text)) continue;
-      const amount = parseCheckoutAmountMatch(text, match, factCurrency);
-      if (amount !== null) payable = amount;
+      const currency = payableTotalCurrency(text, match, factCurrency);
+      if (currency === null) continue;
+      const cents = payableTotalCents(match[3] ?? "", currency);
+      if (cents === null) {
+        unreadable = true;
+        payable = null;
+        continue;
+      }
+      unreadable = false;
+      payable = { amount_cents: cents, currency };
     }
+    if (unreadable) return null;
     if (payable !== null) return payable;
   }
   return null;

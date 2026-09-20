@@ -190,10 +190,33 @@ $76.00 USD`;
       amount_cents: 0,
       note: CHECKOUT_TOTAL_UNREADABLE,
     });
-    expect(resolveDriveApprovalAmount(["Total EUR 76.00 12345"], {})).toMatchObject({
-      amount_cents: 0,
-      note: CHECKOUT_TOTAL_UNREADABLE,
+  });
+
+  it("reads a total followed by a separate digit run, which groups nothing", () => {
+    expect(resolveDriveApprovalAmount(["Total $76.00 3 items"], {})).toMatchObject({
+      amount_cents: 7600,
+      currency: "USD",
     });
+    expect(resolveDriveApprovalAmount(["Total EUR 76.00 12345"], {})).toMatchObject({
+      amount_cents: 7600,
+      currency: "EUR",
+    });
+  });
+
+  it("reports an unreadable summary total as unknown instead of a running total above it", () => {
+    expect(
+      resolveDriveApprovalAmount(["Item total ¥7,000\nShipping ¥600\nOrder total ¥7,600.00"], {}),
+    ).toMatchObject({ amount_cents: 0, note: CHECKOUT_TOTAL_UNREADABLE });
+    expect(
+      resolveDriveApprovalAmount(
+        ["Item total $68.00\nShipping $8.00\nOrder total $76.00 2 items"],
+        {},
+      ),
+    ).toMatchObject({ amount_cents: 7600, currency: "USD" });
+    // An unreadable running line does not condemn a summary total below it.
+    expect(
+      resolveDriveApprovalAmount(["Item total ¥7,000.00\nOrder total ¥7,600"], {}),
+    ).toMatchObject({ amount_cents: 7600, currency: "JPY" });
   });
 
   it("degrades a wedged renderer to an unknown total without cancelling the drive request", async () => {
