@@ -21,6 +21,12 @@ import {
   DRIVE_STALE_LIMIT,
   DRIVE_EXHAUSTED_ACTION_LIMIT,
   pageProgressKey,
+  pagePathKey,
+  stableControlKey,
+  recordProgressCycle,
+  cycleReason,
+  submitHadNoResponse,
+  silentSubmitReason,
   inboxPollMissReason,
   recordDeadAction,
   deadActionReason,
@@ -2276,6 +2282,51 @@ describe("facts, fingerprint, compact merge", () => {
     expect(recordDeadAction(drive, key, "@e:y")).toBe("stop");
     expect(deadActionReason(drive.exhaustedActionKeys, "https://api-ninjas.com/register")).toBe(
       "no change after @e:go, WAIT, @e:ok, @e:x, @e:y on https://api-ninjas.com/register",
+    );
+    const remounted: WireRow[] = [
+      ["@e:f0d29", "t", "Email|f=email|n=a@b.test"],
+      ["@e:f0d31", "b", "Sign Up"],
+    ];
+    const original: WireRow[] = [
+      ["@e:f0d9", "t", "Email|f=email|n=a@b.test"],
+      ["@e:f0d11", "b", "Sign Up"],
+    ];
+    expect(pageProgressKey("https://app.example.test/signup", remounted)).toBe(
+      pageProgressKey("https://app.example.test/signup?from=login", original),
+    );
+    expect(stableControlKey(original[1]!, "https://app.example.test/signup")).toBe(
+      stableControlKey(remounted[1]!, "https://app.example.test/signup"),
+    );
+    const cycle = { seenProgressKeys: [] as string[], leftProgressKeys: [] as string[] };
+    expect(recordProgressCycle(cycle, "login")).toBe("continue");
+    expect(recordProgressCycle(cycle, "signup")).toBe("continue");
+    expect(recordProgressCycle(cycle, "login")).toBe("continue");
+    expect(recordProgressCycle(cycle, "signup")).toBe("continue");
+    expect(recordProgressCycle(cycle, "login")).toBe("cycle");
+    expect(cycleReason("https://app.example.test/login?src=1")).toBe(
+      "cycling through https://app.example.test/login",
+    );
+    expect(pagePathKey("https://app.example.test/login?src=1")).toBe(
+      "https://app.example.test/login",
+    );
+    expect(
+      submitHadNoResponse({
+        navigated: false,
+        responseText: undefined,
+        beforeDisabled: "continue\te",
+        afterDisabled: "continue\te",
+      }),
+    ).toBe(true);
+    expect(
+      submitHadNoResponse({
+        navigated: true,
+        responseText: undefined,
+        beforeDisabled: "continue\te",
+        afterDisabled: "continue\te",
+      }),
+    ).toBe(false);
+    expect(silentSubmitReason("Continue", "https://app.example.test/signup")).toBe(
+      "site did not respond to Continue on https://app.example.test/signup",
     );
     const sets = driveTargetSets(
       filled,

@@ -214,6 +214,10 @@ export interface SessionDriveState {
   lastSubmitResponse?: string | null;
   /** Wall clock when post-submit in-flight waiting started. */
   inFlightStartedAt?: number | null;
+  seenProgressKeys?: string[];
+  leftProgressKeys?: string[];
+  progressReturnCounts?: Record<string, number>;
+  silentSubmitKeys?: string[];
 }
 
 // The last extracted elements are resealed on every retain so each retained

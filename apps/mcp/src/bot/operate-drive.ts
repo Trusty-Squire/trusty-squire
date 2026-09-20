@@ -651,6 +651,21 @@ export function isConsentRow(row: WireRow): boolean {
   );
 }
 
+export function pagePathKey(url: string): string {
+  try {
+    const parsed = new URL(url);
+    return `${parsed.origin}${parsed.pathname}`;
+  } catch {
+    return url;
+  }
+}
+
+export function stableControlKey(row: WireRow, url: string = ""): string {
+  return [pagePathKey(url), row[1], normalizeKey(readableLabel(row)), rowFormId(row) ?? ""].join(
+    "\t",
+  );
+}
+
 export function pageProgressKey(
   url: string,
   rows: readonly WireRow[],
@@ -660,12 +675,20 @@ export function pageProgressKey(
   const kept = rows.filter(
     (row) => isConsentRow(row) || isFillableRow(row) || isSubmitLikeRow(row) || isChoiceRow(row),
   );
-  const stable = kept.map((row) => `${row[0]}\t${row[1]}\t${row[2] ?? ""}`).sort();
+  const stable = kept
+    .map((row) => `${row[1]}\t${row[2] ?? ""}\t${rowFormId(row) ?? ""}`)
+    .sort();
   const headingKey = headings
     .map((heading) => heading.trim().toLowerCase())
     .filter((heading) => heading.length > 0)
     .join("\n");
-  return `${url}\n${headingKey}\n${stable.join("\n")}\nfilled:${[...filledRefs].sort().join(",")}`;
+  const filledStable = [...filledRefs]
+    .map((ref) => {
+      const row = rows.find((entry) => entry[0] === ref);
+      return row === undefined ? ref : stableControlKey(row, url);
+    })
+    .sort();
+  return `${pagePathKey(url)}\n${headingKey}\n${stable.join("\n")}\nfilled:${filledStable.join(",")}`;
 }
 
 export function recordDeadAction(
@@ -713,19 +736,68 @@ export function rowOccluder(row: WireRow): string | undefined {
   return match?.[1];
 }
 
-export function actionFailureKey(row: WireRow): string {
-  return `${row[1]}\t${normalizeKey(readableLabel(row))}`;
+export function actionFailureKey(row: WireRow, url: string = ""): string {
+  return stableControlKey(row, url);
 }
 
 export function rememberFailedAction(
   drive: Pick<SessionDriveState, "failedActionKeys">,
   rows: readonly WireRow[],
   actionKey: string,
+  url: string = "",
 ): void {
   drive.failedActionKeys ??= [];
   const row = rows.find((entry) => entry[0] === actionKey);
-  const key = row === undefined ? actionKey : actionFailureKey(row);
+  const key = row === undefined ? actionKey : actionFailureKey(row, url);
   if (!drive.failedActionKeys.includes(key)) drive.failedActionKeys.push(key);
+}
+
+export function recordProgressCycle(
+  drive: Pick<SessionDriveState, "seenProgressKeys" | "leftProgressKeys" | "progressReturnCounts">,
+  nextKey: string,
+): "continue" | "cycle" {
+  const seen = drive.seenProgressKeys ?? [];
+  const last = seen[seen.length - 1];
+  drive.leftProgressKeys ??= [];
+  drive.progressReturnCounts ??= {};
+  if (last !== undefined && last !== nextKey && !drive.leftProgressKeys.includes(last)) {
+    drive.leftProgressKeys.push(last);
+  }
+  let result: "continue" | "cycle" = "continue";
+  if (drive.leftProgressKeys.includes(nextKey)) {
+    const count = (drive.progressReturnCounts[nextKey] ?? 0) + 1;
+    drive.progressReturnCounts[nextKey] = count;
+    if (count >= 2) result = "cycle";
+  }
+  drive.seenProgressKeys = [...seen, nextKey];
+  return result;
+}
+
+export function cycleReason(url: string): string {
+  return `cycling through ${pagePathKey(url)}`;
+}
+
+export function controlDisabledSignature(rows: readonly WireRow[], url: string = ""): string {
+  return rows
+    .filter((row) => isFillableRow(row) || isSubmitLikeRow(row) || isChoiceRow(row))
+    .map((row) => `${stableControlKey(row, url)}\t${isDisabledRow(row) ? "d" : "e"}`)
+    .sort()
+    .join("\n");
+}
+
+export function submitHadNoResponse(input: {
+  navigated: boolean;
+  responseText?: string | null | undefined;
+  beforeDisabled: string;
+  afterDisabled: string;
+}): boolean {
+  if (input.navigated) return false;
+  if (typeof input.responseText === "string" && input.responseText.length > 0) return false;
+  return input.beforeDisabled === input.afterDisabled;
+}
+
+export function silentSubmitReason(label: string, url: string): string {
+  return `site did not respond to ${label} on ${pagePathKey(url)}`;
 }
 
 export function filledFormIds(
@@ -839,7 +911,12 @@ export function candidateAimScore(
   if (isConsentRow(row) && input.rows.some((other) => rowOccluder(other) !== undefined)) {
     score += 70;
   }
-  if (failed.has(actionFailureKey(row)) || failed.has(row[0])) score -= 70;
+  if (
+    failed.has(actionFailureKey(row, input.pageUrl ?? "")) ||
+    failed.has(row[0])
+  ) {
+    score -= 70;
+  }
   if (phase === "signup") {
     if (isSubmitLikeRow(row) || isFillableRow(row) || isChoiceRow(row)) score += 40;
     if (isOauthChromeRow(row)) score -= 40;
@@ -1795,7 +1872,12 @@ export function clickableCandidates(
   const needsFill = outstandingEmptyFill(rows, filledRefs) !== undefined;
   return driveCandidates(rows, includePayment, pageUrl)
     .filter((candidate) => {
-      if (skipped.has(candidate.ref)) return false;
+      if (
+        skipped.has(candidate.ref) ||
+        skipped.has(stableControlKey(candidate.row, pageUrl))
+      ) {
+        return false;
+      }
       if (!isClickableRow(candidate.row)) return false;
       if (
         formBusy &&
@@ -4027,10 +4109,19 @@ async function driveLoop(input: {
     drive.staleNonWait = confirmed === fingerprint ? drive.staleNonWait + 1 : 0;
     drive.lastFingerprint = confirmed;
     drive.lastActionKey = actionKey;
+    const nextProgress = pageProgressKey(
+      observation.url,
+      rows,
+      drive.filledRefs,
+      observation.semantic?.headings ?? [],
+    );
+    if (recordProgressCycle(drive, nextProgress) === "cycle") {
+      return finish("no_progress", { reason: cycleReason(observation.url) });
+    }
     if (
       deadKeyBaseline !== undefined &&
       confirmed === fingerprint &&
-      pageProgressKey(observation.url, rows, drive.filledRefs, observation.semantic?.headings ?? []) === deadKeyBaseline
+      nextProgress === deadKeyBaseline
     ) {
       const dead = markDead(actionKey);
       if (dead !== "continue") return dead;
@@ -4039,9 +4130,11 @@ async function driveLoop(input: {
     return "continue";
   };
   const markDead = (actionKey: string): DriveHandoff | "continue" => {
-    rememberFailedAction(drive, rows, actionKey);
+    rememberFailedAction(drive, rows, actionKey, observation.url);
     const key = pageProgressKey(observation.url, rows, drive.filledRefs, observation.semantic?.headings ?? []);
-    if (recordDeadAction(drive, key, actionKey) === "stop") {
+    const row = findRow(rows, actionKey, observation.url);
+    const deadKey = row === undefined ? actionKey : stableControlKey(row, observation.url);
+    if (recordDeadAction(drive, key, deadKey) === "stop") {
       return finish("no_progress", {
         reason: deadActionReason(drive.exhaustedActionKeys ?? [], observation.url),
       });
@@ -4365,6 +4458,12 @@ async function driveLoop(input: {
     const beforeKey = pageProgressKey(observation.url, rows, drive.filledRefs, observation.semantic?.headings ?? []);
     const textBeforeClick = observation.dom ?? "";
     const excludeBeforeClick = rows.filter((row) => isSubmitLikeRow(row)).map((row) => readableLabel(row));
+    const urlBeforeClick = observation.url;
+    const disableBeforeClick = controlDisabledSignature(rows, observation.url);
+    const clickedBefore =
+      decision.action.kind === "click"
+        ? findRow(rows, decision.actionKey, observation.url)
+        : undefined;
     const acted = await actDriveSafely(session, sessionId, decision.action, dependencies);
     if (acted.kind === "stale") {
       comboboxMustYield = true;
@@ -4375,7 +4474,7 @@ async function driveLoop(input: {
       if (!drive.staleClickRefs.includes(decision.actionKey)) {
         drive.staleClickRefs.push(decision.actionKey);
       }
-      rememberFailedAction(drive, rows, decision.actionKey);
+      rememberFailedAction(drive, rows, decision.actionKey, observation.url);
       const staleSnap = await snapshotOrTimeout(framesIfNeeded());
       if (staleSnap !== "ok") return staleSnap;
       if (modelChosen) {
@@ -4415,6 +4514,26 @@ async function driveLoop(input: {
       const snap = await refreshSnapshot(framesIfNeeded());
       if (snap.timedOut)
         return finish("evaluate_timeout", { reason: "in-page evaluate exceeded budget" });
+      if (clickedBefore !== undefined && isSubmitLikeRow(clickedBefore)) {
+        const navigated = pagePathKey(observation.url) !== pagePathKey(urlBeforeClick);
+        if (
+          submitHadNoResponse({
+            navigated,
+            responseText: drive.lastSubmitResponse,
+            beforeDisabled: disableBeforeClick,
+            afterDisabled: controlDisabledSignature(rows, observation.url),
+          })
+        ) {
+          const stable = stableControlKey(clickedBefore, urlBeforeClick);
+          drive.silentSubmitKeys ??= [];
+          if (drive.silentSubmitKeys.includes(stable)) {
+            return finish("no_progress", {
+              reason: silentSubmitReason(readableLabel(clickedBefore), urlBeforeClick),
+            });
+          }
+          drive.silentSubmitKeys.push(stable);
+        }
+      }
       drive.lastActProfile = {
         ...drive.lastActProfile,
         act_ms: actMs,

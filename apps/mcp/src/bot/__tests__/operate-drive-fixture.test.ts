@@ -269,6 +269,26 @@ const SLOW_SUBMIT_NEXT_HTML = `<!doctype html><meta charset="utf-8"><title>Slow 
   });
 </script>`;
 
+const CYCLE_LOGIN_HTML = `<!doctype html><meta charset="utf-8"><title>Log in</title>
+<main>
+  <h1>Log in</h1>
+  <form id="f">
+    <label>Email <input id="email" name="email" type="email"></label>
+    <button type="button" id="continue">Continue</button>
+  </form>
+  <a id="to-signup" href="/signup">Create account</a>
+</main>`;
+
+const CYCLE_SIGNUP_HTML = `<!doctype html><meta charset="utf-8"><title>Sign up</title>
+<main>
+  <h1>Create account</h1>
+  <form id="f">
+    <label>Email <input id="email" name="email" type="email"></label>
+    <button type="button" id="continue">Continue</button>
+  </form>
+  <a id="to-login" href="/login">Log in</a>
+</main>`;
+
 // A payment settling behind a blank processor screen: no rows, ever.
 const BLANK_PROCESSOR_HTML = `<!doctype html><meta charset="utf-8"><title>Processing</title>
 <main></main>`;
@@ -2074,6 +2094,75 @@ describe("operate_drive real-browser fixture", () => {
       expect(handoff.reason ?? "").not.toMatch(/already_settled/);
       expect(handoff.status).not.toBe("stuck");
       expect(await page.locator("#next").count()).toBe(1);
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 60_000);
+
+  it("stops a two-page no-op submit loop with a cycle or no-response reason", async () => {
+    const host = "cycle.test";
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    const url = `https://${host}/login`;
+    await page.route("**/*", (route) => {
+      const requested = new URL(route.request().url());
+      const body = requested.pathname.includes("signup") ? CYCLE_SIGNUP_HTML : CYCLE_LOGIN_HTML;
+      return route.fulfill({ contentType: "text/html", body });
+    });
+    await page.goto(url);
+    const started = await startHarnessProvisionSession({
+      browser: BrowserController.fromHarnessPage(page),
+      serviceUrl: url,
+      format: "compact",
+      initialObservation: "standard",
+    });
+    try {
+      const dependencies = deps(async (_api, _state, questions) => {
+        const typeKeys = Object.keys(choiceCriteria(questions.TYPE_TEXT_target));
+        if (typeKeys.length > 0) return jevFromQuestions(questions);
+        const clickCriteria = choiceCriteria(questions.CLICK_target);
+        const continueKey = Object.keys(clickCriteria).find((key) =>
+          (clickCriteria[key] ?? "").toLowerCase().includes("continue"),
+        );
+        const opKeys = Object.keys(choiceCriteria(questions.operation));
+        if (continueKey !== undefined) {
+          return {
+            attempts: 1,
+            elapsedMs: 12,
+            result: {
+              answers: {
+                operation: {
+                  choice: "CLICK",
+                  confidence: 0.93,
+                  probabilities: peaked(opKeys, "CLICK"),
+                },
+                CLICK_target: {
+                  choice: continueKey,
+                  confidence: 0.93,
+                  probabilities: peaked(Object.keys(clickCriteria), continueKey),
+                },
+              },
+            },
+          };
+        }
+        return jevFromQuestions(questions);
+      });
+      const handoff = await runOperateDrive(
+        {
+          session_id: started.session_id,
+          goal: "create an account",
+          facts: { email: "ada@fixture.test" },
+          max_steps: 12,
+          max_seconds: 20,
+        },
+        api(),
+        undefined,
+        dependencies,
+      );
+      expect(handoff.status).toBe("no_progress");
+      expect(handoff.reason ?? "").toMatch(/cycling|did not respond/);
+      expect(handoff.steps).toBeLessThanOrEqual(8);
     } finally {
       await finishProvisionSession(started.session_id);
       await context.close();
