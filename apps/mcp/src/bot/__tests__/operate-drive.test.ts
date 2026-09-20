@@ -407,6 +407,21 @@ describe("decideAfterJev stop reasons", () => {
     ).toEqual(["@e:ncard", "@e:email"]);
   });
 
+  it("has no typeable shipping left once contact is filled, so a leftover state select does not block card inject", () => {
+    const filledEmail: WireRow = ["@e:email", "t", "Email|f=email|s=r|n=a@b.test"];
+    const facts = { email: "a@b.test", state: "NY", card_ref: "card-1" };
+    expect(
+      typeableCandidates([filledEmail, STATE, PAYMENT], facts, true, ["@e:email"]).map(
+        (row) => row.ref,
+      ),
+    ).toEqual([]);
+    expect(
+      fillableCandidates([filledEmail, STATE, PAYMENT], facts, true, ["@e:email"]).map(
+        (row) => row.ref,
+      ),
+    ).toEqual(["@e:state"]);
+  });
+
   it("copies released card public fields so expiry can be typed after inject", () => {
     expect(
       applyReleasedCardFacts({ email: "a@b.test" }, { exp_month: "12", exp_year: "2030", name: "Ada" }),

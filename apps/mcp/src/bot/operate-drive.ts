@@ -3299,11 +3299,22 @@ async function driveLoop(input: {
       drive.filledRefs,
       pageUrl,
     );
+    // inject_card writes only pan/cvv. Expiry, cardholder name, and billing
+    // are typed after release. A leftover state/country SELECT must not
+    // block that split: Jev then clicks the expiry picker (a date field)
+    // instead of naming the card number.
+    const remainingTypes = typeableCandidates(
+      rows,
+      drive.facts,
+      includePayment,
+      drive.filledRefs,
+      pageUrl,
+    );
     if (
       includePayment &&
       (!alreadyCard || cardRetry) &&
       onCheckout &&
-      remainingFills.length === 0 &&
+      remainingTypes.length === 0 &&
       (fields.pan !== undefined || fields.cvv !== undefined)
     ) {
       // Bind the automatic decision to the current snapshot before applying
