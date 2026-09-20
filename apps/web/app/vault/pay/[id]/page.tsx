@@ -328,7 +328,11 @@ export default function PaymentApprovalPage() {
     isJitOrigin && (jitBindingMismatch || ceremony?.card === null || cardMetadataError !== null);
   const needsCard = ceremony?.status === "pending" && ceremony.card_ref === null;
   const amountLabel =
-    approval !== null ? formatAmount(approval.amount_cents, approval.currency) : "";
+    approval === null
+      ? ""
+      : approval.amount_cents === 0 && approval.reason.includes("total not readable")
+        ? "total not readable"
+        : formatAmount(approval.amount_cents, approval.currency);
   const boundCard =
     ceremony?.card_ref == null
       ? null

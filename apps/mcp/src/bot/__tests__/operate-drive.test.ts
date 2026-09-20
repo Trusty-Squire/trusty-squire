@@ -66,6 +66,7 @@ import {
   solverOutcomeBlocksSubmit,
   DRIVE_IN_FLIGHT_MS,
   outstandingRequiredFill,
+  paymentArgs,
   DRIVE_EMPTY_SNAPSHOT_WAITS,
   DRIVE_WIDGET_UNREADY_WAITS,
   DRIVE_WIDGET_UNREADY_REASON,
@@ -3391,5 +3392,54 @@ describe("post-confirmation navigation", () => {
     expect(drive.awaitingDecideAfterExplore).toBe(false);
     expect(drive.filledRefs).toEqual(["@e:email"]);
     expect(drive.silentSubmitKeys).toEqual(["pay"]);
+  });
+});
+
+describe("drive approval amount", () => {
+  const session = {
+    id: "00000000-0000-4000-8000-000000000001",
+    activePayment: null,
+    releasedPaymentCard: null,
+  };
+  const cvv: WireRow = ["@e:cvv", "t", "Security code"];
+  const checkout = "https://whitejade.xyz/checkouts/cn/token/en-us";
+
+  it("puts the visible checkout total on the approval when no amount fact is given", () => {
+    const args = paymentArgs(
+      session,
+      { card_ref: "card-1", merchant: "whitejade.xyz" },
+      "pay for the order",
+      checkout,
+      [PAYMENT, cvv],
+      ["Subtotal $68.00\nShipping $8.00\nTotal $76.00 USD"],
+    );
+    expect(args?.amount_cents).toBe(7600);
+    expect(args?.currency).toBe("USD");
+    expect(args?.reason).toBe("pay for the order");
+  });
+
+  it("does not let a facts amount replace the page total", () => {
+    const args = paymentArgs(
+      session,
+      { card_ref: "card-1", amount_cents: "0", merchant: "whitejade.xyz" },
+      "pay for the order",
+      checkout,
+      [PAYMENT, cvv],
+      ["Total 76.00 USD"],
+    );
+    expect(args?.amount_cents).toBe(7600);
+  });
+
+  it("marks the amount unknown and still mints when the page total cannot be read", () => {
+    const args = paymentArgs(
+      session,
+      { card_ref: "card-1" },
+      "pay for the order",
+      checkout,
+      [PAYMENT, cvv],
+      ["Checkout\nCard number"],
+    );
+    expect(args?.amount_cents).toBe(0);
+    expect(args?.reason).toBe("total not readable");
   });
 });

@@ -74,6 +74,11 @@ import {
   type DriveActResult,
 } from "./drive-act.js";
 import { provisionElementRefs } from "./observe/refs.js";
+import {
+  CHECKOUT_TOTAL_UNREADABLE,
+  readPageCheckoutTexts,
+  resolveDriveApprovalAmount,
+} from "./checkout-total.js";
 import { attemptOperateCaptchaAutoSolve } from "./captcha-solve.js";
 import { RES_POLL_INTERVAL_MS, RES_TIMEOUT_MS } from "./captcha.js";
 
@@ -3891,12 +3896,13 @@ function paymentFields(rows: readonly WireRow[]): { pan?: string; cvv?: string }
   return { ...(pan === undefined ? {} : { pan }), ...(cvv === undefined ? {} : { cvv }) };
 }
 
-function paymentArgs(
-  session: Session,
+export function paymentArgs(
+  session: Pick<Session, "id" | "activePayment" | "releasedPaymentCard">,
   facts: Record<string, string>,
   goal: string,
   url: string,
   rows: readonly WireRow[],
+  pageTexts: readonly string[] = [],
 ): Parameters<InjectCardFn>[1] | undefined {
   const cardRef = facts.card_ref;
   if (cardRef === undefined) return undefined;
@@ -3908,14 +3914,14 @@ function paymentArgs(
   } catch {
     hostname = "checkout";
   }
-  const amount = Number.parseInt(facts.amount_cents ?? "0", 10);
+  const amount = resolveDriveApprovalAmount(pageTexts, facts);
   return {
     session_id: session.id,
     merchant: facts.merchant ?? hostname,
-    amount_cents: Number.isFinite(amount) ? amount : 0,
-    currency: facts.currency ?? "USD",
+    amount_cents: amount.amount_cents,
+    currency: amount.currency,
     item: facts.item ?? goal,
-    reason: facts.reason ?? goal,
+    reason: amount.unknown ? CHECKOUT_TOTAL_UNREADABLE : (facts.reason ?? goal),
     card_ref: cardRef,
     ...(session.activePayment?.status === "awaiting_approval"
       ? { approval_id: session.activePayment.state.approval_id }
@@ -4905,7 +4911,18 @@ async function driveLoop(input: {
           jevRetried: "inject_card requires an active Trusty Squire session",
         });
       }
-      const card = paymentArgs(session, drive.facts, drive.goal, observation?.url ?? "", rows);
+      const pageTexts = [
+        ...(await readPageCheckoutTexts(session.browser.page)),
+        observation?.dom ?? "",
+      ];
+      const card = paymentArgs(
+        session,
+        drive.facts,
+        drive.goal,
+        observation?.url ?? "",
+        rows,
+        pageTexts,
+      );
       if (card === undefined) {
         return finish("needs_value", { field: "card_ref" });
       }

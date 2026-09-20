@@ -358,7 +358,10 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
 
     const account = await opts.deps.accountStore.findAccountById(auth.account_id);
     if (account?.telegram_chat_id != null) {
-      const amount = formatCurrencyAmount(parsed.data.amount_cents, parsed.data.currency);
+      const amount =
+        parsed.data.amount_cents === 0 && parsed.data.reason.includes("total not readable")
+          ? "total not readable"
+          : formatCurrencyAmount(parsed.data.amount_cents, parsed.data.currency);
       const cardName = await approvalCardName(
         parsed.data.card_ref ?? null,
         opts.deps,
