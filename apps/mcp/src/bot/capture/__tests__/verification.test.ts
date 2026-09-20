@@ -12,6 +12,7 @@ import {
   buildVerificationSearchQuery,
   mailRowIsSessionCandidate,
   mailRowMatchesRecipient,
+  preferServiceMatchingRows,
   resolveInboxSearch,
   serviceHostFromUrl,
   isGmailChromeLink,
@@ -317,6 +318,26 @@ describe("mailRowMatchesSender (From address + display name + subject, not one f
     expect(mailRowMatchesSender(craigslistRow, undefined)).toBe(true);
     expect(mailRowMatchesSender(craigslistRow, "   ")).toBe(true);
   });
+  it("matches a sending subdomain or the product name on the From line", () => {
+    expect(
+      mailRowMatchesSender(
+        { fromEmail: "team@notifications.example.test", fromName: "Example", subject: "Confirm" },
+        "example.test",
+      ),
+    ).toBe(true);
+    expect(
+      mailRowMatchesSender(
+        { fromEmail: null, fromName: "Example", subject: "Check your email" },
+        "example.test",
+      ),
+    ).toBe(true);
+    expect(
+      mailRowMatchesSender(
+        { fromEmail: "notify@mailer.other.test", fromName: "Mailer", subject: "Confirm" },
+        "example.test",
+      ),
+    ).toBe(false);
+  });
 });
 
 describe("pickNewestMailRow (relevance order must not decide recency)", () => {
@@ -489,7 +510,7 @@ describe("session-scoped inbox candidates", () => {
         serviceHost: "app.example.test",
         listingScopedToRecipient: true,
       }),
-    ).toBe(false);
+    ).toBe(true);
     expect(
       mailRowIsSessionCandidate(
         row({ ...espOnly, fromEmail: "notify@mail.app.example.test" }),
@@ -545,5 +566,21 @@ describe("session-scoped inbox candidates", () => {
     expect(search.sender).toBe("app.example.test");
     expect(search.query.startsWith("to:ada+run1@example.test ")).toBe(true);
     expect(serviceHostFromUrl("https://app.example.test/signup")).toBe("app.example.test");
+  });
+
+  it("ranks a service-matching row ahead of an ESP-only row for the same recipient", () => {
+    const esp = row({
+      fromEmail: "notify@mailer.other.test",
+      subject: "Confirm",
+      visibleText: "to ada+run1@example.test",
+    });
+    const ours = row({
+      selector: '[data-ts-mail-row="1"]',
+      fromEmail: "hello@app.example.test",
+      subject: "Confirm",
+      visibleText: "to ada+run1@example.test",
+    });
+    expect(preferServiceMatchingRows([esp, ours], "app.example.test")).toEqual([ours]);
+    expect(preferServiceMatchingRows([esp], "app.example.test")).toEqual([esp]);
   });
 });

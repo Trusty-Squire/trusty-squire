@@ -4101,6 +4101,7 @@ async function driveLoop(input: {
     }
 
     if (decision.special === "inbox") {
+      inboxSilent = true;
       const search = resolveInboxSearch(session);
       const planKind = decision.action.kind === "type" ? "otp" : "link";
       const clock = dependencies.now ?? Date.now;
@@ -4120,18 +4121,7 @@ async function driveLoop(input: {
             url: observation.url,
           });
           drive.history.push(inboxPollMissReason(search));
-          return planKind === "otp"
-            ? finish("needs_value", {
-                field: "verification_code",
-                reason: inboxPollMissReason(search),
-              })
-            : finish("stuck", {
-                reason: inboxPollMissReason(search),
-                question: {
-                  question: nextActionInstructions(drive.goal),
-                  options: actionCriteria(rows, drive.facts.card_ref !== undefined),
-                },
-              });
+          return "continue";
         }
         await sleepDrive(DRIVE_WAIT_MS, context?.signal);
         verification = await dependencies.awaitVerification(sessionId, inboxArgs);
