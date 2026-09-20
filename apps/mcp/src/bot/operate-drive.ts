@@ -2633,7 +2633,7 @@ export function pageSuggestsInboxWait(
 ): boolean {
   if (rows.some((row) => isOtpRow(row) && isFillableRow(row))) return true;
   const hay = `${pageUrl} ${rows.map((row) => row[2]).join(" ")} ${pageText}`.toLowerCase();
-  return /(?:check|confirm|verify) your e-?mail|verification (?:link|e-?mail|code)|we(?:'| ha)ve sent|sent you an? e-?mail|open gmail|\/(?:e-?mail\/)?verify(?:\/|\s|$)|#search\//.test(
+  return /(?:check|confirm|verify) your e-?mail|verification (?:link|e-?mail|code)|we(?:'| ha)ve sent|sent you an? e-?mail|open gmail|\/(?:e-?mail\/)?(?:verify|confirm)(?:\/|\?|#|\s|$)|#search\//.test(
     hay,
   );
 }
@@ -2653,15 +2653,17 @@ export function inboxSpecialPlan(
   pageText: string = "",
   goal: string = "",
 ): InboxSpecialPlan | undefined {
-  if (!clicked || remainingFillCount > 0) return undefined;
+  if (!clicked) return undefined;
   if (decisionKind !== "stuck" && decisionKind !== "wait") return undefined;
   if (formSurfaceRows(rows).some((row) => isChoiceRow(row) && !isDisabledRow(row))) {
     return undefined;
   }
   const otp = rows.find((row) => isOtpRow(row) && isFillableRow(row));
   if (otp !== undefined) return { kind: "otp", target: otp[0] };
-  // A check-email heading is success even when the signup form is still listed.
+  // A check-email heading or confirm URL is success even when leftover
+  // signup fields still count as empty. Remaining fills must not win here.
   if (pageSuggestsInboxWait(rows, pageUrl, pageText)) return { kind: "link" };
+  if (remainingFillCount > 0) return undefined;
   // Still looking at the signup form with no confirm text: wait for the SPA.
   if (
     rows.some(
