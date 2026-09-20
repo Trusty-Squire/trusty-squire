@@ -228,6 +228,25 @@ $76.00 USD`;
     ).toMatchObject({ amount_cents: 0, note: CHECKOUT_TOTAL_UNREADABLE });
   });
 
+  it("keeps the summary total when later prose repeats the word total", () => {
+    const summary = "Subtotal\n$68.00\nShipping\n$8.00\nTotal\nUSD $76.00\n";
+    for (const tail of [
+      "In total 4 people are viewing this right now",
+      "Total 3 items",
+      "Based on a total of 128 reviews",
+      "Total 20% off applied",
+      "Delivery: total 2-3 business days",
+      "Total 1,250 points",
+      // A promo amount is money, but it is not the payable total.
+      "You saved a total of $12.00 today",
+    ]) {
+      expect(resolveDriveApprovalAmount([summary + tail], {})).toMatchObject({
+        amount_cents: 7600,
+        currency: "USD",
+      });
+    }
+  });
+
   it("parses a label followed by a long whitespace run without stalling the process", () => {
     const started = performance.now();
     expect(parseCheckoutAmount([`Total${" ".repeat(4000)}x`])).toBeNull();
