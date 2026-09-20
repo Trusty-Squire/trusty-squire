@@ -160,6 +160,7 @@ export const DRIVE_RULES: readonly string[] = [
   "Prefer the submit that belongs to the form just filled over a similarly labeled control elsewhere.",
   "If a needed control is covered, act on whatever covers it first.",
   "Prefer controls that match the current page phase implied by the URL and headings.",
+  "A disabled submit means a required field is still empty until every fillable is populated. Disable is not a gate.",
 ];
 // Drive rules above adapt browser-use/jev-ultrafast (MIT) NEXT_ACTION / TARGET prose.
 
@@ -1147,35 +1148,59 @@ export function isInvalidRow(row: WireRow): boolean {
 }
 
 function rowValueMissing(row: WireRow): boolean {
-  // Password values are omitted from the wire; emptiness is not observable.
-  if (isPasswordRow(row)) return false;
   const match = /(?:^|\|)n=([^|]*)/.exec(row[2] ?? "");
   return match === null || match[1] === undefined || match[1].length === 0;
 }
 
-/** An enabled required-empty or invalid field — fill it, do not treat disable as a stop. */
-export function outstandingRequiredFill(rows: readonly WireRow[]): WireRow | undefined {
+/** An empty or invalid field the submit is waiting on. Fill it; disable is not a gate. */
+export function outstandingEmptyFill(
+  rows: readonly WireRow[],
+  filledRefs: readonly string[] = [],
+): WireRow | undefined {
+  const filled = new Set(filledRefs);
   return rows.find((row) => {
-    if (!isFillableRow(row) || isDisabledRow(row) || isActedRow(row)) return false;
+    if (!isFillableRow(row) || isDisabledRow(row) || isActedRow(row) || filled.has(row[0])) {
+      return false;
+    }
+    if (
+      isSearchRow(row) ||
+      isPaymentRow(row) ||
+      isCvvRow(row) ||
+      isOtpRow(row) ||
+      allowsGoalValueAssignment(row)
+    ) {
+      return false;
+    }
     if (isInvalidRow(row)) return true;
-    return isRequiredRow(row) && rowValueMissing(row);
+    if (isPasswordRow(row)) return true;
+    return rowValueMissing(row);
   });
+}
+
+/** An enabled required-empty or invalid field — fill it, do not treat disable as a stop. */
+export function outstandingRequiredFill(
+  rows: readonly WireRow[],
+  filledRefs: readonly string[] = [],
+): WireRow | undefined {
+  return outstandingEmptyFill(rows, filledRefs);
 }
 
 export type DisabledSubmitKind = "in_flight" | "needs_fill" | "widget_unready" | "none";
 
 /**
  * A disabled submit is three states, not one dead end.
- * in_flight: wait and re-observe. needs_fill: go fill. widget_unready: report.
+ * needs_fill is first. widget_unready is last resort after the inbox is silent.
  */
 export function disabledSubmitKind(
   rows: readonly WireRow[],
   remainingFillCount: number = -1,
+  filledRefs: readonly string[] = [],
+  inboxSilent: boolean = false,
 ): DisabledSubmitKind {
   if (rows.length === 0) return "in_flight";
   const surface = formSurfaceRows(rows);
   if (surface.length === 0) return "none";
-  if (outstandingRequiredFill(rows) !== undefined) return "needs_fill";
+  if (outstandingEmptyFill(rows, filledRefs) !== undefined) return "needs_fill";
   const liveChoice = surface.some((row) => isChoiceRow(row) && !isDisabledRow(row));
   if (liveChoice) return "none";
   const submits = surface.filter((row) => isSubmitLikeRow(row));
@@ -1185,7 +1210,7 @@ export function disabledSubmitKind(
   if (formLocked) return "in_flight";
   if (remainingFillCount !== 0) return "none";
   if (submits.some((row) => isProgressSubmitRow(row))) return "in_flight";
-  return "widget_unready";
+  return inboxSilent ? "widget_unready" : "none";
 }
 
 /** Empty page, or a form whose only remaining surface is disabled — mid-transition, not blocked. */
@@ -1650,9 +1675,11 @@ export function clickableCandidates(
   includePayment: boolean,
   skippedRefs: readonly string[] = [],
   pageUrl: string = "",
+  filledRefs: readonly string[] = [],
 ): DriveCandidate[] {
   const skipped = new Set(skippedRefs);
   const formBusy = formSurfaceRows(rows).some((row) => !isDisabledRow(row));
+  const needsFill = outstandingEmptyFill(rows, filledRefs) !== undefined;
   return driveCandidates(rows, includePayment, pageUrl)
     .filter((candidate) => {
       if (skipped.has(candidate.ref)) return false;
@@ -1675,7 +1702,7 @@ export function clickableCandidates(
       if (
         isDisabledRow(candidate.row) &&
         isSubmitLikeRow(candidate.row) &&
-        formSurfaceRows(rows).some((row) => isChoiceRow(row) && !isDisabledRow(row))
+        (needsFill || formSurfaceRows(rows).some((row) => isChoiceRow(row) && !isDisabledRow(row)))
       ) {
         return false;
       }
@@ -2264,7 +2291,7 @@ export function driveTargetSets(
   );
   const click = takeCapped(
     rankDriveCandidates(
-      clickableCandidates(rows, includePayment, skippedClickRefs, pageUrl),
+      clickableCandidates(rows, includePayment, skippedClickRefs, pageUrl, filledRefs),
       aimInput,
     ),
     remaining,
@@ -3645,6 +3672,7 @@ async function driveLoop(input: {
   let emptySnapshotWaits = 0;
   let settleWaits = 0;
   let widgetWaits = 0;
+  let inboxSilent = false;
   let paySubmitWaits = 0;
 
   const finish = (
@@ -4407,10 +4435,14 @@ async function driveLoop(input: {
       settleWaits = 0;
       widgetWaits = 0;
     }
-    // Disabled submit is three states. in_flight waits; needs_fill falls
-    // through to type/select; widget_unready gets one re-observe then a
-    // named stop so a gate that never mounted cannot burn the budget.
-    const disableKind = disabledSubmitKind(rows, remainingFills.length);
+    // Disabled submit: needs_fill first, in_flight waits, widget_unready only
+    // after the inbox has already been asked and said nothing.
+    const disableKind = disabledSubmitKind(
+      rows,
+      remainingFills.length,
+      drive.filledRefs,
+      inboxSilent,
+    );
     if (rows.length > 0 && disableKind === "in_flight") {
       if (
         settleWaits < DRIVE_EMPTY_SNAPSHOT_WAITS &&
@@ -4435,6 +4467,27 @@ async function driveLoop(input: {
         continue;
       }
       return finish("stuck", { reason: DRIVE_WIDGET_UNREADY_REASON });
+    } else if (
+      rows.length > 0 &&
+      !inboxSilent &&
+      lastNonWaitWasClick(drive.trajectory) &&
+      context?.consentInboxRead !== false &&
+      disabledSubmitKind(rows, remainingFills.length, drive.filledRefs, true) === "widget_unready"
+    ) {
+      inboxSilent = true;
+      const lastClick = [...drive.trajectory]
+        .reverse()
+        .find((step) => step.action === "click" || step.action === "oauth_login");
+      const applied = await applyDecision({
+        kind: "act",
+        action: { kind: "click", target: lastClick?.target ?? "inbox_link" },
+        actionKey: "inbox_link",
+        confidence: 1,
+        special: "inbox",
+      });
+      if (applied !== "continue") return applied;
+      steps += 1;
+      continue;
     }
 
     const fields = paymentFields(rows);
