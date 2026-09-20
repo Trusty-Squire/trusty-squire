@@ -156,6 +156,44 @@ describe("store + retrieve (field map)", () => {
 });
 
 describe("proxy audit failure mode", () => {
+  it("records retrieval and audit concurrently after the upstream response", async () => {
+    const { vault, store, audit } = makeVault({ proxyAuditFailureMode: "best_effort" });
+    const entry = await vault.store(storeInput());
+    let retrievalStarted = false;
+    let auditStarted = false;
+    let releaseRetrieval!: () => void;
+    let releaseAudit!: () => void;
+    const retrievalReleased = new Promise<void>((resolve) => {
+      releaseRetrieval = resolve;
+    });
+    const auditReleased = new Promise<void>((resolve) => {
+      releaseAudit = resolve;
+    });
+    store.markRetrieved = async () => {
+      retrievalStarted = true;
+      await retrievalReleased;
+    };
+    audit.record = async () => {
+      auditStarted = true;
+      await auditReleased;
+    };
+
+    const pending = vault.proxy(
+      entry.reference,
+      ACCOUNT,
+      { method: "POST", url: "https://api.openai.com/v1/chat/completions" },
+      async () => okResponse,
+    );
+    await vi.waitFor(() => expect(retrievalStarted).toBe(true));
+    try {
+      expect(auditStarted).toBe(true);
+    } finally {
+      releaseRetrieval();
+      releaseAudit();
+    }
+    await expect(pending).resolves.toEqual(okResponse);
+  });
+
   it("best_effort returns the upstream response even when proxy audit writes fail", async () => {
     const { vault, audit } = makeVault({ proxyAuditFailureMode: "best_effort" });
     const entry = await vault.store(storeInput());
