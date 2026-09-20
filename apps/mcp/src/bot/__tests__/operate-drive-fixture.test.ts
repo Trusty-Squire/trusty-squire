@@ -447,13 +447,14 @@ describe("operate_drive real-browser fixture", () => {
       expect(waits).toBeGreaterThanOrEqual(Math.ceil(MULTI_STAGE_BLANK_MS / DRIVE_WAIT_MS));
       expect(await page.locator("#stage").textContent()).toBe("payment");
 
-      // The card is released once every typeable fill is done. A leftover
-      // State select does not hold it; the site-search extra does, so it is
-      // already handled by then. Expiry and name-on-card stay untouched until
-      // the card is released.
+      // The card is released once the fact-backed identity/address fills are
+      // done. Neither the leftover State select nor the site-search box the
+      // drive has no fact for may hold it back — the search input is never
+      // filled at all, so gating on it would deadlock the purchase. Expiry and
+      // name-on-card stay untouched until the card is released.
       expect(injections).toBe(1);
       expect(atInject.state2).toBe("");
-      expect(atInject.q).not.toBe("");
+      expect(atInject.q).toBe("");
       expect({ exp: atInject.exp, ncard: atInject.ncard, when: atInject.when }).toEqual({
         exp: "",
         ncard: "",
@@ -475,27 +476,30 @@ describe("operate_drive real-browser fixture", () => {
     }
   }, 60_000);
 
+  const CONFIRMATION_HTML = `<!doctype html><meta charset="utf-8"><title>Blank</title><main><p>Your order is confirmed. #1042</p></main>`;
+
   it.each([
     { answer: "BLOCKED", status: "stuck" },
     { answer: "DONE", status: "complete" },
   ])(
     "asks one terminal-only question on a control-free page and honours $answer",
     async ({ answer, status }) => {
-      const { context, started } = await openFixture(
-        `<!doctype html><meta charset="utf-8"><title>Blank</title><main><p>Order confirmed.</p></main>`,
-        "blank-snapshot.test",
-      );
+      const { context, started } = await openFixture(CONFIRMATION_HTML, "blank-snapshot.test");
       try {
-        const asked: Array<{ names: string[]; operationCriteria: string[] }> = [];
+        const asked: Array<{ names: string[]; operationCriteria: string[]; pageText: string }> = [];
         const criteriaOf = (question: JevQuestion | undefined): string[] =>
           question?.type === "choice" ? Object.keys(question.criteria) : [];
         const result = await runOperateDrive(
           { session_id: started.session_id, goal: "buy one item" },
           api(),
           undefined,
-          deps(async (_api, _state, questions) => {
+          deps(async (_api, state, questions) => {
             const keys = criteriaOf(questions.operation);
-            asked.push({ names: Object.keys(questions), operationCriteria: keys });
+            asked.push({
+              names: Object.keys(questions),
+              operationCriteria: keys,
+              pageText: (state as { page?: { text?: string } }).page?.text ?? "",
+            });
             return {
               attempts: 1,
               elapsedMs: 5,
@@ -513,6 +517,10 @@ describe("operate_drive real-browser fixture", () => {
         expect(asked).toHaveLength(1);
         expect(asked[0]!.names).toEqual(["operation"]);
         expect([...asked[0]!.operationCriteria].sort()).toEqual(["BLOCKED", "DONE"]);
+        // The question says to judge from the page text, so the prose that
+        // carries the only confirmation evidence has to be in it. The document
+        // has no heading — title and headings alone would say nothing.
+        expect(asked[0]!.pageText).toContain("Your order is confirmed. #1042");
         expect(result.trajectory.filter((step) => step.action === "wait")).toHaveLength(
           DRIVE_EMPTY_SNAPSHOT_WAITS,
         );
@@ -523,6 +531,62 @@ describe("operate_drive real-browser fixture", () => {
     },
     30_000,
   );
+
+  it("refuses a terminal DONE whose probabilities do not back it", async () => {
+    const { context, started } = await openFixture(CONFIRMATION_HTML, "blank-unbacked.test");
+    try {
+      let calls = 0;
+      const result = await runOperateDrive(
+        { session_id: started.session_id, goal: "buy one item" },
+        api(),
+        undefined,
+        deps(async () => {
+          calls += 1;
+          return {
+            attempts: 1,
+            elapsedMs: 5,
+            // argmax is BLOCKED; validateChoiceReason rejects this as
+            // choice_not_argmax everywhere else in the drive.
+            result: {
+              answers: {
+                operation: {
+                  choice: "DONE",
+                  confidence: 0.9,
+                  probabilities: { DONE: 0.2, BLOCKED: 0.8 },
+                },
+              },
+            },
+          };
+        }),
+      );
+      // A purchase that was never submitted must not be reported complete.
+      expect(result.status).toBe("stuck");
+      expect(calls).toBe(2);
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
+  it("refuses a terminal DONE that carries no probabilities at all", async () => {
+    const { context, started } = await openFixture(CONFIRMATION_HTML, "blank-noprob.test");
+    try {
+      const result = await runOperateDrive(
+        { session_id: started.session_id, goal: "buy one item" },
+        api(),
+        undefined,
+        deps(async () => ({
+          attempts: 1,
+          elapsedMs: 5,
+          result: { answers: { operation: { choice: "DONE", confidence: 0.9 } } },
+        })),
+      );
+      expect(result.status).toBe("stuck");
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
 
   it("checks DONE against a fresh snapshot even on an unchanged page", async () => {
     const { context, started } = await openFixture(NOOP_HTML, "done-unchanged.test");

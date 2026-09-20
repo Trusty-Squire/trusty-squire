@@ -3330,6 +3330,10 @@ async function driveLoop(input: {
     if (rows.length === 0) {
       if (emptySnapshotWaits >= DRIVE_EMPTY_SNAPSHOT_WAITS) {
         const terminalQuestion = terminalOnlyQuestion(drive.goal);
+        const criteria = terminalQuestion.operation.criteria;
+        // The confirmation evidence on a control-free page is prose, and the
+        // ordinary page text carries only title and headings. The body text
+        // goes into this question's state alone.
         const terminalState = buildJevState(
           drive.goal,
           Object.keys(drive.facts),
@@ -3337,16 +3341,21 @@ async function driveLoop(input: {
           observation.url,
           observation.semantic?.title,
           [],
-          pageTextFromObservation(observation),
+          pageTextFromObservation(observation, [observation.dom ?? ""]),
         );
-        const terminal = await ask(terminalState, terminalQuestion);
-        if (!("result" in terminal)) return terminal;
-        const answered = terminal.result.answers.operation?.choice;
-        if (answered === DRIVE_FIXED_DONE) return finish("complete");
+        let answer: JevAnswer | undefined;
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          const terminal = await ask(terminalState, terminalQuestion);
+          if (!("result" in terminal)) return terminal;
+          answer = terminal.result.answers.operation;
+          if (validateChoice(criteria, answer)) break;
+          answer = undefined;
+        }
+        if (answer?.choice === DRIVE_FIXED_DONE) return finish("complete");
         return finish("stuck", {
           question: {
             question: terminalQuestion.operation.instructions,
-            options: terminalQuestion.operation.criteria,
+            options: criteria,
           },
         });
       }
@@ -3375,17 +3384,13 @@ async function driveLoop(input: {
       pageUrl,
     );
     // inject_card writes only pan/cvv. Expiry, cardholder name, and billing
-    // are typed after release. This list excludes SELECT rows only — a
-    // leftover state/country dropdown must not hold the card back. An
-    // unfilled OTP or site-search row stays in it and does hold the gate, so
-    // an outstanding email verification is settled before the PAN is released.
-    const remainingTypes = typeableCandidates(
-      rows,
-      drive.facts,
-      includePayment,
-      drive.filledRefs,
-      pageUrl,
-    );
+    // are typed after release. The gate counts the identity and address fills
+    // a fact actually backs, minus SELECT rows: a leftover state/country
+    // dropdown must not hold the card back. A site-search or promo input the
+    // drive has no fact for is not a fill at all and never enters this list —
+    // it would otherwise sit here forever and the card would never be
+    // released.
+    const remainingTypes = remainingFills.filter((candidate) => !isSelectRow(candidate.row));
     if (
       includePayment &&
       (!alreadyCard || cardRetry) &&
