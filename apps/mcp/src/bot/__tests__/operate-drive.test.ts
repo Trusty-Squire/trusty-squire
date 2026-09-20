@@ -90,6 +90,9 @@ import {
   rowOccluder,
   type DriveCandidate,
   type WireRow,
+  goalSeeksKey,
+  rowMatchesGoalSeek,
+  clickGoalSeekScore,
 } from "../operate-drive.js";
 import { operateDriveTool } from "../../tools/provision-drive.js";
 import type { JevAnswer } from "../jev-client.js";
@@ -1639,6 +1642,78 @@ describe("form-fill assignment helpers", () => {
     );
     expect(nav.operations).toContain("WAIT");
     expect(nav.operations).toContain("BLOCKED");
+  });
+
+  it("ranks a key-seeking control ahead of dashboard chrome when the goal names a key", () => {
+    const dashboard: WireRow[] = [
+      ["@e:home", "l", "Home"],
+      ["@e:skip", "b", "Skip tour"],
+      ["@e:keys", "l", "API keys"],
+      ["@e:next", "b", "Continue"],
+    ];
+    const goal = "sign up and extract an API key";
+    expect(goalSeeksKey(goal)).toBe(true);
+    expect(rowMatchesGoalSeek(["@e:keys", "l", "API keys"], goal)).toBe(true);
+    expect(rowMatchesGoalSeek(["@e:home", "l", "Home"], goal)).toBe(false);
+    expect(
+      clickGoalSeekScore(["@e:keys", "l", "API keys"], goal, "https://example.test/welcome"),
+    ).toBe(2);
+    expect(
+      clickGoalSeekScore(["@e:next", "b", "Continue"], goal, "https://example.test/welcome"),
+    ).toBe(1);
+    expect(
+      clickGoalSeekScore(["@e:keys", "l", "API keys"], goal, "https://example.test/register"),
+    ).toBe(0);
+    const identityMask = (text: string) => text;
+    const ranked = driveTargetSets(
+      dashboard,
+      {},
+      false,
+      [],
+      "https://example.test/welcome",
+      new Map(),
+      identityMask,
+      [],
+      { goal },
+    );
+    expect(ranked.CLICK.map((c) => c.ref)[0]).toBe("@e:keys");
+    expect(ranked.CLICK.map((c) => c.ref)).toContain("@e:next");
+    expect(ranked.operations).toContain("CLICK");
+    expect(ranked.operations).not.toContain("WAIT");
+    expect(ranked.operations).not.toContain("BLOCKED");
+    const signup = driveTargetSets(
+      dashboard,
+      {},
+      false,
+      [],
+      "https://example.test/register",
+      new Map(),
+      identityMask,
+      [],
+      { goal },
+    );
+    expect(signup.CLICK.map((c) => c.ref)[0]).not.toBe("@e:keys");
+    const keysOnly: WireRow[] = [
+      ["@e:home", "l", "Home"],
+      ["@e:keys", "l", "API keys"],
+    ];
+    const idle = driveTargetSets(keysOnly, {}, false, [], "https://example.test/welcome");
+    expect(idle.operations).toContain("WAIT");
+    expect(idle.operations).toContain("BLOCKED");
+    const seeking = driveTargetSets(
+      keysOnly,
+      {},
+      false,
+      [],
+      "https://example.test/welcome",
+      new Map(),
+      identityMask,
+      [],
+      { goal },
+    );
+    expect(seeking.CLICK.map((c) => c.ref)[0]).toBe("@e:keys");
+    expect(seeking.operations).not.toContain("WAIT");
+    expect(seeking.operations).not.toContain("BLOCKED");
   });
 
   it("keeps a non-DONE answer when every listed control is suppressed", () => {
