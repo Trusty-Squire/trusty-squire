@@ -8,7 +8,7 @@ import type { ApiClient } from "../../api-client.js";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
-import { chromium, type Browser, type Page } from "playwright";
+import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 import { BrowserController } from "../browser.js";
 import {
   advanceOAuthConsent,
@@ -73,8 +73,28 @@ const PRODUCT_URL = `data:text/html,${encodeURIComponent(`
 
 let browser: Browser;
 
-async function controllerForProduct(): Promise<{ controller: BrowserController; product: Page }> {
+// Driving Google OAuth (and reading the Gmail verification inbox) is refused
+// with a `google_session` wall unless the profile already holds a live Google
+// session — that is the profile this suite's fixtures model. Seed the cookie
+// the operator reads for admission and route the account surface its identity
+// probe opens, so the probe never touches the network. A test that needs the
+// signed-out profile clears the cookie itself.
+async function signedInGoogleContext(): Promise<BrowserContext> {
   const context = await browser.newContext();
+  await context.addCookies([
+    { name: "SID", value: "live-google-session-cookie", domain: ".google.com", path: "/" },
+  ]);
+  await context.route("https://myaccount.google.com/**", (route) =>
+    route.fulfill({
+      contentType: "text/html",
+      body: '<button aria-label="Google Account: Operator (operator@example.com)"></button>',
+    }),
+  );
+  return context;
+}
+
+async function controllerForProduct(): Promise<{ controller: BrowserController; product: Page }> {
+  const context = await signedInGoogleContext();
   const product = await context.newPage();
   await product.goto(PRODUCT_URL);
   const controller = BrowserController.fromHarnessPage(product);
@@ -135,7 +155,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
   ])(
     "preserves %s evidence when the initiating click rejects after %s navigation",
     async (destination, mode) => {
-      const context = await browser.newContext();
+      const context = await signedInGoogleContext();
       const product = await context.newPage();
       const productUrl = "https://outcomes.test/login";
       const callback = "https://outcomes.test/dashboard";
@@ -269,7 +289,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
   );
 
   it("returns relying-party required information without treating its Continue as provider consent", async () => {
-    const context = await browser.newContext();
+    const context = await signedInGoogleContext();
     const product = await context.newPage();
     const callback = "https://product.test/auth/callback";
     const provider = `https://accounts.google.com/oauth?redirect_uri=${encodeURIComponent(callback)}`;
@@ -301,7 +321,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
   });
 
   it("does not repeat a consent click or start a second attempt while the owned attempt can settle", async () => {
-    const context = await browser.newContext();
+    const context = await signedInGoogleContext();
     const product = await context.newPage();
     await context.route("https://product.test/**", (route) =>
       route.fulfill({
@@ -361,7 +381,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
   });
 
   it("returns an attempt-bound Google number immediately and stops consent automation", async () => {
-    const context = await browser.newContext();
+    const context = await signedInGoogleContext();
     const product = await context.newPage();
     const challengeUrl =
       "https://accounts.google.com/v3/signin/challenge/dp?redirect_uri=https%3A%2F%2Fproduct.test%2Fcallback";
@@ -422,7 +442,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
   });
 
   it("projects changed Google challenge revisions through ordinary observations and clears disappeared challenges", async () => {
-    const context = await browser.newContext();
+    const context = await signedInGoogleContext();
     const product = await context.newPage();
     const challengeUrl = "https://accounts.google.com/v3/signin/challenge/dp";
     await context.route("https://product.test/**", (route) =>
@@ -541,6 +561,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
     const { controller, product } = await controllerForProduct();
     const context = product.context();
     try {
+      await context.clearCookies(); // the signed-out profile this case is about
       await expect(detectSessionProviders(controller)).resolves.toEqual([]);
     } finally {
       await context.close().catch(() => undefined);
@@ -687,7 +708,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
   }, 60_000);
 
   it("keeps a delayed popup dispatch pending without a return destination", async () => {
-    const context = await browser.newContext();
+    const context = await signedInGoogleContext();
     const product = await context.newPage();
     const delayedProductUrl = `data:text/html,${encodeURIComponent(`
       <main id="state">Signed out</main>
@@ -873,7 +894,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
   });
 
   it("returns a source-page scroll observation despite concurrent tab adoption", async () => {
-    const context = await browser.newContext();
+    const context = await signedInGoogleContext();
     const product = await context.newPage();
     const productUrl = "https://product.test/login";
     const sourceUrl = "https://console.product.test/source";
@@ -959,7 +980,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
   }, 30_000);
 
   it("keeps a provider-less SPA OAuth control pending after its popup closes", async () => {
-    const context = await browser.newContext();
+    const context = await signedInGoogleContext();
     const product = await context.newPage();
     await context.route("https://product.test/login", async (route) => {
       await route.fulfill({ contentType: "text/html", body: "<main>Login</main>" });
@@ -1002,7 +1023,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
   });
 
   it("selects only the sealed data-identifier account", async () => {
-    const context = await browser.newContext();
+    const context = await signedInGoogleContext();
     const product = await context.newPage();
     let selectedAccount: string | null = null;
     let identityAuthUser: string | null = null;
@@ -1052,7 +1073,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
   });
 
   it("selects a sole Google account tile when session email metadata is unavailable", async () => {
-    const context = await browser.newContext();
+    const context = await signedInGoogleContext();
     const product = await context.newPage();
     let selectedAccount: string | null = null;
     await context.route("https://product.test/**", async (route) => {
@@ -1089,7 +1110,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
   });
 
   it("selects only the sealed Google account row without data-identifier", async () => {
-    const context = await browser.newContext();
+    const context = await signedInGoogleContext();
     const product = await context.newPage();
     let selectedAccount: string | null = null;
     await context.route("https://product.test/**", async (route) => {
@@ -1132,7 +1153,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
   });
 
   it("does not dispatch a DOM fallback click after its consent budget expires", async () => {
-    const context = await browser.newContext();
+    const context = await signedInGoogleContext();
     const product = await context.newPage();
     await product.setContent(`
       <a id="consent" href="#approved">Continue</a>
@@ -1162,7 +1183,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
   });
 
   it("completes a same-tab OAuth return to the product console on a sibling host", async () => {
-    const context = await browser.newContext();
+    const context = await signedInGoogleContext();
     const product = await context.newPage();
     const expectedReturnUrl = "https://console.product.test/projects";
     await context.route("https://product.test/**", (route) =>
@@ -1198,7 +1219,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
   it.each(["same-tab", "popup"] as const)(
     "captures the redirect target before a fast %s OAuth return",
     async (topology) => {
-      const context = await browser.newContext();
+      const context = await signedInGoogleContext();
       const product = await context.newPage();
       const expectedReturnUrl = "https://console.product.test/projects";
       const providerUrl = `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(expectedReturnUrl)}`;
@@ -1233,7 +1254,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
   it.each(["same-tab", "popup"] as const)(
     "captures the redirect target from a fast %s HTTP redirect",
     async (topology) => {
-      const context = await browser.newContext();
+      const context = await signedInGoogleContext();
       const product = await context.newPage();
       let expectedReturnUrl = "";
       const returnTarget = createServer((_request, response) => {
@@ -1270,7 +1291,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
   );
 
   it("ignores an unrelated context navigation while capturing a popup redirect", async () => {
-    const context = await browser.newContext();
+    const context = await signedInGoogleContext();
     const product = await context.newPage();
     const expectedReturnUrl = "https://console.product.test/projects";
     const unrelatedReturnUrl = "https://other.test/return";
@@ -1315,7 +1336,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
   });
 
   it("keeps a return with a non-OAuth query challenge pending", async () => {
-    const context = await browser.newContext();
+    const context = await signedInGoogleContext();
     const product = await context.newPage();
     const expectedReturnUrl = "https://console.product.test/projects?organization=expected";
     const challengeUrl = `${expectedReturnUrl}&mfa=required`;
@@ -1350,7 +1371,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
   it.each(["browser-use-dom"])(
     "binds type and select refs to a same-tab OAuth return (%s)",
     async (format) => {
-      const context = await browser.newContext();
+      const context = await signedInGoogleContext();
       const product = await context.newPage();
       const expectedReturnUrl = "https://console.product.test/projects";
       await context.route("https://product.test/**", (route) =>
@@ -1414,7 +1435,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
   it.each(["browser-use-dom"])(
     "observes a normal popup return from its completed page (%s)",
     async (format) => {
-      const context = await browser.newContext();
+      const context = await signedInGoogleContext();
       const product = await context.newPage();
       const expectedReturnUrl = "https://console.product.test/projects";
       await context.route("https://product.test/**", (route) =>
@@ -1468,7 +1489,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
   );
 
   it("settles an atomic popup return on its retained product page", async () => {
-    const context = await browser.newContext();
+    const context = await signedInGoogleContext();
     const product = await context.newPage();
     const expectedReturnUrl = "https://console.product.test/projects";
     await context.route("https://product.test/**", (route) =>
@@ -1541,7 +1562,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
   it.each(["completed", "awaiting_human"] as const)(
     "reports a reused-session popup as %s while the initiating click is still pending",
     async (outcome) => {
-      const context = await browser.newContext();
+      const context = await signedInGoogleContext();
       const product = await context.newPage();
       const returnUrl = "https://console.product.test/projects";
       const providerUrl = `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(returnUrl)}`;
@@ -1634,7 +1655,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
   it.each(["browser-use-dom"])(
     "rechecks completion when the outer action deadline wins during consent work (%s)",
     async (format) => {
-      const context = await browser.newContext();
+      const context = await signedInGoogleContext();
       const product = await context.newPage();
       const expectedReturnUrl = "https://console.product.test/projects";
       const previousTimeout = process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS;
@@ -1779,7 +1800,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
     "https://console.product.test/challenge",
     "https://unrelated.test/projects",
   ])("keeps %s pending after provider navigation", async (destination) => {
-    const context = await browser.newContext();
+    const context = await signedInGoogleContext();
     const product = await context.newPage();
     await context.route("**/*", (route) =>
       route.fulfill({
@@ -1806,7 +1827,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
   it.each(["https://identity.product.test/mfa", "https://product.test/mfa"])(
     "keeps %s pending despite a different initiated destination",
     async (mfaUrl) => {
-      const context = await browser.newContext();
+      const context = await signedInGoogleContext();
       const product = await context.newPage();
       const expectedReturnUrl = "https://console.product.test/projects";
       await context.route("**/*", (route) =>
@@ -1835,7 +1856,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
   );
 
   it("keeps a return with mismatched fixed redirect query pending", async () => {
-    const context = await browser.newContext();
+    const context = await signedInGoogleContext();
     const product = await context.newPage();
     const expectedReturnUrl = "https://console.product.test/projects?organization=expected";
     const mismatchedReturnUrl =
@@ -1865,7 +1886,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
   });
 
   it("keeps a return with conflicting duplicate fixed redirect query pending", async () => {
-    const context = await browser.newContext();
+    const context = await signedInGoogleContext();
     const product = await context.newPage();
     const expectedReturnUrl = "https://console.product.test/projects?organization=expected";
     const conflictingReturnUrl =
@@ -1895,7 +1916,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
   });
 
   it("accepts OAuth response parameters after matching fixed redirect query", async () => {
-    const context = await browser.newContext();
+    const context = await signedInGoogleContext();
     const product = await context.newPage();
     const expectedReturnUrl = "https://console.product.test/projects?organization=expected";
     const returnedUrl = `${expectedReturnUrl}&code=oauth-code&state=oauth-state`;
@@ -1923,7 +1944,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
   });
 
   it("waits through a stable owned callback before completing on its dashboard", async () => {
-    const context = await browser.newContext();
+    const context = await signedInGoogleContext();
     const product = await context.newPage();
     const dashboardUrl = "https://resend.test/emails";
     const callbackUrl = `https://resend.test/auth/callback?redirect_uri=${encodeURIComponent(dashboardUrl)}`;
@@ -1960,7 +1981,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
     const sessions: Array<{ context: Awaited<ReturnType<typeof browser.newContext>>; id: string }> =
       [];
     const startOAuthFixture = async (name: string, providerDelayMs: number) => {
-      const context = await browser.newContext();
+      const context = await signedInGoogleContext();
       const product = await context.newPage();
       const productUrl = `https://${name}.queue.test/login`;
       const returnUrl = `https://${name}.queue.test/dashboard`;
@@ -2028,7 +2049,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
   }, 15_000); // Three sessions include bounded start/post-action settling and a queued login.
 
   it("rejects a compact OAuth target replaced during recovery-page setup", async () => {
-    const context = await browser.newContext();
+    const context = await signedInGoogleContext();
     const product = await context.newPage();
     const productUrl = "https://setup-gap.test/login";
     const providerUrl = `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(
@@ -2081,7 +2102,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
   });
 
   it("rejects a same-selector OAuth replacement at click dispatch", async () => {
-    const context = await browser.newContext();
+    const context = await signedInGoogleContext();
     const product = await context.newPage();
     const productUrl = "https://dispatch-gap.test/login";
     const providerUrl = `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(
@@ -2135,7 +2156,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
   });
 
   it("rejects changed OAuth intent on the same node after actionability", async () => {
-    const context = await browser.newContext();
+    const context = await signedInGoogleContext();
     const product = await context.newPage();
     const productUrl = "https://intent-gap.test/login";
     const providerUrl = `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(
@@ -2188,7 +2209,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
   });
 
   it("rejects an owned return chain longer than callback then dashboard", async () => {
-    const context = await browser.newContext();
+    const context = await signedInGoogleContext();
     const product = await context.newPage();
     const dashboardUrl = "https://resend.test/emails";
     const secondCallbackUrl = `https://resend.test/auth/exchange?redirect_uri=${encodeURIComponent(dashboardUrl)}`;
@@ -2228,7 +2249,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
   });
 
   it("does not complete when a stable intermediate callback returns to login", async () => {
-    const context = await browser.newContext();
+    const context = await signedInGoogleContext();
     const product = await context.newPage();
     const dashboardUrl = "https://resend.test/emails";
     const loginUrl = "https://resend.test/login";
@@ -2261,7 +2282,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
   });
 
   it("keeps an unrelated same-origin page pending after an owned OAuth callback", async () => {
-    const context = await browser.newContext();
+    const context = await signedInGoogleContext();
     const product = await context.newPage();
     const dashboardUrl = "https://resend.test/emails";
     const unrelatedUrl = "https://resend.test/settings";
@@ -2294,7 +2315,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
   });
 
   it("does not accept a delayed callback in a provider-origin return cycle", async () => {
-    const context = await browser.newContext();
+    const context = await signedInGoogleContext();
     const product = await context.newPage();
     const providerBaseUrl = "https://accounts.google.com/provider";
     const providerReturnUrl = "https://accounts.google.com/oauth/authorize";
@@ -2342,7 +2363,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
   });
 
   it("invalidates a callback chain that cycles to a query variant of its provider", async () => {
-    const context = await browser.newContext();
+    const context = await signedInGoogleContext();
     const product = await context.newPage();
     const providerUrl = "https://accounts.google.com/provider";
     const providerVariantUrl = `${providerUrl}?prompt=none`;
@@ -2375,7 +2396,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
   });
 
   it("rejects a cross-provider destination anywhere in the owned return chain", async () => {
-    const context = await browser.newContext();
+    const context = await signedInGoogleContext();
     const product = await context.newPage();
     const foreignProviderUrl = "https://accounts.google.com/consent";
     const callbackUrl = `https://resend.test/auth/callback?redirect_uri=${encodeURIComponent(
@@ -2411,7 +2432,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
   });
 
   it("keeps providerless replay nonterminal for an unrecognized product mediator", async () => {
-    const context = await browser.newContext();
+    const context = await signedInGoogleContext();
     const product = await context.newPage();
     const providerUrl = "https://accounts.google.com/provider";
     const mediatorUrl = `https://auth.resend.test/start?redirect_uri=${encodeURIComponent(providerUrl)}`;
@@ -2440,7 +2461,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
   });
 
   it("does not attribute a product auth-start redirect as the provider root", async () => {
-    const context = await browser.newContext();
+    const context = await signedInGoogleContext();
     const product = await context.newPage();
     const providerUrl = "https://accounts.google.com/provider";
     const productStartUrl = `https://resend.test/auth/start?redirect_uri=${encodeURIComponent(providerUrl)}`;
@@ -2474,7 +2495,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
   });
 
   it("does not extend the owned return chain from later nested navigations", async () => {
-    const context = await browser.newContext();
+    const context = await signedInGoogleContext();
     const product = await context.newPage();
     const dashboardUrl = "https://resend.test/emails";
     const laterCallbackUrl = `https://resend.test/auth/later?redirect_uri=${encodeURIComponent(dashboardUrl)}`;
@@ -2516,7 +2537,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
   it.each(["oauth_login", "oauth_click"] as const)(
     "returns a popup OAuth completion from its initiated destination document (%s)",
     async (kind) => {
-      const context = await browser.newContext();
+      const context = await signedInGoogleContext();
       const product = await context.newPage();
       const productUrl = "https://mail.google.com/checkout";
       const expectedReturnUrl = "https://console.product.test/checkout";
@@ -2641,7 +2662,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
   );
 
   it("reads the verification inbox in a dedicated tab and leaves the source page live", async () => {
-    const context = await browser.newContext();
+    const context = await signedInGoogleContext();
     const product = await context.newPage();
     const productUrl = "https://mail.google.com/product";
     const returnUrl = "https://console.product.test/return";
@@ -2756,7 +2777,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
   }, 20_000);
 
   it("keeps concurrent source-page clicks paired with their own tabs", async () => {
-    const context = await browser.newContext();
+    const context = await signedInGoogleContext();
     const product = await context.newPage();
     const productUrl = "https://product.test/login";
     const returnUrl = "https://console.product.test/return";
@@ -2865,7 +2886,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
   }, 30_000);
 
   it("does not let an OAuth popup replace a queued ordinary click", async () => {
-    const context = await browser.newContext();
+    const context = await signedInGoogleContext();
     const product = await context.newPage();
     const productUrl = "https://product.test/login";
     const ordinaryUrl = "https://console.product.test/ordinary";
@@ -2963,7 +2984,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
     // dispatch time against the adopted first tab's document and is rejected
     // pre-dispatch (stale_ref) rather than re-targeting any page — asserted
     // below via data-wrong-tab-clicked staying unset.
-    const context = await browser.newContext();
+    const context = await signedInGoogleContext();
     const product = await context.newPage();
     const productUrl = "https://product.test/editor";
     const firstUrl = "https://product.test/first";
@@ -3046,7 +3067,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
   });
 
   it("adopts an ordinary newly opened tab for the resulting and next action", async () => {
-    const context = await browser.newContext();
+    const context = await signedInGoogleContext();
     const product = await context.newPage();
     const productUrl = "https://product.test/editor";
     const openedUrl = "https://product.test/opened-editor";
@@ -3098,7 +3119,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
   }, 30_000);
 
   it("rejects a closed completion source instead of clicking a colliding product control", async () => {
-    const context = await browser.newContext();
+    const context = await signedInGoogleContext();
     const product = await context.newPage();
     const expectedReturnUrl = "https://console.product.test/projects";
     await context.route("https://product.test/**", (route) =>
@@ -3174,7 +3195,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
   it.each(["browser-use-dom"])(
     "returns a terminal completion snapshot after an observed popup return closes (%s)",
     async (format) => {
-      const context = await browser.newContext();
+      const context = await signedInGoogleContext();
       const product = await context.newPage();
       const expectedReturnUrl = "https://console.product.test/projects";
       await context.route("https://product.test/**", (route) =>
@@ -3240,7 +3261,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
   );
 
   it("retains a same-tab return as terminal completion when the product document closes", async () => {
-    const context = await browser.newContext();
+    const context = await signedInGoogleContext();
     const product = await context.newPage();
     const expectedReturnUrl = "https://console.product.test/projects";
     await context.route("https://product.test/**", (route) =>
@@ -3277,7 +3298,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
   });
 
   it("invalidates a popup return when its opener moves to a challenge", async () => {
-    const context = await browser.newContext();
+    const context = await signedInGoogleContext();
     const product = await context.newPage();
     const expectedReturnUrl = "https://console.product.test/projects";
     const challengeUrl = "https://product.test/mfa";
@@ -3342,7 +3363,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
   }, 15_000);
 
   it("keeps a popup pending after its observed return navigates to a challenge", async () => {
-    const context = await browser.newContext();
+    const context = await signedInGoogleContext();
     const product = await context.newPage();
     const expectedReturnUrl = "https://console.product.test/projects";
     const challengeUrl = "https://console.product.test/mfa";
@@ -3381,7 +3402,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
   });
 
   it("keeps a popup pending after its observed return changes to a hash-routed challenge", async () => {
-    const context = await browser.newContext();
+    const context = await signedInGoogleContext();
     const product = await context.newPage();
     const expectedReturnUrl = "https://console.product.test/projects";
     await context.route("https://product.test/**", (route) =>
@@ -3416,7 +3437,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
   });
 
   it("accepts an OAuth response fragment at the exact return destination", async () => {
-    const context = await browser.newContext();
+    const context = await signedInGoogleContext();
     const product = await context.newPage();
     const expectedReturnUrl = "https://console.product.test/projects";
     const responseUrl = `${expectedReturnUrl}#code=returned-code&state=attempt-state`;
@@ -3448,7 +3469,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
   });
 
   it("binds tracked clicks to their provided source page", async () => {
-    const context = await browser.newContext();
+    const context = await signedInGoogleContext();
     const product = await context.newPage();
     const provider = await context.newPage();
     await product.setContent(
@@ -3473,7 +3494,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
   });
 
   it("resolves a label fallback from the supplied source page", async () => {
-    const context = await browser.newContext();
+    const context = await signedInGoogleContext();
     const product = await context.newPage();
     const provider = await context.newPage();
     await product.setContent(
@@ -3499,7 +3520,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
     // control. A live dogfood run hit exactly this shape (a routine 2FA
     // challenge, not an expired session) and the false cause made the agent
     // relay wrong information to the operator.
-    const context = await browser.newContext();
+    const context = await signedInGoogleContext();
     const product = await context.newPage();
     await context.route("https://product.test/**", async (route) => {
       await route.fulfill({
@@ -3550,7 +3571,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
   }, 6_000);
 
   it("reports failed when a popup carries the denial to the callback and then closes itself", async () => {
-    const context = await browser.newContext();
+    const context = await signedInGoogleContext();
     const product = await context.newPage();
     await context.route("https://product.test/**", async (route) => {
       const callback = route.request().url().includes("/callback");
@@ -3584,7 +3605,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
   });
 
   it("keeps the same-tab flow pending when its product page closes", async () => {
-    const context = await browser.newContext();
+    const context = await signedInGoogleContext();
     const product = await context.newPage();
     await context.route("https://product.test/**", async (route) => {
       await new Promise((resolve) => setTimeout(resolve, 150));
@@ -3612,7 +3633,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
   });
 
   it("reports failed with the provider's own error code when the return carries error=access_denied", async () => {
-    const context = await browser.newContext();
+    const context = await signedInGoogleContext();
     const product = await context.newPage();
     await context.route("https://product.test/**", async (route) => {
       const callback = route.request().url().includes("/callback");
@@ -3650,7 +3671,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
     // Still being on the product origin at the deadline is not a return from
     // the provider, so this must stay awaiting_human rather than resolve as
     // a completed login.
-    const context = await browser.newContext();
+    const context = await signedInGoogleContext();
     const product = await context.newPage();
     await context.route("https://product.test/**", async (route) => {
       await route.fulfill({
@@ -3673,7 +3694,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
   });
 
   it("does not re-arm the human deadline when the OAuth control never hands off", async () => {
-    const context = await browser.newContext();
+    const context = await signedInGoogleContext();
     const product = await context.newPage();
     await context.route("https://product.test/**", async (route) => {
       await route.fulfill({
@@ -3698,7 +3719,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
   });
 
   it("extends a delayed same-tab facade handoff from its navigation", async () => {
-    const context = await browser.newContext();
+    const context = await signedInGoogleContext();
     const product = await context.newPage();
     const previousTimeout = process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS;
     const previousCooldown = process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS;
@@ -3747,7 +3768,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
   it("ignores an error= parameter the page already carried before this attempt", async () => {
     // A stale denial from an earlier attempt is still in the address bar; this
     // attempt never navigates, so nothing was observed and it must not fail.
-    const context = await browser.newContext();
+    const context = await signedInGoogleContext();
     const product = await context.newPage();
     await context.route("https://product.test/**", async (route) => {
       await route.fulfill({
@@ -3769,7 +3790,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
   });
 
   it("waits for a same-tab provider round trip to return and settle", async () => {
-    const context = await browser.newContext();
+    const context = await signedInGoogleContext();
     const product = await context.newPage();
     const productUrl = "https://product.test/login";
     await context.route("https://product.test/**", async (route) => {
@@ -3801,7 +3822,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
   });
 
   it("recognizes a settled same-tab return while the authenticated dashboard keeps polling", async () => {
-    const context = await browser.newContext();
+    const context = await signedInGoogleContext();
     const product = await context.newPage();
     const productUrl = "https://product.test/login";
     await context.route("https://product.test/**", async (route) => {

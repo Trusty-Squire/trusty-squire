@@ -225,9 +225,28 @@ function fixtureHandler(fixture: Fixture): (url: string) => string {
   };
 }
 
-async function harness(fixture: Fixture): Promise<{ context: BrowserContext }> {
+// Reading the user's Gmail is a Google-dependent operation: `awaitVerification`
+// hands back a `google_session` wall unless the profile holds a live Google
+// session. Every fixture context below models that signed-in profile — the
+// cookie the operator reads for admission, plus the account surface its
+// identity probe opens (routed so the probe never touches the network).
+async function signedInGoogleContext(): Promise<BrowserContext> {
   if (browser === undefined) throw new Error("Chromium unavailable");
   const context = await browser.newContext();
+  await context.addCookies([
+    { name: "SID", value: "live-google-session-cookie", domain: ".google.com", path: "/" },
+  ]);
+  await context.route("https://myaccount.google.com/**", (route) =>
+    route.fulfill({
+      contentType: "text/html",
+      body: '<button aria-label="Google Account: Operator (operator@example.test)"></button>',
+    }),
+  );
+  return context;
+}
+
+async function harness(fixture: Fixture): Promise<{ context: BrowserContext }> {
+  const context = await signedInGoogleContext();
   const handler = fixtureHandler(fixture);
   await context.route("https://mail.google.com/**", (route) =>
     route.fulfill({ contentType: "text/html", body: handler(route.request().url()) }),
@@ -272,8 +291,7 @@ function multiRowHandler(): (url: string) => string {
 }
 
 async function multiRowHarness(): Promise<{ context: BrowserContext }> {
-  if (browser === undefined) throw new Error("Chromium unavailable");
-  const context = await browser.newContext();
+  const context = await signedInGoogleContext();
   const handler = multiRowHandler();
   await context.route("https://mail.google.com/**", (route) =>
     route.fulfill({ contentType: "text/html", body: handler(route.request().url()) }),
@@ -657,8 +675,7 @@ function staleSearchIndexHandler(opts: { craigslistDate?: Date } = {}): (url: st
 async function staleIndexHarness(
   opts: { craigslistDate?: Date } = {},
 ): Promise<{ context: BrowserContext }> {
-  if (browser === undefined) throw new Error("Chromium unavailable");
-  const context = await browser.newContext();
+  const context = await signedInGoogleContext();
   const handler = staleSearchIndexHandler(opts);
   await context.route("https://mail.google.com/**", (route) =>
     route.fulfill({ contentType: "text/html", body: handler(route.request().url()) }),
