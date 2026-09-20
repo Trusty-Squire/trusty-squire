@@ -314,19 +314,13 @@ export function mailRowIsSessionCandidate(
   const visibleRecip = mailRowMatchesRecipient(row, recipient);
   const serviceMatch =
     serviceHost !== undefined && serviceHost.length > 0 && mailRowMatchesSender(row, serviceHost);
-  if (recipient !== undefined && recipient.length > 0 && serviceHost !== undefined && serviceHost.length > 0) {
-    // Visible plus-address is enough (ESP From often omits the product host).
-    // A to:-scoped listing may omit To from the snippet, so service match
-    // stands in. All Mail is not to:-scoped: service-only would pick another
-    // run's same-service mail. A leaky Gmail `to:` plus another service is
-    // not a candidate.
-    return visibleRecip || (opts.listingScopedToRecipient === true && serviceMatch);
-  }
-  if (recipient !== undefined && recipient.length > 0) {
+  const recipKnown = recipient !== undefined && recipient.length > 0;
+  // Recipient is the strong key. Sender/host is a ranking preference, not a
+  // veto: verification mail usually comes from a sending subdomain or ESP.
+  if (recipKnown) {
     return visibleRecip || opts.listingScopedToRecipient === true;
   }
-  if (serviceHost !== undefined && serviceHost.length > 0) return serviceMatch;
-  return false;
+  return serviceMatch;
 }
 
 // The All Mail listing URL. Gmail's SEARCH results are eventually consistent:
@@ -379,8 +373,33 @@ export function mailRowMatchesSender(
   if (fields.length === 0) return true;
   const hint = sender.trim().toLowerCase();
   if (fields.includes(hint)) return true;
+  const hostHint = (hint.includes("@") ? hint.split("@").pop() : hint)?.replace(/^www\./, "") ?? "";
+  if (hostHint.length >= 3 && fields.includes(hostHint)) return true;
+  const hosts = fields.match(/[a-z0-9-]+(?:\.[a-z0-9-]+)+/g) ?? [];
+  if (
+    hostHint.length >= 3 &&
+    hosts.some(
+      (host) => host === hostHint || host.endsWith(`.${hostHint}`) || hostHint.endsWith(`.${host}`),
+    )
+  ) {
+    return true;
+  }
+  const label = hostHint.split(".")[0] ?? "";
+  if (label.length >= 4 && new RegExp(`(?:^|[^a-z0-9])${label}(?:[^a-z0-9]|$)`).test(fields)) {
+    return true;
+  }
   const tokens = hint.split(/\s+/).filter((t) => t.length >= 3);
   return tokens.length > 0 && tokens.every((t) => fields.includes(t));
+}
+
+/** Prefer rows whose From matches the service host; otherwise keep all. */
+export function preferServiceMatchingRows(
+  rows: readonly MailResultRow[],
+  serviceHost: string | undefined,
+): MailResultRow[] {
+  if (serviceHost === undefined || serviceHost.trim().length === 0) return [...rows];
+  const matched = rows.filter((row) => mailRowMatchesSender(row, serviceHost));
+  return matched.length > 0 ? matched : [...rows];
 }
 
 // Pure: the full row date to an epoch ms, or null when absent/unparseable.
@@ -674,11 +693,10 @@ export async function awaitVerification(
         );
         if (searchRows.some((r) => mailRowPredatesSession(r, session.startedAt)))
           staleMatchSeen = true;
+        const freshSearch = searchRows.filter((r) => !mailRowPredatesSession(r, session.startedAt));
         let chosen: MailResultRow | null =
-          searchRows.length > 0
-            ? pickNewestMailRow(
-                searchRows.filter((r) => !mailRowPredatesSession(r, session.startedAt)),
-              )
+          freshSearch.length > 0
+            ? pickNewestMailRow(preferServiceMatchingRows(freshSearch, search.sender))
             : null;
         // Supplement the search listing with the real-time All Mail listing
         // (GMAIL_ALL_MAIL_URL): the search index is eventually consistent and
@@ -700,9 +718,9 @@ export async function awaitVerification(
             search.recipient,
           );
           if (allStale) staleMatchSeen = true;
-          const allPick = allRows.length > 0 ? pickNewestMailRow(allRows) : null;
-          const merged = chooseMailRow(chosen, allPick);
-          if (merged !== null && merged !== chosen) chosenPage = allMailTab;
+          const ranked = preferServiceMatchingRows([...freshSearch, ...allRows], search.sender);
+          const merged = ranked.length > 0 ? pickNewestMailRow(ranked) : null;
+          if (merged !== null && allRows.includes(merged)) chosenPage = allMailTab;
           chosen = merged;
         }
         if (
