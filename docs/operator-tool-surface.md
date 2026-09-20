@@ -31,6 +31,19 @@ SCROLL, WAIT, DONE, BLOCKED) plus a matching per-operation target; unused
 target heads cannot act. Identifying values come only from the facts bag. A
 search or query field may receive a phrase Jev assigns from the goal's own
 words or the facts; identity and payment fields still require a fact.
+On a drive carrying `card_ref`, the released card supplies its own facts —
+`exp_month`, `exp_year`, `exp_year_short`, `card_expiry`, `card_expiry_long`,
+and `card_name` — and the drive types expiry and cardholder name from them
+after release. A later release rebuilds all of them, and they are never offered
+as goal phrases, so a card value cannot be typed into a search box. Card
+controls take those card values and nothing else: the shipping name never
+lands in the cardholder field. A combined expiry control takes the year length
+the control itself states (placeholder, pattern, inputmode, or label), never
+its declared width — seven characters fits both `MM/YYYY` and `MM / YY`. With
+nothing stated the drive writes the two-digit year, reads the value back, and
+rewrites that control once with the four-digit year when the write was
+rejected or truncated. A separate year control uses its own maxlength: two
+digits take `exp_year_short`, anything else takes the four-digit `exp_year`.
 The loop reads verification mail when a verification field is chosen or
 the page is stuck after a click. It does not gate on confidence. The drive
 loop snapshots and acts with an in-page registry plus CDP input; login,
@@ -40,8 +53,10 @@ evaluate, and drive rules prose are adapted from browser-use/jev-ultrafast
 (MIT).
 It returns a handoff (never a bare page): status, the current compact
 observation with the same stable refs, trajectory, and done/remaining.
-`needs_value` names the missing field's label; `stuck` means no listed
-element advances the goal. Resume the same session with `answer` (a
+`needs_value` names the missing field's label; a country control already
+showing a value, and expiry or cardholder-name controls on a drive carrying
+`card_ref`, do not raise it. `stuck` means no listed element advances the
+goal. Resume the same session with `answer` (a
 readable action slug from the handoff options, `done`, or `stuck`) and/or
 added `facts`. Use the single-step primitives only for a handoff you are
 answering or a task that is not a goal.
@@ -60,7 +75,15 @@ and values before taking the next snapshot. URL or title changes alone do
 not end that wait. This replaces the network-idle wait with a 300 ms timer
 that also ends polling when animation frames are suspended. It detects
 content movement, not complete page readiness; later asynchronous content
-may still require another observation or WAIT.
+may still require another observation or WAIT. A guarded action whose target
+sits outside the viewport scrolls it into view instantly before the occlusion
+measurement, so an offscreen control does not burn the attempt.
+
+A snapshot with no controls — a same-document checkout stage swap, or a page
+still hydrating — is re-observed after up to three automatic waits per blank
+window before any question is asked. For that case alone the progress
+fingerprint and the planner's page text fold in the body text, because prose
+is the only evidence such a page offers.
 
 Drive offers `Open <label>` click choices for recognized picker fields alongside
 typing where supported. Supply `origin`, `destination`, and `date` facts for
@@ -75,8 +98,13 @@ automatically when a supplied fact matches its field, including `ticket_type`,
 observation fingerprint. A stale, occluded, or offscreen click yields the next
 decision to Jev even if the recovery observation changes. A matching page-wide
 option also yields to Jev: the dispatcher cannot establish custom option
-ownership and does not select it or mark the field filled. Native selects stay
-on the model decision path. Recovery and option-ownership regressions live in
+ownership and does not select it or mark the field filled. A native select or
+a typeable control whose field matches a supplied fact is filled by the drive
+itself before Jev is asked, once per target per observation fingerprint. A
+checkout page's offscreen fillables stay eligible, because the act path
+scrolls a target into view before it measures; a control already displaying
+that fact is not offered again. Recovery and
+option-ownership regressions live in
 [`operate-drive-fixture.test.ts`](../apps/mcp/src/bot/__tests__/operate-drive-fixture.test.ts).
 
 Calls default to 60 steps and 45 seconds; `max_steps` and `max_seconds` set
@@ -97,7 +125,7 @@ browser-use/jev-ultrafast (MIT) adoptions live in `operate-drive.ts`. Mapping:
 | --- | --- | --- |
 | 1 | Two heads: `operation` plus `<operation>_target`; unused heads cannot act | `buildDriveQuestions`, `decideAfterJev` |
 | 2 | Structured `state` `{page, elements, recent_actions}` and `instructions` `{goal, rules}` | `DriveJevState`, `buildJevState`, `pageTextFromObservation` |
-| 3 | Per-element `operations` plus checked/disabled/required/acted and live `value` from the drive snapshot | `elementState`, `operationsForRow`, `drive-snapshot.ts` |
+| 3 | Per-element `operations` plus checked/disabled/required/acted/invalid, live `value`, and the control's own declared `maxlength`, placeholder, pattern, and inputmode from the drive snapshot | `elementState`, `operationsForRow`, `drive-snapshot.ts` |
 | 4 | `validate_choice`: offered id, exact keys, finite [0,1], sum ±0.02, argmax. Malformed answers are `invalid_answer` (reason + confidence), not `low_confidence`; one same-observation retry | `validateChoiceReason`, `admitsChoice` |
 | 5 | SELECT option is a target (`slug:option`) | `selectTargets`, `selectTargetKey`, `lastSelectOptions` |
 | 6 | WAIT when the needed control is absent/disabled or results are loading | `DRIVE_RULES`, `{kind:"wait"}`, `DRIVE_WAIT_MS` |

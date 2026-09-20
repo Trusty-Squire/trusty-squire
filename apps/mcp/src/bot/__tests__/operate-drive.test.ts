@@ -41,7 +41,15 @@ import {
   pageTextFromObservation,
   peakedProbabilities,
   requiredFactComboboxAction,
+  requiredFactSelectAction,
+  requiredFactTypeAction,
+  requiredExpiryLongRewriteAction,
+  isRequiredRow,
   requiredFillableMissingFact,
+  applyReleasedCardFacts,
+  ensureGeneratedFacts,
+  isExpiryRow,
+  isCardholderNameRow,
   selectTargetKey,
   selectTargets,
   selectCandidates,
@@ -356,7 +364,585 @@ describe("decideAfterJev stop reasons", () => {
 
   it("returns needs_value naming the field label when a required fillable has no matching fact", () => {
     const missingFacts = { first_name: "Ada" };
-    expect(requiredFillableMissingFact(ROWS, missingFacts, false)?.ref).toBe("@e:email");
+    expect(requiredFillableMissingFact(ROWS, missingFacts)?.ref).toBe("@e:email");
+  });
+
+  it("defers a card expiry control only while a card is in play", () => {
+    const expiry: WireRow = ["@e:exp", "t", "Expiration date (MM / YY)|s=r"];
+    expect(isExpiryRow(expiry)).toBe(true);
+    // With a card, the control is the card path's business and is filled after
+    // release, so reporting it missing would halt the purchase early.
+    expect(
+      requiredFillableMissingFact([expiry, PAYMENT, EMAIL], {
+        email: "a@b.test",
+        card_ref: "card-1",
+      })?.ref,
+    ).toBeUndefined();
+    // Without a card there is no release to wait for. A trial signup that asks
+    // for one must still be told which field it needs.
+    expect(requiredFillableMissingFact([expiry, PAYMENT], {})?.ref).toBe("@e:exp");
+  });
+
+  it("defers a name-on-card control only while a card is in play", () => {
+    const cardName: WireRow = ["@e:ncard", "t", "Name on card|s=r"];
+    expect(isCardholderNameRow(cardName)).toBe(true);
+    expect(
+      requiredFillableMissingFact([cardName, EMAIL], { email: "a@b.test", card_ref: "card-1" })
+        ?.ref,
+    ).toBeUndefined();
+    // "Name on card" matches no ordinary alias, so a no-card drive can only
+    // fill it if the host is told the field's name and resumes with a fact.
+    expect(requiredFillableMissingFact([cardName], {})?.ref).toBe("@e:ncard");
+    expect(requiredFillableMissingFact([cardName], { name_on_card: "Ada" })?.ref).toBeUndefined();
+  });
+
+  it("fills a cardholder-name control from the shipping name when the drive has no card", () => {
+    const cardholder: WireRow = ["@e:ch", "t", "Cardholder name|s=r"];
+    const rows = [cardholder, EMAIL];
+    const facts = ensureGeneratedFacts(rows, {
+      first_name: "Ada",
+      last_name: "Lovelace",
+      email: "a@b.test",
+    });
+    expect(isCardholderNameRow(cardholder)).toBe(true);
+    expect(facts.name).toBe("Ada Lovelace");
+    // A provisioning drive that meets an inline cardholder control resolves it
+    // through the ordinary name alias and carries on.
+    expect(matchingFactKeys(facts, cardholder)).toEqual(["name"]);
+    expect(fillableCandidates(rows, facts, false).map((row) => row.ref)).toContain("@e:ch");
+    expect(requiredFillableMissingFact(rows, facts)?.ref).toBeUndefined();
+  });
+
+  it("still gives a cardholder-name control the released card name on a payment drive", () => {
+    const cardholder: WireRow = ["@e:ch", "t", "Cardholder name|s=r"];
+    const rows = [cardholder, PAYMENT];
+    const shipping = ensureGeneratedFacts(rows, {
+      first_name: "Ada",
+      last_name: "Lovelace",
+      card_ref: "card-1",
+    });
+    const released = applyReleasedCardFacts(shipping, {
+      exp_month: "12",
+      exp_year: "2030",
+      name: "A L Byron",
+    });
+    expect(matchingFactKeys(released, cardholder)).toEqual(["card_name"]);
+    expect(released.card_name).toBe("A L Byron");
+  });
+
+  it("does not offer name-on-card as fillable until the card is released", () => {
+    const cardName: WireRow = ["@e:ncard", "t", "Name on card|s=r"];
+    const facts = { email: "a@b.test", card_ref: "card-1" };
+    expect(fillableCandidates([cardName, EMAIL], facts, true).map((row) => row.ref)).toEqual([
+      "@e:email",
+    ]);
+    const released = applyReleasedCardFacts(facts, {
+      exp_month: "12",
+      exp_year: "2030",
+      name: "A L Byron",
+    });
+    expect(fillableCandidates([cardName, EMAIL], released, true).map((row) => row.ref)).toEqual([
+      "@e:ncard",
+      "@e:email",
+    ]);
+  });
+
+  it("types the released cardholder name into name-on-card, never the shipping name", () => {
+    const cardName: WireRow = ["@e:ncard", "t", "Name on card|s=r"];
+    const fullName: WireRow = ["@e:full", "t", "Full name|s=r"];
+    // ensureGeneratedFacts has already synthesized the shipping name by the
+    // time the card is released, many steps into the drive.
+    const shipping = ensureGeneratedFacts([fullName], {
+      first_name: "Ada",
+      last_name: "Lovelace",
+      card_ref: "card-1",
+    });
+    expect(shipping.name).toBe("Ada Lovelace");
+    const facts = applyReleasedCardFacts(shipping, {
+      exp_month: "12",
+      exp_year: "2030",
+      name: "A L Byron",
+    });
+    expect(matchingFactKeys(facts, cardName)).toEqual(["card_name"]);
+    expect(facts.card_name).toBe("A L Byron");
+    expect(matchingFactKeys(facts, fullName)).toEqual(["name"]);
+    expect(facts.name).toBe("Ada Lovelace");
+  });
+
+  it("counts a fact-backed select as an outstanding fill but an unmatched search box as none", () => {
+    const filledEmail: WireRow = ["@e:email", "t", "Email|f=email|s=r|n=a@b.test"];
+    const search: WireRow = ["@e:q", "t", "Search|f=search"];
+    const facts = { email: "a@b.test", state: "NY", card_ref: "card-1" };
+    const rows = [filledEmail, STATE, search, PAYMENT];
+    // This is the set the inject_card gate waits on. The required State
+    // dropdown is in it, so the card is not released before it is resolved.
+    const fills = fillableCandidates(rows, facts, true, ["@e:email"]);
+    expect(fills.map((candidate) => candidate.ref)).toEqual(["@e:state"]);
+    // The search row has no fact and never will, so it is absent — gating on
+    // a set that re-admits it (typeableCandidates does) would deadlock the
+    // release, because such a row only leaves once something types into it.
+    expect(typeableCandidates(rows, facts, true, ["@e:email"]).map((row) => row.ref)).toEqual([
+      "@e:q",
+    ]);
+    const resolved = fillableCandidates(rows, facts, true, ["@e:email", "@e:state"]);
+    expect(resolved).toEqual([]);
+  });
+
+  it("does not treat a Shopify geo-default state as already filled", () => {
+    const country: WireRow = ["@e:country", "s", "Country/Region|f=state|s=r|a=picker|n=US"];
+    const florida: WireRow = ["@e:state", "s", "State|f=state|s=r|a=picker|n=FL"];
+    const facts = { state: "NY", country: "US", zip: "10001" };
+    expect(matchingFactKeys(facts, country)).toEqual(["country"]);
+    expect(matchingFactKeys(facts, florida)).toEqual(["state"]);
+    expect(fillableCandidates([country, florida], facts, false).map((row) => row.ref)).toEqual([
+      "@e:state",
+    ]);
+    expect(requiredFactSelectAction([country, florida], facts)).toEqual({
+      target: "@e:state",
+      text: "NY",
+    });
+  });
+
+  it("drops a state select once its current value matches the fact", () => {
+    const newYork: WireRow = ["@e:state", "s", "State|f=state|s=r|a=picker|n=NY"];
+    const facts = { state: "NY", country: "US" };
+    expect(fillableCandidates([newYork], facts, false)).toEqual([]);
+    expect(requiredFactSelectAction([newYork], facts)).toBeUndefined();
+  });
+
+  it("does not treat an offscreen checkout phone as already filled", () => {
+    const phone: WireRow = ["@e:phone", "t", "Phone (optional)|f=phone|v=offscreen"];
+    const checkout = "https://whitejade.xyz/checkouts/cn/hWNH2exU82n2ocbEQWhd9HjG/en-us";
+    const facts = { phone: "2125550100", card_ref: "card-1" };
+    expect(driveCandidates([phone], true).map((row) => row.ref)).toEqual([]);
+    expect(isRequiredRow(phone)).toBe(false);
+    expect(fillableCandidates([phone], facts, true, [], checkout).map((row) => row.ref)).toEqual([
+      "@e:phone",
+    ]);
+    expect(requiredFactTypeAction([phone], facts, [], checkout)).toEqual({
+      target: "@e:phone",
+      text: "2125550100",
+    });
+  });
+
+  it("holds the card for an optional offscreen phone until the fact is typed", () => {
+    const email: WireRow = ["@e:email", "t", "Email|f=email|s=r|n=a@b.test"];
+    const state: WireRow = ["@e:state", "s", "State|f=state|s=r|a=picker|n=NY"];
+    const phone: WireRow = ["@e:phone", "t", "Phone (optional)|f=phone|v=offscreen"];
+    const rows = [email, state, phone];
+    const facts = { email: "a@b.test", state: "NY", phone: "2125550100", card_ref: "card-1" };
+    const checkout = "https://shop.example/checkout";
+    // The gate waits on this set. Releasing the card while a delivery field is
+    // still pending means the address is edited afterwards, which re-costs the
+    // order and remounts the card frames.
+    expect(fillableCandidates(rows, facts, true, [], checkout).map((row) => row.ref)).toEqual([
+      "@e:phone",
+    ]);
+    expect(requiredFactTypeAction(rows, facts, [], checkout)).toEqual({
+      target: "@e:phone",
+      text: "2125550100",
+    });
+    // Once typed the row leaves the set and the card may be released.
+    expect(fillableCandidates(rows, facts, true, ["@e:phone"], checkout)).toEqual([]);
+  });
+
+  it("leaves a country picker on its geo default alone when no country fact exists", () => {
+    const country: WireRow = ["@e:country", "s", "Country/Region|f=state|s=r|a=picker|n=US"];
+    const facts = { state: "NY", zip: "10001", card_ref: "card-1" };
+    // Shopify serializes Country/Region as f=state; the picker must not take
+    // the state fact, and it is not a missing value either — the merchant's
+    // default is already correct, so the drive keeps moving.
+    expect(matchingFactKeys(facts, country)).toEqual([]);
+    expect(requiredFillableMissingFact([country], facts)?.ref).toBeUndefined();
+    expect(requiredFactSelectAction([country], facts)).toBeUndefined();
+  });
+
+  it("still reports a required empty control with no matching fact", () => {
+    const empty: WireRow = ["@e:country", "s", "Country/Region|f=state|s=r|a=picker"];
+    const facts = { state: "NY", card_ref: "card-1" };
+    expect(requiredFillableMissingFact([empty], facts)?.ref).toBe("@e:country");
+  });
+
+  it("reports a required dropdown sitting on a placeholder sentinel", () => {
+    // `<select required><option value="0">Choose a delivery window</option>…`
+    // serializes as a non-empty current value, but nothing is chosen. It is
+    // not a fill either (no fact matches), so the model is never offered it —
+    // needs_value is the only thing that keeps the card gate shut until the
+    // host answers.
+    const window: WireRow = ["@e:win", "s", "Delivery window|s=r|n=0"];
+    const facts = { state: "NY", card_ref: "card-1" };
+    expect(matchingFactKeys(facts, window)).toEqual([]);
+    expect(fillableCandidates([window], facts, true)).toEqual([]);
+    expect(requiredFillableMissingFact([window], facts)?.ref).toBe("@e:win");
+  });
+
+  it("gives a country picker the country fact when one is supplied", () => {
+    const country: WireRow = ["@e:country", "s", "Country/Region|f=state|s=r|a=picker|n=US"];
+    const facts = { state: "NY", country: "Canada" };
+    expect(matchingFactKeys(facts, country)).toEqual(["country"]);
+    expect(requiredFactSelectAction([country], facts)).toEqual({
+      target: "@e:country",
+      text: "Canada",
+    });
+  });
+
+  it("reads an unusually worded card expiry, but not another document's", () => {
+    const facts = applyReleasedCardFacts(
+      { card_ref: "card-1" },
+      { exp_month: "12", exp_year: "2030", name: "Ada" },
+    );
+    // "Expires end" is the UK-common card wording.
+    const expiresEnd: WireRow = ["@e:exp", "t", "Expires end|f=date|s=r"];
+    expect(isExpiryRow(expiresEnd)).toBe(true);
+    expect(matchingFactKeys(facts, expiresEnd)).toEqual(["card_expiry"]);
+    for (const label of ["Driver's license expiration", "Passport expiry", "Permit expires"]) {
+      const other: WireRow = ["@e:other", "t", `${label}|f=date|s=r`];
+      expect(isExpiryRow(other)).toBe(false);
+      expect(matchingFactKeys(facts, other)).toEqual([]);
+    }
+  });
+
+  it("drops a typed field once its current value matches the fact", () => {
+    const phone: WireRow = ["@e:phone", "t", "Phone (optional)|f=phone|n=2125550100"];
+    const facts = { phone: "2125550100" };
+    expect(fillableCandidates([phone], facts, false)).toEqual([]);
+    expect(requiredFactTypeAction([phone], facts)).toBeUndefined();
+  });
+
+  it("never writes the state fact into a country picker that has no country fact", () => {
+    const country: WireRow = ["@e:country", "s", "Country/Region|f=state|s=r|a=picker|n=US"];
+    const florida: WireRow = ["@e:state", "s", "State|f=state|s=r|a=picker|n=FL"];
+    // Shopify serializes Country/Region as f=state, so without the guard the
+    // state alias family hands the picker "NY".
+    const facts = { state: "NY", zip: "10001" };
+    expect(matchingFactKeys(facts, country)).toEqual([]);
+    expect(requiredFactSelectAction([country, florida], facts)).toEqual({
+      target: "@e:state",
+      text: "NY",
+    });
+  });
+
+  it("applies each outstanding fact-backed select in turn as the page updates", () => {
+    const country: WireRow = ["@e:country", "s", "Country/Region|f=state|s=r|a=picker|n=US"];
+    const florida: WireRow = ["@e:state", "s", "State|f=state|s=r|a=picker|n=FL"];
+    const facts = { state: "NY", country: "CA", zip: "10001" };
+    // The country picker is resolved from the country fact, the state picker
+    // from the state fact — neither borrows the other's value.
+    expect(requiredFactSelectAction([country, florida], facts)).toEqual({
+      target: "@e:country",
+      text: "CA",
+    });
+    expect(requiredFactSelectAction([country, florida], facts, ["@e:country"])).toEqual({
+      target: "@e:state",
+      text: "NY",
+    });
+    const settled: WireRow[] = [
+      ["@e:country", "s", "Country/Region|f=state|s=r|a=picker|n=CA"],
+      ["@e:state", "s", "State|f=state|s=r|a=picker|n=NY"],
+    ];
+    expect(requiredFactSelectAction(settled, facts)).toBeUndefined();
+  });
+
+  it("copies released card public fields so expiry can be typed after inject", () => {
+    expect(
+      applyReleasedCardFacts(
+        { email: "a@b.test" },
+        { exp_month: "12", exp_year: "2030", name: "Ada" },
+      ),
+    ).toEqual({
+      email: "a@b.test",
+      exp_month: "12",
+      exp_year: "2030",
+      exp_year_short: "30",
+      card_name: "Ada",
+      card_expiry: "12/30",
+      card_expiry_long: "12/2030",
+    });
+  });
+
+  it("rebuilds every card-derived fact from the card actually in play", () => {
+    const declined = applyReleasedCardFacts(
+      { email: "a@b.test", card_ref: "card-A" },
+      { exp_month: "12", exp_year: "2030", name: "A L Byron" },
+    );
+    expect(declined.card_expiry).toBe("12/30");
+    // The host retries with a second card; drive.facts survives the retry, so
+    // the first card's values must not be typed beside the second card's PAN.
+    const retried = applyReleasedCardFacts(declined, {
+      exp_month: "3",
+      exp_year: "2027",
+      name: "Ada Lovelace",
+    });
+    expect(retried.card_expiry).toBe("03/27");
+    expect(retried.card_expiry_long).toBe("03/2027");
+    expect(retried.exp_month).toBe("3");
+    expect(retried.exp_year).toBe("2027");
+    expect(retried.exp_year_short).toBe("27");
+    expect(retried.card_name).toBe("Ada Lovelace");
+    expect(retried.email).toBe("a@b.test");
+  });
+
+  it("clears a card-derived fact the newly released card cannot supply", () => {
+    const first = applyReleasedCardFacts(
+      { card_ref: "card-A" },
+      { exp_month: "12", exp_year: "2030", name: "A L Byron" },
+    );
+    expect(first.card_name).toBe("A L Byron");
+    const blankName = applyReleasedCardFacts(first, {
+      exp_month: "12",
+      exp_year: "2030",
+      name: "   ",
+    });
+    expect(blankName.card_name).toBeUndefined();
+  });
+
+  it("sizes a combined expiry write from the control's stated format, not its width", () => {
+    const facts = applyReleasedCardFacts(
+      { card_ref: "card-1" },
+      { exp_month: "12", exp_year: "2030", name: "Ada" },
+    );
+    const valueFor = (row: WireRow): string | undefined => facts[matchingFactKeys(facts, row)[0]!];
+    // Placeholder, pattern, or label that names MM/YYYY vs MM/YY is the signal.
+    expect(valueFor(["@e:l", "t", "Expiration date|f=date|ph=MM/YYYY|w=7"])).toBe("12/2030");
+    expect(valueFor(["@e:p", "t", "Expiration date|f=date|pt=\\d{2}/\\d{4}"])).toBe("12/2030");
+    expect(valueFor(["@e:s", "t", "Expiration date (MM / YY)|f=date|w=9"])).toBe("12/30");
+    expect(valueFor(["@e:u", "t", "Expiration date (MM / YY)|f=date"])).toBe("12/30");
+    // A label that names four digits wins even on a short maxlength.
+    expect(valueFor(["@e:x", "t", "Expiration date (MM/YYYY)|f=date|w=5"])).toBe("12/2030");
+  });
+
+  it("writes the two-digit expiry when the control states no year length", () => {
+    // maxlength 7 fits both "MM/YYYY" and "MM / YY". Mapping the width to a
+    // format is what sent "12/2030" into a two-digit mask, which reformatted
+    // it to "12 / 20" and submitted an expiry that is already past.
+    const facts = applyReleasedCardFacts(
+      { card_ref: "card-1" },
+      { exp_month: "12", exp_year: "2030", name: "Ada" },
+    );
+    const valueFor = (row: WireRow): string | undefined => facts[matchingFactKeys(facts, row)[0]!];
+    expect(valueFor(["@e:m", "t", "Expiration date (MM / YY)|f=date|w=7"])).toBe("12/30");
+    expect(valueFor(["@e:m2", "t", "Expiration date|f=date|w=7"])).toBe("12/30");
+    expect(valueFor(["@e:m3", "t", "Expiration date|f=date|w=8"])).toBe("12/30");
+    expect(valueFor(["@e:m9", "t", "Expiration date|f=date|w=9"])).toBe("12/30");
+  });
+
+  it("rewrites a rejected or truncated two-digit expiry with the four-digit year", () => {
+    const facts = applyReleasedCardFacts(
+      { card_ref: "card-1" },
+      { exp_month: "12", exp_year: "2030", name: "Ada" },
+    );
+    const emptyAfter: WireRow = ["@e:exp", "t", "Expiration date|f=date|s=r"];
+    expect(requiredExpiryLongRewriteAction([emptyAfter], facts, ["@e:exp"])).toEqual({
+      target: "@e:exp",
+      text: "12/2030",
+    });
+    const truncated: WireRow = ["@e:exp", "t", "Expiration date|f=date|s=r|n=12/2"];
+    expect(requiredExpiryLongRewriteAction([truncated], facts, ["@e:exp"])).toEqual({
+      target: "@e:exp",
+      text: "12/2030",
+    });
+    const invalid: WireRow = ["@e:exp", "t", "Expiration date|f=date|s=ri|n=12/30"];
+    expect(requiredExpiryLongRewriteAction([invalid], facts, ["@e:exp"])).toEqual({
+      target: "@e:exp",
+      text: "12/2030",
+    });
+    const accepted: WireRow = ["@e:exp", "t", "Expiration date (MM / YY)|f=date|s=r|n=12/30"];
+    expect(requiredExpiryLongRewriteAction([accepted], facts, ["@e:exp"])).toBeUndefined();
+    expect(requiredExpiryLongRewriteAction([emptyAfter], facts, [])).toBeUndefined();
+  });
+
+  it("keeps a caller-supplied card fact rather than discarding it silently", () => {
+    const supplied = {
+      card_ref: "card-1",
+      exp_month: "01",
+      exp_year: "1999",
+      exp_year_short: "99",
+      card_name: "Ada",
+      card_expiry: "01/99",
+      card_expiry_long: "01/1999",
+    };
+    expect(mergeFacts({ email: "a@b.test" }, supplied)).toEqual({
+      email: "a@b.test",
+      ...supplied,
+    });
+  });
+
+  it("lets the released card overwrite whatever the caller supplied", () => {
+    const facts = mergeFacts(
+      { email: "a@b.test" },
+      { card_ref: "card-1", exp_month: "01", exp_year: "1999", card_name: "Stale" },
+    );
+    const released = applyReleasedCardFacts(facts, {
+      exp_month: "12",
+      exp_year: "2030",
+      name: "Ada Lovelace",
+    });
+    // The release rebuilds the whole card-derived set, so a caller value can
+    // never be the thing typed beside the released card's PAN.
+    expect(released.exp_month).toBe("12");
+    expect(released.exp_year).toBe("2030");
+    expect(released.card_name).toBe("Ada Lovelace");
+    expect(released.card_expiry).toBe("12/30");
+    expect(released.card_expiry_long).toBe("12/2030");
+    expect(released.email).toBe("a@b.test");
+  });
+
+  it("widens a vaulted two-digit year for the controls that ask for four", () => {
+    // card-release-approval accepts YY or YYYY and stores it verbatim, so a
+    // card saved as "30" is a released state the drive really sees.
+    const facts = applyReleasedCardFacts(
+      { card_ref: "card-1" },
+      { exp_month: "12", exp_year: "30", name: "Ada" },
+    );
+    expect(facts.exp_year).toBe("2030");
+    expect(facts.exp_year_short).toBe("30");
+    expect(facts.card_expiry).toBe("12/30");
+    expect(facts.card_expiry_long).toBe("12/2030");
+    const valueFor = (row: WireRow): string | undefined => facts[matchingFactKeys(facts, row)[0]!];
+    expect(valueFor(["@e:y", "t", "Expiration year|f=date|w=4"])).toBe("2030");
+    expect(valueFor(["@e:y2", "t", "Expiration year|f=date|w=2"])).toBe("30");
+    expect(valueFor(["@e:c", "t", "Expiration date|f=date|w=9"])).toBe("12/30");
+  });
+
+  it("writes the two-digit combined expiry when the control states no year length", () => {
+    const facts = applyReleasedCardFacts(
+      { card_ref: "card-1" },
+      { exp_month: "12", exp_year: "2030", name: "Ada" },
+    );
+    const valueFor = (row: WireRow): string | undefined => facts[matchingFactKeys(facts, row)[0]!];
+    expect(valueFor(["@e:c", "t", "Expiration date (MM / YY)|f=date"])).toBe("12/30");
+    expect(valueFor(["@e:c5", "t", "Expiration date|f=date|w=5"])).toBe("12/30");
+    expect(valueFor(["@e:c8", "t", "Expiration date|f=date|w=8"])).toBe("12/30");
+  });
+
+  it("sizes the year write from the control's declared width, not its label", () => {
+    const facts = applyReleasedCardFacts(
+      { card_ref: "card-1" },
+      { exp_month: "12", exp_year: "2030", name: "Ada" },
+    );
+    const valueFor = (row: WireRow): string | undefined => facts[matchingFactKeys(facts, row)[0]!];
+    // A maxlength=2 input silently keeps "20" out of "2030" and the card is
+    // declined with nothing to read anywhere in the drive.
+    expect(valueFor(["@e:y2", "t", "Expiration year|f=date|w=2"])).toBe("30");
+    expect(valueFor(["@e:y4", "t", "Expiration year|f=date|w=4"])).toBe("2030");
+    // How the merchant spelled the label decides nothing: the same wording
+    // resolves either way once the control declares its own width.
+    expect(valueFor(["@e:yy", "t", "Expiration year (YY)|f=date|w=4"])).toBe("2030");
+    expect(valueFor(["@e:yyyy", "t", "Expiration year (YYYY)|f=date|w=2"])).toBe("30");
+    // No declared width is no signal, so the card's own spelling is written.
+    expect(valueFor(["@e:y", "t", "Expiration year|f=date"])).toBe("2030");
+  });
+
+  it("leaves a non-card expiry on a card page to the ordinary aliases", () => {
+    const pan: WireRow = ["@e:pan", "t", "Card number|f=payment"];
+    const licence: WireRow = ["@e:dl", "t", "Driver's license expiration|f=date|s=r"];
+    const passport: WireRow = ["@e:pp", "t", "Passport expiry|f=date|s=r"];
+    const cardExpiry: WireRow = ["@e:exp", "t", "Expiration date (MM / YY)|f=date|s=r"];
+    const facts = applyReleasedCardFacts(
+      { card_ref: "card-1" },
+      { exp_month: "12", exp_year: "2030", name: "Ada" },
+    );
+    // A sibling PAN row does not make every expiry on the page a card expiry.
+    expect(isExpiryRow(licence)).toBe(false);
+    expect(isExpiryRow(passport)).toBe(false);
+    expect(isExpiryRow(cardExpiry)).toBe(true);
+    expect(matchingFactKeys(facts, licence)).toEqual([]);
+    expect(matchingFactKeys(facts, passport)).toEqual([]);
+    expect(matchingFactKeys(facts, cardExpiry)).toEqual(["card_expiry"]);
+    // Only the card control is offered the card value, and the licence field
+    // is still surfaced as a missing required fact rather than silently filled.
+    expect(
+      fillableCandidates([pan, licence, passport, cardExpiry], facts, true).map((row) => row.ref),
+    ).toEqual(["@e:exp"]);
+    expect(requiredFillableMissingFact([pan, licence, cardExpiry], facts)?.ref).toBe("@e:dl");
+  });
+
+  it("keeps released card values out of the goal-value criteria", () => {
+    const facts = applyReleasedCardFacts(
+      { card_ref: "card-1", merchant: "fixture.test" },
+      { exp_month: "12", exp_year: "2030", name: "A L Byron" },
+    );
+    const criteria = goalValueCriteria("Buy one item", facts);
+    // A site-search or promo row must never be offered the card expiry or the
+    // cardholder name as a phrase to type.
+    expect(Object.values(criteria)).not.toContain("12/30");
+    expect(Object.values(criteria)).not.toContain("A L Byron");
+    expect(Object.values(criteria)).not.toContain("2030");
+    expect(Object.keys(criteria)).not.toContain("card_expiry");
+    expect(Object.keys(criteria)).not.toContain("card_name");
+    expect(Object.keys(criteria)).not.toContain("exp_month");
+    expect(Object.keys(criteria)).not.toContain("exp_year");
+    expect(Object.keys(criteria)).not.toContain("exp_year_short");
+    // Ordinary facts still reach it.
+    expect(Object.values(criteria)).toContain("fixture.test");
+  });
+
+  it("reads a plain Expiration date / Expiry date label as the card expiry", () => {
+    // Braintree, Adyen, BigCommerce and Squarespace all label it this way.
+    for (const label of ["Expiration date", "Expiry date", "Expiration date (MM / YY)"]) {
+      const expiry: WireRow = ["@e:exp", "t", `${label}|f=date|s=r`];
+      const facts = applyReleasedCardFacts(
+        { card_ref: "card-1" },
+        { exp_month: "12", exp_year: "2030", name: "Ada" },
+      );
+      expect(isExpiryRow(expiry)).toBe(true);
+      expect(matchingFactKeys(facts, expiry)).toEqual(["card_expiry"]);
+      expect(
+        fillableCandidates([expiry, PAYMENT], facts, true).map((candidate) => candidate.ref),
+      ).toEqual(["@e:exp"]);
+    }
+  });
+
+  it("leaves a passport expiry with no card on the page as an ordinary fillable", () => {
+    const passport: WireRow = ["@e:pp", "t", "Passport expiry|f=date|s=r"];
+    const facts = applyReleasedCardFacts(
+      { card_ref: "card-1" },
+      { exp_month: "12", exp_year: "2030", name: "Ada" },
+    );
+    expect(isExpiryRow(passport)).toBe(false);
+    expect(matchingFactKeys(facts, passport)).toEqual([]);
+    // Not a deferred payment control, so it stays a reportable required field.
+    expect(requiredFillableMissingFact([passport], { card_ref: "card-1" })?.ref).toBe("@e:pp");
+  });
+
+  it("gives the card expiry control the card value even when a travel date fact exists", () => {
+    const cardExpiry: WireRow = ["@e:exp", "t", "Expiration date (MM / YY)|f=date|s=r"];
+    const departure: WireRow = ["@e:dep", "t", "Departure date|f=date"];
+    const facts = applyReleasedCardFacts(
+      { date: "2026-12-01", card_ref: "card-1" },
+      { exp_month: "12", exp_year: "2030", name: "Ada" },
+    );
+    expect(Object.keys(facts).indexOf("date")).toBeLessThan(
+      Object.keys(facts).indexOf("card_expiry"),
+    );
+    expect(matchingFactKeys(facts, cardExpiry)).toEqual(["card_expiry"]);
+    expect(matchingFactKeys(facts, departure)).toEqual(["date"]);
+  });
+
+  it("sends split month and year controls their own released card fields", () => {
+    const month: WireRow = ["@e:m", "t", "Expiration month|f=date"];
+    const year: WireRow = ["@e:y", "t", "Expiration year|f=date"];
+    const facts = applyReleasedCardFacts(
+      { card_ref: "card-1" },
+      { exp_month: "12", exp_year: "2030", name: "Ada" },
+    );
+    expect(matchingFactKeys(facts, month)).toEqual(["exp_month"]);
+    expect(matchingFactKeys(facts, year)).toEqual(["exp_year"]);
+  });
+
+  it("offers the released expiry only to the card expiry control, never to a delivery date", () => {
+    const expiry: WireRow = ["@e:exp", "t", "Expiration date (MM / YY)|s=r"];
+    const deliveryDate: WireRow = ["@e:when", "t", "Delivery date"];
+    const rows = [expiry, deliveryDate, PAYMENT];
+    const facts = applyReleasedCardFacts(
+      { email: "a@b.test", card_ref: "card-1" },
+      { exp_month: "12", exp_year: "2030", name: "Ada" },
+    );
+    expect(matchingFactKeys(facts, expiry)).toEqual(["card_expiry"]);
+    expect(matchingFactKeys(facts, deliveryDate)).toEqual([]);
+    expect(fillableCandidates(rows, facts, true).map((candidate) => candidate.ref)).toEqual([
+      "@e:exp",
+    ]);
   });
 
   it("acts on a validated reversible pick with no confidence floor", () => {
@@ -616,7 +1202,7 @@ describe("form-fill assignment helpers", () => {
   });
 
   it("names a required fillable with no matching fact as needs_value", () => {
-    const missing = requiredFillableMissingFact(ROWS, { first_name: "Ada" }, false);
+    const missing = requiredFillableMissingFact(ROWS, { first_name: "Ada" });
     expect(missing?.ref).toBe("@e:email");
     expect(missing ? missing.row : undefined).toBe(EMAIL);
   });
@@ -993,7 +1579,7 @@ describe("facts, fingerprint, compact merge", () => {
     expect(Object.values(goalValueCriteria(goal, {}))).toEqual(
       expect.arrayContaining(["Ada", "Lovelace"]),
     );
-    expect(requiredFillableMissingFact([email, SUBMIT], {}, false)?.ref).toBe("@e:email");
+    expect(requiredFillableMissingFact([email, SUBMIT], {})?.ref).toBe("@e:email");
   });
 
   it("merges a compact delta into the retained full map", () => {

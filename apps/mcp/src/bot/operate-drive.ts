@@ -104,6 +104,7 @@ export const DRIVE_MAX_JEV_CALLS = 120;
 export const DRIVE_MAX_CANDIDATES = 250;
 export const DRIVE_MAX_CRITERIA = 128;
 export const DRIVE_WAIT_MS = 1500;
+export const DRIVE_EMPTY_SNAPSHOT_WAITS = 3;
 export const DRIVE_STALE_LIMIT = 3;
 export const DRIVE_IDENTICAL_RESNAP_MS = 200;
 export const DRIVE_FIXED_DONE = "DONE";
@@ -293,6 +294,8 @@ export function emptyDriveState(goal: string, facts: Record<string, string>): Se
     trajectory: [],
     history: [],
     filledRefs: [],
+    expiryShortWrittenRefs: [],
+    expiryLongAttemptedRefs: [],
     lastQuestion: null,
     lastActionKey: null,
     lastFingerprint: null,
@@ -391,11 +394,17 @@ function progressFingerprint(
   rows: readonly WireRow[],
   drive: SessionDriveState,
   session: Session,
+  pageText: string = "",
 ): string {
   const fieldState = [
     ...[...session.committedSelectValues.entries()].map(([key, value]) => `sel:${key}=${value}`),
     ...drive.filledRefs.map((ref) => `filled:${ref}`),
   ];
+  // A control-free page can only move by changing its text, so on zero rows
+  // that text is the whole progress signal. Where rows exist the row tuples
+  // already carry it, and folding body text in there would churn the
+  // fingerprint on any ticking content and defeat no-progress detection.
+  if (rows.length === 0 && pageText.length > 0) fieldState.push(`text:${pageText}`);
   return observationFingerprint(url, rows, fieldState);
 }
 
@@ -585,6 +594,143 @@ export function isCvvRow(row: WireRow): boolean {
   return /cvv|cvc|cid|security[- ]?code/.test(label);
 }
 
+const CARD_EXPIRY_FACT = "card_expiry";
+const CARD_EXPIRY_LONG_FACT = "card_expiry_long";
+const CARD_NAME_FACT = "card_name";
+const EXP_YEAR_SHORT_FACT = "exp_year_short";
+/** Facts a card release owns. A release rebuilds every one of them, so a value
+ * an earlier release or the caller left behind never outlives it. */
+const CARD_DERIVED_FACTS = new Set([
+  CARD_EXPIRY_FACT,
+  CARD_EXPIRY_LONG_FACT,
+  CARD_NAME_FACT,
+  EXP_YEAR_SHORT_FACT,
+  "exp_month",
+  "exp_year",
+]);
+
+export function isCountryRow(row: WireRow): boolean {
+  return normalizeKey(readableLabel(row)).includes("country");
+}
+
+function rowHay(row: WireRow): string {
+  return `${normalizeKey(fieldNameForRow(row))} ${normalizeKey(readableLabel(row))}`;
+}
+
+/** Expiry controls a checkout can carry that are not the card's.
+ *
+ * A card expiry names only the date and its format; every other expiry names
+ * the document it belongs to. Matching on the expiry term alone would hand a
+ * licence or passport field the card's MM/YY.
+ */
+const NON_CARD_EXPIRY_OWNERS = new Set([
+  "licence",
+  "license",
+  "passport",
+  "permit",
+  "membership",
+  "warranty",
+  "id",
+]);
+
+export function isExpiryRow(row: WireRow): boolean {
+  const hay = rowHay(row);
+  if (!/expir|exp_month|exp_year|exp_date|cc_exp|mm_yy/.test(hay)) return false;
+  return !hay.split(/[\s_]+/).some((word) => NON_CARD_EXPIRY_OWNERS.has(word));
+}
+
+function expiryFormatHay(row: WireRow): string {
+  return `${row[2] ?? ""} ${readableLabel(row)}`;
+}
+
+/** The year length the control itself states, or undefined when it does not.
+ *
+ * Width / maxlength is not a format. Seven characters fits both "MM/YYYY" and
+ * "MM / YY", so a declared width must never pick the year length.
+ */
+function statedCombinedExpiryFact(row: WireRow): string | undefined {
+  const hay = expiryFormatHay(row);
+  if (/yyyy|\\d\{4\}/i.test(hay)) return CARD_EXPIRY_LONG_FACT;
+  if (
+    /\bmm\s*\/\s*yy\b/i.test(hay) ||
+    /\(yy\)/i.test(hay) ||
+    /(?:^|[^y])yy(?:[^y]|$)/i.test(hay) ||
+    /\\d\{2\}/i.test(hay)
+  ) {
+    return CARD_EXPIRY_FACT;
+  }
+  return undefined;
+}
+
+function cardExpiryFactFor(row: WireRow): string {
+  const hay = rowHay(row);
+  const month = /month|mm/.test(hay);
+  const year = /year|yy/.test(hay);
+  if (month && !year) return "exp_month";
+  // Year-only: a maxlength=2 control drops the leading digits of "2030".
+  // Combined expiry never uses width — see statedCombinedExpiryFact.
+  if (year && !month) return rowWidth(row) === 2 ? EXP_YEAR_SHORT_FACT : "exp_year";
+  return statedCombinedExpiryFact(row) ?? CARD_EXPIRY_FACT;
+}
+
+function rowIsInvalid(row: WireRow): boolean {
+  return /(?:^|\|)s=[^|]*i/.test(row[2] ?? "");
+}
+
+function expiryDigits(value: string): string {
+  return value.replace(/\D/g, "");
+}
+
+function expiryWriteRejectedOrTruncated(row: WireRow, written: string, long: string): boolean {
+  const current = rowCurrentValue(row);
+  if (current === undefined || current.length === 0) return true;
+  if (factValuesMatch(current, long) || factValuesMatch(current, written)) {
+    return rowIsInvalid(row);
+  }
+  const currentDigits = expiryDigits(current);
+  const writtenDigits = expiryDigits(written);
+  const longDigits = expiryDigits(long);
+  if (currentDigits === longDigits) return false;
+  return currentDigits.length < writtenDigits.length || currentDigits !== writtenDigits;
+}
+
+/** After a two-digit combined expiry write, try the four-digit year if the
+ * field rejected or truncated what we typed. Width never decided the first
+ * write; this read-back is the only escalation.
+ */
+export function requiredExpiryLongRewriteAction(
+  rows: readonly WireRow[],
+  facts: Record<string, string>,
+  shortWrittenRefs: readonly string[],
+): { target: string; text: string } | undefined {
+  const written = new Set(shortWrittenRefs);
+  const short = facts[CARD_EXPIRY_FACT];
+  const long = facts[CARD_EXPIRY_LONG_FACT];
+  if (short === undefined || long === undefined || written.size === 0) return undefined;
+  for (const row of rows) {
+    if (!written.has(row[0]) || !isExpiryRow(row)) continue;
+    if (factValuesMatch(rowCurrentValue(row) ?? "", long)) continue;
+    if (!expiryWriteRejectedOrTruncated(row, short, long)) continue;
+    return { target: row[0], text: long };
+  }
+  return undefined;
+}
+
+function recordLandedExpiryWrite(drive: SessionDriveState, target: string, text: string): void {
+  const short = drive.facts[CARD_EXPIRY_FACT];
+  const long = drive.facts[CARD_EXPIRY_LONG_FACT];
+  if (short !== undefined && text === short && !drive.expiryShortWrittenRefs.includes(target)) {
+    drive.expiryShortWrittenRefs.push(target);
+  }
+  if (long !== undefined && text === long && !drive.expiryLongAttemptedRefs.includes(target)) {
+    drive.expiryLongAttemptedRefs.push(target);
+  }
+}
+
+export function isCardholderNameRow(row: WireRow): boolean {
+  return /name_on_card|cardholder|cc_name|card_name|nameoncard/.test(rowHay(row));
+}
+
 export function isGoogleAuthRow(row: WireRow): boolean {
   const label = rowLabel(row).toLowerCase();
   return (
@@ -693,19 +839,37 @@ function aliasKeysFor(token: string): string[] {
 export function matchingFactKeys(facts: Record<string, string>, row: WireRow): string[] {
   const keys = Object.keys(facts);
   if (keys.length === 0) return [];
+  // Card controls take the released card's own values and nothing else — the
+  // shipping name and the cardholder name are different values, and a
+  // host-supplied travel `date` must not outrank the card expiry. Only on a
+  // payment drive, though: with no card to release these narrowings would
+  // leave a card control matching nothing at all, so a drive without a card
+  // keeps resolving them through the ordinary aliases.
+  if (facts.card_ref !== undefined) {
+    if (isCardholderNameRow(row)) {
+      return keys.filter((key) => normalizeKey(key) === CARD_NAME_FACT);
+    }
+    if (isExpiryRow(row)) {
+      const wantedFact = cardExpiryFactFor(row);
+      return keys.filter((key) => normalizeKey(key) === wantedFact);
+    }
+  }
+  const label = normalizeKey(readableLabel(row));
   const wanted = new Set<string>([
     ...aliasKeysFor(fieldNameForRow(row)),
     ...aliasKeysFor(readableLabel(row)),
   ]);
-  const label = normalizeKey(readableLabel(row));
+  // Shopify serializes Country/Region as f=state, so the ordinary aliases hand
+  // the country picker the state fact and the drive writes "NY" into it.
+  if (isCountryRow(row)) {
+    for (const alias of aliasKeysFor("country")) wanted.add(alias);
+    for (const alias of aliasKeysFor("state")) wanted.delete(alias);
+  }
   if (label.includes("last") && label.includes("name")) {
     for (const alias of aliasKeysFor("last_name")) wanted.add(alias);
   }
   if (label.includes("first") && label.includes("name")) {
     for (const alias of aliasKeysFor("first_name")) wanted.add(alias);
-  }
-  if (label.includes("country")) {
-    for (const alias of aliasKeysFor("country")) wanted.add(alias);
   }
   if (label.includes("search") || normalizeKey(fieldNameForRow(row)).includes("search")) {
     for (const alias of aliasKeysFor("query")) wanted.add(alias);
@@ -741,6 +905,43 @@ export function isPasswordRow(row: WireRow): boolean {
   const field = normalizeKey(fieldNameForRow(row));
   const label = normalizeKey(readableLabel(row));
   return field.includes("password") || label.includes("password");
+}
+
+export function applyReleasedCardFacts(
+  facts: Record<string, string>,
+  card:
+    | {
+        exp_month: string;
+        exp_year: string;
+        name: string;
+      }
+    | undefined,
+): Record<string, string> {
+  if (card === undefined) return facts;
+  const month = card.exp_month.trim();
+  const year = card.exp_year.trim();
+  const name = card.name.trim();
+  const shortYear = year.length === 4 ? year.slice(-2) : year;
+  // The vault stores whatever the card was saved with (card-release-approval
+  // accepts YY or YYYY), so a short year has to be widened here or the long
+  // facts carry two digits into a control that declared it wants four.
+  const longYear = year.length === 2 ? `20${year}` : year;
+  const next = { ...facts };
+  // A retry after a decline releases a second card into the same session, so
+  // every one of these is rebuilt from the card actually in play. Keeping a
+  // previously written value types the declined card's expiry beside the new
+  // card's PAN, and nothing downstream would report it.
+  for (const key of CARD_DERIVED_FACTS) delete next[key];
+  if (month.length > 0) next.exp_month = month;
+  if (longYear.length > 0) next.exp_year = longYear;
+  if (shortYear.length > 0) next[EXP_YEAR_SHORT_FACT] = shortYear;
+  if (name.length > 0) next[CARD_NAME_FACT] = name;
+  if (month.length > 0 && year.length > 0) {
+    const paddedMonth = month.padStart(2, "0");
+    next[CARD_EXPIRY_FACT] = `${paddedMonth}/${shortYear}`;
+    next[CARD_EXPIRY_LONG_FACT] = `${paddedMonth}/${longYear}`;
+  }
+  return next;
 }
 
 export function ensureGeneratedFacts(
@@ -900,7 +1101,12 @@ export function goalValueCriteria(
     criteria[slug] = value;
   };
   for (const phrase of goalValuePhrases(goal)) add(phrase);
-  for (const [key, value] of Object.entries(facts)) add(value, key);
+  for (const [key, value] of Object.entries(facts)) {
+    // A released card value is never a goal phrase. Left in, the drive can be
+    // told to type the expiry or the cardholder name into a site-search box.
+    if (CARD_DERIVED_FACTS.has(key)) continue;
+    add(value, key);
+  }
   criteria[DRIVE_FIXED_NONE] = "none of the listed phrases belong in this field; skip it";
   return criteria;
 }
@@ -1011,7 +1217,11 @@ export function fillableCandidates(
     if (!includePayment && (isPaymentRow(row) || isCvvRow(row))) continue;
     if (isPaymentRow(row) || isCvvRow(row)) continue;
     if (isOtpRow(row) && matchingFactKeys(facts, row).length === 0) continue;
-    if (matchingFactKeys(facts, row).length === 0) continue;
+    const matchedKeys = matchingFactKeys(facts, row);
+    if (matchedKeys.length === 0) continue;
+    // A control already showing the fact is done. Left offered, the drive
+    // keeps re-picking a value the control already holds instead of moving on.
+    if (rowAlreadyShowsFact(row, facts, matchedKeys)) continue;
     const role = ROLE_LETTERS[row[1]] ?? row[1];
     const seed = `${row[2] ?? readableLabel(row)}_${role}`;
     const slug = uniqueCriteriaSlug(seed, used);
@@ -1165,6 +1375,13 @@ function takeCapped<T>(items: readonly T[], remaining: { n: number }): T[] {
   return [...slice];
 }
 
+function rowWidth(row: WireRow): number | undefined {
+  const match = /(?:^|\|)w=(\d+)/.exec(row[2] ?? "");
+  if (match === null) return undefined;
+  const width = Number.parseInt(match[1]!, 10);
+  return Number.isFinite(width) && width > 0 ? width : undefined;
+}
+
 function rowCurrentValue(row: WireRow): string | undefined {
   const match = /(?:^|\|)n=([^|]+)/.exec(row[2] ?? "");
   return match?.[1];
@@ -1172,6 +1389,67 @@ function rowCurrentValue(row: WireRow): string | undefined {
 
 function factValuesMatch(left: string, right: string): boolean {
   return normalizeKey(left) === normalizeKey(right);
+}
+
+function firstFactValue(
+  facts: Record<string, string>,
+  keys: readonly string[],
+): string | undefined {
+  return keys.map((key) => facts[key]).find((value) => value !== undefined && value.length > 0);
+}
+
+function rowAlreadyShowsFact(
+  row: WireRow,
+  facts: Record<string, string>,
+  matchedKeys: readonly string[],
+): boolean {
+  const fact = firstFactValue(facts, matchedKeys);
+  const current = rowCurrentValue(row);
+  return fact !== undefined && current !== undefined && factValuesMatch(current, fact);
+}
+
+/** The select the drive must resolve itself before asking the model.
+ *
+ * A fact-backed picker left on the merchant's geo default (Shopify opens the
+ * checkout on FL) is not a judgement call — the host already said which value
+ * belongs there. Leaving it to the model stalls the purchase: the card gate
+ * holds for the outstanding fill while the model spends its turns elsewhere.
+ */
+export function requiredFactSelectAction(
+  rows: readonly WireRow[],
+  facts: Record<string, string>,
+  filledRefs: readonly string[] = [],
+  pageUrl: string = "",
+): { target: string; text: string } | undefined {
+  const includePayment = facts.card_ref !== undefined;
+  for (const candidate of fillableCandidates(rows, facts, includePayment, filledRefs, pageUrl)) {
+    if (!isSelectRow(candidate.row)) continue;
+    const fact = firstFactValue(facts, matchingFactKeys(facts, candidate.row));
+    if (fact === undefined) continue;
+    return { target: candidate.ref, text: fact };
+  }
+  return undefined;
+}
+
+/** The typeable fact the drive must write itself before asking the model.
+ *
+ * Offscreen rows stay eligible: the act path scrolls them into view before
+ * typing, so a host phone fact is no longer a burned attempt.
+ */
+export function requiredFactTypeAction(
+  rows: readonly WireRow[],
+  facts: Record<string, string>,
+  filledRefs: readonly string[] = [],
+  pageUrl: string = "",
+): { target: string; text: string } | undefined {
+  const includePayment = facts.card_ref !== undefined;
+  for (const candidate of fillableCandidates(rows, facts, includePayment, filledRefs, pageUrl)) {
+    if (isSelectRow(candidate.row)) continue;
+    const fact = firstFactValue(facts, matchingFactKeys(facts, candidate.row));
+    if (fact === undefined) continue;
+    return { target: candidate.ref, text: fact };
+  }
+  return undefined;
 }
 
 export function requiredFactComboboxAction(
@@ -1210,7 +1488,6 @@ export function requiredFactComboboxAction(
 export function requiredFillableMissingFact(
   rows: readonly WireRow[],
   facts: Record<string, string>,
-  includePayment: boolean,
   filledRefs: readonly string[] = [],
   pageUrl: string = "",
 ): DriveCandidate | undefined {
@@ -1222,8 +1499,15 @@ export function requiredFillableMissingFact(
     if (isOffscreenRow(row) && !allowOffscreen) continue;
     if (isPaymentRow(row) || isCvvRow(row) || isOtpRow(row) || allowsGoalValueAssignment(row))
       continue;
+    if (facts.card_ref !== undefined && (isExpiryRow(row) || isCardholderNameRow(row))) continue;
     if (!isRequiredRow(row)) continue;
     if (matchingFactKeys(facts, row).length > 0) continue;
+    // A country picker already sitting on the merchant's geo default answers
+    // itself, so handing the goal back for a country would stall a checkout
+    // that is fine. This is the country control alone: any other required row
+    // whose only value is a placeholder sentinel is still a missing value, and
+    // reporting it is what keeps the card gate shut until the host answers.
+    if (isCountryRow(row) && (rowCurrentValue(row) ?? "").length > 0) continue;
     const role = ROLE_LETTERS[row[1]] ?? row[1];
     return {
       ref: row[0],
@@ -2377,6 +2661,8 @@ async function snapshotDriveSession(
     // Retained state keyed by those refs must die with them, or the new
     // document's fields start out marked as already filled.
     drive.filledRefs = [];
+    drive.expiryShortWrittenRefs = [];
+    drive.expiryLongAttemptedRefs = [];
     drive.consumedActionKey = null;
   }
   drive.lastDocumentEpoch = snapshot.documentEpoch;
@@ -2622,6 +2908,8 @@ export async function runOperateDrive(
   const facts = mergeFacts(session.drive?.facts ?? {}, args.facts);
   const drive = session.drive ?? emptyDriveState(args.goal, facts);
   if (!Array.isArray(drive.filledRefs)) drive.filledRefs = [];
+  if (!Array.isArray(drive.expiryShortWrittenRefs)) drive.expiryShortWrittenRefs = [];
+  if (!Array.isArray(drive.expiryLongAttemptedRefs)) drive.expiryLongAttemptedRefs = [];
   if (typeof drive.staleNonWait !== "number") drive.staleNonWait = 0;
   if (drive.boundFingerprint === undefined) drive.boundFingerprint = null;
   if (drive.consumedActionKey === undefined) drive.consumedActionKey = null;
@@ -2705,6 +2993,12 @@ async function driveLoop(input: {
   let steps = 0;
   const comboboxAttempts = new Set<string>();
   let comboboxMustYield = false;
+  const selectAttempts = new Set<string>();
+  let selectMustYield = false;
+  const typeAttempts = new Set<string>();
+  const expiryRewriteAttempts = new Set<string>();
+  let typeMustYield = false;
+  let emptySnapshotWaits = 0;
 
   const finish = (
     status: DriveStatus,
@@ -2758,7 +3052,7 @@ async function driveLoop(input: {
       await sleepDrive(DRIVE_IDENTICAL_RESNAP_MS, context?.signal);
       const snap = await snapshotOrTimeout(framesIfNeeded());
       if (snap !== "ok") return snap;
-      confirmed = progressFingerprint(observation.url, rows, drive, session);
+      confirmed = progressFingerprint(observation.url, rows, drive, session, observation.dom ?? "");
     }
     drive.staleNonWait = confirmed === fingerprint ? drive.staleNonWait + 1 : 0;
     drive.lastFingerprint = confirmed;
@@ -2774,7 +3068,13 @@ async function driveLoop(input: {
     if (decision.kind === "complete") {
       const completeSnap = await snapshotOrTimeout(framesIfNeeded());
       if (completeSnap !== "ok") return completeSnap;
-      const fresh = progressFingerprint(observation.url, rows, drive, session);
+      const fresh = progressFingerprint(
+        observation.url,
+        rows,
+        drive,
+        session,
+        observation.dom ?? "",
+      );
       if (drive.boundFingerprint !== null && fresh !== drive.boundFingerprint) {
         drive.consumedActionKey = null;
         return "continue";
@@ -2811,7 +3111,13 @@ async function driveLoop(input: {
         ...(jevMs === undefined ? {} : { jev_ms: jevMs }),
       });
       drive.history.push("wait");
-      drive.lastFingerprint = progressFingerprint(observation.url, rows, drive, session);
+      drive.lastFingerprint = progressFingerprint(
+        observation.url,
+        rows,
+        drive,
+        session,
+        observation.dom ?? "",
+      );
       drive.lastActionKey = "WAIT";
       drive.consumedActionKey = null;
       return "continue";
@@ -2850,7 +3156,13 @@ async function driveLoop(input: {
         reason: decision.reason,
       });
     }
-    const fingerprint = progressFingerprint(observation?.url ?? "", rows, drive, session);
+    const fingerprint = progressFingerprint(
+      observation?.url ?? "",
+      rows,
+      drive,
+      session,
+      observation?.dom ?? "",
+    );
     if (drive.boundFingerprint !== null && fingerprint !== drive.boundFingerprint) {
       drive.consumedActionKey = null;
       return "continue";
@@ -2953,7 +3265,13 @@ async function driveLoop(input: {
         ...takeActProfile(drive),
       });
       drive.history.push("inject card");
-      const nextFingerprint = progressFingerprint(observation.url, rows, drive, session);
+      const nextFingerprint = progressFingerprint(
+        observation.url,
+        rows,
+        drive,
+        session,
+        observation.dom ?? "",
+      );
       return await noteProgress(fingerprint, nextFingerprint, decision.actionKey);
     }
 
@@ -3005,7 +3323,13 @@ async function driveLoop(input: {
       drive.history.push(
         verification.code !== null ? "type verification code" : "open verification link",
       );
-      const nextFingerprint = progressFingerprint(observation.url, rows, drive, session);
+      const nextFingerprint = progressFingerprint(
+        observation.url,
+        rows,
+        drive,
+        session,
+        observation.dom ?? "",
+      );
       return await noteProgress(fingerprint, nextFingerprint, decision.actionKey);
     }
 
@@ -3031,6 +3355,8 @@ async function driveLoop(input: {
     const acted = await actDriveSafely(session, sessionId, decision.action, dependencies);
     if (acted.kind === "stale") {
       comboboxMustYield = true;
+      selectMustYield = true;
+      typeMustYield = true;
       drive.consumedActionKey = null;
       const staleSnap = await snapshotOrTimeout(framesIfNeeded());
       if (staleSnap !== "ok") return staleSnap;
@@ -3094,13 +3420,23 @@ async function driveLoop(input: {
       if (
         beforeEpoch.length > 0 &&
         completionEpoch.length > 0 &&
-        documentOriginOf(beforeEpoch) === documentOriginOf(completionEpoch) &&
-        !drive.filledRefs.includes(decision.actionKey)
+        documentOriginOf(beforeEpoch) === documentOriginOf(completionEpoch)
       ) {
-        drive.filledRefs.push(decision.actionKey);
+        if (!drive.filledRefs.includes(decision.actionKey)) {
+          drive.filledRefs.push(decision.actionKey);
+        }
+        if (decision.action.kind === "type") {
+          recordLandedExpiryWrite(drive, decision.actionKey, decision.action.text ?? "");
+        }
       }
     }
-    const nextFingerprint = progressFingerprint(observation.url, rows, drive, session);
+    const nextFingerprint = progressFingerprint(
+      observation.url,
+      rows,
+      drive,
+      session,
+      observation.dom ?? "",
+    );
     appendDriveTrace(session, {
       at: "after_act",
       step: drive.trajectory.length,
@@ -3120,7 +3456,13 @@ async function driveLoop(input: {
     // approval that completed on the phone) must pass the consume-once gate
     // on its first post-resume attempt instead of bouncing off a
     // boundFingerprint left over from the previous drive call.
-    drive.boundFingerprint = progressFingerprint(observation.url, rows, drive, session);
+    drive.boundFingerprint = progressFingerprint(
+      observation.url,
+      rows,
+      drive,
+      session,
+      observation.dom ?? "",
+    );
     drive.consumedActionKey = null;
     const resumed = await applyDecision(
       resumeAction(answer, rows, drive.facts, drive.goal, drive.facts.card_ref),
@@ -3156,16 +3498,18 @@ async function driveLoop(input: {
         jevRetried: "askJev requires an active Trusty Squire session (vaulted typesafe credential)",
       });
     }
+    // Per blank window, not per drive call. The auto-apply branches below all
+    // `continue`, so a reset placed after them is skipped on exactly the
+    // iterations that resolve a fill — and the next stage swap then gets no
+    // re-observation at all before the model is asked to rule on zero rows.
+    if (rows.length > 0) emptySnapshotWaits = 0;
     const includePayment = drive.facts.card_ref !== undefined;
-    drive.facts = ensureGeneratedFacts(rows, drive.facts);
-    const pageUrl = observation.url;
-    const missing = requiredFillableMissingFact(
+    drive.facts = ensureGeneratedFacts(
       rows,
-      drive.facts,
-      includePayment,
-      drive.filledRefs,
-      pageUrl,
+      applyReleasedCardFacts(drive.facts, session.releasedPaymentCard?.card),
     );
+    const pageUrl = observation.url;
+    const missing = requiredFillableMissingFact(rows, drive.facts, drive.filledRefs, pageUrl);
     const pageOptions =
       lastSelectOptions.get(session) ?? selectOptionsFromElements(session.lastElements);
     const comboboxObservation = observationFingerprint(observation.url, rows);
@@ -3176,12 +3520,113 @@ async function driveLoop(input: {
     comboboxMustYield = false;
     if (comboboxFill !== undefined) {
       comboboxAttempts.add(comboboxObservation);
-      drive.boundFingerprint = progressFingerprint(observation.url, rows, drive, session);
+      drive.boundFingerprint = progressFingerprint(
+        observation.url,
+        rows,
+        drive,
+        session,
+        observation.dom ?? "",
+      );
       drive.consumedActionKey = null;
       const applied = await applyDecision({
         kind: "act",
         action: { kind: "click", target: comboboxFill.target },
         actionKey: comboboxFill.target,
+        confidence: 1,
+      });
+      if (applied !== "continue") return applied;
+      steps += 1;
+      continue;
+    }
+    // One auto-apply per target per snapshot. A value the control has no option
+    // for comes back stale without touching filledRefs, so an unguarded retry
+    // would pick the same target every iteration until the budget runs out.
+    const selectFill = selectMustYield
+      ? undefined
+      : requiredFactSelectAction(rows, drive.facts, drive.filledRefs, pageUrl);
+    selectMustYield = false;
+    const selectAttemptKey =
+      selectFill === undefined ? undefined : `${comboboxObservation}\t${selectFill.target}`;
+    if (
+      selectFill !== undefined &&
+      selectAttemptKey !== undefined &&
+      !selectAttempts.has(selectAttemptKey)
+    ) {
+      selectAttempts.add(selectAttemptKey);
+      drive.boundFingerprint = progressFingerprint(
+        observation.url,
+        rows,
+        drive,
+        session,
+        observation.dom ?? "",
+      );
+      drive.consumedActionKey = null;
+      const applied = await applyDecision({
+        kind: "act",
+        action: { kind: "select", target: selectFill.target, text: selectFill.text },
+        actionKey: selectFill.target,
+        confidence: 1,
+      });
+      if (applied !== "continue") return applied;
+      steps += 1;
+      continue;
+    }
+    const expiryRewrite = typeMustYield
+      ? undefined
+      : requiredExpiryLongRewriteAction(rows, drive.facts, drive.expiryShortWrittenRefs);
+    const typeFill = typeMustYield
+      ? undefined
+      : requiredFactTypeAction(rows, drive.facts, drive.filledRefs, pageUrl);
+    typeMustYield = false;
+    const rewriteTarget = expiryRewrite?.target;
+    const rewriteAttemptKey =
+      rewriteTarget === undefined ? undefined : `${comboboxObservation}\t${rewriteTarget}`;
+    if (
+      expiryRewrite !== undefined &&
+      rewriteTarget !== undefined &&
+      rewriteAttemptKey !== undefined &&
+      !expiryRewriteAttempts.has(rewriteAttemptKey) &&
+      !drive.expiryLongAttemptedRefs.includes(rewriteTarget)
+    ) {
+      expiryRewriteAttempts.add(rewriteAttemptKey);
+      drive.boundFingerprint = progressFingerprint(
+        observation.url,
+        rows,
+        drive,
+        session,
+        observation.dom ?? "",
+      );
+      drive.consumedActionKey = null;
+      const applied = await applyDecision({
+        kind: "act",
+        action: { kind: "type", target: expiryRewrite.target, text: expiryRewrite.text },
+        actionKey: expiryRewrite.target,
+        confidence: 1,
+      });
+      if (applied !== "continue") return applied;
+      steps += 1;
+      continue;
+    }
+    const typeAttemptKey =
+      typeFill === undefined ? undefined : `${comboboxObservation}\t${typeFill.target}`;
+    if (
+      typeFill !== undefined &&
+      typeAttemptKey !== undefined &&
+      !typeAttempts.has(typeAttemptKey)
+    ) {
+      typeAttempts.add(typeAttemptKey);
+      drive.boundFingerprint = progressFingerprint(
+        observation.url,
+        rows,
+        drive,
+        session,
+        observation.dom ?? "",
+      );
+      drive.consumedActionKey = null;
+      const applied = await applyDecision({
+        kind: "act",
+        action: { kind: "type", target: typeFill.target, text: typeFill.text },
+        actionKey: typeFill.target,
         confidence: 1,
       });
       if (applied !== "continue") return applied;
@@ -3201,6 +3646,21 @@ async function driveLoop(input: {
       });
     }
 
+    // A same-document stage swap (Shopify one-page checkout) and a hydrating
+    // checkout both leave the snapshot empty for a while, so spend the
+    // re-observation budget before asking anything. Past it the ordinary
+    // question already offers exactly WAIT/DONE/BLOCKED and no target, because
+    // zero rows yield no action candidates — its WAIT keeps a payment settling
+    // behind a blank processor screen for as long as the step and time budgets
+    // allow.
+    if (rows.length === 0 && emptySnapshotWaits < DRIVE_EMPTY_SNAPSHOT_WAITS) {
+      emptySnapshotWaits += 1;
+      const applied = await applyDecision({ kind: "wait", confidence: 1 });
+      if (applied !== "continue") return applied;
+      steps += 1;
+      continue;
+    }
+
     const fields = paymentFields(rows);
     // A pending approval records an inject_card trajectory step, so trajectory
     // membership says "attempted", not "released". The released card is the
@@ -3217,6 +3677,13 @@ async function driveLoop(input: {
       drive.filledRefs,
       pageUrl,
     );
+    // inject_card writes only pan/cvv. Expiry, cardholder name, and billing
+    // are typed after release. The gate waits on every fill a fact backs,
+    // dropdowns included: any address edit after the card is in makes the
+    // merchant re-cost the order and remount the card frames, which wipes the
+    // PAN with no path back. An offscreen row still counts — the act path
+    // scrolls it into view. A site-search or promo input the drive has no fact
+    // for is not a fill at all and never enters this list.
     if (
       includePayment &&
       (!alreadyCard || cardRetry) &&
@@ -3229,7 +3696,13 @@ async function driveLoop(input: {
       // describes the preceding action; without rebinding, applyDecision's
       // consume-once gate returns "continue" forever and this branch spins
       // without acting until the time budget expires.
-      drive.boundFingerprint = progressFingerprint(observation.url, rows, drive, session);
+      drive.boundFingerprint = progressFingerprint(
+        observation.url,
+        rows,
+        drive,
+        session,
+        observation.dom ?? "",
+      );
       drive.consumedActionKey = null;
       const applied = await applyDecision({
         kind: "act",
@@ -3278,12 +3751,21 @@ async function driveLoop(input: {
         stateSeenRefs.add(candidate.ref);
         return true;
       }),
-      pageTextFromObservation(observation),
+      // A control-free page's only evidence is its prose, and the ordinary
+      // page text carries just title and headings. Fold the body text in for
+      // that case alone.
+      pageTextFromObservation(observation, rows.length === 0 ? [observation.dom ?? ""] : []),
     );
     const prepareMs = Date.now() - prepareStarted;
     const questionCount = Object.keys(questions).length;
     const stateBytes = Buffer.byteLength(JSON.stringify(state));
-    const fingerprint = progressFingerprint(observation.url, rows, drive, session);
+    const fingerprint = progressFingerprint(
+      observation.url,
+      rows,
+      drive,
+      session,
+      observation.dom ?? "",
+    );
     if (drive.boundFingerprint !== fingerprint) drive.consumedActionKey = null;
     drive.boundFingerprint = fingerprint;
     const decide = (answers: Record<string, JevAnswer>): DriveDecision =>
