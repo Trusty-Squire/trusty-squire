@@ -487,6 +487,68 @@ describe("operate_drive real-browser fixture", () => {
 
   const CONFIRMATION_HTML = `<!doctype html><meta charset="utf-8"><title>Blank</title><main><p>Your order is confirmed. #1042</p></main>`;
 
+  it("re-observes a second blank window after an auto-applied fill", async () => {
+    // The Shopify shape: a stage swap blanks the snapshot, the next stage
+    // mounts carrying one outstanding fact-backed fill, and writing it makes
+    // the merchant re-render — blanking the snapshot a second time. The
+    // re-observation budget belongs to each blank window, so the second one
+    // must still be waited through rather than ruled on with zero rows.
+    const html = `<!doctype html><meta charset="utf-8"><title>Two blanks</title>
+<main><p>loading</p></main>
+<script>
+  setTimeout(() => {
+    document.querySelector("main").innerHTML = '<label>Email <input id=email name=email></label>';
+  }, 4000);
+  document.addEventListener("input", (event) => {
+    if (event.target.id !== "email") return;
+    document.querySelector("main").innerHTML = "";
+    setTimeout(() => {
+      document.querySelector("main").innerHTML = "<p>ready to submit</p>";
+    }, 2000);
+  }, true);
+</script>`;
+    const { context, started } = await openFixture(html, "two-blank-windows.test");
+    try {
+      const result = await runOperateDrive(
+        {
+          session_id: started.session_id,
+          goal: "reach the ready state",
+          facts: { email: "ada@fixture.test" },
+          max_seconds: 40,
+        },
+        api(),
+        undefined,
+        deps(async (_api, state, questions) => {
+          const text = (state as { page?: { text?: string } }).page?.text ?? "";
+          const keys = Object.keys(
+            questions.operation?.type === "choice" ? questions.operation.criteria : {},
+          );
+          const pick = text.includes("ready to submit") ? "DONE" : "BLOCKED";
+          return {
+            attempts: 1,
+            elapsedMs: 5,
+            result: {
+              answers: {
+                operation: { choice: pick, confidence: 0.9, probabilities: peaked(keys, pick) },
+              },
+            },
+          };
+        }),
+      );
+      // Without a per-window budget the second blank snapshot goes straight to
+      // the model, which can only answer BLOCKED on zero rows — the reported
+      // "stuck".
+      expect(result.status).toBe("complete");
+      expect(result.trajectory.filter((step) => step.action === "type")).toHaveLength(1);
+      expect(
+        result.trajectory.filter((step) => step.action === "wait").length,
+      ).toBeGreaterThan(DRIVE_EMPTY_SNAPSHOT_WAITS);
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 60_000);
+
   it.each([
     { answer: "BLOCKED", status: "stuck" },
     { answer: "DONE", status: "complete" },

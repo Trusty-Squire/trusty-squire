@@ -699,13 +699,29 @@ describe("decideAfterJev stop reasons", () => {
       { exp_month: "12", exp_year: "2030", name: "Ada" },
     );
     const valueFor = (row: WireRow): string | undefined => facts[matchingFactKeys(facts, row)[0]!];
-    // A control wide enough for MM/YYYY is asking for four year digits.
-    expect(valueFor(["@e:l", "t", "Expiration date (MM/YYYY)|f=date|w=7"])).toBe("12/2030");
+    // Only a width no two-digit mask could need asks for four year digits.
+    expect(valueFor(["@e:l", "t", "Expiration date (MM/YYYY)|f=date|w=9"])).toBe("12/2030");
     expect(valueFor(["@e:s", "t", "Expiration date (MM / YY)|f=date|w=5"])).toBe("12/30");
     // No declared width is no signal, so the near-universal MM/YY is written.
     expect(valueFor(["@e:u", "t", "Expiration date (MM / YY)|f=date"])).toBe("12/30");
     // The label's spelling decides nothing either way.
-    expect(valueFor(["@e:x", "t", "Expiration date (MM / YY)|f=date|w=7"])).toBe("12/2030");
+    expect(valueFor(["@e:x", "t", "Expiration date (MM/YYYY)|f=date|w=5"])).toBe("12/30");
+  });
+
+  it("writes the two-digit expiry into a seven-character masked control", () => {
+    // `<input maxlength="7" placeholder="MM / YY">` with a client-side mask is
+    // the common hand-rolled shape, and it is exactly as wide as MM/YYYY. Sent
+    // "12/2030" the mask reformats to "12 / 20", hits maxlength and drops the
+    // rest, submitting an expiry that is already past — with nothing to read.
+    const facts = applyReleasedCardFacts(
+      { card_ref: "card-1" },
+      { exp_month: "12", exp_year: "2030", name: "Ada" },
+    );
+    const valueFor = (row: WireRow): string | undefined => facts[matchingFactKeys(facts, row)[0]!];
+    expect(valueFor(["@e:m", "t", "Expiration date (MM / YY)|f=date|w=7"])).toBe("12/30");
+    expect(valueFor(["@e:m2", "t", "Expiration date|f=date|w=7"])).toBe("12/30");
+    // A control wider than any two-digit mask is still unambiguous.
+    expect(valueFor(["@e:m3", "t", "Expiration date|f=date|w=8"])).toBe("12/2030");
   });
 
   it("keeps a caller-supplied card fact rather than discarding it silently", () => {
@@ -758,7 +774,7 @@ describe("decideAfterJev stop reasons", () => {
     const valueFor = (row: WireRow): string | undefined => facts[matchingFactKeys(facts, row)[0]!];
     expect(valueFor(["@e:y", "t", "Expiration year|f=date|w=4"])).toBe("2030");
     expect(valueFor(["@e:y2", "t", "Expiration year|f=date|w=2"])).toBe("30");
-    expect(valueFor(["@e:c", "t", "Expiration date|f=date|w=7"])).toBe("12/2030");
+    expect(valueFor(["@e:c", "t", "Expiration date|f=date|w=9"])).toBe("12/2030");
   });
 
   it("writes the two-digit combined expiry when the control declares no width", () => {
@@ -771,7 +787,7 @@ describe("decideAfterJev stop reasons", () => {
     // checkout takes.
     expect(valueFor(["@e:c", "t", "Expiration date (MM / YY)|f=date"])).toBe("12/30");
     expect(valueFor(["@e:c5", "t", "Expiration date|f=date|w=5"])).toBe("12/30");
-    expect(valueFor(["@e:c7", "t", "Expiration date|f=date|w=7"])).toBe("12/2030");
+    expect(valueFor(["@e:c8", "t", "Expiration date|f=date|w=8"])).toBe("12/2030");
   });
 
   it("sizes the year write from the control's declared width, not its label", () => {

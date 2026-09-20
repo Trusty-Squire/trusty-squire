@@ -596,10 +596,11 @@ const CARD_EXPIRY_FACT = "card_expiry";
 const CARD_EXPIRY_LONG_FACT = "card_expiry_long";
 const CARD_NAME_FACT = "card_name";
 const EXP_YEAR_SHORT_FACT = "exp_year_short";
-// The narrowest control that can hold a four-digit-year expiry: two month
-// digits, one separator, four year digits. Derived from what has to be typed
-// rather than from a rendered mask — "MM / YY" is also seven characters.
-const CARD_EXPIRY_LONG_MIN_WIDTH = 2 + 1 + 4;
+// The widest a two-digit combined expiry ever gets: two month digits, a
+// spaced " / " separator, two year digits. A control this wide or narrower
+// could be that mask or MM/YYYY, so only a strictly wider one unambiguously
+// asks for four year digits.
+const CARD_EXPIRY_SHORT_MAX_WIDTH = 2 + 3 + 2;
 /** Facts only a card release may write. A host cannot supply them and they
  * never outlive the release that produced them. */
 const CARD_DERIVED_FACTS = new Set([
@@ -650,11 +651,12 @@ function cardExpiryFactFor(row: WireRow): string {
   // card is declined with nothing to read. The control's own declared width
   // decides this, never how the merchant spelled the label.
   if (year && !month) return rowWidth(row) === 2 ? EXP_YEAR_SHORT_FACT : "exp_year";
-  // Only the control's own declared width decides the year length. Without one
-  // there is no signal, and the two-digit form is what almost every checkout
-  // takes, so that is the default.
+  // Only the control's own declared width decides the year length, and only
+  // when it cannot also be a spaced two-digit mask. A masked input takes
+  // "12/2030" without erroring, reformats it to "12 / 20" and drops the rest,
+  // submitting an expiry that is already past.
   const width = rowWidth(row);
-  return width !== undefined && width >= CARD_EXPIRY_LONG_MIN_WIDTH
+  return width !== undefined && width > CARD_EXPIRY_SHORT_MAX_WIDTH
     ? CARD_EXPIRY_LONG_FACT
     : CARD_EXPIRY_FACT;
 }
@@ -3379,6 +3381,11 @@ async function driveLoop(input: {
         jevRetried: "askJev requires an active Trusty Squire session (vaulted typesafe credential)",
       });
     }
+    // Per blank window, not per drive call. The auto-apply branches below all
+    // `continue`, so a reset placed after them is skipped on exactly the
+    // iterations that resolve a fill — and the next stage swap then gets no
+    // re-observation at all before the model is asked to rule on zero rows.
+    if (rows.length > 0) emptySnapshotWaits = 0;
     const includePayment = drive.facts.card_ref !== undefined;
     drive.facts = ensureGeneratedFacts(
       rows,
@@ -3494,7 +3501,6 @@ async function driveLoop(input: {
       steps += 1;
       continue;
     }
-    if (rows.length > 0) emptySnapshotWaits = 0;
 
     const fields = paymentFields(rows);
     // A pending approval records an inject_card trajectory step, so trajectory
