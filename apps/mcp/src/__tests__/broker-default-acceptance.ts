@@ -104,6 +104,7 @@ export async function checkDefaultBrokerAcceptance(
     BOT_CDP_ENDPOINT: "",
   });
   const clients: Client[] = [];
+  const sessionOf = new Map<Client, string>();
   let owner: Owner | undefined;
   const readOwner = async (): Promise<Owner | undefined> => {
     try {
@@ -125,10 +126,15 @@ export async function checkDefaultBrokerAcceptance(
     await client.connect(transport);
     const result = await client.callTool({
       name: "operate_start",
-      arguments: { service_url: "http://127.0.0.1:1" },
+      arguments: {
+        service_url:
+          "data:text/html,%3Cform%3E%3Clabel%3EName%3Cinput%20name%3Dname%3E%3C%2Flabel%3E%3C%2Fform%3E",
+      },
     });
     expect(result.isError, JSON.stringify(result)).not.toBe(true);
-    expect(result.structuredContent).toMatchObject({ needs_user: { wall: "google_session" } });
+    expect(result.structuredContent).toMatchObject({ session_id: expect.any(String) });
+    expect(result.structuredContent).not.toHaveProperty("needs_user");
+    sessionOf.set(client, (result.structuredContent as { session_id: string }).session_id);
     process.stdout.write(
       "default-broker MCP operate_start:" + " " + JSON.stringify(result.structuredContent) + "\n",
     );
@@ -176,7 +182,20 @@ export async function checkDefaultBrokerAcceptance(
         "\n",
     );
   } finally {
-    await Promise.all(clients.map(async (client) => await client.close()));
+    // Close each remaining session before its client goes: the broker holds a
+    // disconnecting client open for the whole session drain, and a SIGTERM that
+    // lands inside that window is swallowed by a once-only handler that is
+    // never re-armed — the broker then survives to its idle timeout.
+    await Promise.all(
+      clients.map(async (client) => {
+        const sessionId = sessionOf.get(client);
+        if (sessionId !== undefined)
+          await client
+            .callTool({ name: "operate_finish", arguments: { session_id: sessionId } })
+            .catch(() => undefined);
+        await client.close();
+      }),
+    );
     // Also find an elected child if a failed start returned before owner capture.
     owner = (await readOwner()) ?? owner;
     if (owner && processBirthIdentityState(owner) === "matching") {

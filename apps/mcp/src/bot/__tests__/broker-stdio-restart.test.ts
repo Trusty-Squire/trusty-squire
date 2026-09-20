@@ -325,7 +325,8 @@ describeChromium("broker-backed MCP stdio restart", () => {
       await firstClient.initialize();
       expect(first.diagnostics()).toContain(`[trusty-squire] server v${VERSION} starting`);
       const started = await firstClient.callTool("operate_start", { service_url: serviceUrl });
-      expect(started).toMatchObject({ needs_user: { wall: "google_session" } });
+      expect(started).toMatchObject({ session_id: expect.any(String), url: serviceUrl });
+      expect(started).not.toHaveProperty("needs_user");
       const before = await waitFor(
         async () => await browserLaunch(reapers, owner.pid, profile),
         "real broker browser owner",
@@ -344,7 +345,8 @@ describeChromium("broker-backed MCP stdio restart", () => {
       await secondClient.initialize();
       expect(second.diagnostics()).toContain(`[trusty-squire] server v${VERSION} starting`);
       const resumed = await secondClient.callTool("operate_start", { service_url: serviceUrl });
-      expect(resumed).toMatchObject({ needs_user: { wall: "google_session" } });
+      expect(resumed).toMatchObject({ session_id: expect.any(String), url: serviceUrl });
+      expect(resumed).not.toHaveProperty("needs_user");
       const after = await waitFor(
         async () => await browserLaunch(reapers, owner.pid, profile),
         "retained real broker browser owner",

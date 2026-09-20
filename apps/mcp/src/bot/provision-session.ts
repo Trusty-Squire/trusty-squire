@@ -130,14 +130,15 @@ export interface Observation {
         reason: string;
         next_action: "operate_observe";
       };
-  // Change 5 — fail-closed identity hand-back: set ONLY when an operate task
-  // required a live Google session that was absent. The task did NOT start; the
-  // host asks the user to log in, then retries. No browser was driven.
+  // Fail-closed identity hand-back: set only when a Google-dependent operation
+  // requires a live Google session that is absent. The session stays live, but
+  // that operation is not dispatched; the host asks the user to connect, then
+  // retries it.
   needs_user?: NeedsUserLogin;
-  // PR3 signin-vault: the user's own email (the Google identity captured at
-  // login), present on the start observation when known. The host fills THIS as
-  // the signup email so the account is user-owned, and it is the same identity
-  // whose inbox awaitVerification reads. Absent when no email was captured.
+  // PR3 signin-vault: the user's own email, captured lazily when a
+  // Google-dependent operation runs. The host fills THIS as the signup email
+  // so the account is user-owned, and it is the same identity whose inbox
+  // awaitVerification reads. Absent until an email is captured.
   user_email?: string;
   selected_option?: string;
   format?: "browser-use-dom" | "browser-use-control-query";
@@ -256,7 +257,6 @@ import {
   startProvisionSession as startProvisionSessionInternal,
   startHarnessProvisionSession as startHarnessProvisionSessionInternal,
   UnknownProvisionSessionError,
-  withCeremonyStartAdmission,
   withPaymentSessionCall,
   withProvisionSessionCall,
   type HarnessStartOptions,
@@ -274,7 +274,6 @@ export {
   googleSessionGate,
   paymentSession,
   UnknownProvisionSessionError,
-  withCeremonyStartAdmission,
   withPaymentSessionCall,
   withProvisionSessionCall,
 };
@@ -340,8 +339,8 @@ export {
 const sessionStartPorts: SessionStartPorts = {
   observeSession: async (session, format, startMetadata) =>
     await observeSession(session, format, startMetadata, undefined, false, format),
-  compactV2StartMetadata: (registryHint, loginHint, userEmail) =>
-    compactV2StartMetadata(registryHint, loginHint, userEmail),
+  compactV2StartMetadata: (registryHint, loginHint) =>
+    compactV2StartMetadata(registryHint, loginHint),
 };
 
 export async function startProvisionSession(opts: StartOptions): Promise<Observation> {

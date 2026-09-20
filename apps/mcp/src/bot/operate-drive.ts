@@ -32,6 +32,7 @@ import {
   observe,
   startProvisionSession,
   TargetStaleError,
+  type NeedsUserLogin,
   type Observation,
   type ProvisionAction,
 } from "./provision-session.js";
@@ -3026,6 +3027,15 @@ async function driveLoop(input: {
       ...extra,
     });
 
+  // An operation-scoped wall (the Google identity hand-back) reaches the loop
+  // as an observation, not an exception. Surface its message instead of driving
+  // on against the empty control map it carries.
+  const finishOnWall = (wall: NeedsUserLogin): DriveHandoff =>
+    finish("needs_value", {
+      field: wall.wall,
+      question: { question: wall.message, options: {} },
+    });
+
   const refreshSnapshot = async (needFrames: boolean) => {
     const snap = await snapshotDriveSession(session, sessionId, drive, dependencies, needFrames);
     observation = snap.observation;
@@ -3299,7 +3309,10 @@ async function driveLoop(input: {
           url: verification.link,
         });
       } else {
-        return finish("needs_value", { field: "verification_code" });
+        const wall = verification.needs_user;
+        return wall !== undefined && wall.wall === "google_session"
+          ? finishOnWall(wall)
+          : finish("needs_value", { field: "verification_code" });
       }
       const inboxSnap = await refreshSnapshot(framesIfNeeded());
       if (inboxSnap.timedOut)
@@ -3367,6 +3380,7 @@ async function driveLoop(input: {
     const page = session.browser.page;
     if (acted.kind === "unsupported") {
       observation = await actSafely(dependencies, sessionId, decision.action);
+      if (observation.needs_user !== undefined) return finishOnWall(observation.needs_user);
       rows = mergeCompactTable(rows, observation);
       actMs = Date.now() - actStarted;
     } else {

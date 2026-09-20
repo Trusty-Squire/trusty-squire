@@ -34,7 +34,6 @@ vi.mock("../session/lifecycle.js", async (importOriginal) => {
     forceFinishProvisionSession: state.forceFinish,
     withProvisionSessionCall: async (_sessionId: string, operation: () => Promise<unknown>) =>
       await operation(),
-    withCeremonyStartAdmission: async (operation: () => Promise<unknown>) => await operation(),
   };
 });
 

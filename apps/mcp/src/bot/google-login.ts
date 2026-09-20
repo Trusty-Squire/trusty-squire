@@ -1020,10 +1020,10 @@ export async function tryRunCeremonyInSharedBroker(
     const openCeremony = async () =>
       (await client.call("open", {
         serviceUrl: opts.url,
-        // The ceremony IS what creates the live Google session: its start must
-        // pass the google_session admission gate, or every enrolled machine
-        // with an empty profile deadlocks against a self-referential remedy.
-        // The same flag adopts the browser's live identity — see OpenRequest.
+        // The ceremony IS what creates the live Google session. Keep its open
+        // explicitly marked so it can never be mistaken for a Google-dependent
+        // operator action. The same flag adopts the browser's live identity —
+        // see OpenRequest.
         ceremony: true,
       })) as { sessionId?: string; observation?: unknown };
     let open: Awaited<ReturnType<typeof openCeremony>>;

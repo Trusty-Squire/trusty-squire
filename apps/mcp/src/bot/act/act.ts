@@ -58,7 +58,7 @@ import {
   terminalOAuthCompletionObservation,
 } from "../observe/observe.js";
 import { elementRef, provisionElementRefs } from "../observe/refs.js";
-import { audit, sessionForCall } from "../session/lifecycle.js";
+import { audit, googleSessionGateForSession, sessionForCall } from "../session/lifecycle.js";
 import { substituteCardTokens } from "../card-secret-tokens.js";
 import { clickScreenshot, ScreenshotClickError } from "../screenshot-click.js";
 import {
@@ -93,7 +93,28 @@ async function withOAuthActionBoundary(
   session: Session,
   provider: OAuthProviderId | undefined,
   run: (deadline: OAuthActionDeadline) => Promise<InternalActResult>,
+  outputFormat: "compact" | "full",
 ): Promise<InternalActResult> {
+  if (provider === "google") {
+    const gate = await googleSessionGateForSession(session.id);
+    if (!gate.ok) {
+      const observation = await observeSession(
+        session,
+        outputFormat,
+        undefined,
+        undefined,
+        false,
+        outputFormat,
+        false,
+        true,
+        true,
+      );
+      return {
+        observation: { ...observation, needs_user: gate.needs_user },
+        outcome: {},
+      };
+    }
+  }
   const deadline = oauthActionDeadline(provider);
   const releaseCooldownMs = oauthLoginLeaseCooldownMs();
   // A deadline expiry must NOT terminalize the session: the in-flight OAuth
@@ -373,7 +394,7 @@ export async function actInternally(
         : await run();
     };
     return session !== undefined && (action.kind === "oauth_login" || action.kind === "oauth_click")
-      ? await withOAuthActionBoundary(session, oauthProvider, execute)
+      ? await withOAuthActionBoundary(session, oauthProvider, execute, "compact")
       : await execute(undefined);
   } catch (error) {
     if (session !== undefined && (action.kind === "oauth_login" || action.kind === "oauth_click")) {
@@ -454,7 +475,7 @@ export async function act(
     };
     const result =
       session !== undefined && (action.kind === "oauth_login" || action.kind === "oauth_click")
-        ? await withOAuthActionBoundary(session, oauthProvider, execute)
+        ? await withOAuthActionBoundary(session, oauthProvider, execute, outputFormat)
         : await execute(undefined);
     const threeDs = await observedThreeDsChallenge(sessionId);
     return threeDs === undefined

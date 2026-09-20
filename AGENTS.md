@@ -482,10 +482,12 @@ Every OAuth action routed through `operate_login` stays in the single real
 authorized target and delegates to `loginWithOAuth`; never copy cookies, restore
 storage state, swap browsers, or add a parallel OAuth driver.
 
-`operate_start` admits Google only through `detectSessionProviders()` on that
-live context and feeds it to `googleSessionGate`. An OPERATOR session's
-identity answer still comes from that live context — do not substitute a
-cookie-database read for it.
+`operate_start` never requires or probes a Google session. Operations that
+actually depend on Google identity (Google OAuth, Google-backed signup
+preparation, and Gmail verification) call `detectSessionProviders()` on the
+live context and feed it to `googleSessionGate` at that operation boundary.
+An OPERATOR session's identity answer still comes from that live context — do
+not substitute a cookie-database read for it.
 
 Connect's ceremony and its exception for cookie-snapshot probes are owned by
 [`docs/browser-broker.md`](docs/browser-broker.md). Do not apply that exception

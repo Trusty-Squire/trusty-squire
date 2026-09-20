@@ -49,7 +49,7 @@ import {
 import { isMaskedDisplay } from "../bot/credential-shape.js";
 import { openSessionStorage } from "../session.js";
 import { servingAccountId } from "../session-guard.js";
-import { sessionForCall } from "../bot/session/lifecycle.js";
+import { googleSessionGateForSession, sessionForCall } from "../bot/session/lifecycle.js";
 import { clickDispatchStatusForError } from "../bot/browser.js";
 
 // Read the install-time inbox-read preference. Inbox reads default on; an
@@ -820,6 +820,10 @@ const prepareLoginSchema = z.object({
 });
 
 async function handlePrepareLogin(args: z.infer<typeof prepareLoginSchema>) {
+  const googleGate = await googleSessionGateForSession(args.session_id);
+  if (!googleGate.ok) {
+    return { session_id: args.session_id, needs_user: googleGate.needs_user };
+  }
   const email = getSessionUserEmail(args.session_id);
   if (email === null) {
     return {
@@ -1499,7 +1503,10 @@ export const operateReadInboxTool: Tool<z.infer<typeof readInboxSchema>> = {
     "seals a found OTP into a session slot so it is typed with operate_type slot and " +
     "never crosses the MCP boundary; `grant_inbox_consent` overrides the session's " +
     "inbox-read consent for this call. Returns needs_user when nothing is found yet " +
-    "— retry after a few seconds or ask the user (the session stays live).",
+    "— retry after a few seconds or ask the user (the session stays live). A " +
+    "needs_user carrying wall:google_session is the opposite case: the operator " +
+    "cannot read the inbox until the user runs `connect`, so retrying cannot clear " +
+    "it — don't poll and don't ask the user for a code.",
   inputSchema: readInboxSchema,
   jsonInputSchema: {
     type: "object",
@@ -1616,7 +1623,7 @@ export const operateDriveTool: Tool<z.infer<typeof driveSchema>> = {
     "when the user asked to create an account, complete a purchase, or provision a service — " +
     "prefer it over calling operate_click / operate_type / operate_observe yourself. " +
     "Pass session_id of an open operate_start session, or url to open the page (same start path as " +
-    "operate_start, sign-in wall and hint included) and drive in one call. goal is the task in words. " +
+    "operate_start, with no blanket sign-in wall) and drive in one call. goal is the task in words. " +
     "facts is the key/value bag of values the loop may type (email, first_name, last_name, company, " +
     "address, city, state, zip, password, card_ref, merchant, amount_cents, currency, …); it never " +
     "invents a value. A search or query field may receive a phrase Jev assigns from the goal's own " +

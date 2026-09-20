@@ -1263,7 +1263,7 @@ import {
   closeAllProvisionSessions,
   activeSessionCount,
   formSelectMany,
-  withCeremonyStartAdmission,
+  googleSessionGate,
   captureScreenshot,
   observeQuery,
 } from "../provision-session.js";
@@ -2253,7 +2253,7 @@ describe("Compact V2 action-map boundary", () => {
     expect(h.locatorTypeCalls).toEqual([]);
   });
 
-  it("keeps start metadata, rejects locators, and binds a handle to its current page snapshot", async () => {
+  it("skips Google start metadata, rejects locators, and binds a handle to its current page snapshot", async () => {
     h.workerEmail = "operator@example.test";
     h.elements = [
       elem({
@@ -2268,10 +2268,9 @@ describe("Compact V2 action-map boundary", () => {
     const started = await startProvisionSession({
       serviceUrl: "https://shop.example.com/checkout",
     });
-    expect(started).toMatchObject({
-      format: "browser-use-dom",
-      user_email: "operator@example.test",
-    });
+    expect(started).toMatchObject({ format: "browser-use-dom" });
+    expect(started).not.toHaveProperty("user_email");
+    expect(h.identityProbeCalls).toBe(0);
     const firstRef = domRefs(started)[0]!;
     expect(firstRef).toMatch(/^@e:/);
 
@@ -4799,85 +4798,105 @@ describe("operate_extract — vault-store response", () => {
   });
 });
 
-describe("operate session — live-profile precondition gate", () => {
-  it("omits the compact-v2 auth-gate text field after probing a profile without Google", async () => {
+describe("operate session — operation-scoped Google gate", () => {
+  it("starts without Google and can reach and fill a checkout form", async () => {
     const canonical = "/tmp/trusty-squire-unit-canonical-empty";
     h.providers = []; // no live session
     h.liveGoogleEmail = null;
+    h.elements = [
+      elem({
+        tag: "input",
+        role: "textbox",
+        labelText: "Shipping name",
+        selector: "#shipping-name",
+      }),
+    ];
     const obs = await startProvisionSession({
-      serviceUrl: "https://app.example.com/",
+      serviceUrl: "https://shop.example.com/checkout",
       profileDir: canonical,
     });
-    expect(obs.needs_user).toBeDefined();
-    expect(obs.needs_user?.wall).toBe("google_session");
-    expect(obs).toMatchObject({ format: "browser-use-dom", stage: "auth", url: "" });
-    expect(obs).not.toHaveProperty("text");
+    expect(obs.needs_user).toBeUndefined();
+    expect(obs).toMatchObject({
+      format: "browser-use-dom",
+      url: "https://shop.example.com/checkout",
+    });
     expect(h.startCalls).toBe(1);
-    expect(h.started).toBe(0); // the rejected profile is closed before handoff
-    expect(h.gotos).toHaveLength(0);
-    expect(h.identityProbeCalls).toBe(1); // one live probe supplies admission and metadata
+    expect(h.started).toBe(1);
+    expect(h.gotos).toEqual(["https://shop.example.com/checkout"]);
+    expect(h.identityProbeCalls).toBe(0);
     expect(h.storageStateReads).toEqual([]);
     expect(h.profileDirs).toEqual([canonical]);
     expect(h.destroyedProfiles).toEqual([]);
     expect(h.storageStateWrites).toEqual([]);
-    await expect(finishProvisionSession(obs.session_id)).resolves.toEqual({
-      session_id: obs.session_id,
-      operation_id: expect.any(String),
-      execution: "completed",
-      mutation: "not_dispatched",
-      cleanup: "closed",
-      url: "",
-      closed: true,
+    await act(obs.session_id, {
+      kind: "type",
+      target: domRefs(obs)[0]!,
+      text: "Ada Lovelace",
     });
+    expect(h.typed).toContainEqual({ selector: "#shipping-name", text: "Ada Lovelace" });
+    await finishProvisionSession(obs.session_id);
   });
 
-  it("uses the supplied real profile without a storage-state handoff", async () => {
+  it("uses the supplied real profile without a startup identity probe or storage-state handoff", async () => {
     const canonical = "/tmp/trusty-squire-unit-canonical-seeded";
-    h.providers = ["google"];
+    h.providers = [];
     const obs = await startProvisionSession({
       serviceUrl: "https://app.example.com/",
       profileDir: canonical,
     });
     expect(obs.needs_user).toBeUndefined();
     expect(h.started).toBe(1);
-    expect(h.identityProbeCalls).toBe(1); // one live probe supplies admission and metadata
+    expect(h.identityProbeCalls).toBe(0);
     expect(h.seededStorageStates).toEqual([undefined]);
     expect(h.profileDirs).toEqual([canonical]);
     await finishProvisionSession(obs.session_id);
     expect(h.destroyedProfiles).toEqual([]);
   });
 
-  it("admits a live Google provider probe without requiring account-email metadata", async () => {
-    h.providers = ["google"];
-    h.liveGoogleEmail = null;
-    const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
-    expect(obs.needs_user).toBeUndefined();
-    await expect(finishProvisionSession(obs.session_id)).resolves.toMatchObject({ closed: true });
-  });
-
-  it("refuses a warm start after Google logout in another session", async () => {
-    const first = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
+  it("returns the unchanged google_session wall when Google OAuth is selected without a live session", async () => {
     h.providers = [];
     h.liveGoogleEmail = null;
-    const second = await startProvisionSession({ serviceUrl: "https://app.example.com/two" });
-    expect(second.needs_user?.wall).toBe("google_session");
-    expect(h.identityProbeCalls).toBe(2);
-    expect(h.gotos).toHaveLength(1);
-    await finishProvisionSession(second.session_id);
-    await finishProvisionSession(first.session_id);
-  });
+    h.elements = [
+      elem({
+        tag: "button",
+        role: "button",
+        visibleText: "Continue with Google",
+        selector: "#google-oauth",
+      }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://app.example.com/login" });
+    expect(h.identityProbeCalls).toBe(0);
 
-  it("refreshes account metadata with one live probe per warm start", async () => {
-    h.liveGoogleEmail = "first@example.com";
-    const first = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
-    expect(first.user_email).toBe("first@example.com");
-    await finishProvisionSession(first.session_id);
-    h.liveGoogleEmail = "second@example.com";
-    const second = await startProvisionSession({ serviceUrl: "https://app.example.com/two" });
-    expect(second.needs_user).toBeUndefined();
-    expect(second.user_email).toBe("second@example.com");
-    expect(h.identityProbeCalls).toBe(2);
-    await finishProvisionSession(second.session_id);
+    const result = await act(started.session_id, {
+      kind: "oauth_login",
+      provider: "google",
+      target: domRefs(started)[0]!,
+    });
+
+    const expected = googleSessionGate([]);
+    expect(expected.ok).toBe(false);
+    if (!expected.ok) expect(result.needs_user).toEqual(expected.needs_user);
+    expect(result).toMatchObject({
+      session_id: started.session_id,
+      format: "browser-use-dom",
+      url: "https://app.example.com/login",
+    });
+    // The wall rides the page as it actually is — the live control map, not a
+    // blank one that claims the page has nothing on it.
+    expect(domRefs(result)).toEqual(domRefs(started));
+    expect(h.identityProbeCalls).toBe(1);
+    expect(h.dispatchTargets).toEqual([]);
+
+    const compact = await act(
+      started.session_id,
+      { kind: "oauth_login", provider: "google", target: domRefs(started)[0]! },
+      undefined,
+      "compact",
+    );
+    expect(compact.needs_user?.wall).toBe("google_session");
+    expect(compact.format).toBe("browser-use-control-query");
+    expect(compact.safe_table?.length).toBeGreaterThan(0);
+    await finishProvisionSession(started.session_id);
   });
 
   it("defers the general observation when the drive loop owns first perception", async () => {
@@ -4896,40 +4915,9 @@ describe("operate session — live-profile precondition gate", () => {
     await finishProvisionSession(started.session_id);
   });
 
-  it("accepts the live provider probe without consulting a snapshot", async () => {
-    const canonical = "/tmp/trusty-squire-unit-canonical-probe-only";
-    h.providers = ["google"];
-    const obs = await startProvisionSession({
-      serviceUrl: "https://app.example.com/",
-      profileDir: canonical,
-    });
-    expect(obs.needs_user).toBeUndefined();
-    expect(h.started).toBe(1);
-    await finishProvisionSession(obs.session_id);
-  });
-
   it("does not create or destroy an ephemeral profile", async () => {
     const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
     expect(h.createdProfiles).toEqual([]);
-    await finishProvisionSession(obs.session_id);
-    expect(h.destroyedProfiles).toEqual([]);
-  });
-
-  it("the connect ceremony's own start passes the gate — the ceremony is what creates the session", async () => {
-    // The round-12 review-1 deadlock: the gate's own remedy (`connect
-    // --force-relogin=google`) is the ceremony itself, so gating the
-    // ceremony start refused every enrolled machine whose profile had no
-    // live Google session — self-referentially, forever. The bypass is
-    // scoped to `withCeremonyStartAdmission`, which only the broker's
-    // ceremony open (`open` with `ceremony: true`) enters; an agent-facing
-    // operate_start never reaches it.
-    h.providers = []; // no live session
-    h.liveGoogleEmail = null;
-    const obs = await withCeremonyStartAdmission(() =>
-      startProvisionSession({ serviceUrl: "https://app.example.com/" }),
-    );
-    expect(obs.needs_user).toBeUndefined();
-    expect(h.started).toBe(1); // a real session, on the shared browser
     await finishProvisionSession(obs.session_id);
     expect(h.destroyedProfiles).toEqual([]);
   });
@@ -5093,6 +5081,72 @@ describe("operate session — await_verification into_slot (T3 fix: OTP never ro
     const res = await awaitVerification(obs.session_id, {});
     expect(res.found).toBe(true);
     expect(res.code).toBe("481920");
+  });
+
+  it("detects the live identity once per session, not once per gated operation", async () => {
+    h.providers = ["google"];
+    h.liveGoogleEmail = "captain@example.test";
+    h.visibleText = "Your verification code is 481920.";
+    const first = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
+
+    expect((await awaitVerification(first.session_id, {})).found).toBe(true);
+    expect((await awaitVerification(first.session_id, {})).found).toBe(true);
+    expect(h.identityProbeCalls).toBe(1);
+
+    const second = await startProvisionSession({ serviceUrl: "https://app.example.com/two" });
+    expect((await awaitVerification(second.session_id, {})).found).toBe(true);
+    expect(h.identityProbeCalls).toBe(2);
+
+    await finishProvisionSession(second.session_id);
+    await finishProvisionSession(first.session_id);
+  });
+
+  it("re-probes the same session after a refusal, so connect clears the wall", async () => {
+    h.providers = [];
+    h.liveGoogleEmail = null;
+    h.visibleText = "Your verification code is 481920.";
+    const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+
+    const refused = await awaitVerification(obs.session_id, {});
+    expect(refused.needs_user?.wall).toBe("google_session");
+    expect(refused.found).toBe(false);
+
+    h.providers = ["google"];
+    h.liveGoogleEmail = "captain@example.test";
+    const retried = await awaitVerification(obs.session_id, {});
+    expect(retried.needs_user).toBeUndefined();
+    expect(retried.found).toBe(true);
+    expect(retried.code).toBe("481920");
+
+    await finishProvisionSession(obs.session_id);
+  });
+
+  it("emits the captured identity email on a later observation, never at start", async () => {
+    h.providers = ["google"];
+    h.liveGoogleEmail = "captain@example.test";
+    const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+    expect(obs).not.toHaveProperty("user_email");
+
+    h.visibleText = "Your verification code is 481920.";
+    const res = await awaitVerification(obs.session_id, {});
+    expect(res.found).toBe(true);
+
+    expect(await observe(obs.session_id)).toMatchObject({ user_email: "captain@example.test" });
+    await finishProvisionSession(obs.session_id);
+  });
+
+  it("returns the unchanged google_session wall before a Gmail read without a live session", async () => {
+    h.providers = [];
+    h.liveGoogleEmail = null;
+    const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+
+    const res = await awaitVerification(obs.session_id, {});
+
+    const expected = googleSessionGate([]);
+    expect(expected.ok).toBe(false);
+    if (!expected.ok) expect(res.needs_user).toEqual(expected.needs_user);
+    expect(res.found).toBe(false);
+    expect(h.utilityTabsOpened).toBe(0);
   });
 
   it("allows an explicit opt-out and a later session-only opt-in", async () => {
@@ -6248,7 +6302,9 @@ describe("operate session — PR3c username/password login (capture-at-login sou
     expect(consolidated.slots.password.length).toBeGreaterThanOrEqual(16);
   });
 
-  it("prepare_login hands back when no user email was captured", async () => {
+  it("prepare_login returns the Google session wall when no live identity can be captured", async () => {
+    h.providers = [];
+    h.liveGoogleEmail = null;
     const obs = await startHarnessProvisionSession({
       browser: new BrowserController(),
       serviceUrl: "https://app.example.com/",
@@ -6257,7 +6313,7 @@ describe("operate session — PR3c username/password login (capture-at-login sou
       operateLoginTool.inputSchema.parse({ session_id: obs.session_id, action: "prepare_signup" }),
       null as unknown as ApiClient,
     )) as { needs_user?: { wall: string; resume: string } };
-    expect(res.needs_user?.wall).toBe("user_email");
+    expect(res.needs_user?.wall).toBe("google_session");
     expect(res.needs_user?.resume).toBe("connect");
   });
 

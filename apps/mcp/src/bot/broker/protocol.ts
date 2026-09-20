@@ -50,18 +50,13 @@ export interface OpenRequest {
   proxy?: string;
   /** A direct drive takes its first perception through the drive snapshot. */
   initialObservation?: "drive";
-  /** This open IS the connect re-auth ceremony. Two things follow from it,
-   * and neither is separately selectable:
-   *
-   * 1. Its start passes the `google_session` admission gate, because the
-   *    ceremony is what creates the live Google session — gating it
-   *    deadlocked every enrolled machine whose profile had none (the gate's
-   *    own remedy, `connect --force-relogin=google`, is the ceremony itself).
-   * 2. It adopts whatever identity the shared browser is already live under
-   *    instead of requesting one. Without that, an open carrying no proxy
-   *    against a proxied Chrome is refused `incompatible_runtime` while other
-   *    sessions live, or recycles the shared Chrome underneath them when none
-   *    do. An explicit `proxy` still wins.
+  /** This open IS the connect re-auth ceremony, and one thing follows from it:
+   * it adopts whatever identity the shared browser is already live under
+   * instead of requesting one. Without that, an open carrying no proxy
+   * against a proxied Chrome is refused `incompatible_runtime` while other
+   * sessions live, or recycles the shared Chrome underneath them when none
+   * do. An explicit `proxy` still wins. The ceremony needs no admission
+   * carve-out: a start is never Google-gated.
    *
    * Nothing else changes: the ceremony still gets a full operator session
    * (the deferred --force-relogin logout drive rides it) and still counts in

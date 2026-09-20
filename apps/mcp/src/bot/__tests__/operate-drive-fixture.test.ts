@@ -27,6 +27,7 @@ import {
   type WireRow,
 } from "../operate-drive.js";
 import { finishProvisionSession, startHarnessProvisionSession } from "../provision-session.js";
+import type { Observation, ProvisionAction } from "../provision-session.js";
 import {
   act,
   observe,
@@ -384,6 +385,45 @@ describe("operate_drive real-browser fixture", () => {
       expect(JSON.stringify(handoff.observation?.safe_table)).toContain("Company");
     } finally {
       if (started !== undefined) await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
+  it("ends the drive on the Google wall an act hands back", async () => {
+    const html = `<main><button id="google">Continue with Google</button></main>`;
+    const { context, started } = await openFixture(html, "google-wall.test");
+    try {
+      const dependencies = deps(async (_api, _state, questions) => jevFromQuestions(questions));
+      const actions: ProvisionAction[] = [];
+      dependencies.act = async (sessionId, action) => {
+        actions.push(action);
+        return {
+          session_id: sessionId,
+          format: "browser-use-control-query",
+          stage: "auth",
+          url: "https://google-wall.test/",
+          safe_table: [],
+          needs_user: {
+            wall: "google_session",
+            message: "No live Google session — reconnect with `connect` and retry.",
+            resume: "connect",
+          },
+        } as Observation;
+      };
+      const result = await runOperateDrive(
+        { session_id: started.session_id, goal: "sign in with Google" },
+        api(),
+        undefined,
+        dependencies,
+      );
+      expect(actions).toEqual([
+        expect.objectContaining({ kind: "oauth_login", provider: "google" }),
+      ]);
+      expect(result.status).toBe("needs_value");
+      expect(result.field).toBe("google_session");
+      expect(result.question).toContain("connect");
+    } finally {
+      await finishProvisionSession(started.session_id);
       await context.close();
     }
   }, 30_000);
