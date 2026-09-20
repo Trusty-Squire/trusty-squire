@@ -1830,6 +1830,50 @@ describe("form-fill assignment helpers", () => {
         "complete email verification and create an API key",
       ),
     ).toEqual({ kind: "link" });
+    expect(
+      inboxSpecialPlan(
+        [
+          ["@e:email", "t", "Email|f=email"],
+          ["@e:pw", "t", "Password|f=password"],
+          ["@e:go", "b", "Create account"],
+          ["@e:pick", "combobox", "Country"],
+        ],
+        "stuck",
+        true,
+        0,
+        "https://app.example.test/signup/confirm",
+        "",
+        "complete email verification and create an API key",
+      ),
+    ).toEqual({ kind: "link" });
+    expect(
+      inboxSpecialPlan(
+        [
+          ["@e:email", "t", "Email|f=email"],
+          ["@e:pw", "t", "Password|f=password"],
+          ["@e:go", "b", "Create account"],
+        ],
+        "wait",
+        true,
+        0,
+        "https://app.example.test/signup",
+        "",
+        "complete email verification and create an API key",
+      ),
+    ).toEqual({ kind: "link" });
+    expect(
+      inboxSpecialPlan(
+        [
+          ["@e:email", "t", "Email|f=email"],
+          ["@e:pw", "t", "Password|f=password"],
+          ["@e:pick", "combobox", "Country"],
+        ],
+        "stuck",
+        true,
+        0,
+        "https://app.example.test/welcome",
+      ),
+    ).toBeUndefined();
     const checkEmail: WireRow[] = [["@e:h", "h1", "Check your email"]];
     const inboxSets = driveTargetSets(
       checkEmail,
