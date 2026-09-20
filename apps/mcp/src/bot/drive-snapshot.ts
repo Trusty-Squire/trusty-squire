@@ -50,6 +50,8 @@ export interface DriveSnapshot {
   title: string;
   headings: string[];
   text: string;
+  /** Live-region / aria-invalid descriptions, even when they just became visible. */
+  notices?: string[];
   fingerprint: string;
   documentEpoch: string;
   elements: DriveSnapshotElement[];
@@ -74,6 +76,7 @@ type DriveInPageSnapshot = {
   title: string;
   headings: string[];
   text: string;
+  notices: string[];
   fingerprint: string;
   documentEpoch: string;
   elements: DriveSnapshotElement[];
@@ -244,6 +247,9 @@ export function snapshotToObservation(
     semantic: {
       title: snapshot.title,
       headings: snapshot.headings,
+      ...(snapshot.notices !== undefined && snapshot.notices.length > 0
+        ? { blockers: snapshot.notices.map((text) => ({ kind: "validation" as const, text })) }
+        : {}),
     },
   };
 }
@@ -652,7 +658,37 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
     }
     node = walker.nextNode();
   }
-  const text = words.join("\n").slice(0, 6000);
+  const notices: string[] = [];
+  const seenNotice = new Set<string>();
+  const addNotice = (raw: string): void => {
+    const value = raw.replace(/\s+/g, " ").trim();
+    if (value.length === 0) return;
+    const key = value.toLowerCase();
+    if (seenNotice.has(key)) return;
+    seenNotice.add(key);
+    notices.push(value);
+  };
+  for (const el of Array.from(
+    document.querySelectorAll(
+      '[role="alert"],[role="status"],[aria-live]:not([aria-live="off"])',
+    ),
+  )) {
+    if (!visible(el)) continue;
+    addNotice(el.textContent ?? "");
+  }
+  for (const el of Array.from(document.querySelectorAll("[aria-invalid='true']"))) {
+    const ids = (el.getAttribute("aria-describedby") ?? "").split(/\s+/);
+    for (const id of ids) {
+      if (id.length === 0) continue;
+      const desc = document.getElementById(id);
+      if (desc === null || !visible(desc)) continue;
+      addNotice(desc.textContent ?? "");
+    }
+  }
+  const text = [notices.join("\n"), words.join("\n")]
+    .filter((part) => part.length > 0)
+    .join("\n")
+    .slice(0, 6000);
   const valueParts = elements.map((element) => {
     const bits = [element.ref, element.role, element.label];
     if (element.value !== undefined) bits.push(element.value);
@@ -671,6 +707,7 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
     title: document.title,
     headings,
     text,
+    notices,
     fingerprint,
     documentEpoch: `${performance.timeOrigin}|${location.href}`,
     elements,
@@ -706,6 +743,7 @@ export async function captureFrameSnapshot(
       title: "",
       headings: [],
       text: "",
+      notices: [],
       fingerprint: "",
       documentEpoch: "",
       elements: [],
@@ -724,6 +762,7 @@ export function mergeSnapshots(parts: readonly DriveSnapshot[]): DriveSnapshot {
       title: "",
       headings: [],
       text: "",
+      notices: [],
       fingerprint: "",
       documentEpoch: "",
       elements: [],
@@ -739,12 +778,23 @@ export function mergeSnapshots(parts: readonly DriveSnapshot[]): DriveSnapshot {
     .map((part) => part.text)
     .filter((part) => part.length > 0)
     .join("\n");
+  const notices: string[] = [];
+  const seenNotice = new Set<string>();
+  for (const part of parts) {
+    for (const notice of part.notices ?? []) {
+      const key = notice.toLowerCase();
+      if (notice.length === 0 || seenNotice.has(key)) continue;
+      seenNotice.add(key);
+      notices.push(notice);
+    }
+  }
   const fingerprint = parts.map((part) => part.fingerprint).join("\n---\n");
   return {
     url: main.url,
     title: main.title,
     headings,
     text,
+    ...(notices.length > 0 ? { notices } : {}),
     fingerprint,
     documentEpoch: main.documentEpoch,
     elements,

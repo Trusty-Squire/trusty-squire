@@ -186,6 +186,89 @@ const CAPTCHA_GATE_HTML = `<!doctype html><meta charset="utf-8"><title>Gate widg
   });
 </script>`;
 
+const CAPTCHA_CONSUMED_MESSAGE_HTML = `<!doctype html><meta charset="utf-8"><title>Consumed token</title>
+<main>
+  <h1>Create account</h1>
+  <p id="status">Ready</p>
+  <form id="f">
+    <label>Email <input id="email" name="email" type="email"></label>
+    <iframe id="challenge" title="image challenge" src="about:blank" width="300" height="80"></iframe>
+    <button type="button" id="continue">Continue</button>
+  </form>
+  <p id="msg" hidden></p>
+</main>
+<script>
+  window.consumeDeliveredToken = function () {
+    const email = document.getElementById("email");
+    const btn = document.getElementById("continue");
+    const msg = document.getElementById("msg");
+    email.disabled = true;
+    btn.disabled = true;
+    btn.textContent = "Creating your account";
+    msg.hidden = false;
+    msg.setAttribute("role", "alert");
+    msg.textContent = "This email address has been used to sign up too recently.";
+  };
+  document.getElementById("continue").addEventListener("click", () => {
+    const email = document.getElementById("email");
+    const btn = document.getElementById("continue");
+    if (!email.value) return;
+    if (btn.dataset.consumed === "1") return;
+    btn.disabled = true;
+    btn.dataset.gated = "1";
+  });
+</script>`;
+
+const DROPPED_LAST_CHAR_HTML = `<!doctype html><meta charset="utf-8"><title>Dropped last char</title>
+<main>
+  <h1>Create account</h1>
+  <form id="f">
+    <label>First name <input id="first" name="first_name"></label>
+    <label>Email <input id="email" name="email" type="email"></label>
+    <button type="button" id="continue" onclick="
+      const first = document.getElementById('first');
+      const email = document.getElementById('email');
+      if (!first.value || !email.value) return;
+      if (first.value !== 'Squire') return;
+      document.querySelector('main').innerHTML = '<p id=done>Account created for '+first.value+'</p>';
+    ">Continue</button>
+  </form>
+</main>
+<script>
+  const first = document.getElementById("first");
+  let dropped = false;
+  first.addEventListener("input", () => {
+    if (dropped || first.value.length === 0) return;
+    dropped = true;
+    queueMicrotask(() => {
+      if (first.value.length > 0) first.value = first.value.slice(0, -1);
+    });
+  });
+</script>`;
+
+const SLOW_SUBMIT_NEXT_HTML = `<!doctype html><meta charset="utf-8"><title>Slow submit</title>
+<main>
+  <h1>Create account</h1>
+  <form id="f">
+    <label>Email <input id="email" name="email" type="email"></label>
+    <iframe id="challenge" title="image challenge" src="about:blank" width="300" height="80"></iframe>
+    <button type="button" id="continue">Continue</button>
+  </form>
+</main>
+<script>
+  document.getElementById("continue").addEventListener("click", () => {
+    const email = document.getElementById("email");
+    const btn = document.getElementById("continue");
+    if (!email.value) return;
+    email.disabled = true;
+    btn.disabled = true;
+    btn.textContent = "Creating your account";
+    setTimeout(() => {
+      document.querySelector("main").innerHTML = "<p id=next>Check your email</p>";
+    }, 3000);
+  });
+</script>`;
+
 // A payment settling behind a blank processor screen: no rows, ever.
 const BLANK_PROCESSOR_HTML = `<!doctype html><meta charset="utf-8"><title>Processing</title>
 <main></main>`;
@@ -1815,6 +1898,182 @@ describe("operate_drive real-browser fixture", () => {
       expect(handoff.status).toBe("complete");
       expect(handoff.reason ?? "").not.toMatch(/gate widget/);
       expect(await page.locator("#done").count()).toBe(1);
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 60_000);
+
+  it("finishes with the page message after a delivered captcha, without a second solve", async () => {
+    const host = "captcha-consumed.test";
+    const { context, page, started } = await openFixture(CAPTCHA_CONSUMED_MESSAGE_HTML, host);
+    try {
+      const solverCalls: string[] = [];
+      const dependencies = deps(async (_api, _state, questions) => {
+        const typeKeys = Object.keys(choiceCriteria(questions.TYPE_TEXT_target));
+        if (typeKeys.length > 0) return jevFromQuestions(questions);
+        const clickCriteria = choiceCriteria(questions.CLICK_target);
+        const continueKey = Object.keys(clickCriteria).find((key) =>
+          (clickCriteria[key] ?? "").toLowerCase().includes("continue"),
+        );
+        const opKeys = Object.keys(choiceCriteria(questions.operation));
+        if (continueKey !== undefined) {
+          return {
+            attempts: 1,
+            elapsedMs: 12,
+            result: {
+              answers: {
+                operation: {
+                  choice: "CLICK",
+                  confidence: 0.93,
+                  probabilities: peaked(opKeys, "CLICK"),
+                },
+                CLICK_target: {
+                  choice: continueKey,
+                  confidence: 0.93,
+                  probabilities: peaked(Object.keys(clickCriteria), continueKey),
+                },
+              },
+            },
+          };
+        }
+        return jevFromQuestions(questions, true);
+      });
+      dependencies.attemptCaptchaAutoSolve = async () => {
+        solverCalls.push("solve");
+        await page.evaluate(() => {
+          const consume = (window as unknown as { consumeDeliveredToken?: () => void })
+            .consumeDeliveredToken;
+          consume?.();
+        });
+        return "injected";
+      };
+      const handoff = await runOperateDrive(
+        {
+          session_id: started.session_id,
+          goal: "create an account",
+          facts: { email: "ada@fixture.test" },
+          max_seconds: 20,
+        },
+        api(),
+        undefined,
+        dependencies,
+      );
+      expect(solverCalls).toEqual(["solve"]);
+      expect(handoff.status).not.toBe("budget");
+      expect(handoff.reason ?? "").toContain(
+        "This email address has been used to sign up too recently.",
+      );
+      expect(handoff.seconds).toBeLessThan(15);
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 60_000);
+
+  it("retypes a field whose first entry dropped the last character", async () => {
+    const { context, page, started } = await openFixture(DROPPED_LAST_CHAR_HTML, "typed-retry.test");
+    try {
+      const dependencies = deps(async (_api, _state, questions) => {
+        if ((await page.locator("#done").count()) > 0) return jevFromQuestions(questions, true);
+        const typeKeys = Object.keys(choiceCriteria(questions.TYPE_TEXT_target));
+        if (typeKeys.length > 0) return jevFromQuestions(questions);
+        const clickCriteria = choiceCriteria(questions.CLICK_target);
+        const continueKey = Object.keys(clickCriteria).find((key) =>
+          (clickCriteria[key] ?? "").toLowerCase().includes("continue"),
+        );
+        const opKeys = Object.keys(choiceCriteria(questions.operation));
+        if (continueKey !== undefined) {
+          return {
+            attempts: 1,
+            elapsedMs: 12,
+            result: {
+              answers: {
+                operation: {
+                  choice: "CLICK",
+                  confidence: 0.93,
+                  probabilities: peaked(opKeys, "CLICK"),
+                },
+                CLICK_target: {
+                  choice: continueKey,
+                  confidence: 0.93,
+                  probabilities: peaked(Object.keys(clickCriteria), continueKey),
+                },
+              },
+            },
+          };
+        }
+        return jevFromQuestions(questions, true);
+      });
+      const handoff = await runOperateDrive(
+        {
+          session_id: started.session_id,
+          goal: "create an account",
+          facts: { first_name: "Squire", email: "ada@fixture.test" },
+          max_seconds: 20,
+        },
+        api(),
+        undefined,
+        dependencies,
+      );
+      expect(handoff.status).toBe("complete");
+      expect(handoff.reason ?? "").not.toMatch(/typed First name/);
+      expect(await page.locator("#done").textContent()).toContain("Squire");
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 60_000);
+
+  it("waits out a slow submit instead of finishing stuck on already_settled", async () => {
+    const { context, page, started } = await openFixture(SLOW_SUBMIT_NEXT_HTML, "slow-submit.test");
+    try {
+      const dependencies = deps(async (_api, _state, questions) => {
+        if ((await page.locator("#next").count()) > 0) return jevFromQuestions(questions, true);
+        const typeKeys = Object.keys(choiceCriteria(questions.TYPE_TEXT_target));
+        if (typeKeys.length > 0) return jevFromQuestions(questions);
+        const clickCriteria = choiceCriteria(questions.CLICK_target);
+        const continueKey = Object.keys(clickCriteria).find((key) =>
+          (clickCriteria[key] ?? "").toLowerCase().includes("continue"),
+        );
+        const opKeys = Object.keys(choiceCriteria(questions.operation));
+        if (continueKey !== undefined) {
+          return {
+            attempts: 1,
+            elapsedMs: 12,
+            result: {
+              answers: {
+                operation: {
+                  choice: "CLICK",
+                  confidence: 0.93,
+                  probabilities: peaked(opKeys, "CLICK"),
+                },
+                CLICK_target: {
+                  choice: continueKey,
+                  confidence: 0.93,
+                  probabilities: peaked(Object.keys(clickCriteria), continueKey),
+                },
+              },
+            },
+          };
+        }
+        return jevFromQuestions(questions, true);
+      });
+      dependencies.attemptCaptchaAutoSolve = async () => "already_settled";
+      const handoff = await runOperateDrive(
+        {
+          session_id: started.session_id,
+          goal: "create an account",
+          facts: { email: "ada@fixture.test" },
+          max_seconds: 20,
+        },
+        api(),
+        undefined,
+        dependencies,
+      );
+      expect(handoff.reason ?? "").not.toMatch(/already_settled/);
+      expect(handoff.status).not.toBe("stuck");
+      expect(await page.locator("#next").count()).toBe(1);
     } finally {
       await finishProvisionSession(started.session_id);
       await context.close();
