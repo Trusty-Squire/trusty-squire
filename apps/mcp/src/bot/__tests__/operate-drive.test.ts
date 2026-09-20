@@ -37,11 +37,15 @@ import {
   operationsForRow,
   mergeFacts,
   nextActionInstructions,
+  operationCriteria,
   observationFingerprint,
   pageTextFromObservation,
   peakedProbabilities,
   requiredFactComboboxAction,
   requiredFillableMissingFact,
+  applyReleasedCardFacts,
+  isExpiryRow,
+  isCardholderNameRow,
   selectTargetKey,
   selectTargets,
   selectCandidates,
@@ -345,6 +349,17 @@ describe("decideAfterJev stop reasons", () => {
     ).toEqual({ kind: "stuck", confidence: 0.7 });
   });
 
+  it("waits instead of sticking when BLOCKED is chosen on an empty snapshot", () => {
+    const emptyOps = operationCriteria(["WAIT", "DONE", "BLOCKED"]);
+    expect(
+      decideAfterJev({
+        ...base,
+        rows: [],
+        answers: { operation: valid("BLOCKED", emptyOps, 0.54) },
+      }),
+    ).toEqual({ kind: "wait", confidence: 0.54 });
+  });
+
   it("returns wait when Jev picks WAIT", () => {
     expect(
       decideAfterJev({
@@ -357,6 +372,51 @@ describe("decideAfterJev stop reasons", () => {
   it("returns needs_value naming the field label when a required fillable has no matching fact", () => {
     const missingFacts = { first_name: "Ada" };
     expect(requiredFillableMissingFact(ROWS, missingFacts, false)?.ref).toBe("@e:email");
+  });
+
+  it("does not treat a later-stage expiry field as a missing fact while card_ref is present", () => {
+    const expiry: WireRow = ["@e:exp", "t", "Expiration date (MM / YY)|s=r"];
+    expect(isExpiryRow(expiry)).toBe(true);
+    expect(
+      requiredFillableMissingFact([expiry, EMAIL], { email: "a@b.test", card_ref: "card-1" }, true)
+        ?.ref,
+    ).toBeUndefined();
+    expect(requiredFillableMissingFact([expiry], {}, false)?.ref).toBe("@e:exp");
+  });
+
+  it("does not treat a later-stage name-on-card field as a missing fact while card_ref is present", () => {
+    const cardName: WireRow = ["@e:ncard", "t", "Name on card|s=r"];
+    expect(isCardholderNameRow(cardName)).toBe(true);
+    expect(
+      requiredFillableMissingFact([cardName, EMAIL], { email: "a@b.test", card_ref: "card-1" }, true)
+        ?.ref,
+    ).toBeUndefined();
+    expect(requiredFillableMissingFact([cardName], {}, false)?.ref).toBe("@e:ncard");
+  });
+
+  it("does not offer name-on-card as fillable until the card is released", () => {
+    const cardName: WireRow = ["@e:ncard", "t", "Name on card|s=r"];
+    const facts = { email: "a@b.test", name: "Ada Lovelace", card_ref: "card-1" };
+    expect(fillableCandidates([cardName, EMAIL], facts, true).map((row) => row.ref)).toEqual([
+      "@e:email",
+    ]);
+    expect(
+      fillableCandidates([cardName, EMAIL], { ...facts, exp_month: "12" }, true).map(
+        (row) => row.ref,
+      ),
+    ).toEqual(["@e:ncard", "@e:email"]);
+  });
+
+  it("copies released card public fields so expiry can be typed after inject", () => {
+    expect(
+      applyReleasedCardFacts({ email: "a@b.test" }, { exp_month: "12", exp_year: "2030", name: "Ada" }),
+    ).toEqual({
+      email: "a@b.test",
+      exp_month: "12",
+      exp_year: "2030",
+      name: "Ada",
+      date: "12/30",
+    });
   });
 
   it("acts on a validated reversible pick with no confidence floor", () => {

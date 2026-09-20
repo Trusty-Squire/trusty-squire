@@ -51,6 +51,22 @@ const SIGNUP_HTML = `<!doctype html><meta charset="utf-8"><title>Signup fixture<
 const NOOP_HTML = `<!doctype html><meta charset="utf-8"><title>Noop fixture</title>
 <main><button id="noop">Do nothing</button><p id="status">idle</p></main>`;
 
+const MULTI_STAGE_CHECKOUT_HTML = `<!doctype html><meta charset="utf-8"><title>Checkout fixture</title>
+<main>
+  <h1>Checkout</h1>
+  <form id="f">
+    <label>Email <input id="email" name="email" required></label>
+    <label>First name <input id="first" name="first_name" required></label>
+    <button type="button" id="continue" onclick="
+      const email = document.querySelector('#email').value;
+      const first = document.querySelector('#first').value;
+      if (!email || !first) return;
+      document.querySelector('main').innerHTML =
+        '<label>Card number <input id=pan name=cardnumber></label><p id=stage>payment</p>';
+    ">Continue</button>
+  </form>
+</main>`;
+
 const GROWING_HTML = `<!doctype html><meta charset="utf-8"><title>Growing</title>
 <main><a href="#keep">Keep</a><div id="sink"></div></main>
 <script>
@@ -331,6 +347,48 @@ describe("operate_drive real-browser fixture", () => {
       expect(JSON.stringify(handoff.observation?.safe_table)).toContain("Company");
     } finally {
       if (started !== undefined) await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
+  it("advances a multi-stage purchase goal when later-stage card fields are not yet present", async () => {
+    const { context, page, started } = await openFixture(
+      MULTI_STAGE_CHECKOUT_HTML,
+      "multi-stage-checkout.test",
+    );
+    try {
+      const dependencies = deps(async (_api, _state, questions) => jevFromQuestions(questions));
+      dependencies.injectCard = async () => ({
+        status: "pending_approval",
+        approval_url: "https://trustysquire.ai/pay/fixture",
+      });
+      const result = await runOperateDrive(
+        {
+          session_id: started.session_id,
+          goal:
+            "Buy one item: fill the contact details, pay with the saved card, and stop when the order is confirmed",
+          facts: {
+            email: "ada@fixture.test",
+            first_name: "Ada",
+            card_ref: "card-1",
+            merchant: "fixture.test",
+          },
+          max_steps: 8,
+        },
+        api(),
+        undefined,
+        dependencies,
+      );
+      expect(result.status).not.toBe("stuck");
+      expect(result.trajectory.some((step) => step.action === "type")).toBe(true);
+      const emailStillPresent = (await page.locator("#email").count()) > 0;
+      if (emailStillPresent) {
+        expect(await page.locator("#email").inputValue()).toBe("ada@fixture.test");
+      } else {
+        expect(await page.locator("#stage").textContent()).toBe("payment");
+      }
+    } finally {
+      await finishProvisionSession(started.session_id);
       await context.close();
     }
   }, 30_000);

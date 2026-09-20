@@ -585,6 +585,16 @@ export function isCvvRow(row: WireRow): boolean {
   return /cvv|cvc|cid|security[- ]?code/.test(label);
 }
 
+export function isExpiryRow(row: WireRow): boolean {
+  const hay = `${normalizeKey(fieldNameForRow(row))} ${normalizeKey(readableLabel(row))}`;
+  return /expir|exp_month|exp_year|exp_date|cc_exp/.test(hay);
+}
+
+export function isCardholderNameRow(row: WireRow): boolean {
+  const hay = `${normalizeKey(fieldNameForRow(row))} ${normalizeKey(readableLabel(row))}`;
+  return /name_on_card|cardholder|cc_name|card_name|nameoncard/.test(hay);
+}
+
 export function isGoogleAuthRow(row: WireRow): boolean {
   const label = rowLabel(row).toLowerCase();
   return (
@@ -635,7 +645,16 @@ const FIELD_ALIASES: Record<string, readonly string[]> = {
   email: ["email", "user_email", "login", "username"],
   first_name: ["first_name", "firstname", "first", "given_name"],
   last_name: ["last_name", "lastname", "last", "family_name", "surname", "last-name"],
-  name: ["name", "full_name", "fullname", "cardholder", "cardholder_name"],
+  name: [
+    "name",
+    "full_name",
+    "fullname",
+    "cardholder",
+    "cardholder_name",
+    "name_on_card",
+    "cc_name",
+    "card_name",
+  ],
   company: ["company", "organization", "org", "business"],
   address: ["address", "address1", "line1", "street", "address_line1"],
   address2: ["address2", "line2", "address_line2"],
@@ -741,6 +760,31 @@ export function isPasswordRow(row: WireRow): boolean {
   const field = normalizeKey(fieldNameForRow(row));
   const label = normalizeKey(readableLabel(row));
   return field.includes("password") || label.includes("password");
+}
+
+export function applyReleasedCardFacts(
+  facts: Record<string, string>,
+  card:
+    | {
+        exp_month: string;
+        exp_year: string;
+        name: string;
+      }
+    | undefined,
+): Record<string, string> {
+  if (card === undefined) return facts;
+  const month = card.exp_month.trim();
+  const year = card.exp_year.trim();
+  const name = card.name.trim();
+  const next = { ...facts };
+  if (next.exp_month === undefined && month.length > 0) next.exp_month = month;
+  if (next.exp_year === undefined && year.length > 0) next.exp_year = year;
+  if (next.name === undefined && name.length > 0) next.name = name;
+  if (next.date === undefined && month.length > 0 && year.length > 0) {
+    const yy = year.length === 4 ? year.slice(-2) : year;
+    next.date = `${month.padStart(2, "0")}/${yy}`;
+  }
+  return next;
 }
 
 export function ensureGeneratedFacts(
@@ -1010,6 +1054,16 @@ export function fillableCandidates(
     if (isOffscreenRow(row) && !allowOffscreen) continue;
     if (!includePayment && (isPaymentRow(row) || isCvvRow(row))) continue;
     if (isPaymentRow(row) || isCvvRow(row)) continue;
+    // Cardholder name and expiry are filled from the released card. Offering
+    // them earlier pulls the viewport onto payment while shipping is unfinished
+    // (Shopify one-page checkout) and then offscreen types stale-loop.
+    if (
+      includePayment &&
+      facts.exp_month === undefined &&
+      (isExpiryRow(row) || isCardholderNameRow(row))
+    ) {
+      continue;
+    }
     if (isOtpRow(row) && matchingFactKeys(facts, row).length === 0) continue;
     if (matchingFactKeys(facts, row).length === 0) continue;
     const role = ROLE_LETTERS[row[1]] ?? row[1];
@@ -1222,6 +1276,7 @@ export function requiredFillableMissingFact(
     if (isOffscreenRow(row) && !allowOffscreen) continue;
     if (isPaymentRow(row) || isCvvRow(row) || isOtpRow(row) || allowsGoalValueAssignment(row))
       continue;
+    if (includePayment && (isExpiryRow(row) || isCardholderNameRow(row))) continue;
     if (!isRequiredRow(row)) continue;
     if (matchingFactKeys(facts, row).length > 0) continue;
     const role = ROLE_LETTERS[row[1]] ?? row[1];
@@ -1760,7 +1815,13 @@ export function decideAfterJev(input: {
   );
   const decideChosen = (choice: DriveOperation, confidence: number): DriveDecision => {
     if (choice === "DONE") return { kind: "complete", confidence };
-    if (choice === "BLOCKED") return { kind: "stuck", confidence };
+    if (choice === "BLOCKED") {
+      // An empty snapshot is unsettled perception (Shopify checkout after a
+      // same-tab navigation is the live case), not proof the goal cannot move.
+      // WAIT re-snapshots; BLOCKED remains when elements are listed.
+      if (input.rows.length === 0) return { kind: "wait", confidence };
+      return { kind: "stuck", confidence };
+    }
     if (choice === "WAIT") return { kind: "wait", confidence };
 
     const targetName = targetQuestionName(choice);
@@ -2705,6 +2766,7 @@ async function driveLoop(input: {
   let steps = 0;
   const comboboxAttempts = new Set<string>();
   let comboboxMustYield = false;
+  let emptySnapshotWaits = 0;
 
   const finish = (
     status: DriveStatus,
@@ -3157,7 +3219,10 @@ async function driveLoop(input: {
       });
     }
     const includePayment = drive.facts.card_ref !== undefined;
-    drive.facts = ensureGeneratedFacts(rows, drive.facts);
+    drive.facts = ensureGeneratedFacts(
+      rows,
+      applyReleasedCardFacts(drive.facts, session.releasedPaymentCard?.card),
+    );
     const pageUrl = observation.url;
     const missing = requiredFillableMissingFact(
       rows,
@@ -3200,6 +3265,23 @@ async function driveLoop(input: {
         },
       });
     }
+
+    if (rows.length === 0) {
+      if (emptySnapshotWaits >= 3) {
+        return finish("stuck", {
+          question: {
+            question: nextActionInstructions(drive.goal),
+            options: actionCriteria(rows, includePayment),
+          },
+        });
+      }
+      emptySnapshotWaits += 1;
+      const applied = await applyDecision({ kind: "wait", confidence: 1 });
+      if (applied !== "continue") return applied;
+      steps += 1;
+      continue;
+    }
+    emptySnapshotWaits = 0;
 
     const fields = paymentFields(rows);
     // A pending approval records an inject_card trajectory step, so trajectory
