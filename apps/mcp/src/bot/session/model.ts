@@ -230,6 +230,8 @@ export interface SessionDriveState {
   submittedThisDrive?: boolean;
   /** Already tried logout+restart for a pre-existing session. */
   preexistingRestarted?: boolean;
+  /** Next snapshot should look for an unmasked secret after reveal/show/copy. */
+  pendingRevealScan?: boolean;
 }
 
 // The last extracted elements are resealed on every retain so each retained

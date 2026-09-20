@@ -132,6 +132,12 @@ import {
   isReissuedRef,
   isCreateEntryRow,
   listedItemRows,
+  isDeeperDestination,
+  isRevealOrCopyRow,
+  pageShowsRevealedKey,
+  revealedSecretMarkerRow,
+  attachRevealedSecretMarker,
+  redactSecretShapedTokens,
   isEntityNameRow,
   isLogoutRow,
   alreadySignedInReason,
@@ -1946,13 +1952,23 @@ describe("form-fill assignment helpers", () => {
     ).toBe(false);
     expect(
       pageSuggestsInboxWait(
-        [["@e:hint", "l", "Check your email"]],
+        [["@e:h", "h1", "Check your email"]],
         "https://app.example.test/signup",
       ),
     ).toBe(true);
-    expect(pageSuggestsInboxWait([], "https://app.example.test/email/verify")).toBe(true);
-    expect(pageSuggestsInboxWait([], "https://app.example.test/verifications")).toBe(true);
-    expect(pageSuggestsInboxWait([], "https://app.example.test/signup/confirm")).toBe(true);
+    expect(
+      pageSuggestsInboxWait([], "https://app.example.test/email/verify", "Check your email"),
+    ).toBe(true);
+    expect(pageSuggestsInboxWait([], "https://app.example.test/email/verify")).toBe(false);
+    expect(pageSuggestsInboxWait([], "https://app.example.test/verifications")).toBe(false);
+    expect(pageSuggestsInboxWait([], "https://app.example.test/signup/confirm")).toBe(false);
+    expect(
+      pageSuggestsInboxWait(
+        [["@e:verify", "l", "Verify email|u=https://app.example.test/verifications"]],
+        "https://app.example.test/verifications",
+        "Identity verifications",
+      ),
+    ).toBe(false);
     expect(inboxSpecialPlan([...ROWS, otp], "stuck", true, 0)).toEqual({
       kind: "otp",
       target: "@e:code",
@@ -2034,7 +2050,7 @@ describe("form-fill assignment helpers", () => {
         true,
         0,
         "https://app.example.test/signup/confirm",
-        "",
+        "Check your email",
         "complete email verification and create an API key",
         true,
       ),
@@ -3240,6 +3256,35 @@ describe("post-confirmation navigation", () => {
     expect(isCreateEntryRow(create)).toBe(true);
     expect(isCreateEntryRow(app)).toBe(false);
     expect(listedItemRows([app, create], url).map((row) => row[0])).toEqual(["@e:one"]);
+    const settingsUrl = "https://app.example.test/settings";
+    const nested: WireRow = ["@e:one", "l", "payments-api|u=https://app.example.test/settings/apps/one"];
+    const sibling: WireRow = ["@e:rep", "l", "Reputation|u=https://app.example.test/reputation"];
+    expect(isDeeperDestination("https://app.example.test/settings/apps/one", settingsUrl)).toBe(true);
+    expect(isDeeperDestination("https://app.example.test/reputation", settingsUrl)).toBe(false);
+    expect(listedItemRows([nested, sibling], settingsUrl).map((row) => row[0])).toEqual(["@e:one"]);
+    expect(isRevealOrCopyRow(["@e:show", "b", "Reveal"])).toBe(true);
+    expect(isRevealOrCopyRow(["@e:copy", "b", "Copy"])).toBe(true);
+    expect(isRevealOrCopyRow(["@e:acct", "tb", "Account"])).toBe(false);
+    const marker = revealedSecretMarkerRow(20);
+    expect(pageShowsRevealedKey([marker])).toBe(true);
+    expect(pageShowsRevealedKey([["@e:show", "b", "Reveal"]], "••••••••••••")).toBe(false);
+    expect(redactSecretShapedTokens("prefix sk_live_fixturekey01 suffix").text).toBe(
+      "prefix @key-value suffix",
+    );
+    expect(redactSecretShapedTokens("prefix sk_live_fixturekey01 suffix").lengths).toEqual([20]);
+    const attached = attachRevealedSecretMarker(
+      {
+        session_id: "s",
+        url: "https://app.example.test/apps/one",
+        dom: "API key sk_live_fixturekey01",
+        semantic: { title: "payments-api", headings: ["payments-api"] },
+      },
+      [["@e:show", "b", "Reveal"]],
+    );
+    expect(attached.attached).toBe(true);
+    expect(pageShowsRevealedKey(attached.rows)).toBe(true);
+    expect(JSON.stringify(attached.observation)).not.toContain("sk_live_fixturekey01");
+    expect(JSON.stringify(attached.rows)).toMatch(/@key-value\|secret=1\|len=20/);
     expect(isEntityNameRow(name)).toBe(true);
     expect(matchingFactKeys({ company: "Acme" }, name)).toContain("company");
     const sets = driveTargetSets(
@@ -3302,6 +3347,28 @@ describe("post-confirmation navigation", () => {
         pageUrl: "https://app.example.test/dashboard",
         pageText: "Dashboard",
         goal: "use Continue with Google with the account already signed in to this browser",
+        submittedThisDrive: false,
+      }),
+    ).toBe(false);
+    expect(
+      pageLooksLikeEmailVerification(
+        [
+          ["@e:out", "l", "Log out"],
+          ["@e:list", "l", "Requests"],
+        ],
+        "https://app.example.test/verifications",
+        "Identity verifications",
+      ),
+    ).toBe(false);
+    expect(
+      isPreexistingSessionPage({
+        rows: [
+          ["@e:out", "l", "Log out"],
+          ["@e:list", "l", "Requests"],
+        ],
+        pageUrl: "https://app.example.test/verifications",
+        pageText: "Identity verifications",
+        goal: "extract an API key",
         submittedThisDrive: false,
       }),
     ).toBe(false);

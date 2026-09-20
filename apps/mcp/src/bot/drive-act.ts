@@ -10,6 +10,7 @@ export const DRIVE_SETTLE_MS = 50;
 export const DRIVE_COMBOBOX_WAIT_MS = 400;
 export const DRIVE_OVERLAY_REFRESH_WAIT_MS = 2000;
 export const DRIVE_NAVIGATION_WAIT_MS = 300;
+export const DRIVE_IN_PAGE_SETTLE_MS = 800;
 
 export type DriveActTimings = {
   guardScriptMs: number;
@@ -828,6 +829,65 @@ export async function pageFingerprintOf(page: Page): Promise<string> {
 export function documentOriginOf(epoch: string): string {
   const bar = epoch.indexOf("|");
   return bar === -1 ? epoch : epoch.slice(0, bar);
+}
+
+/** After a same-URL click, wait until the document fingerprint changes. */
+export async function waitForInPageChange(
+  page: Page,
+  beforeFingerprint: string,
+  capMs: number = DRIVE_IN_PAGE_SETTLE_MS,
+): Promise<boolean> {
+  if (beforeFingerprint.length === 0) return false;
+  try {
+    return await evaluateBound(
+      page,
+      async ({ before, cap }) => {
+        const fingerprint = (): string => {
+          const text = document.body?.innerText.slice(0, 6000) ?? "";
+          const controls = Array.from<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>(
+            document.querySelectorAll("input,select,textarea"),
+          )
+            .map((element) => `${element.tagName}:${element.type}:${element.value}`)
+            .join("\n");
+          return [text, controls].join("\n").trim();
+        };
+        if (fingerprint() !== before) return true;
+        return await new Promise<boolean>((resolve) => {
+          let frame = 0;
+          let finished = false;
+          const finish = (changed: boolean): void => {
+            if (finished) return;
+            finished = true;
+            clearTimeout(timer);
+            cancelAnimationFrame(frame);
+            observer.disconnect();
+            resolve(changed);
+          };
+          const timer = setTimeout(() => finish(false), cap);
+          const observer = new MutationObserver(() => {
+            if (fingerprint() !== before) finish(true);
+          });
+          observer.observe(document.documentElement, {
+            subtree: true,
+            childList: true,
+            characterData: true,
+            attributes: true,
+          });
+          const poll = (): void => {
+            if (fingerprint() !== before) {
+              finish(true);
+              return;
+            }
+            frame = requestAnimationFrame(poll);
+          };
+          frame = requestAnimationFrame(poll);
+        });
+      },
+      { before: beforeFingerprint, cap: capMs },
+    );
+  } catch {
+    return false;
+  }
 }
 
 export async function waitForNavigationIdle(page: Page, beforeFingerprint: string): Promise<void> {
