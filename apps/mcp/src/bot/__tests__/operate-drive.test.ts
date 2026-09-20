@@ -44,7 +44,6 @@ import {
   requiredFactComboboxAction,
   requiredFactSelectAction,
   requiredFactTypeAction,
-  cardReleaseBlockingFills,
   isRequiredRow,
   requiredFillableMissingFact,
   applyReleasedCardFacts,
@@ -520,17 +519,74 @@ describe("decideAfterJev stop reasons", () => {
     expect(fillableCandidates([phone], facts, true, [], checkout).map((row) => row.ref)).toEqual([
       "@e:phone",
     ]);
-    expect(requiredFactTypeAction([phone], facts, [], checkout)).toBeUndefined();
-    expect(cardReleaseBlockingFills([phone], facts, [], checkout)).toEqual([]);
+    expect(requiredFactTypeAction([phone], facts, [], checkout)).toEqual({
+      target: "@e:phone",
+      text: "2125550100",
+    });
   });
 
-  it("does not hold the card for an optional offscreen phone once required fills match", () => {
+  it("holds the card for an optional offscreen phone until the fact is typed", () => {
     const email: WireRow = ["@e:email", "t", "Email|f=email|s=r|n=a@b.test"];
     const state: WireRow = ["@e:state", "s", "State|f=state|s=r|a=picker|n=NY"];
     const phone: WireRow = ["@e:phone", "t", "Phone (optional)|f=phone|v=offscreen"];
+    const rows = [email, state, phone];
     const facts = { email: "a@b.test", state: "NY", phone: "2125550100", card_ref: "card-1" };
     const checkout = "https://shop.example/checkout";
-    expect(cardReleaseBlockingFills([email, state, phone], facts, [], checkout)).toEqual([]);
+    // The gate waits on this set. Releasing the card while a delivery field is
+    // still pending means the address is edited afterwards, which re-costs the
+    // order and remounts the card frames.
+    expect(fillableCandidates(rows, facts, true, [], checkout).map((row) => row.ref)).toEqual([
+      "@e:phone",
+    ]);
+    expect(requiredFactTypeAction(rows, facts, [], checkout)).toEqual({
+      target: "@e:phone",
+      text: "2125550100",
+    });
+    // Once typed the row leaves the set and the card may be released.
+    expect(fillableCandidates(rows, facts, true, ["@e:phone"], checkout)).toEqual([]);
+  });
+
+  it("leaves a country picker on its geo default alone when no country fact exists", () => {
+    const country: WireRow = ["@e:country", "s", "Country/Region|f=state|s=r|a=picker|n=US"];
+    const facts = { state: "NY", zip: "10001", card_ref: "card-1" };
+    // Shopify serializes Country/Region as f=state; the picker must not take
+    // the state fact, and it is not a missing value either — the merchant's
+    // default is already correct, so the drive keeps moving.
+    expect(matchingFactKeys(facts, country)).toEqual([]);
+    expect(requiredFillableMissingFact([country], facts)?.ref).toBeUndefined();
+    expect(requiredFactSelectAction([country], facts)).toBeUndefined();
+  });
+
+  it("still reports a required empty control with no matching fact", () => {
+    const empty: WireRow = ["@e:country", "s", "Country/Region|f=state|s=r|a=picker"];
+    const facts = { state: "NY", card_ref: "card-1" };
+    expect(requiredFillableMissingFact([empty], facts)?.ref).toBe("@e:country");
+  });
+
+  it("gives a country picker the country fact when one is supplied", () => {
+    const country: WireRow = ["@e:country", "s", "Country/Region|f=state|s=r|a=picker|n=US"];
+    const facts = { state: "NY", country: "Canada" };
+    expect(matchingFactKeys(facts, country)).toEqual(["country"]);
+    expect(requiredFactSelectAction([country], facts)).toEqual({
+      target: "@e:country",
+      text: "Canada",
+    });
+  });
+
+  it("reads an unusually worded card expiry, but not another document's", () => {
+    const facts = applyReleasedCardFacts(
+      { card_ref: "card-1" },
+      { exp_month: "12", exp_year: "2030", name: "Ada" },
+    );
+    // "Expires end" is the UK-common card wording.
+    const expiresEnd: WireRow = ["@e:exp", "t", "Expires end|f=date|s=r"];
+    expect(isExpiryRow(expiresEnd)).toBe(true);
+    expect(matchingFactKeys(facts, expiresEnd)).toEqual(["card_expiry"]);
+    for (const label of ["Driver's license expiration", "Passport expiry", "Permit expires"]) {
+      const other: WireRow = ["@e:other", "t", `${label}|f=date|s=r`];
+      expect(isExpiryRow(other)).toBe(false);
+      expect(matchingFactKeys(facts, other)).toEqual([]);
+    }
   });
 
   it("drops a typed field once its current value matches the fact", () => {

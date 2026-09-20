@@ -621,40 +621,26 @@ function rowHay(row: WireRow): string {
   return `${normalizeKey(fieldNameForRow(row))} ${normalizeKey(readableLabel(row))}`;
 }
 
-/** Every word a card expiry control spells, and nothing else.
+/** Expiry controls a checkout can carry that are not the card's.
  *
- * A checkout can carry other expiry dates — a driver's licence, a passport —
- * and a sibling card-number row says nothing about which one this is. What
- * separates them is the control's own wording: a card expiry names only the
- * date and its format, while every other expiry names what it belongs to.
+ * A card expiry names only the date and its format; every other expiry names
+ * the document it belongs to. Matching on the expiry term alone would hand a
+ * licence or passport field the card's MM/YY.
  */
-const CARD_EXPIRY_WORDS = new Set([
-  "card",
-  "cc",
-  "credit",
-  "debit",
-  "date",
-  "exp",
-  "expiry",
-  "expiration",
-  "expires",
-  "mm",
-  "yy",
-  "yyyy",
-  "month",
-  "year",
-  "valid",
-  "thru",
-  "through",
+const NON_CARD_EXPIRY_OWNERS = new Set([
+  "licence",
+  "license",
+  "passport",
+  "permit",
+  "membership",
+  "warranty",
+  "id",
 ]);
 
 export function isExpiryRow(row: WireRow): boolean {
   const hay = rowHay(row);
   if (!/expir|exp_month|exp_year|exp_date|cc_exp|mm_yy/.test(hay)) return false;
-  return hay
-    .split(/[\s_]+/)
-    .filter((word) => word.length > 0)
-    .every((word) => CARD_EXPIRY_WORDS.has(word));
+  return !hay.split(/[\s_]+/).some((word) => NON_CARD_EXPIRY_OWNERS.has(word));
 }
 
 function cardExpiryFactFor(row: WireRow): string {
@@ -802,17 +788,16 @@ export function matchingFactKeys(facts: Record<string, string>, row: WireRow): s
     }
   }
   const label = normalizeKey(readableLabel(row));
-  // Shopify serializes Country/Region as f=state, so the ordinary aliases hand
-  // it the state fact and the drive writes "NY" into the country picker. A
-  // country control takes a country fact or nothing.
-  if (label.includes("country")) {
-    const countryWanted = new Set(aliasKeysFor("country"));
-    return keys.filter((key) => countryWanted.has(normalizeKey(key)));
-  }
   const wanted = new Set<string>([
     ...aliasKeysFor(fieldNameForRow(row)),
     ...aliasKeysFor(readableLabel(row)),
   ]);
+  // Shopify serializes Country/Region as f=state, so the ordinary aliases hand
+  // the country picker the state fact and the drive writes "NY" into it.
+  if (label.includes("country")) {
+    for (const alias of aliasKeysFor("country")) wanted.add(alias);
+    for (const alias of aliasKeysFor("state")) wanted.delete(alias);
+  }
   if (label.includes("last") && label.includes("name")) {
     for (const alias of aliasKeysFor("last_name")) wanted.add(alias);
   }
@@ -1377,8 +1362,8 @@ export function requiredFactSelectAction(
 
 /** The typeable fact the drive must write itself before asking the model.
  *
- * Offscreen rows are skipped here: typing them burns an attempt without a
- * trajectory step, then the same snapshot refuses to retry. Scroll first.
+ * Offscreen rows stay eligible: the act path scrolls them into view before
+ * typing, so a host phone fact is no longer a burned attempt.
  */
 export function requiredFactTypeAction(
   rows: readonly WireRow[],
@@ -1388,31 +1373,12 @@ export function requiredFactTypeAction(
 ): { target: string; text: string } | undefined {
   const includePayment = facts.card_ref !== undefined;
   for (const candidate of fillableCandidates(rows, facts, includePayment, filledRefs, pageUrl)) {
-    if (isSelectRow(candidate.row) || isOffscreenRow(candidate.row)) continue;
+    if (isSelectRow(candidate.row)) continue;
     const fact = firstFactValue(facts, matchingFactKeys(facts, candidate.row));
     if (fact === undefined) continue;
     return { target: candidate.ref, text: fact };
   }
   return undefined;
-}
-
-/** Fills that must be resolved before inject_card.
- *
- * Required fields and fact-backed selects can remount the card frames if they
- * change after release. An optional offscreen phone cannot be a Jev target and
- * must not hold the card — the host fact is still typed after a scroll if the
- * row comes on-screen.
- */
-export function cardReleaseBlockingFills(
-  rows: readonly WireRow[],
-  facts: Record<string, string>,
-  filledRefs: readonly string[] = [],
-  pageUrl: string = "",
-): DriveCandidate[] {
-  const includePayment = facts.card_ref !== undefined;
-  return fillableCandidates(rows, facts, includePayment, filledRefs, pageUrl).filter(
-    (candidate) => isSelectRow(candidate.row) || isRequiredRow(candidate.row),
-  );
 }
 
 export function requiredFactComboboxAction(
@@ -1465,6 +1431,10 @@ export function requiredFillableMissingFact(
     if (facts.card_ref !== undefined && (isExpiryRow(row) || isCardholderNameRow(row))) continue;
     if (!isRequiredRow(row)) continue;
     if (matchingFactKeys(facts, row).length > 0) continue;
+    // The control already carries a value the page accepts — a country picker
+    // on the merchant's geo default is the live case. Nothing is missing, so
+    // handing the goal back for a value would stall a checkout that is fine.
+    if ((rowCurrentValue(row) ?? "").length > 0) continue;
     const role = ROLE_LETTERS[row[1]] ?? row[1];
     return {
       ref: row[0],
@@ -3538,25 +3508,18 @@ async function driveLoop(input: {
       drive.filledRefs,
       pageUrl,
     );
-    const blockingFills = cardReleaseBlockingFills(
-      rows,
-      drive.facts,
-      drive.filledRefs,
-      pageUrl,
-    );
     // inject_card writes only pan/cvv. Expiry, cardholder name, and billing
-    // are typed after release. The gate waits on required fills and
-    // fact-backed dropdowns: resolving a State or Country after the card is
-    // in makes the merchant re-cost the order and remount the card frames,
-    // which wipes the PAN with no path back. An optional offscreen phone the
-    // model cannot even target is not a remount risk and must not hold the
-    // card. A site-search or promo input the drive has no fact for is not a
-    // fill at all and never enters this list.
+    // are typed after release. The gate waits on every fill a fact backs,
+    // dropdowns included: any address edit after the card is in makes the
+    // merchant re-cost the order and remount the card frames, which wipes the
+    // PAN with no path back. An offscreen row still counts — the act path
+    // scrolls it into view. A site-search or promo input the drive has no fact
+    // for is not a fill at all and never enters this list.
     if (
       includePayment &&
       (!alreadyCard || cardRetry) &&
       onCheckout &&
-      blockingFills.length === 0 &&
+      remainingFills.length === 0 &&
       (fields.pan !== undefined || fields.cvv !== undefined)
     ) {
       // Bind the automatic decision to the current snapshot before applying

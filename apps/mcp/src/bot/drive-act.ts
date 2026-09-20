@@ -70,6 +70,21 @@ function inPageGuard(input: {
   if (element === undefined || !element.isConnected) {
     return timed({ ok: false, reason: "detached" });
   }
+  // The snapshot keeps offscreen fillables so the model can name them. The
+  // CDP click/type path then uses viewport coordinates, so an offscreen
+  // target used to fail the occlusion check and burn the attempt. Scroll
+  // first — the same thing a person does — then measure.
+  const before = element.getBoundingClientRect();
+  const inView =
+    before.width > 0 &&
+    before.height > 0 &&
+    before.bottom > 0 &&
+    before.top < innerHeight &&
+    before.right > 0 &&
+    before.left < innerWidth;
+  if (!inView) {
+    element.scrollIntoView({ block: "center", inline: "nearest" });
+  }
   const rect = element.getBoundingClientRect();
   if (rect.width <= 0 || rect.height <= 0) {
     return timed({ ok: false, reason: "no_box" });

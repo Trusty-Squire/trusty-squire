@@ -91,6 +91,7 @@ const MULTI_STAGE_CHECKOUT_HTML = `<!doctype html><meta charset="utf-8"><title>C
         '<label>Delivery date <input id=when></label>' +
         '<label>State <select id=state2 required>' +
         '<option value=""></option><option>NY</option><option>CA</option></select></label>' +
+        '<label>Phone (optional) <input id=tel name=phone></label>' +
         '<label>Search <input id=q type=search></label>' +
         '<p id=stage>payment</p>';
     }, ${MULTI_STAGE_BLANK_MS});
@@ -404,7 +405,7 @@ describe("operate_drive real-browser fixture", () => {
       const atInject: Record<string, string> = {};
       dependencies.injectCard = async (_session, args) => {
         injections += 1;
-        for (const id of ["exp", "ncard", "when", "q", "state2"]) {
+        for (const id of ["exp", "ncard", "when", "q", "state2", "tel"]) {
           atInject[id] = await page.locator(`#${id}`).inputValue();
         }
         const fields = await injectCardIntoSessionTargets(started.session_id, card, args.fields);
@@ -434,10 +435,11 @@ describe("operate_drive real-browser fixture", () => {
             first_name: "Ada",
             last_name: "Lovelace",
             state: "NY",
+            phone: "2125550100",
             card_ref: "card-1",
             merchant: "fixture.test",
           },
-          max_steps: 20,
+          max_steps: 24,
         },
         api(),
         undefined,
@@ -458,6 +460,10 @@ describe("operate_drive real-browser fixture", () => {
       // and name-on-card stay untouched until the card is released.
       expect(injections).toBe(1);
       expect(atInject.state2).toBe("NY");
+      // An optional but fact-backed delivery field is still an address edit.
+      // Releasing the card with it pending means the merchant re-costs the
+      // order afterwards and remounts the card frames, wiping the PAN.
+      expect(atInject.tel).toBe("2125550100");
       expect({ exp: atInject.exp, ncard: atInject.ncard, when: atInject.when }).toEqual({
         exp: "",
         ncard: "",
@@ -1131,11 +1137,70 @@ describe("operate_drive real-browser fixture", () => {
     }
   }, 30_000);
 
-  it.each(["offscreen", "occluded"] as const)(
-    "yields a %s Country combobox to model recovery before retrying",
-    async (placement) => {
-      const html = `<!doctype html><title>Country picker</title>
-<main style="${placement === "offscreen" ? "padding-top:1800px;padding-bottom:120px" : ""}">
+  it("scrolls an offscreen Country combobox into view then acts", async () => {
+    const html = `<!doctype html><title>Country picker</title>
+<main style="padding-top:1800px;padding-bottom:120px">
+  <div role="combobox" aria-label="Country" id="country" tabindex="0"
+    style="width:200px;height:40px" onclick="document.querySelector('#options').hidden=false">Choose country</div>
+  <div id="options" hidden><button onclick="
+    document.querySelector('#country').textContent='Canada';
+    document.querySelector('#options').hidden=true;
+  ">Canada</button></div>
+</main>`;
+    const { context, page, started } = await openFixture(html, "country-offscreen-scroll.test");
+    const outcomes: string[] = [];
+    try {
+      const dependencies = deps(async (_api, _state, questions) => {
+        const head = questions.CLICK_target;
+        const target =
+          head?.type === "choice"
+            ? Object.keys(head.criteria).find((key) => head.criteria[key] === "Canada")
+            : undefined;
+        if (target === undefined) return jevFromQuestions(questions, true);
+        const result = jevFromQuestions(questions);
+        for (const [name, pick] of [
+          ["operation", "CLICK"],
+          ["CLICK_target", target],
+        ] as const) {
+          const question = questions[name];
+          if (question?.type !== "choice") throw new Error(`missing ${name}`);
+          result.result.answers[name] = {
+            choice: pick,
+            confidence: 0.93,
+            probabilities: peaked(Object.keys(question.criteria), pick),
+          };
+        }
+        return result;
+      });
+      dependencies.driveAct = async (_sessionId, action) => {
+        const result = await driveActOnPage(page, action);
+        outcomes.push(result.kind);
+        return result;
+      };
+      const handoff = await runOperateDrive(
+        {
+          session_id: started.session_id,
+          goal: "Choose Canada as the country",
+          facts: { country: "Canada" },
+          max_steps: 8,
+        },
+        api(),
+        undefined,
+        dependencies,
+      );
+      expect(handoff.status).toBe("complete");
+      expect(outcomes[0]).toBe("ok");
+      expect(outcomes).not.toContain("stale");
+      expect(await page.locator("#country").textContent()).toBe("Canada");
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
+  it("yields an occluded Country combobox to model recovery before retrying", async () => {
+    const html = `<!doctype html><title>Country picker</title>
+<main>
   <div role="combobox" aria-label="Country" id="country" tabindex="0"
     style="width:200px;height:40px" onclick="document.querySelector('#options').hidden=false">Choose country</div>
   <div id="options" hidden><button onclick="
@@ -1143,13 +1208,9 @@ describe("operate_drive real-browser fixture", () => {
     document.querySelector('#options').hidden=true;
   ">Canada</button></div>
 </main>
-${
-  placement === "occluded"
-    ? `<div id="cover" style="position:absolute;top:0;left:0;width:220px;height:60px"></div>
-<button style="margin-top:80px" onclick="document.querySelector('#cover').remove();this.remove()">Dismiss</button>`
-    : ""
-}`;
-      const { context, page, started } = await openFixture(html, `country-${placement}.test`);
+<div id="cover" style="position:absolute;top:0;left:0;width:220px;height:60px"></div>
+<button style="margin-top:80px" onclick="document.querySelector('#cover').remove();this.remove()">Dismiss</button>`;
+      const { context, page, started } = await openFixture(html, "country-occluded.test");
       const outcomes: string[] = [];
       let modelCalls = 0;
       try {
@@ -1163,20 +1224,16 @@ ${
             expect(outcomes).toEqual(["stale", "ok", "ok"]);
             expect(await page.locator("#options").isVisible()).toBe(true);
           }
-          const operation = modelCalls === 1 && placement === "offscreen" ? "SCROLL" : "CLICK";
-          const head = questions[`${operation}_target`];
-          if (head?.type !== "choice") throw new Error(`missing ${operation} recovery`);
-          const target =
-            operation === "SCROLL"
-              ? "bottom"
-              : Object.keys(head.criteria).find(
-                  (key) => head.criteria[key] === (modelCalls === 1 ? "Dismiss" : "Canada"),
-                );
+          const head = questions.CLICK_target;
+          if (head?.type !== "choice") throw new Error("missing CLICK recovery");
+          const target = Object.keys(head.criteria).find(
+            (key) => head.criteria[key] === (modelCalls === 1 ? "Dismiss" : "Canada"),
+          );
           if (target === undefined) throw new Error("missing recovery target");
           const result = jevFromQuestions(questions);
           for (const [name, pick] of [
-            ["operation", operation],
-            [`${operation}_target`, target],
+            ["operation", "CLICK"],
+            ["CLICK_target", target],
           ] as const) {
             const question = questions[name];
             if (question?.type !== "choice") throw new Error(`missing ${name}`);
@@ -1214,7 +1271,7 @@ ${
         expect(modelCalls).toBe(3);
         expect(outcomes).toEqual(["stale", "ok", "ok", "ok"]);
         expect(await page.locator("#country").textContent()).toBe("Canada");
-        expect(handoff.trajectory[0]?.action).toBe(placement === "offscreen" ? "scroll" : "click");
+        expect(handoff.trajectory[0]?.action).toBe("click");
       } finally {
         await finishProvisionSession(started.session_id);
         await context.close();
