@@ -8,11 +8,12 @@
 # the per-package suites CI already trusts on PRs.
 #
 # mcp's `test` script is the full `vitest run` (real-browser + slow + fast;
-# ~1064s). CI and this validation lap use `test:fast` (~119s) instead. The
-# nightly / post-merge full pass and `test:real-browser` stay on
-# mcp-slow-tests.yml and stable/`latest` release gates. Do not point this
-# command back at `pnpm -r test`: that is the 17-minute tax that burned
-# the validation deadline on four-line unit fixes.
+# ~1064s). This lap asks run-validation-tests.mjs to pick a plan from the
+# git diff: direct-import (~1-2s) when the map can prove it, test:fast
+# (~119s) when it cannot, session extras when a lifecycle hub changed, and
+# the full pass only for the browser / broker / vitest / lockfile cone.
+# Nightly / post-merge full pass and `test:real-browser` stay on
+# mcp-slow-tests.yml and stable/`latest` release gates.
 commands:
   test: |
     set -eu
@@ -20,4 +21,4 @@ commands:
     pnpm --filter '@trusty-squire/registry' prisma:generate
     pnpm -r --filter "./packages/**" --if-present build
     pnpm -r --filter '!@trusty-squire/mcp' --if-present test
-    pnpm --filter @trusty-squire/mcp test:fast
+    node apps/mcp/scripts/run-validation-tests.mjs --from-git

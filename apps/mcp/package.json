@@ -59,6 +59,8 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
     "test:fast": "node scripts/run-test-tier.mjs fast",
+    "test:related": "node scripts/run-related-tests.mjs",
+    "test:validation": "node scripts/run-validation-tests.mjs",
     "test:slow": "node scripts/run-test-tier.mjs slow",
     "test:real-browser": "node scripts/run-test-tier.mjs real-browser",
     "test:cov": "vitest run --coverage",
