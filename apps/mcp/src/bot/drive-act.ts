@@ -83,7 +83,11 @@ function inPageGuard(input: {
     before.right > 0 &&
     before.left < innerWidth;
   if (!inView) {
-    element.scrollIntoView({ block: "center", inline: "nearest" });
+    // "instant" is load-bearing: the default honours the page's CSS
+    // scroll-behavior, and a storefront that sets `smooth` animates the scroll
+    // asynchronously, so the rect below would still be the pre-scroll one and
+    // the occlusion check would burn the attempt this scroll exists to save.
+    element.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
   }
   const rect = element.getBoundingClientRect();
   if (rect.width <= 0 || rect.height <= 0) {

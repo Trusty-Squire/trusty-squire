@@ -1138,7 +1138,11 @@ describe("operate_drive real-browser fixture", () => {
   }, 30_000);
 
   it("scrolls an offscreen Country combobox into view then acts", async () => {
+    // Storefront and checkout themes commonly set smooth scrolling. A scroll
+    // that honours it animates asynchronously, so the guard would measure the
+    // pre-scroll rect and burn the attempt it scrolled to save.
     const html = `<!doctype html><title>Country picker</title>
+<style>html { scroll-behavior: smooth }</style>
 <main style="padding-top:1800px;padding-bottom:120px">
   <div role="combobox" aria-label="Country" id="country" tabindex="0"
     style="width:200px;height:40px" onclick="document.querySelector('#options').hidden=false">Choose country</div>

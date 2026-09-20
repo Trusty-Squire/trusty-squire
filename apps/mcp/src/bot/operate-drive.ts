@@ -617,6 +617,10 @@ const CARD_DERIVED_FACTS = new Set([
   "exp_year",
 ]);
 
+export function isCountryRow(row: WireRow): boolean {
+  return normalizeKey(readableLabel(row)).includes("country");
+}
+
 function rowHay(row: WireRow): string {
   return `${normalizeKey(fieldNameForRow(row))} ${normalizeKey(readableLabel(row))}`;
 }
@@ -794,7 +798,7 @@ export function matchingFactKeys(facts: Record<string, string>, row: WireRow): s
   ]);
   // Shopify serializes Country/Region as f=state, so the ordinary aliases hand
   // the country picker the state fact and the drive writes "NY" into it.
-  if (label.includes("country")) {
+  if (isCountryRow(row)) {
     for (const alias of aliasKeysFor("country")) wanted.add(alias);
     for (const alias of aliasKeysFor("state")) wanted.delete(alias);
   }
@@ -1431,10 +1435,12 @@ export function requiredFillableMissingFact(
     if (facts.card_ref !== undefined && (isExpiryRow(row) || isCardholderNameRow(row))) continue;
     if (!isRequiredRow(row)) continue;
     if (matchingFactKeys(facts, row).length > 0) continue;
-    // The control already carries a value the page accepts — a country picker
-    // on the merchant's geo default is the live case. Nothing is missing, so
-    // handing the goal back for a value would stall a checkout that is fine.
-    if ((rowCurrentValue(row) ?? "").length > 0) continue;
+    // A country picker already sitting on the merchant's geo default answers
+    // itself, so handing the goal back for a country would stall a checkout
+    // that is fine. This is the country control alone: any other required row
+    // whose only value is a placeholder sentinel is still a missing value, and
+    // reporting it is what keeps the card gate shut until the host answers.
+    if (isCountryRow(row) && (rowCurrentValue(row) ?? "").length > 0) continue;
     const role = ROLE_LETTERS[row[1]] ?? row[1];
     return {
       ref: row[0],

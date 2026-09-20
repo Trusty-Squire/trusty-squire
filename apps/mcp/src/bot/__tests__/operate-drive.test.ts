@@ -563,6 +563,19 @@ describe("decideAfterJev stop reasons", () => {
     expect(requiredFillableMissingFact([empty], facts)?.ref).toBe("@e:country");
   });
 
+  it("reports a required dropdown sitting on a placeholder sentinel", () => {
+    // `<select required><option value="0">Choose a delivery window</option>…`
+    // serializes as a non-empty current value, but nothing is chosen. It is
+    // not a fill either (no fact matches), so the model is never offered it —
+    // needs_value is the only thing that keeps the card gate shut until the
+    // host answers.
+    const window: WireRow = ["@e:win", "s", "Delivery window|s=r|n=0"];
+    const facts = { state: "NY", card_ref: "card-1" };
+    expect(matchingFactKeys(facts, window)).toEqual([]);
+    expect(fillableCandidates([window], facts, true)).toEqual([]);
+    expect(requiredFillableMissingFact([window], facts)?.ref).toBe("@e:win");
+  });
+
   it("gives a country picker the country fact when one is supplied", () => {
     const country: WireRow = ["@e:country", "s", "Country/Region|f=state|s=r|a=picker|n=US"];
     const facts = { state: "NY", country: "Canada" };
