@@ -66,6 +66,7 @@ import {
   documentOriginOf,
   driveActOnPage,
   pageFingerprintOf,
+  reenterDriveField,
   resolveDriveFrame,
   settleDriveStep,
   waitForNavigationIdle,
@@ -110,6 +111,8 @@ export const DRIVE_MAX_CANDIDATES = 250;
 export const DRIVE_MAX_CRITERIA = 128;
 export const DRIVE_WAIT_MS = 1500;
 export const DRIVE_EMPTY_SNAPSHOT_WAITS = 3;
+/** Post-submit in-flight patience: a network round trip plus render. */
+export const DRIVE_IN_FLIGHT_MS = 8_000;
 /** One re-observe for a static disabled submit, then report — do not keep waiting. */
 export const DRIVE_WIDGET_UNREADY_WAITS = 1;
 export const DRIVE_WIDGET_UNREADY_REASON =
@@ -2047,6 +2050,23 @@ function rowCurrentValue(row: WireRow): string | undefined {
   return match?.[1];
 }
 
+export function typedValueEquals(actual: string | undefined, intended: string): boolean {
+  if (actual === undefined) return false;
+  return actual.trim() === intended.trim();
+}
+
+export function typedFieldMismatchReason(
+  field: string,
+  intended: string,
+  actual: string | undefined,
+): string {
+  return `typed ${field} as ${JSON.stringify(intended)} but the field shows ${JSON.stringify(actual ?? "")}`;
+}
+
+export function solverOutcomeBlocksSubmit(outcome: string): boolean {
+  return outcome !== "already_settled" && outcome !== "injected" && outcome !== "ok";
+}
+
 function factValuesMatch(left: string, right: string): boolean {
   return normalizeKey(left) === normalizeKey(right);
 }
@@ -3550,6 +3570,7 @@ async function snapshotDriveSession(
     drive.submitBeforeText = null;
     drive.submitExcludeLabels = [];
     drive.lastSubmitResponse = null;
+    drive.inFlightStartedAt = null;
   }
   drive.lastDocumentEpoch = snapshot.documentEpoch;
   const finalized = await finalizeSnapshotOutputs(
@@ -4410,6 +4431,33 @@ async function driveLoop(input: {
           : {}),
       };
     }
+    if (decision.action.kind === "type") {
+      const intended = decision.action.text ?? "";
+      const typedRow = findRow(rows, decision.actionKey, observation.url);
+      const shown = typedRow === undefined ? undefined : rowCurrentValue(typedRow);
+      if (
+        intended.length > 0 &&
+        typedRow !== undefined &&
+        !isPasswordRow(typedRow) &&
+        shown !== undefined &&
+        !typedValueEquals(shown, intended)
+      ) {
+        const pageForRetry = session.browser.page;
+        if (pageForRetry !== null) {
+          await reenterDriveField(pageForRetry, decision.actionKey, intended);
+          const retrySnap = await refreshSnapshot(framesIfNeeded());
+          if (retrySnap.timedOut)
+            return finish("evaluate_timeout", { reason: "in-page evaluate exceeded budget" });
+        }
+        const retried = findRow(rows, decision.actionKey, observation.url);
+        const again = retried === undefined ? undefined : rowCurrentValue(retried);
+        if (!typedValueEquals(again, intended)) {
+          return finish("stuck", {
+            reason: typedFieldMismatchReason(readableLabel(typedRow), intended, again ?? shown),
+          });
+        }
+      }
+    }
     drive.trajectory.push({
       action: decision.action.kind,
       target: decision.actionKey,
@@ -4661,6 +4709,7 @@ async function driveLoop(input: {
       drive.exhaustedActionKeys = [];
       settleWaits = 0;
       widgetWaits = 0;
+      drive.inFlightStartedAt = null;
     }
     // Disabled submit: needs_fill first, in_flight waits, widget_unready on a
     // rendered challenge or after the inbox is silent.
@@ -4678,10 +4727,16 @@ async function driveLoop(input: {
       return finish("stuck", { reason });
     };
     if (rows.length > 0 && disableKind === "in_flight") {
-      if (
-        settleWaits < DRIVE_EMPTY_SNAPSHOT_WAITS &&
-        !(drive.exhaustedActionKeys ?? []).includes("WAIT")
-      ) {
+      const afterSubmit =
+        typeof drive.submitBeforeText === "string" || captchaConsumed;
+      const started = drive.inFlightStartedAt ?? now();
+      drive.inFlightStartedAt = started;
+      const waitBudget = afterSubmit ? DRIVE_IN_FLIGHT_MS : DRIVE_EMPTY_SNAPSHOT_WAITS * DRIVE_WAIT_MS;
+      const stillWaiting =
+        afterSubmit
+          ? now() - started < waitBudget
+          : settleWaits < DRIVE_EMPTY_SNAPSHOT_WAITS;
+      if (stillWaiting && !(drive.exhaustedActionKeys ?? []).includes("WAIT")) {
         settleWaits += 1;
         const applied = await applyDecision({ kind: "wait", confidence: 1 });
         if (applied !== "continue") return applied;
@@ -4728,6 +4783,12 @@ async function driveLoop(input: {
           ),
       );
       if (afterSolve !== "widget_unready") continue;
+      if (!solverOutcomeBlocksSubmit(outcome)) {
+        const applied = await applyDecision({ kind: "wait", confidence: 1 });
+        if (applied !== "continue") return applied;
+        steps += 1;
+        continue;
+      }
       if (captchaSolveStillWorking(outcome)) {
         if (now() - captchaSolveStartedAt >= RES_TIMEOUT_MS) {
           return finishWithSubmitResponse() ?? finish("stuck", { reason: widgetUnreadySolveReason(outcome) });
@@ -5044,6 +5105,8 @@ async function driveLoop(input: {
   }
   return finish(
     "budget",
-    lastCaptchaOutcome === undefined ? {} : { reason: widgetUnreadySolveReason(lastCaptchaOutcome) },
+    lastCaptchaOutcome === undefined || !solverOutcomeBlocksSubmit(lastCaptchaOutcome)
+      ? {}
+      : { reason: widgetUnreadySolveReason(lastCaptchaOutcome) },
   );
 }

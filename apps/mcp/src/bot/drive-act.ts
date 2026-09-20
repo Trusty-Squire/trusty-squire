@@ -95,6 +95,37 @@ async function clickDriveElement(frame: Frame, ref: string): Promise<boolean> {
   }
 }
 
+export async function reenterDriveField(
+  page: Page,
+  ref: string,
+  text: string,
+): Promise<boolean> {
+  const frame = resolveDriveFrame(page, ref);
+  const element = await resolveDriveElement(frame, ref);
+  if (element === null) return false;
+  try {
+    await element.scrollIntoViewIfNeeded().catch(() => undefined);
+    await element.click({ timeout: LOCATOR_ACT_TIMEOUT_MS });
+    return await element.evaluate((node, value) => {
+      if (!(node instanceof HTMLInputElement) && !(node instanceof HTMLTextAreaElement)) {
+        return false;
+      }
+      node.focus();
+      node.select();
+      node.value = value;
+      node.dispatchEvent(
+        new InputEvent("input", { bubbles: true, inputType: "insertReplacementText", data: value }),
+      );
+      node.dispatchEvent(new Event("change", { bubbles: true }));
+      return node.value === value;
+    }, text);
+  } catch {
+    return false;
+  } finally {
+    await element.dispose().catch(() => undefined);
+  }
+}
+
 async function typeDriveElement(frame: Frame, ref: string, text: string): Promise<boolean> {
   const element = await resolveDriveElement(frame, ref);
   if (element === null) return false;

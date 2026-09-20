@@ -55,6 +55,10 @@ import {
   submitResponseText,
   SUBMIT_RESPONSE_REASON_MAX,
   attachObservationNotice,
+  typedValueEquals,
+  typedFieldMismatchReason,
+  solverOutcomeBlocksSubmit,
+  DRIVE_IN_FLIGHT_MS,
   outstandingRequiredFill,
   DRIVE_EMPTY_SNAPSHOT_WAITS,
   DRIVE_WIDGET_UNREADY_WAITS,
@@ -1663,6 +1667,23 @@ describe("form-fill assignment helpers", () => {
     expect(observation.semantic?.blockers).toEqual([
       { kind: "validation", text: "This email address has been used to sign up too recently." },
     ]);
+  });
+
+  it("re-enters a typed field when the snapshot value is not what was typed", () => {
+    expect(typedValueEquals("Squire", "Squire")).toBe(true);
+    expect(typedValueEquals("Squir", "Squire")).toBe(false);
+    expect(typedValueEquals(undefined, "Squire")).toBe(false);
+    expect(typedFieldMismatchReason("First name", "Squire", "Squir")).toBe(
+      'typed First name as "Squire" but the field shows "Squir"',
+    );
+  });
+
+  it("never treats an already-settled solver as a submit blocker", () => {
+    expect(DRIVE_IN_FLIGHT_MS).toBeGreaterThanOrEqual(6_000);
+    expect(solverOutcomeBlocksSubmit("already_settled")).toBe(false);
+    expect(solverOutcomeBlocksSubmit("injected")).toBe(false);
+    expect(solverOutcomeBlocksSubmit("cooldown")).toBe(true);
+    expect(solverOutcomeBlocksSubmit("challenge_still_rendered")).toBe(true);
   });
 
   it("treats a leftover painted challenge as settled after a delivered token", () => {

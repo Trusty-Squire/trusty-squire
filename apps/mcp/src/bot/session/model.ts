@@ -212,6 +212,8 @@ export interface SessionDriveState {
   submitBeforeText?: string | null;
   submitExcludeLabels?: string[];
   lastSubmitResponse?: string | null;
+  /** Wall clock when post-submit in-flight waiting started. */
+  inFlightStartedAt?: number | null;
 }
 
 // The last extracted elements are resealed on every retain so each retained
