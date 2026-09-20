@@ -158,6 +158,7 @@ export interface DriveTrajectoryStep {
   target: string;
   confidence: number;
   url: string;
+  reason?: string;
   stage?: string;
   jev_ms?: number;
   act_ms?: number;
@@ -232,6 +233,8 @@ export interface SessionDriveState {
   preexistingRestarted?: boolean;
   /** Next snapshot should look for an unmasked secret after reveal/show/copy. */
   pendingRevealScan?: boolean;
+  /** OAuth hand-offs that returned to the same login page this drive. */
+  oauthReturnAttempts?: number;
 }
 
 // The last extracted elements are resealed on every retain so each retained

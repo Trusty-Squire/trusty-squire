@@ -722,7 +722,6 @@ export async function loginWithOAuth(
       observedProductContinuation = null;
     }
     productNavigated = true;
-    startHumanHandoff();
     resolveProductNavigation();
   };
   const completionPage = (): Page | null => {
@@ -812,7 +811,6 @@ export async function loginWithOAuth(
     });
     const onPopup = (page: Page): void => {
       if (!browser.ownedPages.has(page)) return;
-      startHumanHandoff();
       popupCapture.page = page;
       captureFramelessRequestsForPopup(page);
       popupCapture.onNavigation = (frame: Frame): void => recordTopLevelNavigation(page, frame);
@@ -1006,7 +1004,7 @@ export async function loginWithOAuth(
       settled = await waitForOAuthLifecycle(
         browser,
         expectedReturnUrls,
-        remainingBudgetMs(),
+        Math.min(remainingBudgetMs(), 12_000),
         completionPage,
         hasTerminalCompletion,
       );
@@ -1063,6 +1061,7 @@ export async function loginWithOAuth(
               observedAt: new Date(),
             });
             if (challenge !== null) {
+              startHumanHandoff();
               pendingOnProvider = true;
               throw await oauthHumanChallengeError(browser, challenge);
             }
@@ -1073,7 +1072,7 @@ export async function loginWithOAuth(
             continue;
           }
         }
-        const consentBudgetMs = oauthDeadline - Date.now();
+        const consentBudgetMs = Math.min(oauthDeadline - Date.now(), 15_000);
         const advanced = await advanceOAuthConsent(
           browser,
           consentProvider,
