@@ -288,41 +288,100 @@ async function waitForOverlayOptionsToChange(page: Page, before: string[]): Prom
   );
 }
 
-async function clickDriveCmdkItem(frame: Frame, ref: string): Promise<boolean> {
-  const label = await frame
-    .evaluate(
-      (input: { ref: string }) => {
-        type DriveCache = { nodes: Map<string, Element> };
-        const root = window as Window & { __tsDriveRegistry?: DriveCache };
-        const element = root.__tsDriveRegistry?.nodes.get(input.ref);
-        if (element === undefined || !element.isConnected) return null;
-        const inCmdk =
-          element.hasAttribute("cmdk-item") ||
-          element.closest("[cmdk-root],[cmdk-list],[cmdk-group]") !== null;
-        if (!inCmdk) return null;
-        const item = element.closest("[cmdk-item]") ?? element;
-        const text = (item.textContent ?? "").replace(/\s+/g, " ").trim();
-        return text.length === 0 ? null : text.slice(0, 80);
-      },
-      { ref },
-    )
+export function listOptionIdentity(
+  role: string | null,
+  inListbox: boolean,
+  inMenu: boolean,
+  text: string,
+): { text: string; role: "option" | "menuitem" } | null {
+  const trimmed = text.replace(/\s+/g, " ").trim();
+  if (trimmed.length === 0) return null;
+  if (role === "option" || (inListbox && role !== "combobox" && role !== "listbox")) {
+    return { text: trimmed.slice(0, 80), role: "option" };
+  }
+  if (role === "menuitem" || inMenu) return { text: trimmed.slice(0, 80), role: "menuitem" };
+  return null;
+}
+
+const LIST_FILTER_SELECTOR =
+  '[role="combobox"][aria-expanded="true"],[role="listbox"] input,input[aria-autocomplete="list"],input[aria-autocomplete="both"]';
+
+async function listOwnerSignature(frame: Frame): Promise<string> {
+  return frame
+    .evaluate(() => {
+      const owners = Array.from(
+        document.querySelectorAll(
+          '[role="combobox"],[aria-haspopup="listbox"],[aria-expanded="true"]',
+        ),
+      );
+      return owners
+        .map((element) => {
+          const value =
+            element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement
+              ? element.value
+              : (element.textContent ?? "").replace(/\s+/g, " ").trim();
+          return `${value}\t${element.getAttribute("placeholder") ?? ""}`;
+        })
+        .join("\n");
+    })
+    .catch(() => "");
+}
+
+async function typeIntoOpenFilter(page: Page, text: string): Promise<boolean> {
+  const filter = page.locator(LIST_FILTER_SELECTOR).first();
+  if ((await filter.count().catch(() => 0)) === 0) return false;
+  try {
+    await filter.click({ timeout: 2000 });
+    await filter.fill("");
+    await filter.pressSequentially(text, { delay: 20 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Commit a listbox/combobox option via a fresh locator, not cached coordinates.
+ *
+ * Coordinate clicks miss widgets that re-render the list before the pointer
+ * lands. Some options are not real until the filter input receives an input
+ * event; some listen for Enter on the highlighted item instead of click.
+ */
+async function clickDriveListOption(frame: Frame, ref: string): Promise<boolean> {
+  const info = await frame
+    .evaluate((input: { ref: string }) => {
+      type DriveCache = { nodes: Map<string, Element> };
+      const root = window as Window & { __tsDriveRegistry?: DriveCache };
+      const element = root.__tsDriveRegistry?.nodes.get(input.ref);
+      if (element === undefined || !element.isConnected) return null;
+      const option = element.closest('[role="option"],[role="menuitem"]');
+      const item = option ?? element;
+      const role = item.getAttribute("role");
+      const inListbox = item.closest('[role="listbox"]') !== null;
+      const inMenu = item.closest('[role="menu"]') !== null;
+      const text = (item.textContent ?? "").replace(/\s+/g, " ").trim();
+      return { role, inListbox, inMenu, text };
+    }, { ref })
     .catch(() => null);
-  if (label === null || label.length === 0) return false;
+  if (info === null) return false;
+  const identity = listOptionIdentity(info.role, info.inListbox, info.inMenu, info.text);
+  if (identity === null) return false;
   const page = frame.page();
-  const option = page.getByRole("option", { name: label, exact: true }).first();
-  const fallback = page
-    .locator("[cmdk-item]:not([aria-disabled='true']):not([data-disabled='true'])")
-    .filter({ hasText: label })
-    .first();
-  const target = (await option.count().catch(() => 0)) > 0 ? option : fallback;
+  const before = await listOwnerSignature(frame);
+  const option = page.getByRole(identity.role, { name: identity.text, exact: true }).first();
+  if ((await option.count().catch(() => 0)) === 0) {
+    await typeIntoOpenFilter(page, identity.text);
+  }
+  const target = page.getByRole(identity.role, { name: identity.text, exact: true }).first();
   if ((await target.count().catch(() => 0)) === 0) return false;
   try {
     await target.scrollIntoViewIfNeeded().catch(() => undefined);
     await target.click({ timeout: 5000 });
-    // cmdk onSelect also binds Enter on the highlighted item. A pointer
-    // click that only focuses still needs this to commit.
+    if ((await listOwnerSignature(frame)) !== before) return true;
     await page.keyboard.press("Enter");
-    await page.waitForTimeout(300);
+    if ((await listOwnerSignature(frame)) !== before) return true;
+    if (await typeIntoOpenFilter(page, identity.text)) {
+      await page.keyboard.press("Enter");
+    }
     return true;
   } catch {
     return false;
@@ -389,14 +448,14 @@ export async function driveActOnPage(page: Page, action: ProvisionAction): Promi
   if (!guard.ok) return { kind: "stale", reason: guard.reason, ...timings };
   if (action.kind === "select")
     return { kind: "ok", combobox: false, searchSubmit: false, ...timings };
-  // Drive clicks use CDP at the guard's cached center. cmdk re-renders the
-  // list before that event lands, so onSelect never fires (Meilisearch
-  // /welcome-informations: Other clicked, trigger stayed "Select reasons...",
-  // Next stayed disabled). clickInner already routes these through
-  // locator.click(); operate_drive never calls clickInner.
+  // Drive clicks use CDP at the guard's cached center. Listbox/combobox
+  // widgets often re-render the list before that event lands, so the
+  // option's select handler never fires. A fresh role=option locator,
+  // then Enter, then a filter input event, is the family commit — not
+  // coordinates.
   if (action.kind === "click") {
-    const cmdkClicked = await clickDriveCmdkItem(frame, action.target);
-    if (cmdkClicked) {
+    const listClicked = await clickDriveListOption(frame, action.target);
+    if (listClicked) {
       return {
         kind: "ok",
         combobox: guard.combobox,

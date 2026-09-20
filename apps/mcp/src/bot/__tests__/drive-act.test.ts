@@ -1,6 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Page } from "playwright";
-import { pageFingerprintOf, settleDriveStep, waitForNavigationIdle } from "../drive-act.js";
+import {
+  listOptionIdentity,
+  pageFingerprintOf,
+  settleDriveStep,
+  waitForNavigationIdle,
+} from "../drive-act.js";
 import { attachOperatorRequestAbort, withOperatorRequestContext } from "../request-cancellation.js";
 
 describe("navigation content settle", () => {
@@ -109,5 +114,24 @@ describe("action settle", () => {
     await vi.advanceTimersByTimeAsync(1);
     await waiting;
     expect(settled).toBe(true);
+  });
+});
+
+describe("list option identity", () => {
+  it("accepts an ARIA option or a listbox child, not a combobox trigger", () => {
+    expect(listOptionIdentity("option", false, false, "Other")).toEqual({
+      text: "Other",
+      role: "option",
+    });
+    expect(listOptionIdentity("none", true, false, "Keyword Search")).toEqual({
+      text: "Keyword Search",
+      role: "option",
+    });
+    expect(listOptionIdentity("menuitem", false, true, "Save")).toEqual({
+      text: "Save",
+      role: "menuitem",
+    });
+    expect(listOptionIdentity("combobox", false, false, "Select reasons...")).toBeNull();
+    expect(listOptionIdentity("option", false, false, "   ")).toBeNull();
   });
 });
