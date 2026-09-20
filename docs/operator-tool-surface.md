@@ -44,13 +44,32 @@ nothing stated the drive writes the two-digit year, reads the value back, and
 rewrites that control once with the four-digit year when the write was
 rejected or truncated. A separate year control uses its own maxlength: two
 digits take `exp_year_short`, anything else takes the four-digit `exp_year`.
-The loop reads verification mail when a verification field is chosen or
-the page is stuck after a click. It does not gate on confidence. The drive
+The loop reads verification mail when a verification field is listed, and also
+when a click leaves the page waiting with no fill or live choice left and its
+wording or URL says mail is expected (check-your-email text, an Open Gmail
+control, a verify path). It polls that read for up to 45 seconds before handing
+back `needs_value` for `verification_code`, or `stuck` when a link rather than a
+code was expected. It does not gate on confidence. The drive
 loop snapshots and acts with an in-page registry plus CDP input; login,
 inbox, and card still use those primitives. The two-head Jev request,
 structured state, choice validation, WAIT, SELECT option targets, snapshot
 evaluate, and drive rules prose are adapted from browser-use/jev-ultrafast
 (MIT).
+
+WAIT and BLOCKED are offered only while no listed work remains: an enabled
+fill, select, choice, or non-OAuth submit that is actually offered keeps both
+out of the answer set, and WAIT is also withheld after a WAIT that changed
+nothing. When the snapshot is empty, its whole form surface is disabled, or a
+submit is in flight with no fills left, the loop takes up to three automatic
+waits itself and then offers only DONE and BLOCKED.
+
+An action that produced no observable change is not offered again while the
+page's URL, form surface, and filled fields stay the same; WAIT counts in that
+budget, and a stale or occluded click ref is withheld until the observation
+fingerprint changes. After five such dead actions on one page, or when they
+leave no actionable operation, the drive ends with `no_progress` and a `reason`
+naming them.
+
 It returns a handoff (never a bare page): status, the current compact
 observation with the same stable refs, trajectory, and done/remaining.
 `needs_value` names the missing field's label; a country control already

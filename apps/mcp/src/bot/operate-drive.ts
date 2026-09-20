@@ -586,15 +586,9 @@ export function pageProgressKey(
   filledRefs: readonly string[] = [],
 ): string {
   const kept = rows.filter(
-    (row) =>
-      isConsentRow(row) ||
-      isFillableRow(row) ||
-      isSubmitLikeRow(row) ||
-      isChoiceRow(row),
+    (row) => isConsentRow(row) || isFillableRow(row) || isSubmitLikeRow(row) || isChoiceRow(row),
   );
-  const stable = kept
-    .map((row) => `${row[0]}\t${row[1]}\t${row[2] ?? ""}`)
-    .sort();
+  const stable = kept.map((row) => `${row[0]}\t${row[1]}\t${row[2] ?? ""}`).sort();
   return `${url}\n${stable.join("\n")}\nfilled:${[...filledRefs].sort().join(",")}`;
 }
 
@@ -837,10 +831,7 @@ export function snapshotNeedsSettle(
   if (surface.every((row) => isDisabledRow(row))) return true;
   // Submit in flight (AbstractAPI “Creating…”, OpenRouter “Loading Continue”):
   // no fills left, no live choice, every submit disabled — wait for the hop.
-  if (
-    remainingFillCount === 0 &&
-    !surface.some((row) => isChoiceRow(row) && !isDisabledRow(row))
-  ) {
+  if (remainingFillCount === 0 && !surface.some((row) => isChoiceRow(row) && !isDisabledRow(row))) {
     const submits = surface.filter((row) => isSubmitLikeRow(row));
     if (submits.length > 0 && submits.every((row) => isDisabledRow(row))) return true;
   }
@@ -1868,10 +1859,7 @@ export function driveTargetSets(
     ),
     remaining,
   );
-  const click = takeCapped(
-    clickableCandidates(rows, includePayment, skippedClickRefs),
-    remaining,
-  );
+  const click = takeCapped(clickableCandidates(rows, includePayment, skippedClickRefs), remaining);
   const scroll = takeCapped(scrollTargets(rows), remaining);
   const operations: DriveOperation[] = [];
   if (click.length > 0) operations.push("CLICK");
@@ -4071,8 +4059,7 @@ async function driveLoop(input: {
     if (drive.lastFingerprint !== null && drive.lastFingerprint !== fingerprint) {
       drive.staleClickRefs = [];
     }
-    const staleWait =
-      drive.lastActionKey === "WAIT" && drive.lastFingerprint === fingerprint;
+    const staleWait = drive.lastActionKey === "WAIT" && drive.lastFingerprint === fingerprint;
     const skippedActions = [
       ...new Set([...(drive.exhaustedActionKeys ?? []), ...(drive.staleClickRefs ?? [])]),
     ];

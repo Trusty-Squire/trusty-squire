@@ -290,19 +290,22 @@ async function waitForOverlayOptionsToChange(page: Page, before: string[]): Prom
 
 async function clickDriveCmdkItem(frame: Frame, ref: string): Promise<boolean> {
   const label = await frame
-    .evaluate((input: { ref: string }) => {
-      type DriveCache = { nodes: Map<string, Element> };
-      const root = window as Window & { __tsDriveRegistry?: DriveCache };
-      const element = root.__tsDriveRegistry?.nodes.get(input.ref);
-      if (element === undefined || !element.isConnected) return null;
-      const inCmdk =
-        element.hasAttribute("cmdk-item") ||
-        element.closest("[cmdk-root],[cmdk-list],[cmdk-group]") !== null;
-      if (!inCmdk) return null;
-      const item = element.closest("[cmdk-item]") ?? element;
-      const text = (item.textContent ?? "").replace(/\s+/g, " ").trim();
-      return text.length === 0 ? null : text.slice(0, 80);
-    }, { ref })
+    .evaluate(
+      (input: { ref: string }) => {
+        type DriveCache = { nodes: Map<string, Element> };
+        const root = window as Window & { __tsDriveRegistry?: DriveCache };
+        const element = root.__tsDriveRegistry?.nodes.get(input.ref);
+        if (element === undefined || !element.isConnected) return null;
+        const inCmdk =
+          element.hasAttribute("cmdk-item") ||
+          element.closest("[cmdk-root],[cmdk-list],[cmdk-group]") !== null;
+        if (!inCmdk) return null;
+        const item = element.closest("[cmdk-item]") ?? element;
+        const text = (item.textContent ?? "").replace(/\s+/g, " ").trim();
+        return text.length === 0 ? null : text.slice(0, 80);
+      },
+      { ref },
+    )
     .catch(() => null);
   if (label === null || label.length === 0) return false;
   const page = frame.page();

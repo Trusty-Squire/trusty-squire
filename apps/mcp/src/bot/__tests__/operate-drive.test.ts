@@ -366,8 +366,7 @@ describe("decideAfterJev stop reasons", () => {
       ["@e:models", "l", "Models"],
     ];
     const navQuestions = buildDriveQuestions(nav, {}, "sign up");
-    const navOps =
-      navQuestions.operation?.type === "choice" ? navQuestions.operation.criteria : {};
+    const navOps = navQuestions.operation?.type === "choice" ? navQuestions.operation.criteria : {};
     expect(navOps).toHaveProperty("BLOCKED");
     expect(
       decideAfterJev({
@@ -385,8 +384,7 @@ describe("decideAfterJev stop reasons", () => {
       ["@e:models", "l", "Models"],
     ];
     const navQuestions = buildDriveQuestions(nav, {}, "sign up");
-    const navOps =
-      navQuestions.operation?.type === "choice" ? navQuestions.operation.criteria : {};
+    const navOps = navQuestions.operation?.type === "choice" ? navQuestions.operation.criteria : {};
     expect(navOps).toHaveProperty("WAIT");
     expect(
       decideAfterJev({
@@ -1445,9 +1443,20 @@ describe("form-fill assignment helpers", () => {
         0,
       ),
     ).toEqual({ kind: "link" });
-    expect(pageSuggestsInboxWait([["@e:logo", "l", "Meilisearch logo"], ["@e:fb", "b", "Send feedback"]], "https://cloud.meilisearch.com/teams")).toBe(false);
     expect(
-      pageSuggestsInboxWait([["@e:hint", "l", "Check your email"]], "https://app.example.test/signup"),
+      pageSuggestsInboxWait(
+        [
+          ["@e:logo", "l", "Meilisearch logo"],
+          ["@e:fb", "b", "Send feedback"],
+        ],
+        "https://cloud.meilisearch.com/teams",
+      ),
+    ).toBe(false);
+    expect(
+      pageSuggestsInboxWait(
+        [["@e:hint", "l", "Check your email"]],
+        "https://app.example.test/signup",
+      ),
     ).toBe(true);
     expect(pageSuggestsInboxWait([], "https://app.currencyapi.com/email/verify")).toBe(true);
     expect(inboxSpecialPlan([...ROWS, otp], "stuck", true, 0)).toEqual({
@@ -1478,9 +1487,9 @@ describe("form-fill assignment helpers", () => {
     expect(inboxVerificationDecision({ found: false, code: null, link: null }, "link")).toBe(
       "retry",
     );
-    expect(
-      inboxVerificationDecision({ found: true, code: "123456", link: null }, "otp"),
-    ).toBe("type_code");
+    expect(inboxVerificationDecision({ found: true, code: "123456", link: null }, "otp")).toBe(
+      "type_code",
+    );
     expect(inboxVerificationDecision({ found: true, code: "123456", link: null }, "link")).toBe(
       "needs_code",
     );
@@ -1633,13 +1642,16 @@ describe("facts, fingerprint, compact merge", () => {
       ["@e:ad", "l", "Own Your AI: Control your models"],
     ];
     const key = pageProgressKey("https://api-ninjas.com/register", filled, ["@e:email"]);
-    expect(pageProgressKey("https://api-ninjas.com/register", filled, ["@e:email", "@e:pw"])).not.toBe(
-      key,
-    );
-    expect(pageProgressKey("https://api-ninjas.com/register", [
-      ...filled,
-      ["@e:ad2", "l", "A different marketing line"],
-    ], ["@e:email"])).toBe(key);
+    expect(
+      pageProgressKey("https://api-ninjas.com/register", filled, ["@e:email", "@e:pw"]),
+    ).not.toBe(key);
+    expect(
+      pageProgressKey(
+        "https://api-ninjas.com/register",
+        [...filled, ["@e:ad2", "l", "A different marketing line"]],
+        ["@e:email"],
+      ),
+    ).toBe(key);
     expect(
       pageProgressKey(
         "https://api-ninjas.com/register",
@@ -1647,7 +1659,10 @@ describe("facts, fingerprint, compact merge", () => {
         ["@e:email"],
       ),
     ).not.toBe(key);
-    const drive = { exhaustedProgressKey: null as string | null, exhaustedActionKeys: [] as string[] };
+    const drive = {
+      exhaustedProgressKey: null as string | null,
+      exhaustedActionKeys: [] as string[],
+    };
     expect(recordDeadAction(drive, key, "@e:go")).toBe("continue");
     expect(drive.exhaustedActionKeys).toEqual(["@e:go"]);
     expect(recordDeadAction(drive, key, "@e:go")).toBe("continue");
