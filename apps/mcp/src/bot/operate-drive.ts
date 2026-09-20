@@ -39,6 +39,7 @@ import {
 import { audit, sessionForCall } from "./session/lifecycle.js";
 import { registrableHost } from "./session/hosts.js";
 import { observedThreeDsChallenge, rememberCompactV2SourcePage } from "./observe/observe.js";
+import { safeStageV2 } from "./compact-observation-v2.js";
 import {
   lastSelectOptions,
   type DriveActProfile,
@@ -107,6 +108,7 @@ export const DRIVE_MAX_CRITERIA = 128;
 export const DRIVE_WAIT_MS = 1500;
 export const DRIVE_EMPTY_SNAPSHOT_WAITS = 3;
 export const DRIVE_INBOX_POLL_MS = 45_000;
+export const DRIVE_PAY_SUBMIT_WAITS = 3;
 export const DRIVE_STALE_LIMIT = 3;
 export const DRIVE_EXHAUSTED_ACTION_LIMIT = 5;
 export const DRIVE_IDENTICAL_RESNAP_MS = 200;
@@ -115,6 +117,7 @@ export const DRIVE_FIXED_STUCK = "BLOCKED";
 export const DRIVE_FIXED_NONE = "none";
 export const DRIVE_VALUE_QUESTION = "TYPE_TEXT_value";
 export const DRIVE_CHECK_EMAIL = "check_email";
+export const DRIVE_INJECT_CARD_HISTORY = "inject card";
 export const DRIVE_CHECK_EMAIL_INSTRUCTIONS =
   "Does this page tell the user to check email for a verification link or code?";
 export const DRIVE_OPERATIONS = [
@@ -623,6 +626,63 @@ export function isSubmitLikeRow(row: WireRow): boolean {
   );
 }
 
+const PAYMENT_SUBMIT_LABEL =
+  /pay[- ]?now|place[- ]?order|complete[- ]?(?:order|purchase|payment)|submit[- ]?payment|buy[- ]?now/;
+
+/** A row that can carry a checkout's submit control.
+ *
+ * `<input type="submit">` already reports role button. A radio or checkbox is
+ * a payment-METHOD option: clicking one after release switches method and
+ * remounts the card frames.
+ */
+const BUTTON_LIKE_ROLES = new Set(["b", "button"]);
+
+export function isButtonLikeRow(row: WireRow): boolean {
+  return BUTTON_LIKE_ROLES.has(row[1]);
+}
+
+/** Whether an offscreen row is still worth offering.
+ *
+ * Shopify parks "Pay now" below the fold (LIVE #6, top≈1458 in a 720px
+ * viewport) and the act path scrolls, so a checkout's buttons stay reachable.
+ * The page, not the label, is the test: a label allowlist would drop a
+ * localized "Payer maintenant". Off a checkout no offscreen button is offered,
+ * so a product page's own "Buy now" stays unclickable.
+ */
+export function offscreenRowStaysOffered(row: WireRow, pageUrl: string): boolean {
+  return isButtonLikeRow(row) && isCheckoutUrl(pageUrl);
+}
+
+/** Whether the drive already asked to pay since the card went in.
+ *
+ * The pay control is replaced by the processor's own screen, so "no pay row"
+ * after a dispatched pay click means submitted, not stuck. The line must name
+ * a button: a click on a radio spelled "Buy now, pay later" chose a method.
+ * Without a recorded release the drive cannot place a click relative to one,
+ * so an earlier storefront "Buy now" never counts.
+ */
+export function paymentSubmitDispatched(history: readonly string[]): boolean {
+  const released = history.lastIndexOf(DRIVE_INJECT_CARD_HISTORY);
+  if (released === -1) return false;
+  return history
+    .slice(released + 1)
+    .some(
+      (line) =>
+        /^click the button labeled /i.test(line) && PAYMENT_SUBMIT_LABEL.test(line.toLowerCase()),
+    );
+}
+
+/** Whether the checkout has moved off its payment form.
+ *
+ * The drive's own history only knows the clicks the drive made; a host that
+ * submits with operate_click and resumes the drive on the processor step
+ * leaves no trace in it. The page itself is the stronger signal.
+ */
+export function checkoutPastPaymentForm(url: string): boolean {
+  if (safeStageV2(url, []) === "complete") return true;
+  return /(?:^|\/)processing(?:\/|$)/.test(urlPathname(url));
+}
+
 /** Fill, select, an enabled non-OAuth submit, or an enabled choice is still listed — WAIT and BLOCKED are not honest. */
 export function pageHasListedWork(
   rows: readonly WireRow[],
@@ -636,17 +696,65 @@ export function pageHasListedWork(
   });
 }
 
-export function isCheckoutUrl(url: string): boolean {
+/** A visible control the planner could take for the checkout's submit.
+ *
+ * A picker textbox reports clickable but is a FILL dressed as a click, so a
+ * payment stage carrying only fields offers nothing to mistake for Pay —
+ * refusing there would abort a drive whose remaining work is a fill or a DONE
+ * call (a card-fill goal never submits at all).
+ */
+function isPaymentSubstituteRow(row: WireRow): boolean {
+  return isClickableRow(row) && !isFillableRow(row) && !isOffscreenRow(row);
+}
+
+export function paymentSubmitControlMissing(input: {
+  rows: readonly WireRow[];
+  includePayment: boolean;
+  alreadyCard: boolean;
+  cardRetry: boolean;
+  pageUrl: string;
+  remainingFills: number;
+  history: readonly string[];
+}): string | undefined {
+  if (
+    !input.includePayment ||
+    !input.alreadyCard ||
+    input.cardRetry ||
+    !isCheckoutUrl(input.pageUrl) ||
+    input.remainingFills > 0 ||
+    checkoutPastPaymentForm(input.pageUrl) ||
+    paymentSubmitDispatched(input.history) ||
+    input.rows.some((row) => isButtonLikeRow(row))
+  ) {
+    return undefined;
+  }
+  const seen = input.rows
+    .filter((row) => isPaymentSubstituteRow(row))
+    .map((row) => readableLabel(row))
+    .filter((label, index, all) => label.length > 0 && all.indexOf(label) === index)
+    .slice(0, 8);
+  if (seen.length === 0) return undefined;
+  return `the control for this operation is not present (CLICK pay/place-order). visible: ${seen.join(", ")}`;
+}
+
+function urlPathname(url: string): string {
   try {
-    const path = new URL(url).pathname.toLowerCase();
-    return /(?:^|\/)(?:checkouts?|payment)(?:\/|$)/.test(path);
+    return new URL(url).pathname.toLowerCase();
   } catch {
-    return /(?:^|\/)(?:checkouts?|payment)(?:\/|$)/i.test(url);
+    return url.toLowerCase();
   }
 }
 
-export function isCandidateRow(row: WireRow, includePayment: boolean): boolean {
-  if (isOffscreenRow(row)) return false;
+export function isCheckoutUrl(url: string): boolean {
+  return /(?:^|\/)(?:checkouts?|payment)(?:\/|$)/.test(urlPathname(url));
+}
+
+export function isCandidateRow(
+  row: WireRow,
+  includePayment: boolean,
+  pageUrl: string = "",
+): boolean {
+  if (isOffscreenRow(row) && !offscreenRowStaysOffered(row, pageUrl)) return false;
   if (isDisabledRow(row) && !isSubmitLikeRow(row)) return false;
   if (!includePayment && (isPaymentRow(row) || isCvvRow(row))) return false;
   return true;
@@ -1266,11 +1374,12 @@ export function validateChoice(
 export function driveCandidates(
   rows: readonly WireRow[],
   includePayment: boolean,
+  pageUrl: string = "",
 ): DriveCandidate[] {
   const used = new Set<string>();
   const candidates: DriveCandidate[] = [];
   for (const row of rows) {
-    if (!isCandidateRow(row, includePayment)) continue;
+    if (!isCandidateRow(row, includePayment, pageUrl)) continue;
     const role = ROLE_LETTERS[row[1]] ?? row[1];
     const seed = `${row[2] ?? readableLabel(row)}_${role}`;
     const slug = uniqueCriteriaSlug(seed, used);
@@ -1290,10 +1399,11 @@ export function clickableCandidates(
   rows: readonly WireRow[],
   includePayment: boolean,
   skippedRefs: readonly string[] = [],
+  pageUrl: string = "",
 ): DriveCandidate[] {
   const skipped = new Set(skippedRefs);
   const formBusy = formSurfaceRows(rows).some((row) => !isDisabledRow(row));
-  return driveCandidates(rows, includePayment)
+  return driveCandidates(rows, includePayment, pageUrl)
     .filter((candidate) => {
       if (skipped.has(candidate.ref)) return false;
       if (!isClickableRow(candidate.row)) return false;
@@ -1481,6 +1591,34 @@ export function selectTargets(
   return targets;
 }
 
+export function scrollDescription(row: WireRow, rows: readonly WireRow[]): string {
+  return `scroll to reveal the ${actionDescription(row, rows)}`;
+}
+
+/** The recent-actions line for a dispatched action.
+ *
+ * A scroll reveals a control; it does not operate it. Describing one as a click
+ * both misinforms the model and makes a scroll onto Pay look like a dispatched
+ * payment to `paymentSubmitDispatched`.
+ */
+export function actionHistoryLine(
+  action: ProvisionAction,
+  acted: WireRow | undefined,
+  rows: readonly WireRow[],
+): string {
+  if (acted === undefined) return action.kind;
+  if (action.kind === "scroll") return scrollDescription(acted, rows);
+  const operation =
+    action.kind === "click"
+      ? "CLICK"
+      : action.kind === "type"
+        ? "TYPE_TEXT"
+        : action.kind === "select"
+          ? "SELECT"
+          : undefined;
+  return actionDescription(acted, rows, operation);
+}
+
 export function scrollTargets(rows: readonly WireRow[]): DriveCandidate[] {
   const used = new Set<string>();
   const targets: DriveCandidate[] = [];
@@ -1495,7 +1633,7 @@ export function scrollTargets(rows: readonly WireRow[]): DriveCandidate[] {
       ref: row[0],
       role,
       slug,
-      description: `scroll to reveal the ${actionDescription(row, rows)}`,
+      description: scrollDescription(row, rows),
       row,
     });
   }
@@ -1858,7 +1996,10 @@ export function driveTargetSets(
     ),
     remaining,
   );
-  const click = takeCapped(clickableCandidates(rows, includePayment, skippedClickRefs), remaining);
+  const click = takeCapped(
+    clickableCandidates(rows, includePayment, skippedClickRefs, pageUrl),
+    remaining,
+  );
   const scroll = takeCapped(scrollTargets(rows), remaining);
   const operations: DriveOperation[] = [];
   if (click.length > 0) operations.push("CLICK");
@@ -2548,11 +2689,15 @@ function handoffObservation(observation: Observation, rows: WireRow[]): Observat
   };
 }
 
-function findRow(rows: readonly WireRow[], refOrSlug: string): WireRow | undefined {
+function findRow(
+  rows: readonly WireRow[],
+  refOrSlug: string,
+  pageUrl: string,
+): WireRow | undefined {
   const byRef = rows.find((row) => row[0] === refOrSlug || rowLabel(row) === refOrSlug);
   if (byRef !== undefined) return byRef;
   for (const includePayment of [false, true]) {
-    const hit = driveCandidates(rows, includePayment).find(
+    const hit = driveCandidates(rows, includePayment, pageUrl).find(
       (candidate) => candidate.slug === refOrSlug,
     );
     if (hit !== undefined) return hit.row;
@@ -2831,7 +2976,8 @@ async function snapshotDriveSession(
   }
   ensureFrameCacheInvalidation(session);
   const omit = maskedRefsOf(drive);
-  const main = await captureFrameSnapshot(page, omit, 0);
+  const keepOffscreenButtons = isCheckoutUrl(page.url());
+  const main = await captureFrameSnapshot(page, omit, 0, keepOffscreenButtons);
   if (main === null) {
     const observation = await deps.observe(sessionId, "compact");
     const compactRows = mergeCompactTable([], observation);
@@ -2854,13 +3000,13 @@ async function snapshotDriveSession(
     for (let index = 1; index < frames.length; index += 1) {
       const frame = frames[index]!;
       const signature = await frameDynamicsSignature(frame);
-      const key = `${index}:${frame.url()}`;
+      const key = `${index}:${frame.url()}:${keepOffscreenButtons}`;
       const cached = cache.get(key);
       if (cached !== undefined && cached.signature === signature) {
         parts.push(cached.snapshot);
         continue;
       }
-      const child = await captureFrameSnapshot(frame, omit, index);
+      const child = await captureFrameSnapshot(frame, omit, index, keepOffscreenButtons);
       if (child === null) continue;
       cache.set(key, { signature, snapshot: child });
       parts.push(child);
@@ -2915,9 +3061,10 @@ function resolveResumeAnswer(
   answer: string,
   snapshotRows: readonly WireRow[],
   compactRows: readonly WireRow[],
+  pageUrl: string,
 ): string {
-  if (findRow(snapshotRows, answer) !== undefined) return answer;
-  const compact = findRow(compactRows, answer);
+  if (findRow(snapshotRows, answer, pageUrl) !== undefined) return answer;
+  const compact = findRow(compactRows, answer, pageUrl);
   if (compact === undefined) return answer;
   const wantedField = rowField(compact);
   const wantedLabel = readableLabel(compact).toLowerCase();
@@ -2997,6 +3144,7 @@ function resumeAction(
   facts: Record<string, string>,
   goal: string,
   cardRef: string | undefined,
+  pageUrl: string,
 ): DriveDecision {
   if (answer === DRIVE_FIXED_DONE || answer === "done") return { kind: "complete", confidence: 1 };
   if (answer === DRIVE_FIXED_STUCK || answer === "stuck") {
@@ -3004,9 +3152,9 @@ function resumeAction(
   }
   if (answer === "WAIT" || answer === "wait") return { kind: "wait", confidence: 1 };
   const includePayment = cardRef !== undefined;
-  const questions = buildDriveQuestions(rows, facts, goal, includePayment);
-  const sets = driveTargetSets(rows, facts, includePayment);
-  const row = findRow(rows, answer);
+  const questions = buildDriveQuestions(rows, facts, goal, includePayment, [], pageUrl);
+  const sets = driveTargetSets(rows, facts, includePayment, [], pageUrl);
+  const row = findRow(rows, answer, pageUrl);
   if (row === undefined) {
     return {
       kind: "invalid_answer",
@@ -3223,6 +3371,7 @@ async function driveLoop(input: {
   let typeMustYield = false;
   let emptySnapshotWaits = 0;
   let settleWaits = 0;
+  let paySubmitWaits = 0;
 
   const finish = (
     status: DriveStatus,
@@ -3492,7 +3641,7 @@ async function driveLoop(input: {
           ...(jevMs === undefined ? {} : { jev_ms: jevMs }),
           ...takeActProfile(drive),
         });
-        drive.history.push("inject card");
+        drive.history.push(DRIVE_INJECT_CARD_HISTORY);
         const approvalUrl =
           typeof payment.approval_url === "string" ? payment.approval_url : undefined;
         return finish("pending_approval", {
@@ -3530,7 +3679,7 @@ async function driveLoop(input: {
         ...(jevMs === undefined ? {} : { jev_ms: jevMs }),
         ...takeActProfile(drive),
       });
-      drive.history.push("inject card");
+      drive.history.push(DRIVE_INJECT_CARD_HISTORY);
       const nextFingerprint = progressFingerprint(
         observation.url,
         rows,
@@ -3630,19 +3779,11 @@ async function driveLoop(input: {
       return await noteProgress(fingerprint, nextFingerprint, decision.actionKey);
     }
 
-    const historyLine = (() => {
-      const acted = findRow(rows, decision.actionKey);
-      if (acted === undefined) return decision.action.kind;
-      const operation =
-        decision.action.kind === "click"
-          ? "CLICK"
-          : decision.action.kind === "type"
-            ? "TYPE_TEXT"
-            : decision.action.kind === "select"
-              ? "SELECT"
-              : undefined;
-      return actionDescription(acted, rows, operation);
-    })();
+    const historyLine = actionHistoryLine(
+      decision.action,
+      findRow(rows, decision.actionKey, observation.url),
+      rows,
+    );
     const beforeEpoch =
       drive.lastDocumentEpoch ??
       (session.browser.page === null ? "" : await documentEpochOf(session.browser.page));
@@ -3763,7 +3904,7 @@ async function driveLoop(input: {
 
   if (args.answer !== undefined) {
     const compactRows = drive.resumeCompactRows ?? mergeCompactTable([], priorCompact ?? {});
-    const answer = resolveResumeAnswer(args.answer, rows, compactRows);
+    const answer = resolveResumeAnswer(args.answer, rows, compactRows, observation.url);
     // Resume binds to the fresh snapshot: the pending operation (e.g. an
     // approval that completed on the phone) must pass the consume-once gate
     // on its first post-resume attempt instead of bouncing off a
@@ -3777,7 +3918,7 @@ async function driveLoop(input: {
     );
     drive.consumedActionKey = null;
     const resumed = await applyDecision(
-      resumeAction(answer, rows, drive.facts, drive.goal, drive.facts.card_ref),
+      resumeAction(answer, rows, drive.facts, drive.goal, drive.facts.card_ref, observation.url),
     );
     if (resumed !== "continue") return resumed;
     steps += 1;
@@ -4057,6 +4198,31 @@ async function driveLoop(input: {
       continue;
     }
 
+    const missingPay = paymentSubmitControlMissing({
+      rows,
+      includePayment,
+      alreadyCard,
+      cardRetry,
+      pageUrl,
+      remainingFills: remainingFills.length,
+      history: drive.history,
+    });
+    if (missingPay === undefined) {
+      paySubmitWaits = 0;
+    } else if (paySubmitWaits < DRIVE_PAY_SUBMIT_WAITS) {
+      // A checkout that is still hydrating already carries its header and
+      // footer buttons, so the snapshot is non-empty while the pay control has
+      // not mounted. Spend a bounded re-observation budget before calling a
+      // paid-for order stuck.
+      paySubmitWaits += 1;
+      const applied = await applyDecision({ kind: "wait", confidence: 1 });
+      if (applied !== "continue") return applied;
+      steps += 1;
+      continue;
+    } else {
+      return finish("stuck", { reason: missingPay });
+    }
+
     if (drive.jevCalls >= DRIVE_MAX_JEV_CALLS) return finish("budget");
 
     const prepareStarted = Date.now();
@@ -4121,7 +4287,8 @@ async function driveLoop(input: {
       observation.url,
       observation.semantic?.title,
       [...sets.TYPE_TEXT, ...sets.SELECT, ...sets.CLICK].filter((candidate) => {
-        if (isOffscreenRow(candidate.row)) return false;
+        if (isOffscreenRow(candidate.row) && !offscreenRowStaysOffered(candidate.row, pageUrl))
+          return false;
         if (stateSeenRefs.has(candidate.ref)) return false;
         stateSeenRefs.add(candidate.ref);
         return true;

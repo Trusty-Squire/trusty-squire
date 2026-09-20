@@ -62,6 +62,7 @@ interface DriveSnapshotArg {
   budgetMs: number;
   maxWalkNodes: number;
   maxNameVisits: number;
+  keepOffscreenButtons: boolean;
 }
 
 type DriveInPageSnapshot = {
@@ -401,6 +402,7 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
     if (rect.width <= 0 || rect.height <= 0) continue;
     const inViewport =
       rect.bottom > 0 && rect.top < innerHeight && rect.right > 0 && rect.left < innerWidth;
+    const buttonLike = role === "button" || element.tagName === "BUTTON";
     const keepOffscreen =
       role === "textbox" ||
       role === "searchbox" ||
@@ -408,7 +410,8 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
       role === "checkbox" ||
       role === "radio" ||
       role === "combobox" ||
-      element.tagName === "SELECT";
+      element.tagName === "SELECT" ||
+      (buttonLike && arg.keepOffscreenButtons);
     const pinned =
       element.closest(
         "header,nav,footer,[role='banner'],[role='navigation'],[role='contentinfo']",
@@ -615,6 +618,7 @@ export async function captureFrameSnapshot(
   target: Page | Frame,
   omitValueRefs: readonly string[],
   frameOrdinal: number,
+  keepOffscreenButtons = false,
 ): Promise<DriveSnapshot | null> {
   const wallStarted = Date.now();
   try {
@@ -625,6 +629,7 @@ export async function captureFrameSnapshot(
       budgetMs: DRIVE_SNAPSHOT_BUDGET_MS,
       maxWalkNodes: DRIVE_SNAPSHOT_MAX_WALK_NODES,
       maxNameVisits: DRIVE_SNAPSHOT_MAX_NAME_VISITS,
+      keepOffscreenButtons,
     });
     const wallMs = Date.now() - wallStarted;
     if (raw === null) return null;

@@ -2175,7 +2175,7 @@ describe("operate_drive real-browser fixture", () => {
     }
   }, 30_000);
 
-  it("keeps offscreen fields and drops ordinary offscreen buttons", async () => {
+  it("keeps offscreen fields and drops offscreen buttons off a checkout", async () => {
     const html = `<!doctype html><meta charset="utf-8"><title>Picker viewport</title>
 <main style="min-height:4000px">
   <label>Departure <input id="dep" aria-haspopup="dialog"></label>
@@ -2200,6 +2200,31 @@ describe("operate_drive real-browser fixture", () => {
       const company = snap.elements.find((element) => element.label.includes("Company"));
       expect(company?.offscreen).toBe(true);
       expect(company?.role).toBe("textbox");
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
+  it("keeps an offscreen checkout submit button whatever its language", async () => {
+    const html = `<!doctype html><meta charset="utf-8"><title>Checkout</title>
+<main style="min-height:4000px">
+  <label>Card number <input id="pan"></label>
+  <button type="button" id="pay" style="position:absolute;top:1458px">Payer maintenant</button>
+</main>`;
+    const { context, page, started } = await openFixture(
+      html,
+      "whitejade.xyz",
+      "standard",
+      "/checkouts/cn/hWNH38PujD9hoKo3tgk00iw6/fr",
+    );
+    try {
+      const snap = await captureFrameSnapshot(page, [], 0, true);
+      expect(snap).not.toBeNull();
+      if (snap === null) return;
+      const pay = snap.elements.find((element) => element.label === "Payer maintenant");
+      expect(pay?.offscreen).toBe(true);
+      expect(pay?.role).toBe("button");
     } finally {
       await finishProvisionSession(started.session_id);
       await context.close();

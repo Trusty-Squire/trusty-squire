@@ -63,6 +63,7 @@ export const REAL_BROWSER_FILES = [
   "src/bot/__tests__/observe-jp-mojibake.test.ts",
   "src/bot/__tests__/operate-session-flow.test.ts",
   "src/bot/__tests__/operate-drive-fixture.test.ts",
+  "src/bot/__tests__/checkout-pay-submit-fixture.test.ts",
   "src/bot/__tests__/operate-drive-matrix.test.ts",
   "src/bot/__tests__/operator-click-fallback.test.ts",
   "src/bot/__tests__/operator-login-read-browser.test.ts",
