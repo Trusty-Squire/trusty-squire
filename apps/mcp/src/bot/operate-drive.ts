@@ -623,6 +623,13 @@ export function isSubmitLikeRow(row: WireRow): boolean {
   );
 }
 
+export function isPaymentSubmitRow(row: WireRow): boolean {
+  const label = readableLabel(row).toLowerCase();
+  return /pay[- ]?now|place[- ]?order|complete[- ]?(?:order|purchase|payment)|submit[- ]?payment|buy[- ]?now/.test(
+    label,
+  );
+}
+
 /** Fill, select, an enabled non-OAuth submit, or an enabled choice is still listed — WAIT and BLOCKED are not honest. */
 export function pageHasListedWork(
   rows: readonly WireRow[],
@@ -636,6 +643,32 @@ export function pageHasListedWork(
   });
 }
 
+export function paymentSubmitControlMissing(input: {
+  rows: readonly WireRow[];
+  includePayment: boolean;
+  alreadyCard: boolean;
+  cardRetry: boolean;
+  onCheckout: boolean;
+  remainingFills: number;
+}): string | undefined {
+  if (
+    !input.includePayment ||
+    !input.alreadyCard ||
+    input.cardRetry ||
+    !input.onCheckout ||
+    input.remainingFills > 0 ||
+    input.rows.some((row) => isPaymentSubmitRow(row))
+  ) {
+    return undefined;
+  }
+  const seen = input.rows
+    .filter((row) => isClickableRow(row) && !isOffscreenRow(row))
+    .map((row) => readableLabel(row))
+    .filter((label, index, all) => label.length > 0 && all.indexOf(label) === index)
+    .slice(0, 8);
+  return `the control for this operation is not present (CLICK pay/place-order). visible: ${seen.join(", ") || "none"}`;
+}
+
 export function isCheckoutUrl(url: string): boolean {
   try {
     const path = new URL(url).pathname.toLowerCase();
@@ -646,7 +679,10 @@ export function isCheckoutUrl(url: string): boolean {
 }
 
 export function isCandidateRow(row: WireRow, includePayment: boolean): boolean {
-  if (isOffscreenRow(row)) return false;
+  // Offscreen payment submits stay offered: Shopify parks "Pay now" below the
+  // fold (LIVE #6, top≈1458 in a 720px viewport) and the act path scrolls.
+  // Other offscreen chrome stays hidden so Jev cannot shrug-click it.
+  if (isOffscreenRow(row) && !isPaymentSubmitRow(row)) return false;
   if (isDisabledRow(row) && !isSubmitLikeRow(row)) return false;
   if (!includePayment && (isPaymentRow(row) || isCvvRow(row))) return false;
   return true;
@@ -4057,6 +4093,16 @@ async function driveLoop(input: {
       continue;
     }
 
+    const missingPay = paymentSubmitControlMissing({
+      rows,
+      includePayment,
+      alreadyCard,
+      cardRetry,
+      onCheckout,
+      remainingFills: remainingFills.length,
+    });
+    if (missingPay !== undefined) return finish("stuck", { reason: missingPay });
+
     if (drive.jevCalls >= DRIVE_MAX_JEV_CALLS) return finish("budget");
 
     const prepareStarted = Date.now();
@@ -4121,7 +4167,7 @@ async function driveLoop(input: {
       observation.url,
       observation.semantic?.title,
       [...sets.TYPE_TEXT, ...sets.SELECT, ...sets.CLICK].filter((candidate) => {
-        if (isOffscreenRow(candidate.row)) return false;
+        if (isOffscreenRow(candidate.row) && !isPaymentSubmitRow(candidate.row)) return false;
         if (stateSeenRefs.has(candidate.ref)) return false;
         stateSeenRefs.add(candidate.ref);
         return true;

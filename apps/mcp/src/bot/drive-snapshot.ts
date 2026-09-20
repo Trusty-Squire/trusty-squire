@@ -408,7 +408,9 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
       role === "checkbox" ||
       role === "radio" ||
       role === "combobox" ||
-      element.tagName === "SELECT";
+      role === "button" ||
+      element.tagName === "SELECT" ||
+      element.tagName === "BUTTON";
     const pinned =
       element.closest(
         "header,nav,footer,[role='banner'],[role='navigation'],[role='contentinfo']",

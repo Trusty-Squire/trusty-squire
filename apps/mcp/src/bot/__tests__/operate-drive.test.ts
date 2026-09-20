@@ -31,6 +31,9 @@ import {
   clickableCandidates,
   decideAfterJev,
   driveCandidates,
+  isCandidateRow,
+  isPaymentSubmitRow,
+  paymentSubmitControlMissing,
   fillActionForCandidate,
   fillableCandidates,
   isOtpRow,
@@ -192,6 +195,45 @@ describe("request building", () => {
       "@e:go",
     ]);
     expect(driveCandidates(mixed, true).map((c) => c.ref)).toContain("@e:pan");
+  });
+
+  it("keeps an offscreen Pay now as a click candidate and drops other offscreen buttons", () => {
+    const pay: WireRow = ["@e:pay", "b", "Pay now$68.00|v=offscreen"];
+    const back: WireRow = ["@e:back", "b", "Back to finalize order"];
+    const chrome: WireRow = ["@e:x", "b", "button|v=offscreen"];
+    expect(isPaymentSubmitRow(pay)).toBe(true);
+    expect(isPaymentSubmitRow(back)).toBe(false);
+    expect(isCandidateRow(pay, true)).toBe(true);
+    expect(isCandidateRow(chrome, true)).toBe(false);
+    expect(clickableCandidates([pay, back, chrome], true).map((c) => c.ref)).toEqual([
+      "@e:pay",
+      "@e:back",
+    ]);
+  });
+
+  it("reports a missing Pay control instead of clicking Back to finalize order", () => {
+    const back: WireRow = ["@e:back", "b", "Back to finalize order"];
+    const pay: WireRow = ["@e:pay", "b", "Pay now$68.00|v=offscreen"];
+    expect(
+      paymentSubmitControlMissing({
+        rows: [back],
+        includePayment: true,
+        alreadyCard: true,
+        cardRetry: false,
+        onCheckout: true,
+        remainingFills: 0,
+      }),
+    ).toMatch(/the control for this operation is not present \(CLICK pay\/place-order\)/);
+    expect(
+      paymentSubmitControlMissing({
+        rows: [back, pay],
+        includePayment: true,
+        alreadyCard: true,
+        cardRetry: false,
+        onCheckout: true,
+        remainingFills: 0,
+      }),
+    ).toBeUndefined();
   });
 
   it("puts SELECT option keys on the SELECT_target head", () => {
