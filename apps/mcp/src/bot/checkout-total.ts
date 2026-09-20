@@ -52,8 +52,26 @@ export function currencyMinorDigits(currency: string): number {
   }).resolvedOptions().maximumFractionDigits!;
 }
 
-function parseDisplayedNumber(raw: string, minorDigits: number): number | null {
-  const value = raw.replace(/\s/g, "");
+/** Apostrophes and the space family group digits in every locale that uses
+ * them and never mark a fraction, so they can be dropped — but only from a
+ * number whose groups are well formed. Anything else the capture swept up is
+ * an unreadable total, not a figure to guess the grouping of. */
+const CHECKOUT_GROUP_SEPARATORS = String.raw`\u0020\u00a0\u2009\u202f'\u2019`;
+const checkoutGroupSeparatorPattern = new RegExp(`[${CHECKOUT_GROUP_SEPARATORS}]`, "gu");
+const checkoutGroupedNumberPattern = new RegExp(
+  String.raw`^[0-9]{1,3}(?:[${CHECKOUT_GROUP_SEPARATORS}][0-9]{3})+(?:[.,][0-9]+)?$`,
+  "u",
+);
+
+function withoutGroupSeparators(raw: string): string | null {
+  checkoutGroupSeparatorPattern.lastIndex = 0;
+  if (!checkoutGroupSeparatorPattern.test(raw)) return raw;
+  return checkoutGroupedNumberPattern.test(raw)
+    ? raw.replaceAll(checkoutGroupSeparatorPattern, "")
+    : null;
+}
+
+function parseDisplayedNumber(value: string, minorDigits: number): number | null {
   const comma = value.lastIndexOf(",");
   const dot = value.lastIndexOf(".");
   let normalized = value;
@@ -93,7 +111,7 @@ const checkoutTotalLabel =
   String.raw`|税込(?:み)?(?:合計|総額|金額|価格)?|総合計|総計|総額|合計金額|合計|小計|注文合計|注文金額|支払い金額|支払金額|請求金額|請求額)(?![${cjkLetter}]))`;
 const checkoutTotalPattern = new RegExp(
   checkoutTotalLabel +
-    String.raw`(?:\s*[（(]税込み?[）)])?\s*[:：]?\s*(?:(\p{L}{1,4}\p{Sc}?)\s*)?(\p{Sc})?\s*([0-9](?:[0-9.,]*[0-9])?)(?![0-9.,])(?:[^\S\r\n]*(\p{L}{1,4}\p{Sc}?|\p{Sc})(?=\s|$|[.,;:!?)（）(。、]))?(?![${cjkLetter}])`,
+    String.raw`(?:\s*[（(]税込み?[）)])?\s*[:：]?\s*(?:(\p{L}{1,4}\p{Sc}?)\s*)?(\p{Sc})?\s*([0-9](?:[0-9.,${CHECKOUT_GROUP_SEPARATORS}]*[0-9])?)(?![0-9.,'’])(?:[^\S\r\n]*(\p{L}{1,4}\p{Sc}?|\p{Sc})(?=\s|$|[.,;:!?)（）(。、]))?(?![${cjkLetter}])`,
   "giu",
 );
 
@@ -152,8 +170,7 @@ function resolveCheckoutCurrencyToken(token: string | undefined): PageCurrency |
  * A lone three-digit group reads as a thousands group only where no currency
  * spends three minor digits — under KWD/BHD `1,234` is genuinely either 1234
  * or 1.234, and a guess would show the human the wrong money. */
-function displayedScaleMismatches(raw: string, minorDigits: number): boolean {
-  const value = raw.replace(/\s/g, "");
+function displayedScaleMismatches(value: string, minorDigits: number): boolean {
   const comma = value.lastIndexOf(",");
   const dot = value.lastIndexOf(".");
   const separator = Math.max(comma, dot);
@@ -192,8 +209,10 @@ function parseCheckoutAmountMatch(
   const currency =
     !pageCurrency.unique && factCurrency !== undefined ? factCurrency : pageCurrency.code;
   const minorDigits = currencyMinorDigits(currency);
-  if (displayedScaleMismatches(match[3] ?? "", minorDigits)) return null;
-  const amount = parseDisplayedNumber(match[3] ?? "", minorDigits);
+  const displayed = withoutGroupSeparators(match[3] ?? "");
+  if (displayed === null) return null;
+  if (displayedScaleMismatches(displayed, minorDigits)) return null;
+  const amount = parseDisplayedNumber(displayed, minorDigits);
   if (amount === null) return null;
   const scale = 10 ** minorDigits;
   const minor = Math.round(amount * scale);

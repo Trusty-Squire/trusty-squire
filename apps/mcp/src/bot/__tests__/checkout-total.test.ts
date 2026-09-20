@@ -162,6 +162,40 @@ $76.00 USD`;
     });
   });
 
+  it("reads apostrophe- and space-grouped totals instead of their leading group", () => {
+    expect(resolveDriveApprovalAmount(["Total CHF 1'234.56"], {})).toMatchObject({
+      amount_cents: 123456,
+      currency: "CHF",
+    });
+    expect(resolveDriveApprovalAmount(["Total CHF 1\u2019234.56"], {})).toMatchObject({
+      amount_cents: 123456,
+      currency: "CHF",
+    });
+    expect(resolveDriveApprovalAmount(["Total EUR 1 234,56"], {})).toMatchObject({
+      amount_cents: 123456,
+      currency: "EUR",
+    });
+    expect(resolveDriveApprovalAmount(["Total EUR 1\u202f234,56"], {})).toMatchObject({
+      amount_cents: 123456,
+      currency: "EUR",
+    });
+    expect(resolveDriveApprovalAmount(["Total 1'234'567.89 CHF"], {})).toMatchObject({
+      amount_cents: 123456789,
+      currency: "CHF",
+    });
+  });
+
+  it("refuses a grouped number whose groups are malformed rather than join the digits", () => {
+    expect(resolveDriveApprovalAmount(["Total CHF 1'23.45"], {})).toMatchObject({
+      amount_cents: 0,
+      note: CHECKOUT_TOTAL_UNREADABLE,
+    });
+    expect(resolveDriveApprovalAmount(["Total EUR 76.00 12345"], {})).toMatchObject({
+      amount_cents: 0,
+      note: CHECKOUT_TOTAL_UNREADABLE,
+    });
+  });
+
   it("degrades a wedged renderer to an unknown total without cancelling the drive request", async () => {
     vi.useFakeTimers();
     const wedged = wedgedPage();
