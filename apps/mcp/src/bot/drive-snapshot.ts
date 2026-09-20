@@ -33,6 +33,10 @@ export interface DriveSnapshotElement {
   /** The control's own `maxlength`, when it declares one. */
   width?: number;
   placeholder?: string;
+  /** The control's HTML `name`, when it has one. */
+  name?: string;
+  /** The input `type` (`email`, `text`, …), when the node is an input. */
+  inputType?: string;
   pattern?: string;
   inputMode?: string;
   invalid?: boolean;
@@ -121,6 +125,33 @@ export function inferFieldFromLabel(label: string, role: string): string | undef
   return undefined;
 }
 
+const EMAIL_SHAPE = /[^\s@]+@[^\s@]+\.[a-z]{2,}/i;
+
+export function looksLikeEmailAddress(value: string): boolean {
+  return EMAIL_SHAPE.test(value);
+}
+
+/** Fact key from the control's label or name. Type/placeholder email wins; a domain in a placeholder never names the field. */
+export function inferFieldFromControl(input: {
+  label: string;
+  role: string;
+  name?: string;
+  placeholder?: string;
+  inputType?: string;
+}): string | undefined {
+  const type = (input.inputType ?? "").toLowerCase();
+  if (type === "email") return "email";
+  if (looksLikeEmailAddress(input.placeholder ?? "") || looksLikeEmailAddress(input.label)) {
+    return "email";
+  }
+  const fromName = inferFieldFromLabel(input.name ?? "", input.role);
+  if (fromName !== undefined) return fromName;
+  if ((input.placeholder ?? "").length > 0 && input.label === input.placeholder) {
+    return undefined;
+  }
+  return inferFieldFromLabel(input.label, input.role);
+}
+
 export function driveRowsFromSnapshot(snapshot: DriveSnapshot): SnapshotRow[] {
   const rows: SnapshotRow[] = [];
   const optionParents = new Map<string, DriveSnapshotElement[]>();
@@ -142,7 +173,13 @@ export function driveRowsFromSnapshot(snapshot: DriveSnapshot): SnapshotRow[] {
     const facts: string[] = [];
     const label = element.label.replace(/\|/g, " ").trim();
     if (label.length > 0) facts.push(label);
-    const field = inferFieldFromLabel(element.label, element.role);
+    const field = inferFieldFromControl({
+      label: element.label,
+      role: element.role,
+      ...(element.name === undefined ? {} : { name: element.name }),
+      ...(element.placeholder === undefined ? {} : { placeholder: element.placeholder }),
+      ...(element.inputType === undefined ? {} : { inputType: element.inputType }),
+    });
     if (field !== undefined) facts.push(`f=${field}`);
     const states: string[] = [];
     if (element.required === true) states.push("r");
@@ -529,6 +566,13 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
         ? element.maxLength
         : undefined;
     const placeholder = element.getAttribute("placeholder")?.trim() ?? "";
+    const inputName =
+      element instanceof HTMLInputElement ||
+      element instanceof HTMLTextAreaElement ||
+      element instanceof HTMLSelectElement
+        ? element.name.trim()
+        : (element.getAttribute("name") ?? "").trim();
+    const inputType = element instanceof HTMLInputElement ? element.type : "";
     const pattern = element instanceof HTMLInputElement ? element.pattern.trim() : "";
     const inputMode = element.getAttribute("inputmode")?.trim() ?? "";
     const invalid =
@@ -562,6 +606,8 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
       ...(picker ? { picker: true } : {}),
       ...(width === undefined ? {} : { width }),
       ...(placeholder.length > 0 ? { placeholder } : {}),
+      ...(inputName.length > 0 ? { name: inputName } : {}),
+      ...(inputType.length > 0 ? { inputType } : {}),
       ...(pattern.length > 0 ? { pattern } : {}),
       ...(inputMode.length > 0 ? { inputMode } : {}),
       ...(invalid ? { invalid: true } : {}),

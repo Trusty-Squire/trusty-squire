@@ -10,6 +10,7 @@ import {
   DRIVE_SNAPSHOT_MAX_WALK_NODES,
   driveRowsFromSnapshot,
   inferFieldFromLabel,
+  inferFieldFromControl,
   snapshotSelectOptions,
   snapshotToObservation,
   type DriveSnapshot,
@@ -47,6 +48,28 @@ describe("drive snapshot conversion", () => {
     expect(inferFieldFromLabel("Departure", "textbox")).toBe("date");
     expect(inferFieldFromLabel("Expiry", "textbox")).toBe("date");
     expect(inferFieldFromLabel("Card number", "textbox")).toBe("payment");
+    expect(
+      inferFieldFromControl({
+        label: "billing@yourcompany.com",
+        role: "textbox",
+        placeholder: "billing@yourcompany.com",
+        inputType: "email",
+      }),
+    ).toBe("email");
+    expect(
+      inferFieldFromControl({
+        label: "billing@yourcompany.com",
+        role: "textbox",
+        placeholder: "billing@yourcompany.com",
+      }),
+    ).toBe("email");
+    expect(
+      inferFieldFromControl({
+        label: "Company",
+        role: "textbox",
+        name: "company",
+      }),
+    ).toBe("company");
     const rows = driveRowsFromSnapshot(
       snapshot({
         elements: [

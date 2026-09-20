@@ -727,6 +727,111 @@ describe("operate_drive real-browser fixture", () => {
     }
   }, 30_000);
 
+  it("clicks a nav link over a filter that shares the goal noun", async () => {
+    const html = `<!doctype html><meta charset="utf-8"><title>Dashboard</title>
+<nav><a id="keys" href="/keys">API Keys</a></nav>
+<label>All API keys
+  <select id="filter"><option>All API keys</option><option>Mine</option></select>
+</label>`;
+    const { context, page, started } = await openFixture(html, "keys-filter.test", "standard", "/dashboard");
+    try {
+      const dependencies = deps(async (_api, _state, questions) => jevFromQuestions(questions));
+      const result = await runOperateDrive(
+        { session_id: started.session_id, goal: "sign up and extract an API key", max_steps: 6 },
+        api(),
+        undefined,
+        dependencies,
+      );
+      expect(page.url()).toMatch(/\/keys/);
+      expect(result.trajectory.some((step) => step.action === "click")).toBe(true);
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
+  it("opens unvisited section tabs until the goal noun appears", async () => {
+    const settingsHtml = `<!doctype html><meta charset="utf-8"><title>Settings</title>
+<nav><a id="settings" href="/settings">Settings</a></nav>
+<div role="tablist">
+  <button type="button" role="tab" id="billing">billing</button>
+  <button type="button" role="tab" id="account">account</button>
+  <button type="button" role="tab" id="apps">apps</button>
+</div>
+<section id="panel"></section>
+<script>
+  const panels = {
+    billing: "<p>Plan</p>",
+    account: "<p>Profile</p>",
+    apps: '<a id="keys" href="/keys">API Keys</a>',
+  };
+  const show = (name) => { document.getElementById("panel").innerHTML = panels[name]; };
+  document.getElementById("billing").onclick = () => show("billing");
+  document.getElementById("account").onclick = () => show("account");
+  document.getElementById("apps").onclick = () => show("apps");
+</script>`;
+    const keysHtml = `<!doctype html><meta charset="utf-8"><title>API Keys</title>
+<main><h1>API Keys</h1><p id="key">sk_live_fixture</p></main>`;
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await page.route("**/*", (route) => {
+      const url = route.request().url();
+      route.fulfill({
+        contentType: "text/html",
+        body: url.includes("/keys") ? keysHtml : settingsHtml,
+      });
+    });
+    const url = "https://settings-tabs.test/settings";
+    await page.goto(url);
+    const started = await startHarnessProvisionSession({
+      browser: BrowserController.fromHarnessPage(page),
+      serviceUrl: url,
+      format: "compact",
+      initialObservation: "standard",
+    });
+    try {
+      const dependencies = deps(async (_api, _state, questions) => jevFromQuestions(questions));
+      const result = await runOperateDrive(
+        { session_id: started.session_id, goal: "extract an API key", max_steps: 8 },
+        api(),
+        undefined,
+        dependencies,
+      );
+      expect(page.url()).toMatch(/\/keys/);
+      expect(result.trajectory.filter((step) => step.action === "click").length).toBeGreaterThanOrEqual(4);
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
+  it("does not write a company fact into an email field named by its placeholder", async () => {
+    const html = `<!doctype html><meta charset="utf-8"><title>Billing</title>
+<main>
+  <input id="bill" type="email" placeholder="billing@yourcompany.com">
+  <button type="button" id="save">Save</button>
+</main>`;
+    const { context, page, started } = await openFixture(html, "email-placeholder.test");
+    try {
+      const dependencies = deps(async (_api, _state, questions) => jevFromQuestions(questions));
+      await runOperateDrive(
+        {
+          session_id: started.session_id,
+          goal: "save billing contact",
+          facts: { company: "Acme", email: "ada@fixture.test" },
+          max_steps: 6,
+        },
+        api(),
+        undefined,
+        dependencies,
+      );
+      expect(await page.locator("#bill").inputValue()).toBe("ada@fixture.test");
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
   it("advances a whole-purchase goal across the empty snapshot into the payment stage", async () => {
     const { context, page, started } = await openFixture(
       MULTI_STAGE_CHECKOUT_HTML,

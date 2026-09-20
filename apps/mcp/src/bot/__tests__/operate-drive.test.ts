@@ -115,6 +115,12 @@ import {
   pageOffersOnlyThirdPartySignup,
   noOtherSignupPathReason,
   oauthProviderForRow,
+  isListFilterRow,
+  isGoalDestinationRow,
+  isSectionNavRow,
+  unvisitedSectionNavRows,
+  rowLooksLikeEmail,
+  rowCarriesGoalNoun,
 } from "../operate-drive.js";
 import { operateDriveTool } from "../../tools/provision-drive.js";
 import type { JevAnswer } from "../jev-client.js";
@@ -3019,5 +3025,70 @@ describe("third-party-only signup", () => {
       kind: "act",
       action: { kind: "oauth_login", target: github[0], provider: "github" },
     });
+  });
+});
+
+describe("post-confirmation navigation", () => {
+  const keys: WireRow = ["@e:keys", "l", "API Keys"];
+  const filter: WireRow = ["@e:filter", "s", "All API keys"];
+  const settings: WireRow = ["@e:set", "l", "Settings"];
+  const billing: WireRow = ["@e:bill", "tb", "billing"];
+  const account: WireRow = ["@e:acct", "tb", "account"];
+  const apps: WireRow = ["@e:apps", "tb", "apps"];
+  const email: WireRow = [
+    "@e:mail",
+    "t",
+    "billing@yourcompany.com|f=email|ph=billing@yourcompany.com",
+  ];
+
+  it("treats a filter whose label shares the goal noun as a picker, not a destination", () => {
+    expect(isListFilterRow(filter)).toBe(true);
+    expect(isGoalDestinationRow(keys)).toBe(true);
+    expect(isGoalDestinationRow(filter)).toBe(false);
+    expect(rowMatchesGoalSeek(filter, "extract an API key")).toBe(false);
+    expect(rowCarriesGoalNoun(settings, "extract an API key")).toBe(false);
+    expect(rowCarriesGoalNoun(keys, "extract an API key")).toBe(true);
+    expect(rowMatchesGoalSeek(keys, "extract an API key")).toBe(true);
+    expect(clickGoalSeekScore(filter, "extract an API key", "https://example.test/dashboard")).toBe(
+      0,
+    );
+    expect(clickGoalSeekScore(keys, "extract an API key", "https://example.test/dashboard")).toBe(2);
+    const sets = driveTargetSets(
+      [filter, keys],
+      {},
+      false,
+      [],
+      "https://example.test/dashboard",
+      new Map(),
+      (text) => text,
+      [],
+      { goal: "sign up and extract an API key" },
+    );
+    expect(sets.CLICK.map((entry) => entry.ref)).toEqual(["@e:keys"]);
+    expect(sets.SELECT).toEqual([]);
+  });
+
+  it("lists unvisited section tabs and skips the page the drive is already on", () => {
+    expect(isSectionNavRow(billing)).toBe(true);
+    expect(isSectionNavRow(filter)).toBe(false);
+    const url = "https://example.test/settings";
+    expect(
+      unvisitedSectionNavRows([settings, billing, account, apps], [], url).map((row) => row[0]),
+    ).toEqual(["@e:bill", "@e:acct", "@e:apps"]);
+    expect(
+      unvisitedSectionNavRows(
+        [settings, billing, account, apps],
+        [stableControlKey(billing, url)],
+        url,
+      ).map((row) => row[0]),
+    ).toEqual(["@e:acct", "@e:apps"]);
+  });
+
+  it("never matches a company fact to an email-shaped field", () => {
+    expect(rowLooksLikeEmail(email)).toBe(true);
+    expect(matchingFactKeys({ company: "Acme" }, email)).toEqual([]);
+    expect(matchingFactKeys({ company: "Acme", email: "ada@example.test" }, email)).toEqual([
+      "email",
+    ]);
   });
 });
