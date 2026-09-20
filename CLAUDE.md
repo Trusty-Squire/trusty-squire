@@ -561,7 +561,8 @@ Session data model and its **single** construction contract now live in
 side by side). `Session` is still re-exported from `provision-session.ts`.
 
 The **lifecycle registry transaction** now lives in
-`apps/mcp/src/bot/session/lifecycle.ts`: the session map + refused-start set,
+`apps/mcp/src/bot/session/lifecycle.ts`: the session map, the per-session
+Google identity check that Google-dependent operations call (starts do not),
 broker page acquisition and release, the generic session call lease
 and its drain, the watchdog, the bounded close, the single terminal-teardown
 owner, artifact cleanup, and start/finish/shutdown. Its ORDER is the contract —
