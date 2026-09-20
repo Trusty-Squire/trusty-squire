@@ -32,23 +32,26 @@ describe("navigation content settle", () => {
     vi.useRealTimers();
   });
 
-  it.each([false, true])("waits for destination content with empty shell=%s", async (emptyShell) => {
-    const before = await pageFingerprintOf(page);
-    location.href = "https://shop.test/checkout";
-    document.title = "Checkout";
-    if (emptyShell) document.body.innerText = "";
-    let settled = false;
-    const waiting = waitForNavigationIdle(page, before).then(() => {
-      settled = true;
-    });
-    await vi.advanceTimersByTimeAsync(96);
-    expect(settled).toBe(false);
-    document.body.innerText = "Shipping address";
-    await vi.advanceTimersByTimeAsync(16);
-    await waiting;
-    expect(settled).toBe(true);
-    expect(vi.getTimerCount()).toBe(0);
-  });
+  it.each([false, true])(
+    "waits for destination content with empty shell=%s",
+    async (emptyShell) => {
+      const before = await pageFingerprintOf(page);
+      location.href = "https://shop.test/checkout";
+      document.title = "Checkout";
+      if (emptyShell) document.body.innerText = "";
+      let settled = false;
+      const waiting = waitForNavigationIdle(page, before).then(() => {
+        settled = true;
+      });
+      await vi.advanceTimersByTimeAsync(96);
+      expect(settled).toBe(false);
+      document.body.innerText = "Shipping address";
+      await vi.advanceTimersByTimeAsync(16);
+      await waiting;
+      expect(settled).toBe(true);
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
 
   it("settles when destination controls render without body text", async () => {
     const before = await pageFingerprintOf(page);
@@ -62,7 +65,11 @@ describe("navigation content settle", () => {
   });
 
   it.each([false, true])("caps waiting at 300ms with suspended frames=%s", async (suspended) => {
-    if (suspended) vi.stubGlobal("requestAnimationFrame", vi.fn(() => 1));
+    if (suspended)
+      vi.stubGlobal(
+        "requestAnimationFrame",
+        vi.fn(() => 1),
+      );
     const before = await pageFingerprintOf(page);
     const controller = new AbortController();
     attachOperatorRequestAbort(controller.signal, (reason) => controller.abort(reason));
