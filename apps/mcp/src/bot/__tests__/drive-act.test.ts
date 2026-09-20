@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Page } from "playwright";
 import {
+  drivePointerUsesCdp,
   listOptionIdentity,
   pageFingerprintOf,
   settleDriveStep,
@@ -133,5 +134,14 @@ describe("list option identity", () => {
     });
     expect(listOptionIdentity("combobox", false, false, "Select reasons...")).toBeNull();
     expect(listOptionIdentity("option", false, false, "   ")).toBeNull();
+  });
+});
+
+describe("drive pointer path", () => {
+  it("keeps CDP only for a cross-origin child frame", () => {
+    expect(drivePointerUsesCdp(true, true)).toBe(false);
+    expect(drivePointerUsesCdp(true, false)).toBe(false);
+    expect(drivePointerUsesCdp(false, true)).toBe(false);
+    expect(drivePointerUsesCdp(false, false)).toBe(true);
   });
 });
