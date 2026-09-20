@@ -696,6 +696,17 @@ export function pageHasListedWork(
   });
 }
 
+/** A visible control the planner could take for the checkout's submit.
+ *
+ * A picker textbox reports clickable but is a FILL dressed as a click, so a
+ * payment stage carrying only fields offers nothing to mistake for Pay —
+ * refusing there would abort a drive whose remaining work is a fill or a DONE
+ * call (a card-fill goal never submits at all).
+ */
+function isPaymentSubstituteRow(row: WireRow): boolean {
+  return isClickableRow(row) && !isFillableRow(row) && !isOffscreenRow(row);
+}
+
 export function paymentSubmitControlMissing(input: {
   rows: readonly WireRow[];
   includePayment: boolean;
@@ -718,11 +729,12 @@ export function paymentSubmitControlMissing(input: {
     return undefined;
   }
   const seen = input.rows
-    .filter((row) => isClickableRow(row) && !isOffscreenRow(row))
+    .filter((row) => isPaymentSubstituteRow(row))
     .map((row) => readableLabel(row))
     .filter((label, index, all) => label.length > 0 && all.indexOf(label) === index)
     .slice(0, 8);
-  return `the control for this operation is not present (CLICK pay/place-order). visible: ${seen.join(", ") || "none"}`;
+  if (seen.length === 0) return undefined;
+  return `the control for this operation is not present (CLICK pay/place-order). visible: ${seen.join(", ")}`;
 }
 
 function urlPathname(url: string): string {

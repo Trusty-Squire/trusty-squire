@@ -273,6 +273,25 @@ describe("request building", () => {
     expect(paymentSubmitControlMissing({ ...gate, rows: [link, pay] })).toBeUndefined();
   });
 
+  it("keeps driving a payment stage that offers no substitute to click", () => {
+    // Fields only: a picker textbox reports clickable but is a fill, so there
+    // is nothing to mistake for Pay and nothing to refuse — a card-fill goal
+    // on a bare checkout must still reach its own ending.
+    const expiry: WireRow = ["@e:exp", "t", "Expiration date (MM / YY)|f=date"];
+    const pan: WireRow = ["@e:pan", "t", "Card number|f=cc-number"];
+    expect(
+      paymentSubmitControlMissing({
+        rows: [pan, expiry],
+        includePayment: true,
+        alreadyCard: true,
+        cardRetry: false,
+        pageUrl: "https://checkout.test/checkout",
+        remainingFills: 0,
+        history: [],
+      }),
+    ).toBeUndefined();
+  });
+
   it("does not call a dispatched or completed payment stuck", () => {
     const processing: WireRow = ["@e:back", "l", "Back to finalize order"];
     const gate = {
