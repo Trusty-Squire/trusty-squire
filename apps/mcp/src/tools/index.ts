@@ -46,6 +46,8 @@ export interface Tool<TArgs extends Record<string, unknown> = Record<string, unk
 export interface ToolContext {
   notifyUser?: (message: string, data?: Record<string, unknown>) => Promise<void>;
   signal?: AbortSignal;
+  /** Broker-only startup hint: a direct drive owns its first perception. */
+  initialObservation?: "drive";
 }
 
 // Re-exported for convenience; defined in its own module to avoid a

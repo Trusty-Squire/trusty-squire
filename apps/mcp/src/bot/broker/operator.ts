@@ -54,6 +54,7 @@ const openSchema = z
     serviceUrl: z.string().min(1),
     format: z.enum(["compact", "full"]).optional(),
     proxy: z.string().optional(),
+    initialObservation: z.literal("drive").optional(),
     ceremony: z.boolean().optional(),
   })
   .strict();
@@ -226,7 +227,11 @@ export class OperatorBroker implements BrokerTransportPort {
             await withBrokerAdmission({ sessionId: id }, async () =>
               input.ceremony === true
                 ? await withCeremonyStartAdmission(async () => await tool.handler(args, pinnedApi))
-                : await tool.handler(args, pinnedApi),
+                : await tool.handler(args, pinnedApi, {
+                    ...(input.initialObservation === undefined
+                      ? {}
+                      : { initialObservation: input.initialObservation }),
+                  }),
             ),
         );
         if (signal.aborted) throw signal.reason ?? new Error("operator_request_cancelled");

@@ -210,7 +210,12 @@ export class OperatorForwarder {
         typeof args.url === "string" &&
         typeof args.session_id !== "string"
       ) {
-        const opened = parseOpenReply(await dispatch("open", { serviceUrl: args.url }));
+        const opened = parseOpenReply(
+          await dispatch("open", {
+            serviceUrl: args.url,
+            initialObservation: "drive",
+          }),
+        );
         if (opened.owned && opened.sessionId !== undefined) this.sessions.add(opened.sessionId);
         if (!opened.owned || opened.sessionId === undefined) {
           const refusedStartId = opened.observation.session_id;

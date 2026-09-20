@@ -357,7 +357,10 @@ describe("MCP broker forwarding over the Contract B wire", () => {
           ).toEqual({ status: "budget", session_id: "session-drive" });
           expect(seen[0]).toMatchObject({
             method: "open",
-            params: { serviceUrl: "https://signup.test/" },
+            params: {
+              serviceUrl: "https://signup.test/",
+              initialObservation: "drive",
+            },
           });
           expect(seen[1]).toMatchObject({
             method: "command",

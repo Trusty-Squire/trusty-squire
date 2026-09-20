@@ -9,6 +9,7 @@ import type { ProvisionAction } from "./provision-session.js";
 export const DRIVE_SETTLE_MS = 50;
 export const DRIVE_COMBOBOX_WAIT_MS = 400;
 export const DRIVE_OVERLAY_REFRESH_WAIT_MS = 2000;
+export const DRIVE_NAVIGATION_WAIT_MS = 300;
 
 export type DriveActTimings = {
   guardScriptMs: number;
@@ -467,9 +468,8 @@ export async function driveActOnPage(page: Page, action: ProvisionAction): Promi
 export async function settleDriveStep(page: Page, combobox: boolean): Promise<number> {
   const started = Date.now();
   try {
-    await evaluateBound(
-      page,
-      async (wait) => {
+    const frames = page
+      .evaluate(async (wait) => {
         await Promise.race([
           new Promise<void>((resolve) => {
             requestAnimationFrame(() => {
@@ -480,9 +480,16 @@ export async function settleDriveStep(page: Page, combobox: boolean): Promise<nu
             setTimeout(resolve, wait);
           }),
         ]);
-      },
-      DRIVE_SETTLE_MS,
-    );
+      }, DRIVE_SETTLE_MS)
+      .catch(() => undefined);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      frames,
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, DRIVE_SETTLE_MS);
+      }),
+    ]);
+    if (timer !== undefined) clearTimeout(timer);
     if (combobox) await waitForOpenedOverlay(page);
   } catch {
     return Date.now() - started;
@@ -498,11 +505,61 @@ export async function documentEpochOf(page: Page): Promise<string> {
   }
 }
 
+export async function pageFingerprintOf(page: Page): Promise<string> {
+  try {
+    return await evaluateBound(page, () => {
+      const text = document.body?.innerText.slice(0, 6000) ?? "";
+      const controls = Array.from(
+        document.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>(
+          "input,select,textarea",
+        ),
+      )
+        .map((element) => `${element.tagName}:${element.type}:${element.value}`)
+        .join("\n");
+      return [text, controls].join("\n").trim();
+    });
+  } catch {
+    return "";
+  }
+}
+
 export function documentOriginOf(epoch: string): string {
   const bar = epoch.indexOf("|");
   return bar === -1 ? epoch : epoch.slice(0, bar);
 }
 
-export async function waitForNavigationIdle(page: Page): Promise<void> {
-  await page.waitForLoadState("networkidle", { timeout: 3000 }).catch(() => undefined);
+export async function waitForNavigationIdle(page: Page, beforeFingerprint: string): Promise<void> {
+  await evaluateBound(
+    page,
+    async ({ before, cap }) => {
+      const fingerprint = (): string => {
+        const text = document.body?.innerText.slice(0, 6000) ?? "";
+        const controls = Array.from<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>(
+          document.querySelectorAll("input,select,textarea"),
+        )
+          .map((element) => `${element.tagName}:${element.type}:${element.value}`)
+          .join("\n");
+        return [text, controls].join("\n").trim();
+      };
+      await new Promise<void>((resolve) => {
+        let frame: number;
+        const finish = (): void => {
+          clearTimeout(timer);
+          cancelAnimationFrame(frame);
+          resolve();
+        };
+        const timer = setTimeout(finish, cap);
+        const poll = (): void => {
+          const current = fingerprint();
+          if (current.length > 0 && current !== before) {
+            finish();
+          } else {
+            frame = requestAnimationFrame(poll);
+          }
+        };
+        frame = requestAnimationFrame(poll);
+      });
+    },
+    { before: beforeFingerprint, cap: DRIVE_NAVIGATION_WAIT_MS },
+  ).catch(() => undefined);
 }

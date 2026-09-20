@@ -53,6 +53,15 @@ loop to handle. The live Google-session admission gate still applies.
 Standalone `operate_start` retains its general initial observation in the
 requested format and best-effort consent-banner dismissal before that read.
 
+After a guarded drive action, settling waits for two animation frames or
+50 ms. If the document's time origin changed, the loop then polls for a
+nonempty, changed fingerprint of body text and input/select/textarea types
+and values before taking the next snapshot. URL or title changes alone do
+not end that wait. This replaces the network-idle wait with a 300 ms timer
+that also ends polling when animation frames are suspended. It detects
+content movement, not complete page readiness; later asynchronous content
+may still require another observation or WAIT.
+
 Drive offers `Open <label>` click choices for recognized picker fields alongside
 typing where supported. Supply `origin`, `destination`, and `date` facts for
 travel forms: Departure matches the date, not the origin. Picker typing preserves

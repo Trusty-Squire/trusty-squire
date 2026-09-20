@@ -5,7 +5,7 @@
 // Jev confidence.
 
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { chromium, type Browser } from "playwright";
 import type { ApiClient } from "../../api-client.js";
@@ -23,7 +23,11 @@ import {
   awaitVerification,
   injectCardIntoSessionTargets,
 } from "../provision-session.js";
-import { captureFrameSnapshot, driveRowsFromSnapshot } from "../drive-snapshot.js";
+import {
+  captureFrameSnapshot,
+  driveRowsFromSnapshot,
+  snapshotToObservation,
+} from "../drive-snapshot.js";
 import { driveActOnPage, settleDriveStep } from "../drive-act.js";
 import { sessionForCall } from "../session/lifecycle.js";
 import { DriveEvaluateTimeout } from "../drive-evaluate.js";
@@ -170,6 +174,113 @@ function refFor(started: { safe_table?: unknown }, label: string): string {
 }
 
 describe("operate_drive real-browser fixture", () => {
+  it.skipIf(process.env.DRIVE_WHITEJADE_STARTUP_AB !== "1")(
+    "measures Whitejade drive startup with the general bypass kept versus deleted",
+    async () => {
+      const samples: Array<{ variant: string; elapsedMs: number; startupCaptures: number }> = [];
+      for (let run = 0; run < 3; run += 1) {
+        for (const variant of run % 2 === 0 ? ["kept", "deleted"] : ["deleted", "kept"]) {
+          const context = await browser.newContext();
+          const page = await context.newPage();
+          const controller = BrowserController.fromHarnessPage(page);
+          const original = controller.extractBrowserUseObservation.bind(controller);
+          let starting = false;
+          let startupCaptures = 0;
+          vi.spyOn(controller, "extractBrowserUseObservation").mockImplementation(
+            async (source, settle) => {
+              if (starting) startupCaptures += 1;
+              return await original(source, starting && variant === "kept" ? false : settle);
+            },
+          );
+          let sessionId: string | undefined;
+          try {
+            const dependencies = deps(async (_api, _state, questions) =>
+              jevFromQuestions(questions, true),
+            );
+            dependencies.startSession = async (options) => {
+              starting = true;
+              try {
+                const started = await startHarnessProvisionSession({
+                  ...options,
+                  browser: controller,
+                });
+                sessionId = started.session_id;
+                return started;
+              } finally {
+                starting = false;
+              }
+            };
+            const begin = performance.now();
+            const result = await runOperateDrive(
+              {
+                url: "https://whitejade.xyz/products/the-recovery-creme?variant=53574851297391",
+                goal: "inspect the product page",
+              },
+              api(),
+              undefined,
+              dependencies,
+            );
+            const elapsedMs = performance.now() - begin;
+            expect(result.status).toBe("complete");
+            expect(result.observation?.url).toContain("whitejade.xyz");
+            expect(startupCaptures).toBe(0);
+            samples.push({ variant, elapsedMs, startupCaptures });
+          } finally {
+            if (sessionId !== undefined) await finishProvisionSession(sessionId);
+            await context.close();
+          }
+        }
+      }
+      const median = (variant: string) =>
+        samples
+          .filter((sample) => sample.variant === variant)
+          .map((sample) => sample.elapsedMs)
+          .sort((a, b) => a - b)[1];
+      writeFileSync(
+        "../../drive-startup-review-evidence.json",
+        JSON.stringify(
+          {
+            measuredAt: new Date().toISOString(),
+            scope:
+              "Live Whitejade product startup and DONE, mocked Jev; not a full checkout timing",
+            comparison:
+              "Kept variant forces startup general captures to skip settling; deleted uses normal settling",
+            landed: "deleted",
+            reason: "Drive startup never calls general observation in either variant",
+            samples,
+            mediansMs: { kept: median("kept"), deleted: median("deleted") },
+          },
+          null,
+          2,
+        ) + "\n",
+      );
+    },
+    180_000,
+  );
+
+  it("keeps the full general settle for ordinary startup", async () => {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await page.route("**/*", (route) =>
+      route.fulfill({ contentType: "text/html", body: NOOP_HTML }),
+    );
+    const controller = BrowserController.fromHarnessPage(page);
+    const capture = vi.spyOn(controller, "extractBrowserUseObservation");
+    let sessionId: string | undefined;
+    try {
+      const started = await startHarnessProvisionSession({
+        browser: controller,
+        serviceUrl: "https://ordinary-start.test/",
+        format: "compact",
+      });
+      sessionId = started.session_id;
+      expect(capture).toHaveBeenCalledWith(undefined, true);
+    } finally {
+      if (sessionId !== undefined) await finishProvisionSession(sessionId);
+      await context.close();
+    }
+  }, 30_000);
+
   it("starts URL-owned drives with deferred general perception and snapshots directly", async () => {
     const context = await browser.newContext();
     const page = await context.newPage();
@@ -220,6 +331,177 @@ describe("operate_drive real-browser fixture", () => {
       expect(JSON.stringify(handoff.observation?.safe_table)).toContain("Company");
     } finally {
       if (started !== undefined) await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
+  it("checks DONE against a fresh snapshot even on an unchanged page", async () => {
+    const { context, started } = await openFixture(NOOP_HTML, "done-unchanged.test");
+    try {
+      let snapshots = 0;
+      const dependencies = deps(async (_api, _state, questions) =>
+        jevFromQuestions(questions, true),
+      );
+      dependencies.snapshot = async (sessionId) => {
+        snapshots += 1;
+        return await observe(sessionId, "compact");
+      };
+      const result = await runOperateDrive(
+        { session_id: started.session_id, goal: "confirm the page is open" },
+        api(),
+        undefined,
+        dependencies,
+      );
+      expect(result.status).toBe("complete");
+      expect(result.jev_calls).toBe(1);
+      expect(snapshots).toBe(2);
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
+  it("recaptures when the page changes while DONE is being decided", async () => {
+    const { context, page, started } = await openFixture(NOOP_HTML, "done-changing.test");
+    try {
+      let snapshots = 0;
+      let decisions = 0;
+      const dependencies = deps(async (_api, _state, questions) => {
+        decisions += 1;
+        if (decisions === 1) {
+          await page.evaluate(() => {
+            document.querySelector("#status")!.textContent = "changed";
+          });
+        }
+        return jevFromQuestions(questions, true);
+      });
+      dependencies.snapshot = async (sessionId) => {
+        snapshots += 1;
+        return await observe(sessionId, "compact");
+      };
+      const result = await runOperateDrive(
+        { session_id: started.session_id, goal: "confirm the page is open" },
+        api(),
+        undefined,
+        dependencies,
+      );
+      expect(result.status).toBe("complete");
+      expect(result.jev_calls).toBe(1);
+      expect(snapshots).toBe(2);
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
+  it.each(["checked", "disabled", "url", "frame"])(
+    "reconsiders DONE when %s changes during the decision",
+    async (change) => {
+      const html = `<main><label>Notifications <input id="setting" type="checkbox" checked></label>
+        <iframe srcdoc='<label>Frame setting <input value=original></label>'></iframe></main>`;
+      const { context, page, started } = await openFixture(html, "done-state.test");
+      try {
+        let decisions = 0;
+        const result = await runOperateDrive(
+          {
+            session_id: started.session_id,
+            goal: "inspect settings",
+            ...(change === "frame" ? { facts: { card_ref: "fixture-card" } } : {}),
+          },
+          api(),
+          undefined,
+          deps(async (_api, _state, questions) => {
+            decisions += 1;
+            if (decisions === 1) {
+              if (change === "frame") {
+                await page.frames()[1]!.evaluate(() => {
+                  document.querySelector<HTMLInputElement>("input")!.value = "updated";
+                });
+              } else {
+                await page.evaluate((kind) => {
+                  const setting = document.querySelector<HTMLInputElement>("#setting")!;
+                  if (kind === "checked") setting.checked = false;
+                  if (kind === "disabled") setting.disabled = true;
+                  if (kind === "url") history.pushState({}, "", "/updated");
+                }, change);
+              }
+            }
+            return jevFromQuestions(questions, true);
+          }),
+        );
+        expect(result.status).toBe("complete");
+        expect(decisions).toBe(2);
+      } finally {
+        await finishProvisionSession(started.session_id);
+        await context.close();
+      }
+    },
+    30_000,
+  );
+
+  it("retries an identical snapshot when content moves after capture", async () => {
+    const { context, page, started } = await openFixture(NOOP_HTML, "capture-race.test");
+    try {
+      let snapshots = 0;
+      let decisions = 0;
+      const dependencies = deps(async (_api, state, questions) => {
+        decisions += 1;
+        if (decisions === 2) expect(JSON.stringify(state)).toMatch(/ready.now/i);
+        return jevFromQuestions(questions, decisions > 1);
+      });
+      dependencies.snapshot = async (sessionId) => {
+        const snapshot = await captureFrameSnapshot(page, [], 0);
+        if (snapshot === null) throw new Error("missing fixture snapshot");
+        const captured = snapshotToObservation(
+          snapshot,
+          sessionId,
+          driveRowsFromSnapshot(snapshot),
+        );
+        snapshots += 1;
+        if (snapshots === 2) {
+          await page.evaluate(() => {
+            document.querySelector("button")!.textContent = "Ready now";
+          });
+        }
+        return captured;
+      };
+      const result = await runOperateDrive(
+        { session_id: started.session_id, goal: "click and inspect" },
+        api(),
+        undefined,
+        dependencies,
+      );
+      expect(result.status).toBe("complete");
+      expect(decisions).toBe(2);
+      expect(snapshots).toBe(4);
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
+  it("adopts a popup whose initial response takes 150ms", async () => {
+    const html = `<main><a href="/destination" target="_blank">Open destination</a></main>`;
+    const { context, started } = await openFixture(html, "delayed-popup.test");
+    try {
+      await context.route("**/destination", async (route) => {
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        await route.fulfill({ contentType: "text/html", body: "<main>Destination ready</main>" });
+      });
+      let decisions = 0;
+      const result = await runOperateDrive(
+        { session_id: started.session_id, goal: "open destination" },
+        api(),
+        undefined,
+        deps(async (_api, _state, questions) => {
+          decisions += 1;
+          return jevFromQuestions(questions, decisions > 1);
+        }),
+      );
+      expect(result.status).toBe("complete");
+      expect(result.observation?.url).toBe("https://delayed-popup.test/destination");
+    } finally {
+      await finishProvisionSession(started.session_id);
       await context.close();
     }
   }, 30_000);
