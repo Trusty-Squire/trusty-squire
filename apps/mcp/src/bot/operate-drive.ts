@@ -2669,14 +2669,19 @@ export function goalSeeksVerification(goal: string): boolean {
 export function inboxSpecialPlan(
   rows: readonly WireRow[],
   decisionKind: DriveDecision["kind"],
-  _clicked: boolean,
+  clicked: boolean,
   remainingFillCount: number,
   pageUrl: string = "",
   pageText: string = "",
   goal: string = "",
 ): InboxSpecialPlan | undefined {
   if (decisionKind !== "stuck" && decisionKind !== "wait") return undefined;
-  if (formSurfaceRows(rows).some((row) => isChoiceRow(row) && !isDisabledRow(row))) {
+  const waitingForMail = pageSuggestsInboxWait(rows, pageUrl, pageText);
+  // A leftover picker on a confirm/check-email page is not the next act.
+  if (
+    !waitingForMail &&
+    formSurfaceRows(rows).some((row) => isChoiceRow(row) && !isDisabledRow(row))
+  ) {
     return undefined;
   }
   const otp = rows.find((row) => isOtpRow(row) && isFillableRow(row));
@@ -2684,9 +2689,10 @@ export function inboxSpecialPlan(
   // A check-email heading or confirm URL is the next act even with no click
   // in this drive (a resumed session) and even when leftover signup fields
   // still count as empty.
-  if (pageSuggestsInboxWait(rows, pageUrl, pageText)) return { kind: "link" };
+  if (waitingForMail) return { kind: "link" };
   if (remainingFillCount > 0) return undefined;
-  // Still looking at the signup form with no confirm text: wait for the SPA.
+  // Still looking at the signup form with no confirm text: wait for the SPA
+  // unless we just submitted and the goal is the verification mail.
   if (
     rows.some(
       (row) =>
@@ -2697,6 +2703,7 @@ export function inboxSpecialPlan(
         !isOffscreenRow(row),
     )
   ) {
+    if (clicked && goalSeeksVerification(goal)) return { kind: "link" };
     return undefined;
   }
   if (goalSeeksVerification(goal)) return { kind: "link" };
@@ -4546,7 +4553,13 @@ async function driveLoop(input: {
       !inboxSilent &&
       lastNonWaitWasClick(drive.trajectory) &&
       context?.consentInboxRead !== false &&
-      disabledSubmitKind(rows, remainingFills.length, drive.filledRefs, true) === "widget_unready"
+      (disabledSubmitKind(rows, remainingFills.length, drive.filledRefs, true) ===
+        "widget_unready" ||
+        pageSuggestsInboxWait(
+          rows,
+          pageUrl,
+          pageTextFromObservation(observation, [observation.dom ?? ""]),
+        ))
     ) {
       inboxSilent = true;
       const lastClick = [...drive.trajectory]
