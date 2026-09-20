@@ -99,6 +99,7 @@ let cardListOverride: unknown[] | null = null;
 let approvalAmountCents = 6000;
 let approvalCurrency = "USD";
 let approvalReason = "gift";
+let approvalItem = "phone case";
 
 function approvalBody() {
   const metadata =
@@ -115,7 +116,7 @@ function approvalBody() {
     operator_pubkey: "AAAA",
     account_binding: "opaque-account-binding",
     expires_at: "2026-07-01T00:10:00.000Z",
-    item: "phone case",
+    item: approvalItem,
     reason: approvalReason,
     agent: "claude-code",
     card: bound
@@ -158,6 +159,7 @@ beforeEach(() => {
   approvalAmountCents = 6000;
   approvalCurrency = "USD";
   approvalReason = "gift";
+  approvalItem = "phone case";
   vi.clearAllMocks();
   pairing.getPairingState.mockResolvedValue({ enrolled: true });
   pairing.pairDevice.mockResolvedValue(undefined);
@@ -353,13 +355,15 @@ describe("pay page — JIT add-card ceremony", () => {
   it("shows total not readable instead of 0 when the checkout amount could not be read", async () => {
     bound = true;
     approvalAmountCents = 0;
-    approvalReason = "total not readable";
+    approvalItem = "phone case — total not readable";
+    approvalReason = "buy the case Dana asked for";
     render(<PaymentApprovalPage />);
     await screen.findByRole("button", { name: /Approve payment/ });
 
     const paymentLine = screen.getByText(/Pay with/);
     expect(paymentLine.textContent).toContain("total not readable");
     expect(paymentLine.textContent).not.toContain("$0.00");
+    expect(screen.getByText("buy the case Dana asked for")).toBeTruthy();
   });
 
   it("blocks JIT approval when the server-bound card metadata cannot be loaded", async () => {

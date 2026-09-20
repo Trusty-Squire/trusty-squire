@@ -1178,6 +1178,79 @@ describe("payment approval relay", () => {
     expect(body.text).toContain(`/vault/pay/${created.id}`);
   });
 
+  it("never shows 0.00 for an unreadable checkout total, on the approval or the 3-D Secure prompt", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubEnv("TELEGRAM_BOT_TOKEN", "synthetic-bot-token");
+    const account = await deps.accountStore.findAccountByEmail("payer@example.test");
+    await deps.accountStore.setTelegramChatId(account!.id, "555000111");
+
+    const created = await server.inject({
+      method: "POST",
+      url: "/v1/pay/approvals",
+      headers: { authorization: `Bearer ${agentToken}`, "x-squire-agent-identity": "Hermes" },
+      payload: {
+        merchant: "Whitejade",
+        checkout_origin: "https://checkout.synthetic.test",
+        amount_cents: 0,
+        currency: "USD",
+        card_ref: "card_synthetic_1",
+        operator_pubkey: "c3ludGhldGljLW9wZXJhdG9yLWtleQ",
+        item: "jade lamp — total not readable",
+        reason: "pay for the order",
+      },
+    });
+    expect(created.statusCode).toBe(201);
+    const approvalBody = JSON.parse(
+      (fetchMock.mock.calls[0]![1] as RequestInit).body as string,
+    ) as { text: string };
+    expect(approvalBody.text).toContain("approve total not readable to Whitejade");
+    expect(approvalBody.text).not.toContain("0.00");
+
+    fetchMock.mockClear();
+    const notified = await server.inject({
+      method: "POST",
+      url: `/v1/pay/approvals/${(created.json() as { id: string }).id}/notify-3ds`,
+      headers: { authorization: `Bearer ${agentToken}` },
+    });
+    expect(notified.statusCode).toBe(200);
+    const threeDsBody = JSON.parse((fetchMock.mock.calls[0]![1] as RequestInit).body as string) as {
+      text: string;
+    };
+    expect(threeDsBody.text).toContain("total not readable");
+    expect(threeDsBody.text).not.toContain("0.00");
+  });
+
+  it("still formats a genuine zero-dollar approval as an amount", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubEnv("TELEGRAM_BOT_TOKEN", "synthetic-bot-token");
+    const account = await deps.accountStore.findAccountByEmail("payer@example.test");
+    await deps.accountStore.setTelegramChatId(account!.id, "555000111");
+
+    const created = await server.inject({
+      method: "POST",
+      url: "/v1/pay/approvals",
+      headers: { authorization: `Bearer ${agentToken}`, "x-squire-agent-identity": "Hermes" },
+      payload: {
+        merchant: "Synthetic Books",
+        checkout_origin: "https://checkout.synthetic.test",
+        amount_cents: 0,
+        currency: "USD",
+        card_ref: "card_synthetic_1",
+        operator_pubkey: "c3ludGhldGljLW9wZXJhdG9yLWtleQ",
+        item: "free sample",
+        reason: "Synthetic test purchase",
+      },
+    });
+    expect(created.statusCode).toBe(201);
+    const body = JSON.parse((fetchMock.mock.calls[0]![1] as RequestInit).body as string) as {
+      text: string;
+    };
+    expect(body.text).toContain("USD 0.00");
+    expect(body.text).not.toContain("total not readable");
+  });
+
   it("uses truthful generic card copy for a cardless Telegram approval", async () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true });
     vi.stubGlobal("fetch", fetchMock);

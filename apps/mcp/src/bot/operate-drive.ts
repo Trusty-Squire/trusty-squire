@@ -75,7 +75,7 @@ import {
 } from "./drive-act.js";
 import { provisionElementRefs } from "./observe/refs.js";
 import {
-  CHECKOUT_TOTAL_UNREADABLE,
+  approvalItemWithNote,
   readPageCheckoutTexts,
   resolveDriveApprovalAmount,
 } from "./checkout-total.js";
@@ -3920,8 +3920,8 @@ export function paymentArgs(
     merchant: facts.merchant ?? hostname,
     amount_cents: amount.amount_cents,
     currency: amount.currency,
-    item: facts.item ?? goal,
-    reason: amount.unknown ? CHECKOUT_TOTAL_UNREADABLE : (facts.reason ?? goal),
+    item: approvalItemWithNote(facts.item ?? goal, amount.note),
+    reason: facts.reason ?? goal,
     card_ref: cardRef,
     ...(session.activePayment?.status === "awaiting_approval"
       ? { approval_id: session.activePayment.state.approval_id }

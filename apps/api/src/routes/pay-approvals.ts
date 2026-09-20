@@ -19,6 +19,16 @@ import {
 import { authenticatedRequester } from "../services/requesting-agent.js";
 import { VAULT_AUDIT_TYPES } from "@trusty-squire/vault";
 
+/** operate_drive marks an unreadable checkout total on the item; the human must
+ * never be shown $0.00 for an amount nobody could read. */
+const CHECKOUT_TOTAL_UNREADABLE = "total not readable";
+
+function approvalAmountLabel(amountCents: number, currency: string, item: string): string {
+  return amountCents === 0 && item.includes(CHECKOUT_TOTAL_UNREADABLE)
+    ? CHECKOUT_TOTAL_UNREADABLE
+    : formatCurrencyAmount(amountCents, currency);
+}
+
 // Web base for the approval link sent to Telegram. Reuses PWA_BASE_URL
 // (the same override server.ts's defaultPwaBaseUrl() reads) if set, else
 // the Telegram-specific override, else the production default.
@@ -358,10 +368,11 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
 
     const account = await opts.deps.accountStore.findAccountById(auth.account_id);
     if (account?.telegram_chat_id != null) {
-      const amount =
-        parsed.data.amount_cents === 0 && parsed.data.reason.includes("total not readable")
-          ? "total not readable"
-          : formatCurrencyAmount(parsed.data.amount_cents, parsed.data.currency);
+      const amount = approvalAmountLabel(
+        parsed.data.amount_cents,
+        parsed.data.currency,
+        parsed.data.item,
+      );
       const cardName = await approvalCardName(
         parsed.data.card_ref ?? null,
         opts.deps,
@@ -425,7 +436,7 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
       const account = await opts.deps.accountStore.findAccountById(auth.account_id);
       let sent = false;
       if (account?.telegram_chat_id != null) {
-        const amount = formatCurrencyAmount(record.amountCents, record.currency);
+        const amount = approvalAmountLabel(record.amountCents, record.currency, record.item);
         const text =
           parsed.data.mode === "detected_challenge"
             ? `🔐 3-D Secure required — approve the ${amount} payment to ${record.merchant} in your bank app to finish checkout.`

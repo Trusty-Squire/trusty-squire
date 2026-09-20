@@ -3,13 +3,19 @@
 // stay deleted: an unreadable total must still mint, never refuse.
 
 import type { Page } from "playwright";
-import { evaluateBound } from "./drive-evaluate.js";
 
 export const CHECKOUT_TOTAL_UNREADABLE = "total not readable";
 
 /** inject_card's inputSchema and POST /v1/pay/approvals both cap amount_cents
- * here. A page number above it would 400 the mint and block the purchase. */
+ * and item here. A page number or a note above them would 400 the mint and
+ * block the purchase. */
 const APPROVAL_AMOUNT_CENTS_MAX = 2_147_483_647;
+const APPROVAL_ITEM_MAX_CHARS = 500;
+
+/** This read is best-effort and optional: it owns its own deadline and never
+ * touches the drive's request-cancellation path, so a busy checkout page
+ * degrades to an unknown total instead of curtailing the card release. */
+export const CHECKOUT_TEXT_READ_BUDGET_MS = 4_000;
 
 export interface CheckoutAmount {
   amount_cents: number;
@@ -18,6 +24,8 @@ export interface CheckoutAmount {
 
 export interface DriveApprovalAmount extends CheckoutAmount {
   unknown: boolean;
+  /** Shown to the human beside the amount; never replaces the signed reason. */
+  note: string | null;
 }
 
 const CURRENCY_SYMBOLS: Record<string, string> = {
@@ -107,10 +115,16 @@ function isCheckoutCountSuffix(token: string | undefined): boolean {
   return false;
 }
 
-function resolveCheckoutCurrencyToken(token: string | undefined): string | undefined {
+interface PageCurrency {
+  code: string;
+  /** A symbol like $ is shared by many currencies; a code names exactly one. */
+  explicit: boolean;
+}
+
+function resolveCheckoutCurrencyToken(token: string | undefined): PageCurrency | undefined {
   if (token === undefined) return undefined;
   const upper = token.toUpperCase();
-  if (CHECKOUT_CURRENCY_CODES.has(upper)) return upper;
+  if (CHECKOUT_CURRENCY_CODES.has(upper)) return { code: upper, explicit: true };
   const codeWithSymbol = upper.match(/^([A-Z]{3})(\p{Sc})$/u);
   const code = codeWithSymbol?.[1];
   const symbol = codeWithSymbol?.[2];
@@ -120,20 +134,10 @@ function resolveCheckoutCurrencyToken(token: string | undefined): string | undef
     CHECKOUT_CURRENCY_CODES.has(code) &&
     CURRENCY_SYMBOLS[symbol] === code
   ) {
-    return code;
+    return { code, explicit: true };
   }
-  return CURRENCY_SYMBOLS[token] ?? CURRENCY_SYMBOLS[upper];
-}
-
-function fallbackCurrencyScaleMismatches(raw: string, minorDigits: number): boolean {
-  const value = raw.replace(/\s/g, "");
-  const comma = value.lastIndexOf(",");
-  const dot = value.lastIndexOf(".");
-  const separator = Math.max(comma, dot);
-  if (separator < 0) return false;
-  const fractionLength = value.length - separator - 1;
-  if (fractionLength === 3 && (comma < 0 || dot < 0)) return false;
-  return fractionLength > minorDigits;
+  const symbolCode = CURRENCY_SYMBOLS[token] ?? CURRENCY_SYMBOLS[upper];
+  return symbolCode === undefined ? undefined : { code: symbolCode, explicit: false };
 }
 
 function checkoutTextHasFreeShipping(text: string): boolean {
@@ -143,7 +147,7 @@ function checkoutTextHasFreeShipping(text: string): boolean {
 function parseCheckoutAmountMatch(
   text: string,
   match: RegExpMatchArray,
-  fallbackCurrency?: string,
+  factCurrency?: string,
 ): CheckoutAmount | null {
   const matchEnd = (match.index ?? 0) + match[0].length;
   const trailingLine = text.slice(matchEnd).split(/\r?\n/u, 1)[0] ?? "";
@@ -159,12 +163,9 @@ function parseCheckoutAmountMatch(
   const symbol = resolveCheckoutCurrencyToken(match[2]);
   const suffix = resolveCheckoutCurrencyToken(match[4]);
   const pageCurrency = prefix ?? suffix ?? symbol;
-  const currency = (pageCurrency ?? fallbackCurrency)?.toUpperCase();
-  if (currency === undefined || !/^[A-Z]{3}$/.test(currency)) return null;
+  if (pageCurrency === undefined) return null;
+  const currency = pageCurrency.explicit ? pageCurrency.code : (factCurrency ?? pageCurrency.code);
   const minorDigits = currencyMinorDigits(currency);
-  if (pageCurrency === undefined && fallbackCurrencyScaleMismatches(match[3] ?? "", minorDigits)) {
-    return null;
-  }
   const amount = parseDisplayedNumber(match[3] ?? "", minorDigits);
   if (amount === null) return null;
   const scale = 10 ** minorDigits;
@@ -173,17 +174,21 @@ function parseCheckoutAmountMatch(
   return { amount_cents: minor, currency };
 }
 
+/** The payable total is the summary line, so the LAST labelled total in a
+ * document wins over the running ones above it. */
 export function parseCheckoutAmount(
   texts: readonly string[],
-  fallbackCurrency?: string,
+  factCurrency?: string,
 ): CheckoutAmount | null {
   for (const text of texts) {
     checkoutTotalPattern.lastIndex = 0;
+    let payable: CheckoutAmount | null = null;
     for (const match of text.matchAll(checkoutTotalPattern)) {
       if (match[0].startsWith("小計") && !checkoutTextHasFreeShipping(text)) continue;
-      const amount = parseCheckoutAmountMatch(text, match, fallbackCurrency);
-      if (amount !== null) return amount;
+      const amount = parseCheckoutAmountMatch(text, match, factCurrency);
+      if (amount !== null) payable = amount;
     }
+    if (payable !== null) return payable;
   }
   return null;
 }
@@ -193,25 +198,74 @@ function factCurrency(facts: Record<string, string>): string | undefined {
   return raw !== undefined && /^[A-Z]{3}$/.test(raw) ? raw : undefined;
 }
 
-/** Page total wins. A facts amount may confirm it or sit above it as a cap; it never replaces it. */
+function factAmountCents(facts: Record<string, string>): number | null {
+  const raw = facts.amount_cents?.trim();
+  if (raw === undefined || !/^[0-9]+$/.test(raw)) return null;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isSafeInteger(parsed) ? parsed : null;
+}
+
+function formatMinorAmount(minor: number, currency: string): string {
+  const minorDigits = currencyMinorDigits(currency);
+  return `${(minor / 10 ** minorDigits).toFixed(minorDigits)} ${currency}`;
+}
+
+/** The page total is the amount. A facts amount only confirms it — when the two
+ * disagree the page still wins and the human is told they disagreed. */
 export function resolveDriveApprovalAmount(
   pageTexts: readonly string[],
   facts: Record<string, string> = {},
 ): DriveApprovalAmount {
-  const fallback = factCurrency(facts);
-  const parsed = parseCheckoutAmount(pageTexts, fallback ?? "USD");
+  const currencyFact = factCurrency(facts);
+  const parsed = parseCheckoutAmount(pageTexts, currencyFact);
   if (parsed === null || parsed.amount_cents > APPROVAL_AMOUNT_CENTS_MAX) {
-    return { amount_cents: 0, currency: fallback ?? "USD", unknown: true };
+    return {
+      amount_cents: 0,
+      currency: currencyFact ?? "USD",
+      unknown: true,
+      note: CHECKOUT_TOTAL_UNREADABLE,
+    };
   }
-  return { amount_cents: parsed.amount_cents, currency: parsed.currency, unknown: false };
+  const expected = factAmountCents(facts);
+  const disagrees =
+    expected !== null &&
+    (expected !== parsed.amount_cents ||
+      (currencyFact !== undefined && currencyFact !== parsed.currency));
+  return {
+    amount_cents: parsed.amount_cents,
+    currency: parsed.currency,
+    unknown: false,
+    note: disagrees
+      ? `agent expected ${formatMinorAmount(expected, currencyFact ?? parsed.currency)}, ` +
+        `page shows ${formatMinorAmount(parsed.amount_cents, parsed.currency)}`
+      : null,
+  };
+}
+
+/** The note rides the item so the signed reason stays the agent's purpose. */
+export function approvalItemWithNote(item: string, note: string | null): string {
+  if (note === null) return item;
+  const suffix = ` — ${note}`;
+  const room = Math.max(APPROVAL_ITEM_MAX_CHARS - suffix.length, 0);
+  return `${item.slice(0, room).trim()}${suffix}`;
 }
 
 export async function readPageCheckoutTexts(page: Page | null): Promise<string[]> {
   if (page === null) return [];
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const read = page.evaluate(() => document.body?.innerText ?? "");
+  read.catch(() => undefined);
   try {
-    const text = await evaluateBound(page, () => document.body?.innerText ?? "");
-    return text.trim().length > 0 ? [text] : [];
+    const text = await Promise.race([
+      read,
+      new Promise<null>((resolve) => {
+        timer = setTimeout(() => resolve(null), CHECKOUT_TEXT_READ_BUDGET_MS);
+      }),
+    ]);
+    return text !== null && text.trim().length > 0 ? [text] : [];
   } catch {
     return [];
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
   }
 }

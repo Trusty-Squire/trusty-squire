@@ -3418,28 +3418,31 @@ describe("drive approval amount", () => {
     expect(args?.reason).toBe("pay for the order");
   });
 
-  it("does not let a facts amount replace the page total", () => {
+  it("does not let a facts amount replace the page total, and says they disagreed", () => {
     const args = paymentArgs(
       session,
-      { card_ref: "card-1", amount_cents: "0", merchant: "whitejade.xyz" },
+      { card_ref: "card-1", amount_cents: "0", merchant: "whitejade.xyz", item: "jade lamp" },
       "pay for the order",
       checkout,
       [PAYMENT, cvv],
       ["Total 76.00 USD"],
     );
     expect(args?.amount_cents).toBe(7600);
+    expect(args?.item).toBe("jade lamp — agent expected 0.00 USD, page shows 76.00 USD");
+    expect(args?.reason).toBe("pay for the order");
   });
 
   it("marks the amount unknown and still mints when the page total cannot be read", () => {
     const args = paymentArgs(
       session,
-      { card_ref: "card-1" },
+      { card_ref: "card-1", item: "jade lamp" },
       "pay for the order",
       checkout,
       [PAYMENT, cvv],
       ["Checkout\nCard number"],
     );
     expect(args?.amount_cents).toBe(0);
-    expect(args?.reason).toBe("total not readable");
+    expect(args?.item).toBe("jade lamp — total not readable");
+    expect(args?.reason).toBe("pay for the order");
   });
 });

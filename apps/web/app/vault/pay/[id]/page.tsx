@@ -330,7 +330,7 @@ export default function PaymentApprovalPage() {
   const amountLabel =
     approval === null
       ? ""
-      : approval.amount_cents === 0 && approval.reason.includes("total not readable")
+      : approval.amount_cents === 0 && approval.item.includes("total not readable")
         ? "total not readable"
         : formatAmount(approval.amount_cents, approval.currency);
   const boundCard =
