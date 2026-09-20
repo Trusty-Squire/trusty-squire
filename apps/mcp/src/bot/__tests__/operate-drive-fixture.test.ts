@@ -51,21 +51,42 @@ const SIGNUP_HTML = `<!doctype html><meta charset="utf-8"><title>Signup fixture<
 const NOOP_HTML = `<!doctype html><meta charset="utf-8"><title>Noop fixture</title>
 <main><button id="noop">Do nothing</button><p id="status">idle</p></main>`;
 
+// Shopify one-page checkout in miniature: contact + a shipping SELECT first,
+// then a same-document swap that leaves the snapshot empty for ~600ms before
+// the payment stage mounts card, expiry, name-on-card, a delivery date the
+// card expiry must never be typed into, and a site-search box the drive never
+// fills.
 const MULTI_STAGE_CHECKOUT_HTML = `<!doctype html><meta charset="utf-8"><title>Checkout fixture</title>
 <main>
   <h1>Checkout</h1>
   <form id="f">
     <label>Email <input id="email" name="email" required></label>
     <label>First name <input id="first" name="first_name" required></label>
-    <button type="button" id="continue" onclick="
-      const email = document.querySelector('#email').value;
-      const first = document.querySelector('#first').value;
-      if (!email || !first) return;
-      document.querySelector('main').innerHTML =
-        '<label>Card number <input id=pan name=cardnumber></label><p id=stage>payment</p>';
-    ">Continue</button>
+    <label>State <select id="state" required>
+      <option value=""></option><option>NY</option><option>CA</option>
+    </select></label>
+    <button type="button" id="continue">Continue to payment</button>
   </form>
-</main>`;
+</main>
+<script>
+  document.querySelector("#continue").addEventListener("click", () => {
+    if (!document.querySelector("#email").value) return;
+    if (!document.querySelector("#first").value) return;
+    document.querySelector("main").innerHTML = "";
+    setTimeout(() => {
+      document.querySelector("main").innerHTML =
+        '<label>Card number <input id=pan autocomplete=cc-number></label>' +
+        '<label>CVV <input id=cvv autocomplete=cc-csc></label>' +
+        '<label>Expiration date (MM / YY) <input id=exp></label>' +
+        '<label>Name on card <input id=ncard></label>' +
+        '<label>Delivery date <input id=when></label>' +
+        '<label>State <select id=state2 required>' +
+        '<option value=""></option><option>NY</option><option>CA</option></select></label>' +
+        '<label>Search <input id=q type=search></label>' +
+        '<p id=stage>payment</p>';
+    }, 600);
+  });
+</script>`;
 
 const GROWING_HTML = `<!doctype html><meta charset="utf-8"><title>Growing</title>
 <main><a href="#keep">Keep</a><div id="sink"></div></main>
@@ -163,10 +184,11 @@ async function openFixture(
   html: string,
   host: string,
   initialObservation: "standard" | "drive" = "standard",
+  path = "/",
 ) {
   const context = await browser.newContext();
   const page = await context.newPage();
-  const url = `https://${host}/`;
+  const url = `https://${host}${path}`;
   await page.route("**/*", (route) => route.fulfill({ contentType: "text/html", body: html }));
   await page.goto(url);
   const started = await startHarnessProvisionSession({
@@ -351,47 +373,89 @@ describe("operate_drive real-browser fixture", () => {
     }
   }, 30_000);
 
-  it("advances a multi-stage purchase goal when later-stage card fields are not yet present", async () => {
+  it("advances a whole-purchase goal across the empty snapshot into the payment stage", async () => {
     const { context, page, started } = await openFixture(
       MULTI_STAGE_CHECKOUT_HTML,
       "multi-stage-checkout.test",
+      "standard",
+      "/checkouts/cn1",
     );
     try {
+      const session = sessionForCall(started.session_id)!;
+      const card = {
+        pan: "4111111111111111",
+        cvv: "739",
+        exp_month: "12",
+        exp_year: "2030",
+        name: "Ada Lovelace",
+        billing: { line1: "1 Main St", city: "Boston", postal_code: "02110", country: "US" },
+      };
       const dependencies = deps(async (_api, _state, questions) => jevFromQuestions(questions));
-      dependencies.injectCard = async () => ({
-        status: "pending_approval",
-        approval_url: "https://trustysquire.ai/pay/fixture",
-      });
+      let injections = 0;
+      const atInject: Record<string, string> = {};
+      dependencies.injectCard = async (_session, args) => {
+        injections += 1;
+        for (const id of ["exp", "ncard", "when", "q"]) {
+          atInject[id] = await page.locator(`#${id}`).inputValue();
+        }
+        const fields = await injectCardIntoSessionTargets(started.session_id, card, args.fields);
+        session.releasedPaymentCard = {
+          approvalId: "approved",
+          approvalUrl: "https://approval.test",
+          checkout: {
+            merchant: "fixture.test",
+            checkout_origin: "https://multi-stage-checkout.test",
+            amount_cents: 100,
+            currency: "USD",
+          },
+          cardRef: "card-1",
+          last4: "1111",
+          deadline: Date.now() + 60_000,
+          card,
+        };
+        return { status: "card_injected", complete: true, fields };
+      };
       const result = await runOperateDrive(
         {
           session_id: started.session_id,
           goal:
-            "Buy one item: fill the contact details, pay with the saved card, and stop when the order is confirmed",
+            "Buy one item: fill the contact and shipping details, pay with the saved card, and stop when the order is confirmed",
           facts: {
             email: "ada@fixture.test",
             first_name: "Ada",
+            state: "NY",
             card_ref: "card-1",
             merchant: "fixture.test",
           },
-          max_steps: 8,
+          max_steps: 16,
         },
         api(),
         undefined,
         dependencies,
       );
       expect(result.status).not.toBe("stuck");
-      expect(result.trajectory.some((step) => step.action === "type")).toBe(true);
-      const emailStillPresent = (await page.locator("#email").count()) > 0;
-      if (emailStillPresent) {
-        expect(await page.locator("#email").inputValue()).toBe("ada@fixture.test");
-      } else {
-        expect(await page.locator("#stage").textContent()).toBe("payment");
-      }
+      // The same-document swap leaves one empty snapshot; the loop re-observes
+      // rather than asking Jev to rule on nothing.
+      expect(result.trajectory.some((step) => step.action === "wait")).toBe(true);
+      expect(await page.locator("#stage").textContent()).toBe("payment");
+
+      // The card is released once the typeable shipping/contact fills are done:
+      // neither the unfilled State select nor the site-search box may hold it,
+      // and expiry + name-on-card are still untouched at that point.
+      expect(injections).toBe(1);
+      expect(atInject).toEqual({ exp: "", ncard: "", when: "", q: "" });
+      expect(await page.locator("#pan").inputValue()).toBe(card.pan);
+      expect(await page.locator("#cvv").inputValue()).toBe(card.cvv);
+
+      // After release the expiry belongs to the card expiry control alone.
+      expect(await page.locator("#exp").inputValue()).toBe("12/30");
+      expect(await page.locator("#ncard").inputValue()).toBe("Ada Lovelace");
+      expect(await page.locator("#when").inputValue()).toBe("");
     } finally {
       await finishProvisionSession(started.session_id);
       await context.close();
     }
-  }, 30_000);
+  }, 60_000);
 
   it("checks DONE against a fresh snapshot even on an unchanged page", async () => {
     const { context, started } = await openFixture(NOOP_HTML, "done-unchanged.test");

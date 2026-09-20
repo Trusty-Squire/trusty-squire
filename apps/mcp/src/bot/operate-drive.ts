@@ -585,6 +585,8 @@ export function isCvvRow(row: WireRow): boolean {
   return /cvv|cvc|cid|security[- ]?code/.test(label);
 }
 
+const CARD_EXPIRY_FACT = "card_expiry";
+
 export function isExpiryRow(row: WireRow): boolean {
   const hay = `${normalizeKey(fieldNameForRow(row))} ${normalizeKey(readableLabel(row))}`;
   return /expir|exp_month|exp_year|exp_date|cc_exp/.test(hay);
@@ -744,6 +746,10 @@ export function matchingFactKeys(facts: Record<string, string>, row: WireRow): s
   ) {
     for (const alias of aliasKeysFor("date")) wanted.add(alias);
   }
+  // The released card's combined MM/YY carries its own key rather than joining
+  // the shared travel/delivery `date` family, so a "Delivery date" input on the
+  // same checkout can never be typed with the expiry.
+  if (isExpiryRow(row)) wanted.add(CARD_EXPIRY_FACT);
   if (label.includes("ticket_type") || label.includes("trip_type")) {
     for (const alias of aliasKeysFor("ticket_type")) wanted.add(alias);
   }
@@ -780,9 +786,9 @@ export function applyReleasedCardFacts(
   if (next.exp_month === undefined && month.length > 0) next.exp_month = month;
   if (next.exp_year === undefined && year.length > 0) next.exp_year = year;
   if (next.name === undefined && name.length > 0) next.name = name;
-  if (next.date === undefined && month.length > 0 && year.length > 0) {
+  if (next[CARD_EXPIRY_FACT] === undefined && month.length > 0 && year.length > 0) {
     const yy = year.length === 4 ? year.slice(-2) : year;
-    next.date = `${month.padStart(2, "0")}/${yy}`;
+    next[CARD_EXPIRY_FACT] = `${month.padStart(2, "0")}/${yy}`;
   }
   return next;
 }
@@ -1815,13 +1821,7 @@ export function decideAfterJev(input: {
   );
   const decideChosen = (choice: DriveOperation, confidence: number): DriveDecision => {
     if (choice === "DONE") return { kind: "complete", confidence };
-    if (choice === "BLOCKED") {
-      // An empty snapshot is unsettled perception (Shopify checkout after a
-      // same-tab navigation is the live case), not proof the goal cannot move.
-      // WAIT re-snapshots; BLOCKED remains when elements are listed.
-      if (input.rows.length === 0) return { kind: "wait", confidence };
-      return { kind: "stuck", confidence };
-    }
+    if (choice === "BLOCKED") return { kind: "stuck", confidence };
     if (choice === "WAIT") return { kind: "wait", confidence };
 
     const targetName = targetQuestionName(choice);
@@ -2766,7 +2766,7 @@ async function driveLoop(input: {
   let steps = 0;
   const comboboxAttempts = new Set<string>();
   let comboboxMustYield = false;
-  let emptySnapshotWaits = 0;
+  let emptySnapshotReobserved = false;
 
   const finish = (
     status: DriveStatus,
@@ -3266,22 +3266,18 @@ async function driveLoop(input: {
       });
     }
 
-    if (rows.length === 0) {
-      if (emptySnapshotWaits >= 3) {
-        return finish("stuck", {
-          question: {
-            question: nextActionInstructions(drive.goal),
-            options: actionCriteria(rows, includePayment),
-          },
-        });
-      }
-      emptySnapshotWaits += 1;
+    // A same-document stage swap (Shopify one-page checkout) leaves one empty
+    // snapshot behind. Re-observe once before Jev is asked to rule on nothing.
+    // A page still empty after that is a real state — a finished signup shows
+    // only a confirmation paragraph — so Jev still gets to call it.
+    if (rows.length === 0 && !emptySnapshotReobserved) {
+      emptySnapshotReobserved = true;
       const applied = await applyDecision({ kind: "wait", confidence: 1 });
       if (applied !== "continue") return applied;
       steps += 1;
       continue;
     }
-    emptySnapshotWaits = 0;
+    if (rows.length > 0) emptySnapshotReobserved = false;
 
     const fields = paymentFields(rows);
     // A pending approval records an inject_card trajectory step, so trajectory
@@ -3303,13 +3299,7 @@ async function driveLoop(input: {
     // are typed after release. A leftover state/country SELECT must not
     // block that split: Jev then clicks the expiry picker (a date field)
     // instead of naming the card number.
-    const remainingTypes = typeableCandidates(
-      rows,
-      drive.facts,
-      includePayment,
-      drive.filledRefs,
-      pageUrl,
-    );
+    const remainingTypes = remainingFills.filter((candidate) => !isSelectRow(candidate.row));
     if (
       includePayment &&
       (!alreadyCard || cardRetry) &&

@@ -46,6 +46,7 @@ import {
   applyReleasedCardFacts,
   isExpiryRow,
   isCardholderNameRow,
+  isSelectRow,
   selectTargetKey,
   selectTargets,
   selectCandidates,
@@ -349,17 +350,6 @@ describe("decideAfterJev stop reasons", () => {
     ).toEqual({ kind: "stuck", confidence: 0.7 });
   });
 
-  it("waits instead of sticking when BLOCKED is chosen on an empty snapshot", () => {
-    const emptyOps = operationCriteria(["WAIT", "DONE", "BLOCKED"]);
-    expect(
-      decideAfterJev({
-        ...base,
-        rows: [],
-        answers: { operation: valid("BLOCKED", emptyOps, 0.54) },
-      }),
-    ).toEqual({ kind: "wait", confidence: 0.54 });
-  });
-
   it("returns wait when Jev picks WAIT", () => {
     expect(
       decideAfterJev({
@@ -407,19 +397,21 @@ describe("decideAfterJev stop reasons", () => {
     ).toEqual(["@e:ncard", "@e:email"]);
   });
 
-  it("has no typeable shipping left once contact is filled, so a leftover state select does not block card inject", () => {
+  it("leaves no unfilled typeable fill behind a leftover state select or an unmatched search box", () => {
     const filledEmail: WireRow = ["@e:email", "t", "Email|f=email|s=r|n=a@b.test"];
+    const search: WireRow = ["@e:q", "t", "Search|f=search"];
     const facts = { email: "a@b.test", state: "NY", card_ref: "card-1" };
+    const rows = [filledEmail, STATE, search, PAYMENT];
+    const fills = fillableCandidates(rows, facts, true, ["@e:email"]);
+    expect(fills.map((candidate) => candidate.ref)).toEqual(["@e:state"]);
     expect(
-      typeableCandidates([filledEmail, STATE, PAYMENT], facts, true, ["@e:email"]).map(
-        (row) => row.ref,
-      ),
+      fills.filter((candidate) => !isSelectRow(candidate.row)).map((candidate) => candidate.ref),
     ).toEqual([]);
-    expect(
-      fillableCandidates([filledEmail, STATE, PAYMENT], facts, true, ["@e:email"]).map(
-        (row) => row.ref,
-      ),
-    ).toEqual(["@e:state"]);
+    // typeableCandidates re-admits the unfillable search row, which is why the
+    // inject_card gate counts fills-minus-selects instead.
+    expect(typeableCandidates(rows, facts, true, ["@e:email"]).map((row) => row.ref)).toEqual([
+      "@e:q",
+    ]);
   });
 
   it("copies released card public fields so expiry can be typed after inject", () => {
@@ -430,8 +422,22 @@ describe("decideAfterJev stop reasons", () => {
       exp_month: "12",
       exp_year: "2030",
       name: "Ada",
-      date: "12/30",
+      card_expiry: "12/30",
     });
+  });
+
+  it("offers the released expiry only to the card expiry control, never to a delivery date", () => {
+    const expiry: WireRow = ["@e:exp", "t", "Expiration date (MM / YY)|s=r"];
+    const deliveryDate: WireRow = ["@e:when", "t", "Delivery date"];
+    const facts = applyReleasedCardFacts(
+      { email: "a@b.test", card_ref: "card-1" },
+      { exp_month: "12", exp_year: "2030", name: "Ada" },
+    );
+    expect(matchingFactKeys(facts, expiry)).toEqual(["card_expiry"]);
+    expect(matchingFactKeys(facts, deliveryDate)).toEqual([]);
+    expect(
+      fillableCandidates([expiry, deliveryDate], facts, true).map((candidate) => candidate.ref),
+    ).toEqual(["@e:exp"]);
   });
 
   it("acts on a validated reversible pick with no confidence floor", () => {
