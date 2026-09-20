@@ -28,7 +28,6 @@ import {
 } from "../operate-drive.js";
 import { finishProvisionSession, startHarnessProvisionSession } from "../provision-session.js";
 import type { Observation, ProvisionAction } from "../provision-session.js";
-import { forceFinishProvisionSession } from "../session/lifecycle.js";
 import {
   act,
   observe,
@@ -2705,50 +2704,4 @@ describe("drive review regressions", () => {
     },
     30_000,
   );
-
-  it("does not tear down a signed checkout after the drive ends", async () => {
-    const { context, started } = await openFixture(
-      "<p>checkout</p>",
-      "whitejade.xyz",
-      "drive",
-      "/checkouts/cn/token/en-us",
-    );
-    try {
-      const session = sessionForCall(started.session_id);
-      expect(session).toBeDefined();
-      session!.releasedPaymentCard = {
-        approvalId: "01M2ZCF57BYC6SQDMCY37WVVPG",
-        approvalUrl: "https://trustysquire.ai/vault/pay/01M2ZCF57BYC6SQDMCY37WVVPG",
-        checkout: {
-          merchant: "whitejade.xyz",
-          checkout_origin: "https://whitejade.xyz",
-          amount_cents: 7600,
-          currency: "USD",
-        },
-        cardRef: "01M1HT3QND5MA9RBZP0FXKMQBG",
-        last4: "4242",
-        deadline: Date.now() + 60_000,
-        card: {
-          pan: "4111111111111111",
-          exp_month: "11",
-          exp_year: "29",
-          name: "Replay Evaluation",
-          cvv: "123",
-          billing: {
-            line1: "123 Test Street",
-            city: "New York",
-            state: "NY",
-            postal_code: "10001",
-            country: "US",
-          },
-        },
-      };
-      const result = await finishProvisionSession(started.session_id);
-      expect(result.closed).toBe(false);
-      expect(sessionForCall(started.session_id)).toBe(session);
-    } finally {
-      await forceFinishProvisionSession(started.session_id);
-      await context.close();
-    }
-  }, 30_000);
 });

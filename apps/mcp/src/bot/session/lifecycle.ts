@@ -802,24 +802,6 @@ async function closeFinishingProvisionSession(
 // preparation (which can store a credential).
 const finishCleanupRetries = new WeakMap<Session, () => Promise<FinishResult>>();
 
-function checkoutUrlOpen(url: string): boolean {
-  try {
-    const path = new URL(url).pathname.toLowerCase();
-    return /(?:^|\/)(?:checkouts?|payment)(?:\/|$)/.test(path);
-  } catch {
-    return /(?:^|\/)(?:checkouts?|payment)(?:\/|$)/i.test(url);
-  }
-}
-
-export function mustHoldOpenPaymentSession(session: {
-  activePayment: Session["activePayment"];
-  releasedPaymentCard: Session["releasedPaymentCard"];
-  browser: { currentUrl: () => string };
-}): boolean {
-  if (session.activePayment?.status === "awaiting_approval") return true;
-  return session.releasedPaymentCard !== null && checkoutUrlOpen(session.browser.currentUrl());
-}
-
 export async function finishProvisionSessionWithPreparation<T>(
   sessionId: string,
   prepare: () => Promise<T>,
@@ -827,12 +809,6 @@ export async function finishProvisionSessionWithPreparation<T>(
 ): Promise<PreparedFinishResult<T>> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
-  if (mustHoldOpenPaymentSession(session)) {
-    return {
-      finish: finishReceipt(sessionId, session.browser.currentUrl(), false),
-      prepared: undefined,
-    };
-  }
   if (session.closing) {
     const retry = finishCleanupRetries.get(session);
     if (retry !== undefined) {

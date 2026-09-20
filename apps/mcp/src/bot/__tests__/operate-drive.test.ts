@@ -17,6 +17,7 @@ import {
   DRIVE_VALUE_QUESTION,
   goalValueCriteria,
   DRIVE_IDENTICAL_RESNAP_MS,
+  DRIVE_INJECT_CARD_HISTORY,
   DRIVE_STALE_LIMIT,
   DRIVE_EXHAUSTED_ACTION_LIMIT,
   pageProgressKey,
@@ -34,6 +35,7 @@ import {
   isCandidateRow,
   isPaymentSubmitRow,
   paymentSubmitControlMissing,
+  paymentSubmitDispatched,
   fillActionForCandidate,
   fillableCandidates,
   isOtpRow,
@@ -201,39 +203,83 @@ describe("request building", () => {
     const pay: WireRow = ["@e:pay", "b", "Pay now$68.00|v=offscreen"];
     const back: WireRow = ["@e:back", "b", "Back to finalize order"];
     const chrome: WireRow = ["@e:x", "b", "button|v=offscreen"];
+    const checkout = "https://whitejade.xyz/checkouts/cn/token/en-us";
     expect(isPaymentSubmitRow(pay)).toBe(true);
     expect(isPaymentSubmitRow(back)).toBe(false);
-    expect(isCandidateRow(pay, true)).toBe(true);
-    expect(isCandidateRow(chrome, true)).toBe(false);
-    expect(clickableCandidates([pay, back, chrome], true).map((c) => c.ref)).toEqual([
+    expect(isCandidateRow(pay, true, checkout)).toBe(true);
+    expect(isCandidateRow(chrome, true, checkout)).toBe(false);
+    expect(clickableCandidates([pay, back, chrome], true, checkout).map((c) => c.ref)).toEqual([
       "@e:pay",
       "@e:back",
     ]);
   });
 
+  it("drops an offscreen Buy now off a checkout page", () => {
+    const buy: WireRow = ["@e:buy", "b", "Buy now|v=offscreen"];
+    const product = "https://whitejade.xyz/products/jade-lamp";
+    expect(isCandidateRow(buy, true, product)).toBe(false);
+    expect(clickableCandidates([buy], true, product)).toEqual([]);
+    expect(
+      clickableCandidates([buy], true, "https://whitejade.xyz/checkouts/cn/token").map(
+        (c) => c.ref,
+      ),
+    ).toEqual(["@e:buy"]);
+  });
+
   it("reports a missing Pay control instead of clicking Back to finalize order", () => {
     const back: WireRow = ["@e:back", "b", "Back to finalize order"];
     const pay: WireRow = ["@e:pay", "b", "Pay now$68.00|v=offscreen"];
+    const gate = {
+      includePayment: true,
+      alreadyCard: true,
+      cardRetry: false,
+      onCheckout: true,
+      remainingFills: 0,
+      stage: undefined,
+      history: [],
+    };
+    expect(paymentSubmitControlMissing({ ...gate, rows: [back] })).toMatch(
+      /the control for this operation is not present \(CLICK pay\/place-order\)/,
+    );
+    expect(paymentSubmitControlMissing({ ...gate, rows: [back, pay] })).toBeUndefined();
+  });
+
+  it("does not call a dispatched or completed payment stuck", () => {
+    const processing: WireRow = ["@e:back", "b", "Back to finalize order"];
+    const gate = {
+      rows: [processing],
+      includePayment: true,
+      alreadyCard: true,
+      cardRetry: false,
+      onCheckout: true,
+      remainingFills: 0,
+      stage: undefined,
+      history: [],
+    };
+    expect(paymentSubmitControlMissing(gate)).toBeDefined();
     expect(
       paymentSubmitControlMissing({
-        rows: [back],
-        includePayment: true,
-        alreadyCard: true,
-        cardRetry: false,
-        onCheckout: true,
-        remainingFills: 0,
-      }),
-    ).toMatch(/the control for this operation is not present \(CLICK pay\/place-order\)/);
-    expect(
-      paymentSubmitControlMissing({
-        rows: [back, pay],
-        includePayment: true,
-        alreadyCard: true,
-        cardRetry: false,
-        onCheckout: true,
-        remainingFills: 0,
+        ...gate,
+        history: [DRIVE_INJECT_CARD_HISTORY, 'click the button labeled "Pay now$68.00"'],
       }),
     ).toBeUndefined();
+    expect(paymentSubmitControlMissing({ ...gate, stage: "complete" })).toBeUndefined();
+  });
+
+  it("ignores a pay click that predates the card release", () => {
+    expect(
+      paymentSubmitDispatched([
+        'click the button labeled "Buy it now"',
+        DRIVE_INJECT_CARD_HISTORY,
+        "type into the Name on card field",
+      ]),
+    ).toBe(false);
+    expect(
+      paymentSubmitDispatched([
+        DRIVE_INJECT_CARD_HISTORY,
+        'click the button labeled "Place order"',
+      ]),
+    ).toBe(true);
   });
 
   it("puts SELECT option keys on the SELECT_target head", () => {
