@@ -40,6 +40,9 @@ const CURRENCY_SYMBOLS: Record<string, string> = {
   ZŁ: "PLN",
 };
 
+/** Shared by several ISO currencies, so the page symbol alone does not name one. */
+const AMBIGUOUS_CURRENCY_SYMBOLS = new Set(["$", "£", "¥", "￥"]);
+
 const CHECKOUT_CURRENCY_CODES = new Set(Intl.supportedValuesOf("currency"));
 
 export function currencyMinorDigits(currency: string): number {
@@ -117,14 +120,15 @@ function isCheckoutCountSuffix(token: string | undefined): boolean {
 
 interface PageCurrency {
   code: string;
-  /** A symbol like $ is shared by many currencies; a code names exactly one. */
-  explicit: boolean;
+  /** False only for a symbol several currencies share, where a currency fact
+   * can say which one the page means. */
+  unique: boolean;
 }
 
 function resolveCheckoutCurrencyToken(token: string | undefined): PageCurrency | undefined {
   if (token === undefined) return undefined;
   const upper = token.toUpperCase();
-  if (CHECKOUT_CURRENCY_CODES.has(upper)) return { code: upper, explicit: true };
+  if (CHECKOUT_CURRENCY_CODES.has(upper)) return { code: upper, unique: true };
   const codeWithSymbol = upper.match(/^([A-Z]{3})(\p{Sc})$/u);
   const code = codeWithSymbol?.[1];
   const symbol = codeWithSymbol?.[2];
@@ -134,10 +138,26 @@ function resolveCheckoutCurrencyToken(token: string | undefined): PageCurrency |
     CHECKOUT_CURRENCY_CODES.has(code) &&
     CURRENCY_SYMBOLS[symbol] === code
   ) {
-    return { code, explicit: true };
+    return { code, unique: true };
   }
-  const symbolCode = CURRENCY_SYMBOLS[token] ?? CURRENCY_SYMBOLS[upper];
-  return symbolCode === undefined ? undefined : { code: symbolCode, explicit: false };
+  const symbolKey = CURRENCY_SYMBOLS[token] !== undefined ? token : upper;
+  const symbolCode = CURRENCY_SYMBOLS[symbolKey];
+  return symbolCode === undefined
+    ? undefined
+    : { code: symbolCode, unique: !AMBIGUOUS_CURRENCY_SYMBOLS.has(symbolKey) };
+}
+
+/** A currency fact that disagrees with the fractional scale the page displays
+ * would rescale the number, so the total is unreadable rather than rewritten. */
+function factCurrencyScaleMismatches(raw: string, minorDigits: number): boolean {
+  const value = raw.replace(/\s/g, "");
+  const comma = value.lastIndexOf(",");
+  const dot = value.lastIndexOf(".");
+  const separator = Math.max(comma, dot);
+  if (separator < 0) return false;
+  const fractionLength = value.length - separator - 1;
+  if (fractionLength === 3 && (comma < 0 || dot < 0)) return false;
+  return fractionLength > minorDigits;
 }
 
 function checkoutTextHasFreeShipping(text: string): boolean {
@@ -164,8 +184,10 @@ function parseCheckoutAmountMatch(
   const suffix = resolveCheckoutCurrencyToken(match[4]);
   const pageCurrency = prefix ?? suffix ?? symbol;
   if (pageCurrency === undefined) return null;
-  const currency = pageCurrency.explicit ? pageCurrency.code : (factCurrency ?? pageCurrency.code);
+  const overridden = !pageCurrency.unique && factCurrency !== undefined;
+  const currency = overridden ? factCurrency : pageCurrency.code;
   const minorDigits = currencyMinorDigits(currency);
+  if (overridden && factCurrencyScaleMismatches(match[3] ?? "", minorDigits)) return null;
   const amount = parseDisplayedNumber(match[3] ?? "", minorDigits);
   if (amount === null) return null;
   const scale = 10 ** minorDigits;

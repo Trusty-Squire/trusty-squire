@@ -101,6 +101,28 @@ $76.00 USD`;
     });
   });
 
+  it("keeps a symbol only one currency uses, and its scale, over a currency fact", () => {
+    expect(resolveDriveApprovalAmount(["合計 7,600円"], { currency: "USD" })).toMatchObject({
+      amount_cents: 7600,
+      currency: "JPY",
+    });
+    expect(resolveDriveApprovalAmount(["Total €76,00"], { currency: "USD" })).toMatchObject({
+      amount_cents: 7600,
+      currency: "EUR",
+    });
+  });
+
+  it("refuses a currency fact that would rescale the number the page displays", () => {
+    expect(resolveDriveApprovalAmount(["Total £76.00"], { currency: "JPY" })).toMatchObject({
+      amount_cents: 0,
+      note: CHECKOUT_TOTAL_UNREADABLE,
+    });
+    expect(resolveDriveApprovalAmount(["Total £76.00"], { currency: "GBP" })).toMatchObject({
+      amount_cents: 7600,
+      currency: "GBP",
+    });
+  });
+
   it("degrades a wedged renderer to an unknown total without cancelling the drive request", async () => {
     vi.useFakeTimers();
     const wedged = wedgedPage();

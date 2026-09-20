@@ -67,6 +67,7 @@ import {
   DRIVE_IN_FLIGHT_MS,
   outstandingRequiredFill,
   paymentArgs,
+  driveApprovalPageTexts,
   DRIVE_EMPTY_SNAPSHOT_WAITS,
   DRIVE_WIDGET_UNREADY_WAITS,
   DRIVE_WIDGET_UNREADY_REASON,
@@ -151,6 +152,8 @@ import {
 import { operateDriveTool } from "../../tools/provision-drive.js";
 import type { JevAnswer } from "../jev-client.js";
 import { captchaInjectSettled } from "../captcha-solve.js";
+import type { Page } from "playwright";
+import type { Session } from "../provision-session.js";
 
 const EMAIL: WireRow = ["@e:email", "t", "@email|f=email|s=r"];
 const NAME: WireRow = ["@e:name", "t", "@first-name|f=first_name"];
@@ -3444,5 +3447,62 @@ describe("drive approval amount", () => {
     expect(args?.amount_cents).toBe(0);
     expect(args?.item).toBe("jade lamp — total not readable");
     expect(args?.reason).toBe("pay for the order");
+  });
+});
+
+describe("drive approval page texts", () => {
+  function pageReading(text: string): { page: Page; reads: () => number } {
+    let reads = 0;
+    const page = {
+      evaluate: async () => {
+        reads += 1;
+        return text;
+      },
+    } as unknown as Page;
+    return { page, reads: () => reads };
+  }
+
+  it("reads the live checkout total on a fresh mint", async () => {
+    const reader = pageReading("Total $76.00 USD");
+    await expect(
+      driveApprovalPageTexts(
+        { browser: { page: reader.page }, activePayment: null, releasedPaymentCard: null },
+        "<dom/>",
+      ),
+    ).resolves.toEqual(["Total $76.00 USD", "<dom/>"]);
+    expect(reader.reads()).toBe(1);
+  });
+
+  it("does not read the page again once the approval terms are fixed", async () => {
+    const released = pageReading("Total $76.00 USD");
+    await expect(
+      driveApprovalPageTexts(
+        {
+          browser: { page: released.page },
+          activePayment: null,
+          releasedPaymentCard: {
+            approvalId: "appr_1",
+          } as unknown as Session["releasedPaymentCard"],
+        },
+        "<dom/>",
+      ),
+    ).resolves.toEqual(["<dom/>"]);
+    expect(released.reads()).toBe(0);
+
+    const awaiting = pageReading("Total $76.00 USD");
+    await expect(
+      driveApprovalPageTexts(
+        {
+          browser: { page: awaiting.page },
+          activePayment: {
+            status: "awaiting_approval",
+            state: { approval_id: "appr_2" },
+          } as unknown as Session["activePayment"],
+          releasedPaymentCard: null,
+        },
+        "<dom/>",
+      ),
+    ).resolves.toEqual(["<dom/>"]);
+    expect(awaiting.reads()).toBe(0);
   });
 });

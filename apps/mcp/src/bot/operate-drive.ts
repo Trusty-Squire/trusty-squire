@@ -3896,6 +3896,29 @@ function paymentFields(rows: readonly WireRow[]): { pan?: string; cvv?: string }
   return { ...(pan === undefined ? {} : { pan }), ...(cvv === undefined ? {} : { cvv }) };
 }
 
+function resumedApprovalId(
+  session: Pick<Session, "activePayment" | "releasedPaymentCard">,
+): string | null {
+  if (session.activePayment?.status === "awaiting_approval") {
+    return session.activePayment.state.approval_id;
+  }
+  return session.releasedPaymentCard?.approvalId ?? null;
+}
+
+/** A resumed release replays the approval's own terms, so reading the page
+ * total again would only cost a full-body layout on the checkout page. */
+export async function driveApprovalPageTexts(
+  session: { browser: { page: Page | null } } & Pick<
+    Session,
+    "activePayment" | "releasedPaymentCard"
+  >,
+  observedDom: string,
+): Promise<string[]> {
+  const read =
+    resumedApprovalId(session) === null ? await readPageCheckoutTexts(session.browser.page) : [];
+  return [...read, observedDom];
+}
+
 export function paymentArgs(
   session: Pick<Session, "id" | "activePayment" | "releasedPaymentCard">,
   facts: Record<string, string>,
@@ -3906,6 +3929,7 @@ export function paymentArgs(
 ): Parameters<InjectCardFn>[1] | undefined {
   const cardRef = facts.card_ref;
   if (cardRef === undefined) return undefined;
+  const approvalId = resumedApprovalId(session);
   const fields = paymentFields(rows);
   if (fields.pan === undefined && fields.cvv === undefined) return undefined;
   let hostname = "checkout";
@@ -3923,11 +3947,7 @@ export function paymentArgs(
     item: approvalItemWithNote(facts.item ?? goal, amount.note),
     reason: facts.reason ?? goal,
     card_ref: cardRef,
-    ...(session.activePayment?.status === "awaiting_approval"
-      ? { approval_id: session.activePayment.state.approval_id }
-      : session.releasedPaymentCard !== null
-        ? { approval_id: session.releasedPaymentCard.approvalId }
-        : {}),
+    ...(approvalId === null ? {} : { approval_id: approvalId }),
     fields: {
       ...(fields.pan === undefined ? {} : { pan: { ref: fields.pan } }),
       ...(fields.cvv === undefined ? {} : { cvv: { ref: fields.cvv } }),
@@ -4911,10 +4931,7 @@ async function driveLoop(input: {
           jevRetried: "inject_card requires an active Trusty Squire session",
         });
       }
-      const pageTexts = [
-        ...(await readPageCheckoutTexts(session.browser.page)),
-        observation?.dom ?? "",
-      ];
+      const pageTexts = await driveApprovalPageTexts(session, observation?.dom ?? "");
       const card = paymentArgs(
         session,
         drive.facts,
