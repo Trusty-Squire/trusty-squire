@@ -1752,6 +1752,23 @@ export class BrowserController implements BrowserDriver {
       await this.page.click(selector, { timeout: 8000, noWaitAfter: true });
       return;
     }
+    // Drive clicks go through humanClick (cached coordinates). cmdk re-renders
+    // its list as the pointer moves, so those coords miss the item and onSelect
+    // never fires — measured on Meilisearch /welcome-informations: "Other"
+    // clicks left the trigger placeholder and Next disabled. Use the existing
+    // locator-resolved cmdk commit instead.
+    const cmdkTarget = this.page.locator(selector).first();
+    const isCmdkItem = await cmdkTarget
+      .evaluate(
+        (el) =>
+          el.hasAttribute("cmdk-item") ||
+          el.closest("[cmdk-root],[cmdk-list],[cmdk-group]") !== null,
+      )
+      .catch(() => false);
+    if (isCmdkItem) {
+      await this.clickComboboxOption(cmdkTarget);
+      return;
+    }
     await this.humanClick(selector);
   }
 
