@@ -352,6 +352,8 @@ export interface CredentialVaultDeps {
   // a 500 because a post-response retrieval counter/audit write hit a transient
   // DB connection failure. Storage/reveal/rotate/delete audit semantics stay
   // strict; this option applies only to proxy() audit side effects.
+  // best_effort overlaps the post-response counter and audit writes but still
+  // awaits both; strict (the default) keeps counter-before-audit ordering.
   proxyAuditFailureMode?: "strict" | "best_effort";
 }
 
@@ -924,9 +926,7 @@ export class CredentialVault implements VaultClient {
     try {
       const response = await executor({ accountId, http, fields });
       const markRetrieved = () =>
-        this.runProxyAuditSideEffect(() =>
-          this.deps.store.markRetrieved(reference, this.now()),
-        );
+        this.runProxyAuditSideEffect(() => this.deps.store.markRetrieved(reference, this.now()));
       const recordExecuted = () =>
         this.recordProxyAudit(accountId, VAULT_AUDIT_TYPES.proxyExecuted, {
           reference,
