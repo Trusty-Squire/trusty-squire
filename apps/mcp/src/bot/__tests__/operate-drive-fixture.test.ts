@@ -1238,6 +1238,103 @@ describe("operate_drive real-browser fixture", () => {
     }
   }, 30_000);
 
+  it("continues an OAuth-goal drive that starts on a signed-in dashboard", async () => {
+    const dashHtml = `<!doctype html><meta charset="utf-8"><title>Dashboard</title>
+<nav>
+  <a id="settings" href="/settings">Settings</a>
+  <a id="keys" href="/keys">API Keys</a>
+  <a id="verify" href="/verifications">Verify email</a>
+  <a id="logout" href="/logged-out">Log out</a>
+</nav>
+<p>Welcome back</p>`;
+    const keysHtml = `<!doctype html><meta charset="utf-8"><title>API Keys</title>
+<main><h1>API Keys</h1><p id="key">sk_live_fixture</p></main>`;
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await page.route("**/*", (route) => {
+      const url = route.request().url();
+      route.fulfill({
+        contentType: "text/html",
+        body: url.includes("/keys") ? keysHtml : dashHtml,
+      });
+    });
+    const startUrl = "https://signed-in-dash.test/dashboard";
+    await page.goto(startUrl);
+    const started = await startHarnessProvisionSession({
+      browser: BrowserController.fromHarnessPage(page),
+      serviceUrl: startUrl,
+      format: "compact",
+      initialObservation: "standard",
+    });
+    try {
+      const dependencies = deps(async (_api, _state, questions) => jevFromQuestions(questions));
+      const result = await runOperateDrive(
+        {
+          session_id: started.session_id,
+          goal: "use Continue with Google with the account already signed in to this browser and extract an API key",
+          max_steps: 6,
+        },
+        api(),
+        undefined,
+        dependencies,
+      );
+      expect(result.reason ?? "").not.toMatch(/already signed in as another account/i);
+      expect(result.steps).toBeGreaterThan(0);
+      expect(page.url()).toMatch(/\/keys/);
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
+  it("finishes with a same-URL field error after submit", async () => {
+    const html = `<!doctype html><meta charset="utf-8"><title>Register</title>
+<main>
+  <label>Email <input id="email" name="email" type="email"></label>
+  <button type="button" id="go">Register</button>
+  <p id="email-error" hidden></p>
+</main>
+<script>
+  document.getElementById("go").onclick = () => {
+    const input = document.getElementById("email");
+    const err = document.getElementById("email-error");
+    input.setAttribute("aria-invalid", "true");
+    input.setAttribute("aria-errormessage", "email-error");
+    err.hidden = false;
+    err.textContent = "You are prohibited of registering an account. (Error: A1)";
+    const payload = document.getElementById("page-data") ?? document.createElement("script");
+    payload.id = "page-data";
+    payload.type = "application/json";
+    payload.textContent = JSON.stringify({
+      props: { errors: { email: "You are prohibited of registering an account. (Error: A1)" } },
+    });
+    document.body.appendChild(payload);
+  };
+</script>`;
+    const { context, page, started } = await openFixture(html, "field-error.test", "standard", "/register");
+    try {
+      const dependencies = deps(async (_api, _state, questions) => jevFromQuestions(questions));
+      const result = await runOperateDrive(
+        {
+          session_id: started.session_id,
+          goal: "create an account",
+          facts: { email: "ada@fixture.test" },
+          max_steps: 6,
+        },
+        api(),
+        undefined,
+        dependencies,
+      );
+      expect(page.url()).toMatch(/\/register/);
+      expect(result.status).toBe("stuck");
+      expect(result.reason).toMatch(/prohibited of registering/i);
+      expect(result.reason ?? "").not.toMatch(/did not respond/i);
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
   it("starts a new goal on the same session without inheriting cycle memory", async () => {
     const html = `<!doctype html><meta charset="utf-8"><title>Settings</title>
 <nav><a id="settings" href="/settings">Settings</a></nav>

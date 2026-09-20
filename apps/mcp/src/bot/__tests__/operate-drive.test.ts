@@ -135,6 +135,11 @@ import {
   isEntityNameRow,
   isLogoutRow,
   alreadySignedInReason,
+  goalSeeksThirdPartySignin,
+  pageLooksLikeEmailVerification,
+  pageShowsForeignIdentity,
+  isPreexistingSessionPage,
+  invalidFieldReason,
   rowLooksLikeEmail,
   rowCarriesGoalNoun,
   isOffProductNavRow,
@@ -2400,6 +2405,15 @@ describe("facts, fingerprint, compact merge", () => {
         afterDisabled: "continue\te",
       }),
     ).toBe(false);
+    expect(
+      submitHadNoResponse({
+        navigated: false,
+        responseText: undefined,
+        beforeDisabled: "continue\te",
+        afterDisabled: "continue\te",
+        rerendered: true,
+      }),
+    ).toBe(false);
     expect(silentSubmitReason("Continue", "https://app.example.test/signup")).toBe(
       "site did not respond to Continue on https://app.example.test/signup",
     );
@@ -3257,6 +3271,58 @@ describe("post-confirmation navigation", () => {
         "Check your email",
       ),
     ).toBeUndefined();
+    const verifyRows: WireRow[] = [
+      ["@e:h", "h1", "Check your email"],
+      ["@e:out", "l", "Log out"],
+    ];
+    expect(
+      pageLooksLikeEmailVerification(
+        verifyRows,
+        "https://app.example.test/verifications",
+        "Check your email",
+      ),
+    ).toBe(true);
+    expect(
+      isPreexistingSessionPage({
+        rows: verifyRows,
+        pageUrl: "https://app.example.test/verifications",
+        pageText: "Check your email",
+        goal: "sign up and extract an API key",
+        submittedThisDrive: false,
+      }),
+    ).toBe(true);
+    const dashRows: WireRow[] = [
+      ["@e:keys", "l", "API Keys|u=https://app.example.test/keys"],
+      ["@e:out", "l", "Log out"],
+      ["@e:verify", "l", "Verify email|u=https://app.example.test/verifications"],
+    ];
+    expect(
+      isPreexistingSessionPage({
+        rows: dashRows,
+        pageUrl: "https://app.example.test/dashboard",
+        pageText: "Dashboard",
+        goal: "use Continue with Google with the account already signed in to this browser",
+        submittedThisDrive: false,
+      }),
+    ).toBe(false);
+    expect(
+      goalSeeksThirdPartySignin(
+        "use Continue with Google with the account already signed in to this browser",
+      ),
+    ).toBe(true);
+    expect(
+      pageShowsForeignIdentity(
+        [["@e:who", "l", "ada@other.test"]],
+        "Signed in as ada@other.test",
+        "sign up as ada@example.test",
+      ),
+    ).toBe(true);
+    expect(
+      invalidFieldReason(
+        [["@e:email", "t", "Email|f=email|s=i"]],
+        ["You are prohibited of registering an account. (Error: A1)"],
+      ),
+    ).toMatch(/prohibited of registering/i);
   });
 
   it("finishes after A-B-A-B destination alternation regardless of refs", () => {
