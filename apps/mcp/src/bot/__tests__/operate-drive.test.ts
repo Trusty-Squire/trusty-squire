@@ -36,6 +36,7 @@ import {
   isPaymentSubmitRow,
   paymentSubmitControlMissing,
   paymentSubmitDispatched,
+  checkoutPastPaymentForm,
   actionHistoryLine,
   scrollDescription,
   fillActionForCandidate,
@@ -221,11 +222,31 @@ describe("request building", () => {
     const product = "https://whitejade.xyz/products/jade-lamp";
     expect(isCandidateRow(buy, true, product)).toBe(false);
     expect(clickableCandidates([buy], true, product)).toEqual([]);
+    expect(isCandidateRow(buy, true, "")).toBe(false);
+    expect(clickableCandidates([buy], true)).toEqual([]);
     expect(
       clickableCandidates([buy], true, "https://whitejade.xyz/checkouts/cn/token").map(
         (c) => c.ref,
       ),
     ).toEqual(["@e:buy"]);
+  });
+
+  it("does not treat a payment-method radio spelled Pay now as a submit control", () => {
+    const radio: WireRow = ["@e:method", "r", "Pay now|v=offscreen"];
+    const checkout = "https://whitejade.xyz/checkouts/cn/token/en-us";
+    expect(isPaymentSubmitRow(radio)).toBe(false);
+    expect(isCandidateRow(radio, true, checkout)).toBe(false);
+    expect(
+      paymentSubmitControlMissing({
+        rows: [radio, ["@e:back", "b", "Back to finalize order"]],
+        includePayment: true,
+        alreadyCard: true,
+        cardRetry: false,
+        pageUrl: checkout,
+        remainingFills: 0,
+        history: [],
+      }),
+    ).toMatch(/the control for this operation is not present/);
   });
 
   it("reports a missing Pay control instead of clicking Back to finalize order", () => {
@@ -271,6 +292,25 @@ describe("request building", () => {
     ).toBeUndefined();
   });
 
+  it("does not call a host-submitted payment stuck on the processor step", () => {
+    const processing = "https://whitejade.xyz/checkouts/cn/hWNH38PujD9hoKo3tgk00iw6/processing";
+    expect(checkoutPastPaymentForm(processing)).toBe(true);
+    expect(
+      checkoutPastPaymentForm("https://whitejade.xyz/checkouts/cn/hWNH38PujD9hoKo3tgk00iw6/en-us"),
+    ).toBe(false);
+    expect(
+      paymentSubmitControlMissing({
+        rows: [["@e:back", "b", "Back to finalize order"]],
+        includePayment: true,
+        alreadyCard: true,
+        cardRetry: false,
+        pageUrl: processing,
+        remainingFills: 0,
+        history: [],
+      }),
+    ).toBeUndefined();
+  });
+
   it("ignores a pay click that predates the card release", () => {
     expect(
       paymentSubmitDispatched([
@@ -279,6 +319,7 @@ describe("request building", () => {
         "type into the Name on card field",
       ]),
     ).toBe(false);
+    expect(paymentSubmitDispatched(['click the button labeled "Buy now"'])).toBe(false);
     expect(
       paymentSubmitDispatched([
         DRIVE_INJECT_CARD_HISTORY,

@@ -629,7 +629,17 @@ export function isSubmitLikeRow(row: WireRow): boolean {
 const PAYMENT_SUBMIT_LABEL =
   /pay[- ]?now|place[- ]?order|complete[- ]?(?:order|purchase|payment)|submit[- ]?payment|buy[- ]?now/;
 
+/** Roles a checkout's submit control can carry.
+ *
+ * A radio or checkbox spelled "Pay now" is a payment-METHOD option, not a
+ * submit. Clicking one after release switches method and remounts the card
+ * frames, and counting one as a submit would silence the missing-control
+ * report while no submit exists.
+ */
+const PAYMENT_SUBMIT_ROLES = new Set(["b", "button", "l", "link"]);
+
 export function isPaymentSubmitRow(row: WireRow): boolean {
+  if (!PAYMENT_SUBMIT_ROLES.has(row[1])) return false;
   return PAYMENT_SUBMIT_LABEL.test(readableLabel(row).toLowerCase());
 }
 
@@ -642,20 +652,33 @@ export function isPaymentSubmitRow(row: WireRow): boolean {
  * a purchase it was never asked to make.
  */
 export function offscreenRowStaysOffered(row: WireRow, pageUrl: string): boolean {
-  if (!isPaymentSubmitRow(row)) return false;
-  return pageUrl.length === 0 || isCheckoutUrl(pageUrl);
+  return isPaymentSubmitRow(row) && isCheckoutUrl(pageUrl);
 }
 
 /** Whether the drive already asked to pay since the card went in.
  *
  * The pay control is replaced by the processor's own screen, so "no pay row"
- * after a dispatched pay click means submitted, not stuck.
+ * after a dispatched pay click means submitted, not stuck. Without a recorded
+ * release the drive cannot place a click relative to one, so an earlier
+ * storefront "Buy now" never counts.
  */
 export function paymentSubmitDispatched(history: readonly string[]): boolean {
-  const sinceRelease = history.slice(history.lastIndexOf(DRIVE_INJECT_CARD_HISTORY) + 1);
-  return sinceRelease.some(
-    (line) => /^click /i.test(line) && PAYMENT_SUBMIT_LABEL.test(line.toLowerCase()),
-  );
+  const released = history.lastIndexOf(DRIVE_INJECT_CARD_HISTORY);
+  if (released === -1) return false;
+  return history
+    .slice(released + 1)
+    .some((line) => /^click /i.test(line) && PAYMENT_SUBMIT_LABEL.test(line.toLowerCase()));
+}
+
+/** Whether the checkout has moved off its payment form.
+ *
+ * The drive's own history only knows the clicks the drive made; a host that
+ * submits with operate_click and resumes the drive on the processor step
+ * leaves no trace in it. The page itself is the stronger signal.
+ */
+export function checkoutPastPaymentForm(url: string): boolean {
+  if (safeStageV2(url, []) === "complete") return true;
+  return /(?:^|\/)processing(?:\/|$)/.test(urlPathname(url));
 }
 
 /** Fill, select, an enabled non-OAuth submit, or an enabled choice is still listed — WAIT and BLOCKED are not honest. */
@@ -686,7 +709,7 @@ export function paymentSubmitControlMissing(input: {
     input.cardRetry ||
     !isCheckoutUrl(input.pageUrl) ||
     input.remainingFills > 0 ||
-    safeStageV2(input.pageUrl, []) === "complete" ||
+    checkoutPastPaymentForm(input.pageUrl) ||
     paymentSubmitDispatched(input.history) ||
     input.rows.some((row) => isPaymentSubmitRow(row))
   ) {
@@ -700,13 +723,16 @@ export function paymentSubmitControlMissing(input: {
   return `the control for this operation is not present (CLICK pay/place-order). visible: ${seen.join(", ") || "none"}`;
 }
 
-export function isCheckoutUrl(url: string): boolean {
+function urlPathname(url: string): string {
   try {
-    const path = new URL(url).pathname.toLowerCase();
-    return /(?:^|\/)(?:checkouts?|payment)(?:\/|$)/.test(path);
+    return new URL(url).pathname.toLowerCase();
   } catch {
-    return /(?:^|\/)(?:checkouts?|payment)(?:\/|$)/i.test(url);
+    return url.toLowerCase();
   }
+}
+
+export function isCheckoutUrl(url: string): boolean {
+  return /(?:^|\/)(?:checkouts?|payment)(?:\/|$)/.test(urlPathname(url));
 }
 
 export function isCandidateRow(
@@ -2649,11 +2675,15 @@ function handoffObservation(observation: Observation, rows: WireRow[]): Observat
   };
 }
 
-function findRow(rows: readonly WireRow[], refOrSlug: string): WireRow | undefined {
+function findRow(
+  rows: readonly WireRow[],
+  refOrSlug: string,
+  pageUrl: string,
+): WireRow | undefined {
   const byRef = rows.find((row) => row[0] === refOrSlug || rowLabel(row) === refOrSlug);
   if (byRef !== undefined) return byRef;
   for (const includePayment of [false, true]) {
-    const hit = driveCandidates(rows, includePayment).find(
+    const hit = driveCandidates(rows, includePayment, pageUrl).find(
       (candidate) => candidate.slug === refOrSlug,
     );
     if (hit !== undefined) return hit.row;
@@ -3016,9 +3046,10 @@ function resolveResumeAnswer(
   answer: string,
   snapshotRows: readonly WireRow[],
   compactRows: readonly WireRow[],
+  pageUrl: string,
 ): string {
-  if (findRow(snapshotRows, answer) !== undefined) return answer;
-  const compact = findRow(compactRows, answer);
+  if (findRow(snapshotRows, answer, pageUrl) !== undefined) return answer;
+  const compact = findRow(compactRows, answer, pageUrl);
   if (compact === undefined) return answer;
   const wantedField = rowField(compact);
   const wantedLabel = readableLabel(compact).toLowerCase();
@@ -3098,6 +3129,7 @@ function resumeAction(
   facts: Record<string, string>,
   goal: string,
   cardRef: string | undefined,
+  pageUrl: string,
 ): DriveDecision {
   if (answer === DRIVE_FIXED_DONE || answer === "done") return { kind: "complete", confidence: 1 };
   if (answer === DRIVE_FIXED_STUCK || answer === "stuck") {
@@ -3105,9 +3137,9 @@ function resumeAction(
   }
   if (answer === "WAIT" || answer === "wait") return { kind: "wait", confidence: 1 };
   const includePayment = cardRef !== undefined;
-  const questions = buildDriveQuestions(rows, facts, goal, includePayment);
-  const sets = driveTargetSets(rows, facts, includePayment);
-  const row = findRow(rows, answer);
+  const questions = buildDriveQuestions(rows, facts, goal, includePayment, [], pageUrl);
+  const sets = driveTargetSets(rows, facts, includePayment, [], pageUrl);
+  const row = findRow(rows, answer, pageUrl);
   if (row === undefined) {
     return {
       kind: "invalid_answer",
@@ -3732,7 +3764,11 @@ async function driveLoop(input: {
       return await noteProgress(fingerprint, nextFingerprint, decision.actionKey);
     }
 
-    const historyLine = actionHistoryLine(decision.action, findRow(rows, decision.actionKey), rows);
+    const historyLine = actionHistoryLine(
+      decision.action,
+      findRow(rows, decision.actionKey, observation.url),
+      rows,
+    );
     const beforeEpoch =
       drive.lastDocumentEpoch ??
       (session.browser.page === null ? "" : await documentEpochOf(session.browser.page));
@@ -3853,7 +3889,7 @@ async function driveLoop(input: {
 
   if (args.answer !== undefined) {
     const compactRows = drive.resumeCompactRows ?? mergeCompactTable([], priorCompact ?? {});
-    const answer = resolveResumeAnswer(args.answer, rows, compactRows);
+    const answer = resolveResumeAnswer(args.answer, rows, compactRows, observation.url);
     // Resume binds to the fresh snapshot: the pending operation (e.g. an
     // approval that completed on the phone) must pass the consume-once gate
     // on its first post-resume attempt instead of bouncing off a
@@ -3867,7 +3903,7 @@ async function driveLoop(input: {
     );
     drive.consumedActionKey = null;
     const resumed = await applyDecision(
-      resumeAction(answer, rows, drive.facts, drive.goal, drive.facts.card_ref),
+      resumeAction(answer, rows, drive.facts, drive.goal, drive.facts.card_ref, observation.url),
     );
     if (resumed !== "continue") return resumed;
     steps += 1;
