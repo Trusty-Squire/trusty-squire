@@ -2422,10 +2422,7 @@ function resolveResumeAnswer(
   return hit?.[0] ?? answer;
 }
 
-// CDP click dispatch is synchronous and Playwright delivers the page event on
-// the next turn. One frame-sized polling interval catches that event without
-// charging every same-tab click the general action path's 300ms popup grace.
-const DRIVE_OPENED_TAB_ADOPTION_GRACE_MS = 50;
+const DRIVE_OPENED_TAB_ADOPTION_GRACE_MS = 300;
 
 async function actDriveSafely(
   session: Session,
@@ -2755,17 +2752,15 @@ async function driveLoop(input: {
     fingerprint: string,
     nextFingerprint: string,
     actionKey: string,
-    semanticPageMoved = false,
   ): Promise<DriveHandoff | "continue"> => {
     let confirmed = nextFingerprint;
-    if (confirmed === fingerprint && !semanticPageMoved) {
+    if (confirmed === fingerprint) {
       await sleepDrive(DRIVE_IDENTICAL_RESNAP_MS, context?.signal);
       const snap = await snapshotOrTimeout(framesIfNeeded());
       if (snap !== "ok") return snap;
       confirmed = progressFingerprint(observation.url, rows, drive, session);
     }
-    drive.staleNonWait =
-      confirmed === fingerprint && !semanticPageMoved ? drive.staleNonWait + 1 : 0;
+    drive.staleNonWait = confirmed === fingerprint ? drive.staleNonWait + 1 : 0;
     drive.lastFingerprint = confirmed;
     drive.lastActionKey = actionKey;
     if (drive.staleNonWait >= DRIVE_STALE_LIMIT) return finish("no_progress");
@@ -2775,19 +2770,8 @@ async function driveLoop(input: {
   const applyDecision = async (
     decision: DriveDecision,
     jevMs?: number,
-    decisionPageFingerprint?: string,
   ): Promise<DriveHandoff | "continue"> => {
     if (decision.kind === "complete") {
-      const page = session.browser.page;
-      if (page !== null && decisionPageFingerprint !== undefined) {
-        const currentPageFingerprint = await pageFingerprintOf(page);
-        if (
-          decisionPageFingerprint.length > 0 &&
-          currentPageFingerprint === decisionPageFingerprint
-        ) {
-          return finish("complete");
-        }
-      }
       const completeSnap = await snapshotOrTimeout(framesIfNeeded());
       if (completeSnap !== "ok") return completeSnap;
       const fresh = progressFingerprint(observation.url, rows, drive, session);
@@ -3126,14 +3110,7 @@ async function driveLoop(input: {
       fingerprint_after: nextFingerprint,
       ...(driveTraceEnabled() ? { native_selects_after: await nativeSelectSnapshot(session) } : {}),
     });
-    const currentPageFingerprint =
-      page === null || beforePageFingerprint.length === 0 ? "" : await pageFingerprintOf(page);
-    return await noteProgress(
-      fingerprint,
-      nextFingerprint,
-      decision.actionKey,
-      currentPageFingerprint.length > 0 && currentPageFingerprint !== beforePageFingerprint,
-    );
+    return await noteProgress(fingerprint, nextFingerprint, decision.actionKey);
   };
 
   if (args.answer !== undefined) {
@@ -3307,8 +3284,6 @@ async function driveLoop(input: {
     const questionCount = Object.keys(questions).length;
     const stateBytes = Buffer.byteLength(JSON.stringify(state));
     const fingerprint = progressFingerprint(observation.url, rows, drive, session);
-    const page = session.browser.page;
-    const decisionPageFingerprint = page === null ? "" : await pageFingerprintOf(page);
     if (drive.boundFingerprint !== fingerprint) drive.consumedActionKey = null;
     drive.boundFingerprint = fingerprint;
     const decide = (answers: Record<string, JevAnswer>): DriveDecision =>
@@ -3413,7 +3388,7 @@ async function driveLoop(input: {
         continue;
       }
     }
-    const applied = await applyDecision(decision, jevMs, decisionPageFingerprint);
+    const applied = await applyDecision(decision, jevMs);
     if (applied !== "continue") return applied;
     steps += 1;
   }

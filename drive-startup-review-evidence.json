@@ -1,0 +1,43 @@
+{
+  "measuredAt": "2026-09-20T02:05:14.874Z",
+  "scope": "Live Whitejade product startup and DONE, mocked Jev; not a full checkout timing",
+  "comparison": "Kept variant forces startup general captures to skip settling; deleted uses normal settling",
+  "landed": "deleted",
+  "reason": "Drive startup never calls general observation in either variant",
+  "samples": [
+    {
+      "variant": "kept",
+      "elapsedMs": 1324.3420159999996,
+      "startupCaptures": 0
+    },
+    {
+      "variant": "deleted",
+      "elapsedMs": 879.8710540000002,
+      "startupCaptures": 0
+    },
+    {
+      "variant": "deleted",
+      "elapsedMs": 1043.257614,
+      "startupCaptures": 0
+    },
+    {
+      "variant": "kept",
+      "elapsedMs": 2642.7522900000004,
+      "startupCaptures": 0
+    },
+    {
+      "variant": "kept",
+      "elapsedMs": 3257.6874049999988,
+      "startupCaptures": 0
+    },
+    {
+      "variant": "deleted",
+      "elapsedMs": 7669.958602000001,
+      "startupCaptures": 0
+    }
+  ],
+  "mediansMs": {
+    "kept": 2642.7522900000004,
+    "deleted": 1043.257614
+  }
+}
