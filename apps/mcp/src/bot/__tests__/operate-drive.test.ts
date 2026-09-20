@@ -42,6 +42,10 @@ import {
   pageTextFromObservation,
   peakedProbabilities,
   requiredFactComboboxAction,
+  requiredFactSelectAction,
+  requiredFactTypeAction,
+  cardReleaseBlockingFills,
+  isRequiredRow,
   requiredFillableMissingFact,
   applyReleasedCardFacts,
   ensureGeneratedFacts,
@@ -483,6 +487,91 @@ describe("decideAfterJev stop reasons", () => {
     ]);
     const resolved = fillableCandidates(rows, facts, true, ["@e:email", "@e:state"]);
     expect(resolved).toEqual([]);
+  });
+
+  it("does not treat a Shopify geo-default state as already filled", () => {
+    const country: WireRow = ["@e:country", "s", "Country/Region|f=state|s=r|a=picker|n=US"];
+    const florida: WireRow = ["@e:state", "s", "State|f=state|s=r|a=picker|n=FL"];
+    const facts = { state: "NY", country: "US", zip: "10001" };
+    expect(matchingFactKeys(facts, country)).toEqual(["country"]);
+    expect(matchingFactKeys(facts, florida)).toEqual(["state"]);
+    expect(fillableCandidates([country, florida], facts, false).map((row) => row.ref)).toEqual([
+      "@e:state",
+    ]);
+    expect(requiredFactSelectAction([country, florida], facts)).toEqual({
+      target: "@e:state",
+      text: "NY",
+    });
+  });
+
+  it("drops a state select once its current value matches the fact", () => {
+    const newYork: WireRow = ["@e:state", "s", "State|f=state|s=r|a=picker|n=NY"];
+    const facts = { state: "NY", country: "US" };
+    expect(fillableCandidates([newYork], facts, false)).toEqual([]);
+    expect(requiredFactSelectAction([newYork], facts)).toBeUndefined();
+  });
+
+  it("does not treat an offscreen checkout phone as already filled", () => {
+    const phone: WireRow = ["@e:phone", "t", "Phone (optional)|f=phone|v=offscreen"];
+    const checkout = "https://whitejade.xyz/checkouts/cn/hWNH2exU82n2ocbEQWhd9HjG/en-us";
+    const facts = { phone: "2125550100", card_ref: "card-1" };
+    expect(driveCandidates([phone], true).map((row) => row.ref)).toEqual([]);
+    expect(isRequiredRow(phone)).toBe(false);
+    expect(fillableCandidates([phone], facts, true, [], checkout).map((row) => row.ref)).toEqual([
+      "@e:phone",
+    ]);
+    expect(requiredFactTypeAction([phone], facts, [], checkout)).toBeUndefined();
+    expect(cardReleaseBlockingFills([phone], facts, [], checkout)).toEqual([]);
+  });
+
+  it("does not hold the card for an optional offscreen phone once required fills match", () => {
+    const email: WireRow = ["@e:email", "t", "Email|f=email|s=r|n=a@b.test"];
+    const state: WireRow = ["@e:state", "s", "State|f=state|s=r|a=picker|n=NY"];
+    const phone: WireRow = ["@e:phone", "t", "Phone (optional)|f=phone|v=offscreen"];
+    const facts = { email: "a@b.test", state: "NY", phone: "2125550100", card_ref: "card-1" };
+    const checkout = "https://shop.example/checkout";
+    expect(cardReleaseBlockingFills([email, state, phone], facts, [], checkout)).toEqual([]);
+  });
+
+  it("drops a typed field once its current value matches the fact", () => {
+    const phone: WireRow = ["@e:phone", "t", "Phone (optional)|f=phone|n=2125550100"];
+    const facts = { phone: "2125550100" };
+    expect(fillableCandidates([phone], facts, false)).toEqual([]);
+    expect(requiredFactTypeAction([phone], facts)).toBeUndefined();
+  });
+
+  it("never writes the state fact into a country picker that has no country fact", () => {
+    const country: WireRow = ["@e:country", "s", "Country/Region|f=state|s=r|a=picker|n=US"];
+    const florida: WireRow = ["@e:state", "s", "State|f=state|s=r|a=picker|n=FL"];
+    // Shopify serializes Country/Region as f=state, so without the guard the
+    // state alias family hands the picker "NY".
+    const facts = { state: "NY", zip: "10001" };
+    expect(matchingFactKeys(facts, country)).toEqual([]);
+    expect(requiredFactSelectAction([country, florida], facts)).toEqual({
+      target: "@e:state",
+      text: "NY",
+    });
+  });
+
+  it("applies each outstanding fact-backed select in turn as the page updates", () => {
+    const country: WireRow = ["@e:country", "s", "Country/Region|f=state|s=r|a=picker|n=US"];
+    const florida: WireRow = ["@e:state", "s", "State|f=state|s=r|a=picker|n=FL"];
+    const facts = { state: "NY", country: "CA", zip: "10001" };
+    // The country picker is resolved from the country fact, the state picker
+    // from the state fact — neither borrows the other's value.
+    expect(requiredFactSelectAction([country, florida], facts)).toEqual({
+      target: "@e:country",
+      text: "CA",
+    });
+    expect(requiredFactSelectAction([country, florida], facts, ["@e:country"])).toEqual({
+      target: "@e:state",
+      text: "NY",
+    });
+    const settled: WireRow[] = [
+      ["@e:country", "s", "Country/Region|f=state|s=r|a=picker|n=CA"],
+      ["@e:state", "s", "State|f=state|s=r|a=picker|n=NY"],
+    ];
+    expect(requiredFactSelectAction(settled, facts)).toBeUndefined();
   });
 
   it("copies released card public fields so expiry can be typed after inject", () => {

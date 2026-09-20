@@ -801,19 +801,23 @@ export function matchingFactKeys(facts: Record<string, string>, row: WireRow): s
       return keys.filter((key) => normalizeKey(key) === wantedFact);
     }
   }
+  const label = normalizeKey(readableLabel(row));
+  // Shopify serializes Country/Region as f=state, so the ordinary aliases hand
+  // it the state fact and the drive writes "NY" into the country picker. A
+  // country control takes a country fact or nothing.
+  if (label.includes("country")) {
+    const countryWanted = new Set(aliasKeysFor("country"));
+    return keys.filter((key) => countryWanted.has(normalizeKey(key)));
+  }
   const wanted = new Set<string>([
     ...aliasKeysFor(fieldNameForRow(row)),
     ...aliasKeysFor(readableLabel(row)),
   ]);
-  const label = normalizeKey(readableLabel(row));
   if (label.includes("last") && label.includes("name")) {
     for (const alias of aliasKeysFor("last_name")) wanted.add(alias);
   }
   if (label.includes("first") && label.includes("name")) {
     for (const alias of aliasKeysFor("first_name")) wanted.add(alias);
-  }
-  if (label.includes("country")) {
-    for (const alias of aliasKeysFor("country")) wanted.add(alias);
   }
   if (label.includes("search") || normalizeKey(fieldNameForRow(row)).includes("search")) {
     for (const alias of aliasKeysFor("query")) wanted.add(alias);
@@ -1157,7 +1161,11 @@ export function fillableCandidates(
     if (!includePayment && (isPaymentRow(row) || isCvvRow(row))) continue;
     if (isPaymentRow(row) || isCvvRow(row)) continue;
     if (isOtpRow(row) && matchingFactKeys(facts, row).length === 0) continue;
-    if (matchingFactKeys(facts, row).length === 0) continue;
+    const matchedKeys = matchingFactKeys(facts, row);
+    if (matchedKeys.length === 0) continue;
+    // A control already showing the fact is done. Left offered, the drive
+    // keeps re-picking a value the control already holds instead of moving on.
+    if (rowAlreadyShowsFact(row, facts, matchedKeys)) continue;
     const role = ROLE_LETTERS[row[1]] ?? row[1];
     const seed = `${row[2] ?? readableLabel(row)}_${role}`;
     const slug = uniqueCriteriaSlug(seed, used);
@@ -1325,6 +1333,86 @@ function rowCurrentValue(row: WireRow): string | undefined {
 
 function factValuesMatch(left: string, right: string): boolean {
   return normalizeKey(left) === normalizeKey(right);
+}
+
+function firstFactValue(
+  facts: Record<string, string>,
+  keys: readonly string[],
+): string | undefined {
+  return keys.map((key) => facts[key]).find((value) => value !== undefined && value.length > 0);
+}
+
+function rowAlreadyShowsFact(
+  row: WireRow,
+  facts: Record<string, string>,
+  matchedKeys: readonly string[],
+): boolean {
+  const fact = firstFactValue(facts, matchedKeys);
+  const current = rowCurrentValue(row);
+  return fact !== undefined && current !== undefined && factValuesMatch(current, fact);
+}
+
+/** The select the drive must resolve itself before asking the model.
+ *
+ * A fact-backed picker left on the merchant's geo default (Shopify opens the
+ * checkout on FL) is not a judgement call — the host already said which value
+ * belongs there. Leaving it to the model stalls the purchase: the card gate
+ * holds for the outstanding fill while the model spends its turns elsewhere.
+ */
+export function requiredFactSelectAction(
+  rows: readonly WireRow[],
+  facts: Record<string, string>,
+  filledRefs: readonly string[] = [],
+  pageUrl: string = "",
+): { target: string; text: string } | undefined {
+  const includePayment = facts.card_ref !== undefined;
+  for (const candidate of fillableCandidates(rows, facts, includePayment, filledRefs, pageUrl)) {
+    if (!isSelectRow(candidate.row)) continue;
+    const fact = firstFactValue(facts, matchingFactKeys(facts, candidate.row));
+    if (fact === undefined) continue;
+    return { target: candidate.ref, text: fact };
+  }
+  return undefined;
+}
+
+/** The typeable fact the drive must write itself before asking the model.
+ *
+ * Offscreen rows are skipped here: typing them burns an attempt without a
+ * trajectory step, then the same snapshot refuses to retry. Scroll first.
+ */
+export function requiredFactTypeAction(
+  rows: readonly WireRow[],
+  facts: Record<string, string>,
+  filledRefs: readonly string[] = [],
+  pageUrl: string = "",
+): { target: string; text: string } | undefined {
+  const includePayment = facts.card_ref !== undefined;
+  for (const candidate of fillableCandidates(rows, facts, includePayment, filledRefs, pageUrl)) {
+    if (isSelectRow(candidate.row) || isOffscreenRow(candidate.row)) continue;
+    const fact = firstFactValue(facts, matchingFactKeys(facts, candidate.row));
+    if (fact === undefined) continue;
+    return { target: candidate.ref, text: fact };
+  }
+  return undefined;
+}
+
+/** Fills that must be resolved before inject_card.
+ *
+ * Required fields and fact-backed selects can remount the card frames if they
+ * change after release. An optional offscreen phone cannot be a Jev target and
+ * must not hold the card — the host fact is still typed after a scroll if the
+ * row comes on-screen.
+ */
+export function cardReleaseBlockingFills(
+  rows: readonly WireRow[],
+  facts: Record<string, string>,
+  filledRefs: readonly string[] = [],
+  pageUrl: string = "",
+): DriveCandidate[] {
+  const includePayment = facts.card_ref !== undefined;
+  return fillableCandidates(rows, facts, includePayment, filledRefs, pageUrl).filter(
+    (candidate) => isSelectRow(candidate.row) || isRequiredRow(candidate.row),
+  );
 }
 
 export function requiredFactComboboxAction(
@@ -2859,6 +2947,10 @@ async function driveLoop(input: {
   let steps = 0;
   const comboboxAttempts = new Set<string>();
   let comboboxMustYield = false;
+  const selectAttempts = new Set<string>();
+  let selectMustYield = false;
+  const typeAttempts = new Set<string>();
+  let typeMustYield = false;
   let emptySnapshotWaits = 0;
 
   const finish = (
@@ -3186,6 +3278,8 @@ async function driveLoop(input: {
     const acted = await actDriveSafely(session, sessionId, decision.action, dependencies);
     if (acted.kind === "stale") {
       comboboxMustYield = true;
+      selectMustYield = true;
+      typeMustYield = true;
       drive.consumedActionKey = null;
       const staleSnap = await snapshotOrTimeout(framesIfNeeded());
       if (staleSnap !== "ok") return staleSnap;
@@ -3340,6 +3434,65 @@ async function driveLoop(input: {
       steps += 1;
       continue;
     }
+    // One auto-apply per target per snapshot. A value the control has no option
+    // for comes back stale without touching filledRefs, so an unguarded retry
+    // would pick the same target every iteration until the budget runs out.
+    const selectFill = selectMustYield
+      ? undefined
+      : requiredFactSelectAction(rows, drive.facts, drive.filledRefs, pageUrl);
+    selectMustYield = false;
+    const selectAttemptKey =
+      selectFill === undefined ? undefined : `${comboboxObservation}\t${selectFill.target}`;
+    if (
+      selectFill !== undefined &&
+      selectAttemptKey !== undefined &&
+      !selectAttempts.has(selectAttemptKey)
+    ) {
+      selectAttempts.add(selectAttemptKey);
+      drive.boundFingerprint = progressFingerprint(
+        observation.url,
+        rows,
+        drive,
+        session,
+        observation.dom ?? "",
+      );
+      drive.consumedActionKey = null;
+      const applied = await applyDecision({
+        kind: "act",
+        action: { kind: "select", target: selectFill.target, text: selectFill.text },
+        actionKey: selectFill.target,
+        confidence: 1,
+      });
+      if (applied !== "continue") return applied;
+      steps += 1;
+      continue;
+    }
+    const typeFill = typeMustYield
+      ? undefined
+      : requiredFactTypeAction(rows, drive.facts, drive.filledRefs, pageUrl);
+    typeMustYield = false;
+    const typeAttemptKey =
+      typeFill === undefined ? undefined : `${comboboxObservation}\t${typeFill.target}`;
+    if (typeFill !== undefined && typeAttemptKey !== undefined && !typeAttempts.has(typeAttemptKey)) {
+      typeAttempts.add(typeAttemptKey);
+      drive.boundFingerprint = progressFingerprint(
+        observation.url,
+        rows,
+        drive,
+        session,
+        observation.dom ?? "",
+      );
+      drive.consumedActionKey = null;
+      const applied = await applyDecision({
+        kind: "act",
+        action: { kind: "type", target: typeFill.target, text: typeFill.text },
+        actionKey: typeFill.target,
+        confidence: 1,
+      });
+      if (applied !== "continue") return applied;
+      steps += 1;
+      continue;
+    }
     if (missing !== undefined) {
       const field = fieldLabelForRow(missing.row);
       return finish("needs_value", {
@@ -3385,19 +3538,25 @@ async function driveLoop(input: {
       drive.filledRefs,
       pageUrl,
     );
+    const blockingFills = cardReleaseBlockingFills(
+      rows,
+      drive.facts,
+      drive.filledRefs,
+      pageUrl,
+    );
     // inject_card writes only pan/cvv. Expiry, cardholder name, and billing
-    // are typed after release. The gate waits on every fill a fact actually
-    // backs, dropdowns included: resolving a State or Country after the card
-    // is in makes the merchant re-cost the order and remount the card frames,
-    // which wipes the PAN with no path back. A site-search or promo input the
-    // drive has no fact for is not a fill at all and never enters this list —
-    // it would otherwise sit here forever and the card would never be
-    // released.
+    // are typed after release. The gate waits on required fills and
+    // fact-backed dropdowns: resolving a State or Country after the card is
+    // in makes the merchant re-cost the order and remount the card frames,
+    // which wipes the PAN with no path back. An optional offscreen phone the
+    // model cannot even target is not a remount risk and must not hold the
+    // card. A site-search or promo input the drive has no fact for is not a
+    // fill at all and never enters this list.
     if (
       includePayment &&
       (!alreadyCard || cardRetry) &&
       onCheckout &&
-      remainingFills.length === 0 &&
+      blockingFills.length === 0 &&
       (fields.pan !== undefined || fields.cvv !== undefined)
     ) {
       // Bind the automatic decision to the current snapshot before applying
