@@ -58,6 +58,8 @@ import {
   DRIVE_WIDGET_UNREADY_REASON,
   captchaSolveStillWorking,
   widgetUnreadySolveReason,
+  isRenderedCaptchaRow,
+  pageHasRenderedCaptcha,
   DRIVE_TERMINAL_OPERATIONS,
   isPickerRow,
   matchingFactKeys,
@@ -1538,6 +1540,8 @@ describe("form-fill assignment helpers", () => {
     expect(DRIVE_WIDGET_UNREADY_REASON).toMatch(/gate widget/);
     expect(captchaSolveStillWorking("fetch_started")).toBe(true);
     expect(captchaSolveStillWorking("in_flight")).toBe(true);
+    expect(captchaSolveStillWorking("cooldown")).toBe(true);
+    expect(captchaSolveStillWorking("expiry_backoff")).toBe(true);
     expect(captchaSolveStillWorking("no_key")).toBe(false);
     expect(captchaSolveStillWorking("unsupported_variant")).toBe(false);
     expect(captchaSolveStillWorking("solver_error")).toBe(false);
@@ -1575,6 +1579,29 @@ describe("form-fill assignment helpers", () => {
     ];
     expect(disabledSubmitKind(staticDisabled, 0)).toBe("none");
     expect(disabledSubmitKind(staticDisabled, 0, [], true)).toBe("widget_unready");
+    const captchaGate: WireRow[] = [
+      ["@e:email", "t", "Email|f=email|n=a@b.test"],
+      ["@e:go", "b", "Sign Up|s=d"],
+      ["@e:img", "b", "image challenge|x=x"],
+      ["@e:v", "b", "Verify|x=x"],
+      ["@e:skip", "b", "Skip|x=x"],
+    ];
+    expect(isRenderedCaptchaRow(captchaGate[2]!)).toBe(true);
+    expect(pageHasRenderedCaptcha(captchaGate)).toBe(true);
+    expect(disabledSubmitKind(captchaGate, 0)).toBe("widget_unready");
+    expect(disabledSubmitKind(captchaGate, 0, [], false)).toBe("widget_unready");
+    expect(
+      disabledSubmitKind(
+        [
+          ["@e:email", "t", "Email|f=email|n=a@b.test"],
+          ["@e:go", "b", "Creating your account|s=d"],
+          ["@e:img", "b", "image challenge|x=x"],
+        ],
+        0,
+      ),
+    ).toBe("widget_unready");
+    expect(isRenderedCaptchaRow(["@e:v", "b", "Verify email"])).toBe(false);
+    expect(pageHasRenderedCaptcha(staticDisabled)).toBe(false);
     expect(snapshotNeedsSettle(staticDisabled, 0)).toBe(false);
     const emptyPassword: WireRow[] = [
       ["@e:email", "t", "Email|f=email|n=a@b.test"],

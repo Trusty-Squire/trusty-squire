@@ -23,7 +23,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 const h = vi.hoisted(() => ({
   solveCalls: [] as string[],
-  solveResult: { kind: "ok" as const, token: "P0_eyJhbGciOiJIUzI1NiJ9.MINTED" },
+  failSolve: false,
   variantTokenPresent: false,
   challengeRendered: true,
   solverAvailable: true,
@@ -36,17 +36,29 @@ vi.mock("../captcha.js", async (importOriginal) => ({
     isAvailable(): boolean {
       return h.solverAvailable;
     }
-    async solveHcaptcha(): Promise<typeof h.solveResult> {
+    async solveHcaptcha(): Promise<
+      { kind: "ok"; token: string } | { kind: "solver_error"; reason: string }
+    > {
       h.solveCalls.push("hcaptcha");
-      return h.solveResult;
+      return h.failSolve
+        ? { kind: "solver_error", reason: "boom" }
+        : { kind: "ok", token: "P0_eyJhbGciOiJIUzI1NiJ9.MINTED" };
     }
-    async solveRecaptchaV2(): Promise<typeof h.solveResult> {
+    async solveRecaptchaV2(): Promise<
+      { kind: "ok"; token: string } | { kind: "solver_error"; reason: string }
+    > {
       h.solveCalls.push("recaptcha_v2");
-      return h.solveResult;
+      return h.failSolve
+        ? { kind: "solver_error", reason: "boom" }
+        : { kind: "ok", token: "P0_eyJhbGciOiJIUzI1NiJ9.MINTED" };
     }
-    async solveTurnstile(): Promise<typeof h.solveResult> {
+    async solveTurnstile(): Promise<
+      { kind: "ok"; token: string } | { kind: "solver_error"; reason: string }
+    > {
       h.solveCalls.push("turnstile");
-      return h.solveResult;
+      return h.failSolve
+        ? { kind: "solver_error", reason: "boom" }
+        : { kind: "ok", token: "P0_eyJhbGciOiJIUzI1NiJ9.MINTED" };
     }
   },
   detectCaptchaVariant: async () => ({
@@ -132,7 +144,7 @@ const outcomes = (): string[] =>
 
 beforeEach(() => {
   h.solveCalls = [];
-  h.solveResult = { kind: "ok" as const, token: "P0_eyJhbGciOiJIUzI1NiJ9.MINTED" };
+  h.failSolve = false;
   h.variantTokenPresent = false;
   h.challengeRendered = true;
   h.solverAvailable = true;
@@ -161,12 +173,18 @@ describe("attemptOperateCaptchaAutoSolve — bounded spend", () => {
 
     // Observe 2, past the token's shelf life: expired, and the very next
     // fetch is skipped instead of buying another doomed token.
+    const diag: string[] = [];
+    const errorSpy = vi.spyOn(console, "error").mockImplementation((msg: string) => {
+      diag.push(String(msg));
+    });
     vi.advanceTimersByTime(121_000);
     await attemptOperateCaptchaAutoSolve(session, page);
     await flushDetached();
+    errorSpy.mockRestore();
     expect(h.solveCalls).toHaveLength(1);
     expect(outcomes()).toContain("token_expired");
     expect(outcomes()).toContain("fetch_skipped");
+    expect(diag.some((line) => /outcome=fetch_skipped reason=expiry_backoff/.test(line))).toBe(true);
 
     // 30s into the backoff: still skipped (backoff is 30s from the expiry,
     // minus the elapsed observe time — advance just past it).
@@ -223,6 +241,45 @@ describe("attemptOperateCaptchaAutoSolve — bounded spend", () => {
     await flushDetached();
     expect(h.solveCalls).toHaveLength(1);
     expect(outcomes()).not.toContain("autosolve_disabled");
+  });
+
+  it("emits an unsealed diag line when a fetch is already in flight", async () => {
+    const session = fakeSession();
+    const page = fakePage(false);
+    const diag: string[] = [];
+    const errorSpy = vi.spyOn(console, "error").mockImplementation((msg: string) => {
+      diag.push(String(msg));
+    });
+    try {
+      const first = await attemptOperateCaptchaAutoSolve(session, page);
+      expect(first).toBe("fetch_started");
+      const second = await attemptOperateCaptchaAutoSolve(session, page);
+      expect(second).toBe("in_flight");
+      expect(diag.some((line) => /outcome=fetch_skipped reason=in_flight/.test(line))).toBe(true);
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it("emits an unsealed diag line while cooldown is armed after a failed fetch", async () => {
+    const session = fakeSession();
+    const page = fakePage(false);
+    const diag: string[] = [];
+    const errorSpy = vi.spyOn(console, "error").mockImplementation((msg: string) => {
+      diag.push(String(msg));
+    });
+    try {
+      h.failSolve = true;
+      const first = await attemptOperateCaptchaAutoSolve(session, page);
+      expect(first).toBe("fetch_started");
+      await flushDetached();
+      diag.length = 0;
+      const cooled = await attemptOperateCaptchaAutoSolve(session, page);
+      expect(cooled).toBe("cooldown");
+      expect(diag.some((line) => /outcome=fetch_skipped reason=cooldown/.test(line))).toBe(true);
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 
   it("never spends when no challenge is rendered (bare checkbox stays free)", async () => {

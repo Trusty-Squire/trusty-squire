@@ -631,6 +631,9 @@ async function startDetachedTokenFetch(session: Session, page?: Page): Promise<s
   const state = autoSolveState(session);
   if (state.inFlight) {
     audit(session.id, "captcha_autosolve", { outcome: "fetch_skipped", reason: "in_flight" });
+    console.error(
+      `[captcha-autosolve-diag] session=${session.id} outcome=fetch_skipped reason=in_flight`,
+    );
     return "in_flight";
   }
   if (
@@ -638,6 +641,9 @@ async function startDetachedTokenFetch(session: Session, page?: Page): Promise<s
     Date.now() - state.lastFinishedAt < CAPTCHA_AUTOSOLVE_RETRY_COOLDOWN_MS
   ) {
     audit(session.id, "captcha_autosolve", { outcome: "fetch_skipped", reason: "cooldown" });
+    console.error(
+      `[captcha-autosolve-diag] session=${session.id} outcome=fetch_skipped reason=cooldown`,
+    );
     return "cooldown";
   }
   if (Date.now() < state.expiryBackoffUntil) {

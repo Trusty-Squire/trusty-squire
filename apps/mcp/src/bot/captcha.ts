@@ -1558,8 +1558,8 @@ const TWOCAPTCHA_API_BASE = "https://api.2captcha.com";
 // submission is just queued). The RES polling can take 60-120s on
 // busy days; we cap at 180s to keep the bot's overall budget bounded.
 const IN_TIMEOUT_MS = 10_000;
-const RES_POLL_INTERVAL_MS = 5_000;
-const RES_TIMEOUT_MS = 180_000;
+export const RES_POLL_INTERVAL_MS = 5_000;
+export const RES_TIMEOUT_MS = 180_000;
 
 // A single authenticated 2Captcha request, with the API key NOT yet attached —
 // the transport (direct or vault-proxy) injects it. `keyInjection` says where:
