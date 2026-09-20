@@ -64,6 +64,7 @@ import {
 } from "./browser-process-runtime.js";
 import type { RemoteLoginRig } from "./remote-login-display.js";
 import type { PageDriver } from "./page-driver.js";
+import { hasDisplay } from "./display-env.js";
 
 const OPERATOR_BROWSER_WINDOW_SIZE = { width: 1280, height: 1024 };
 
@@ -82,6 +83,8 @@ export class BrowserProcessOwner {
   private childChromeProcessGroup = false;
 
   private ownedDisplayRig: RemoteLoginRig | null = null;
+
+  private ownedDisplayCleanup: (() => void) | null = null;
 
   private ownedChromeProcessTreeProof: OwnedChromeProcessTreeProof | null = null;
 
@@ -162,12 +165,16 @@ export class BrowserProcessOwner {
   }
 
   private async ownedHeadedBrowserEnvironment(): Promise<NodeJS.ProcessEnv> {
+    // Real screen wins: Xvfb exists for headless hosts only.
+    if (hasDisplay()) return { ...process.env };
     if (this.ownedDisplayRig === null) {
-      const { createXvfbDisplayRig, startRemoteLoginDisplay } =
+      const { createXvfbDisplayRig, startRemoteLoginDisplay, registerRemoteLoginRigCleanup } =
         await import("./remote-login-display.js");
       const rig = createXvfbDisplayRig(OPERATOR_BROWSER_WINDOW_SIZE);
       this.ownedDisplayRig = rig;
       await startRemoteLoginDisplay(rig);
+      // Process-exit backstop: a SIGKILL'd broker previously leaked this Xvfb.
+      this.ownedDisplayCleanup = registerRemoteLoginRigCleanup(rig, () => undefined);
     }
     const { remoteLoginEnvironment } = await import("./remote-login-display.js");
     const rig = this.ownedDisplayRig;
@@ -176,6 +183,9 @@ export class BrowserProcessOwner {
   }
 
   private async teardownOwnedDisplay(): Promise<void> {
+    const cleanup = this.ownedDisplayCleanup;
+    this.ownedDisplayCleanup = null;
+    cleanup?.();
     const rig = this.ownedDisplayRig;
     this.ownedDisplayRig = null;
     if (rig === null) return;
@@ -525,8 +535,9 @@ export class BrowserProcessOwner {
             : ""),
       );
     }
-    // Keep the operator browser headed: the browser runs on the operator's
-    // Xvfb display, preserving the normal Chrome surface OAuth providers see.
+    // Keep the operator browser headed: the machine screen when one exists,
+    // otherwise the operator's Xvfb, preserving the normal Chrome surface
+    // OAuth providers see.
     this.launchedMode = "headed";
 
     // T3: a PERSISTENT context backed by this operator session's unique

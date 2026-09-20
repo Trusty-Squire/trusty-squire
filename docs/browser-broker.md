@@ -85,10 +85,14 @@ custody (`launchCeremonyBrowserContext`) — runs only where no broker can serve
 yet (for example, a first connect on an unenrolled machine, or an unreachable
 broker socket); its profile gate fail-fasts
 with the busy-profile message rather than racing a browser that holds the
-profile. Because the broker's Chrome runs on its own private Xvfb, connect
-exposes that display over noVNC for the ceremony (same x11vnc + websockify +
-tunnel stack as the standalone remote login, reaped at the ceremony's lease
-boundary) — a tab no human can see is a tab no human can complete.
+profile. The shared-broker path stays first because that Chrome already
+holds the profile. A host with a screen (`hasDisplay()` in
+`apps/mcp/src/bot/display-env.ts`) launches that Chrome on the machine
+display — no Xvfb, no noVNC. Headless hosts still use the broker's
+private Xvfb and connect exposes it over noVNC for the ceremony (same
+x11vnc + websockify + tunnel stack as the standalone remote login, reaped
+at the ceremony's lease boundary) — a tab no human can see is a tab no
+human can complete.
 Display discovery first reads the holder profile's tracked launch display from
 the owner-reaper manifest, then falls back to the holder's process tree: Chrome
 can erase its main process environment while children retain DISPLAY/XAUTHORITY.

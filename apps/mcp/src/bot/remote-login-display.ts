@@ -109,8 +109,10 @@ function createRemoteLoginSecrets(rig: RemoteLoginRig): void {
 
 // VNC credentials WITHOUT an Xvfb or a new Xauthority: the shared-broker
 // exposure adopts an existing display + authority (the broker daemon's Xvfb
-// rig) and only needs VNC secrets of its own. createRemoteLoginSecrets would
-// also mint an Xauthority, which would clobber the adopted rig.authFile.
+// on a headless host) and only needs VNC secrets of its own.
+// createRemoteLoginSecrets would also mint an Xauthority, which would
+// clobber the adopted rig.authFile. A host with a screen never reaches
+// this path — hasDisplay() keeps the ceremony on the machine display.
 export function createRemoteLoginVncSecrets(rig: RemoteLoginRig): void {
   const privateDir = mkdtempSync(join(tmpdir(), "tsq-login-"));
   chmodSync(privateDir, 0o700);

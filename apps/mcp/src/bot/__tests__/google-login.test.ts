@@ -35,6 +35,7 @@ import {
   extractOAuthScopes,
   hasDisplay,
   pollUntil,
+  runInBotChrome,
   runLoginBrowserForEnvironment,
   runDisplayedChrome,
   scopesAreBasic,
@@ -142,6 +143,38 @@ describe("interactive login display routing", () => {
     });
     expect(displayed).toHaveBeenCalledOnce();
     expect(remote).not.toHaveBeenCalled();
+  });
+});
+
+describe("install ceremony browser routing", () => {
+  const opts: RunInBotChromeOpts = {
+    profileDir: "/unused/profile",
+    url: "https://example.test/login",
+    deadline: Date.now() + 60_000,
+    pollUntilDone: async () => false,
+    bannerLabel: "Complete sign-in.",
+  };
+
+  it("keeps a live shared broker first because that Chrome already holds the profile", async () => {
+    const shared = vi.fn(async () => ({ status: "satisfied", closeState: "closed" }) as const);
+    const environment = vi.fn(async () => ({ status: "timeout", closeState: "closed" }) as const);
+
+    await expect(
+      runInBotChrome(opts, { tryShared: shared, runForEnvironment: environment }),
+    ).resolves.toMatchObject({ status: "satisfied" });
+    expect(shared).toHaveBeenCalledOnce();
+    expect(environment).not.toHaveBeenCalled();
+  });
+
+  it("falls through to the display-aware path only when no broker can serve", async () => {
+    const shared = vi.fn(async () => null);
+    const environment = vi.fn(async () => ({ status: "satisfied", closeState: "closed" }) as const);
+
+    await expect(
+      runInBotChrome(opts, { tryShared: shared, runForEnvironment: environment }),
+    ).resolves.toMatchObject({ status: "satisfied" });
+    expect(shared).toHaveBeenCalledOnce();
+    expect(environment).toHaveBeenCalledOnce();
   });
 });
 
