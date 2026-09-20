@@ -294,6 +294,8 @@ export function emptyDriveState(goal: string, facts: Record<string, string>): Se
     trajectory: [],
     history: [],
     filledRefs: [],
+    expiryShortWrittenRefs: [],
+    expiryLongAttemptedRefs: [],
     lastQuestion: null,
     lastActionKey: null,
     lastFingerprint: null,
@@ -2648,6 +2650,8 @@ async function snapshotDriveSession(
     // Retained state keyed by those refs must die with them, or the new
     // document's fields start out marked as already filled.
     drive.filledRefs = [];
+    drive.expiryShortWrittenRefs = [];
+    drive.expiryLongAttemptedRefs = [];
     drive.consumedActionKey = null;
   }
   drive.lastDocumentEpoch = snapshot.documentEpoch;
@@ -2893,6 +2897,8 @@ export async function runOperateDrive(
   const facts = mergeFacts(session.drive?.facts ?? {}, args.facts);
   const drive = session.drive ?? emptyDriveState(args.goal, facts);
   if (!Array.isArray(drive.filledRefs)) drive.filledRefs = [];
+  if (!Array.isArray(drive.expiryShortWrittenRefs)) drive.expiryShortWrittenRefs = [];
+  if (!Array.isArray(drive.expiryLongAttemptedRefs)) drive.expiryLongAttemptedRefs = [];
   if (typeof drive.staleNonWait !== "number") drive.staleNonWait = 0;
   if (drive.boundFingerprint === undefined) drive.boundFingerprint = null;
   if (drive.consumedActionKey === undefined) drive.consumedActionKey = null;
@@ -2979,8 +2985,6 @@ async function driveLoop(input: {
   const selectAttempts = new Set<string>();
   let selectMustYield = false;
   const typeAttempts = new Set<string>();
-  const expiryShortWrittenRefs = new Set<string>();
-  const expiryLongAttempts = new Set<string>();
   let typeMustYield = false;
   let emptySnapshotWaits = 0;
 
@@ -3553,7 +3557,7 @@ async function driveLoop(input: {
     }
     const expiryRewrite = typeMustYield
       ? undefined
-      : requiredExpiryLongRewriteAction(rows, drive.facts, [...expiryShortWrittenRefs]);
+      : requiredExpiryLongRewriteAction(rows, drive.facts, drive.expiryShortWrittenRefs);
     const typeFill = typeMustYield
       ? undefined
       : requiredFactTypeAction(rows, drive.facts, drive.filledRefs, pageUrl);
@@ -3562,9 +3566,9 @@ async function driveLoop(input: {
     if (
       expiryRewrite !== undefined &&
       rewriteTarget !== undefined &&
-      !expiryLongAttempts.has(rewriteTarget)
+      !drive.expiryLongAttemptedRefs.includes(rewriteTarget)
     ) {
-      expiryLongAttempts.add(rewriteTarget);
+      drive.expiryLongAttemptedRefs.push(rewriteTarget);
       drive.boundFingerprint = progressFingerprint(
         observation.url,
         rows,
@@ -3591,8 +3595,11 @@ async function driveLoop(input: {
       !typeAttempts.has(typeAttemptKey)
     ) {
       typeAttempts.add(typeAttemptKey);
-      if (typeFill.text === drive.facts[CARD_EXPIRY_FACT]) {
-        expiryShortWrittenRefs.add(typeFill.target);
+      if (
+        typeFill.text === drive.facts[CARD_EXPIRY_FACT] &&
+        !drive.expiryShortWrittenRefs.includes(typeFill.target)
+      ) {
+        drive.expiryShortWrittenRefs.push(typeFill.target);
       }
       drive.boundFingerprint = progressFingerprint(
         observation.url,

@@ -187,6 +187,8 @@ export interface SessionDriveState {
   trajectory: DriveTrajectoryStep[];
   history: string[];
   filledRefs: string[];
+  expiryShortWrittenRefs: string[];
+  expiryLongAttemptedRefs: string[];
   lastQuestion: DriveHandoffQuestion | null;
   lastActionKey: string | null;
   lastFingerprint: string | null;

@@ -1074,6 +1074,73 @@ describe("operate_drive real-browser fixture", () => {
     }
   }, 30_000);
 
+  it("rewrites a rejected two-digit expiry written by an earlier operate_drive call", async () => {
+    // The short write and the rewrite land in separate calls, so the read-back
+    // correction has to survive the call that wrote the two-digit form.
+    const html = `<!doctype html><meta charset="utf-8"><title>Long expiry resume</title>
+<main>
+  <label>Card number <input id="pan" autocomplete="cc-number"></label>
+  <label>CVV <input id="cvv" autocomplete="cc-csc"></label>
+  <label>Expiration date <input id="exp" required></label>
+  <p id="writes" hidden></p>
+</main>
+<script>
+  const exp = document.getElementById("exp");
+  const writes = document.getElementById("writes");
+  exp.addEventListener("input", () => {
+    writes.textContent = writes.textContent + exp.value + ";";
+    if (!/^\\d{2}\\/\\d{4}$/.test(exp.value)) exp.value = "";
+  });
+</script>`;
+    const { context, page, started } = await openFixture(html, "expiry-rewrite-resume.test");
+    try {
+      const session = sessionForCall(started.session_id)!;
+      session.releasedPaymentCard = {
+        approvalId: "approved",
+        approvalUrl: "https://approval.test",
+        checkout: {
+          merchant: "fixture.test",
+          checkout_origin: "https://expiry-rewrite-resume.test",
+          amount_cents: 100,
+          currency: "USD",
+        },
+        cardRef: "card-1",
+        last4: "1111",
+        deadline: Date.now() + 60_000,
+        card: {
+          pan: "4111111111111111",
+          cvv: "739",
+          exp_month: "12",
+          exp_year: "2030",
+          name: "Ada",
+          billing: { line1: "1 Main St", city: "Boston", postal_code: "02110", country: "US" },
+        },
+      };
+      const drive = async (maxSteps: number) =>
+        await runOperateDrive(
+          {
+            session_id: started.session_id,
+            goal: "fill the card expiry",
+            facts: { card_ref: "card-1" },
+            max_steps: maxSteps,
+          },
+          api(),
+          undefined,
+          deps(async (_api, _state, questions) => jevFromQuestions(questions, true)),
+        );
+      await drive(1);
+      expect(await page.locator("#writes").textContent()).toBe("12/30;");
+      expect(await page.locator("#exp").inputValue()).toBe("");
+
+      await drive(2);
+      expect(await page.locator("#writes").textContent()).toBe("12/30;12/2030;");
+      expect(await page.locator("#exp").inputValue()).toBe("12/2030");
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
   it("carries a real control's maxlength through the snapshot into the expiry write", async () => {
     // A split year input that can only hold two digits. Written with "2030" the
     // browser keeps "20", the gateway declines, and nothing in the drive
@@ -1246,6 +1313,8 @@ describe("operate_drive real-browser fixture", () => {
         trajectory: [],
         history: [],
         filledRefs: [],
+        expiryShortWrittenRefs: [],
+        expiryLongAttemptedRefs: [],
         lastQuestion: null,
         lastActionKey: null,
         lastFingerprint: null,
