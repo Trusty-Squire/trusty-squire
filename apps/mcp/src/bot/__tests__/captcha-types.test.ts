@@ -4,8 +4,22 @@
 // here.
 
 import { describe, expect, it } from "vitest";
-import type { CaptchaSolveResult, CaptchaKind } from "../captcha.js";
-import { isRecaptchaCheckboxFrameUrl } from "../captcha.js";
+import type { CaptchaSolveResult, CaptchaKind, RecaptchaDetectEvidence } from "../captcha.js";
+import { classifyRecaptchaVariant, isRecaptchaCheckboxFrameUrl } from "../captcha.js";
+
+function evidence(partial: Partial<RecaptchaDetectEvidence>): RecaptchaDetectEvidence {
+  return {
+    challengeFrameVisible: false,
+    anchorType: null,
+    anchorSize: null,
+    apiRender: null,
+    sitekey: null,
+    hasVisibleCheckboxAnchor: false,
+    hasInvisibleAnchor: false,
+    hasBadge: false,
+    ...partial,
+  };
+}
 
 describe("isRecaptchaCheckboxFrameUrl", () => {
   it("accepts the normal-size api2/anchor checkbox frame", () => {
@@ -59,6 +73,53 @@ describe("isRecaptchaCheckboxFrameUrl", () => {
     expect(
       isRecaptchaCheckboxFrameUrl("https://evil.example.com/recaptcha/api2/anchor?k=6Lk"),
     ).toBe(false);
+  });
+});
+
+describe("classifyRecaptchaVariant", () => {
+  it("classifies a v2-invisible image challenge as recaptcha_v2, not v3", () => {
+    // IPInfo: api.js?render=explicit + type=image&size=invisible + visible bframe.
+    // The pre-fix size=invisible → v3 mapping bought a score token the grid rejected.
+    expect(
+      classifyRecaptchaVariant(
+        evidence({
+          challengeFrameVisible: true,
+          anchorType: "image",
+          anchorSize: "invisible",
+          apiRender: "explicit",
+          sitekey: "6LftmFkUAAAAADydGEH99T-xmZoK69ErtRCzfVFf",
+          hasInvisibleAnchor: true,
+        }),
+      ),
+    ).toBe("recaptcha_v2");
+    expect(
+      classifyRecaptchaVariant(
+        evidence({
+          anchorType: "image",
+          anchorSize: "invisible",
+          hasInvisibleAnchor: true,
+        }),
+      ),
+    ).toBe("recaptcha_v2");
+    expect(
+      classifyRecaptchaVariant(evidence({ apiRender: "explicit", hasInvisibleAnchor: true })),
+    ).toBe("recaptcha_v2");
+  });
+
+  it("keeps a visible checkbox as v2 and a score-only badge as v3", () => {
+    expect(classifyRecaptchaVariant(evidence({ hasVisibleCheckboxAnchor: true }))).toBe(
+      "recaptcha_v2",
+    );
+    expect(classifyRecaptchaVariant(evidence({ hasBadge: true }))).toBe("recaptcha_v3");
+    expect(
+      classifyRecaptchaVariant(
+        evidence({
+          apiRender: "6LscorekeyAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          hasBadge: true,
+        }),
+      ),
+    ).toBe("recaptcha_v3");
+    expect(classifyRecaptchaVariant(evidence({}))).toBe(null);
   });
 });
 
