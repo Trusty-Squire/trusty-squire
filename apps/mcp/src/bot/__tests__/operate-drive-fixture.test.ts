@@ -138,6 +138,16 @@ const MULTI_STAGE_CHECKOUT_HTML = `<!doctype html><meta charset="utf-8"><title>C
   });
 </script>`;
 
+const STALLED_HTML = `<!doctype html><meta charset="utf-8"><title>Stalled form</title>
+<main>
+  <h1>Create account</h1>
+  <form id="f">
+    <label><input id="terms" type="checkbox" checked> I agree to the terms</label>
+    <button type="button" id="create" disabled>Create account</button>
+  </form>
+  <p id="status">Validating your workspace…</p>
+</main>`;
+
 const GROWING_HTML = `<!doctype html><meta charset="utf-8"><title>Growing</title>
 <main><a href="#keep">Keep</a><div id="sink"></div></main>
 <script>
@@ -1738,6 +1748,48 @@ describe("operate_drive real-browser fixture", () => {
       );
       expect(handoff.status).toBe("no_progress");
       expect(handoff.trajectory.length).toBeGreaterThanOrEqual(1);
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 60_000);
+
+  it("never reports complete on a stalled form the planner cannot act on", async () => {
+    const { context, page, started } = await openFixture(STALLED_HTML, "signup-stalled.test");
+    try {
+      const offered: string[][] = [];
+      const handoff = await runOperateDrive(
+        {
+          session_id: started.session_id,
+          goal: "create an account",
+          max_steps: 4,
+        },
+        api(),
+        undefined,
+        deps(async (_api, _state, questions) => {
+          const operations = Object.keys(choiceCriteria(questions.operation));
+          offered.push(operations);
+          // A planner that would rather wait out the server than claim success.
+          const pick = operations.includes("WAIT") ? "WAIT" : operations[0]!;
+          return {
+            attempts: 1,
+            elapsedMs: 12,
+            result: {
+              answers: {
+                operation: {
+                  choice: pick,
+                  confidence: 0.93,
+                  probabilities: peaked(operations, pick),
+                },
+              },
+            },
+          };
+        }),
+      );
+      expect(offered.length).toBeGreaterThanOrEqual(1);
+      for (const operations of offered) expect(operations).not.toEqual(["DONE"]);
+      expect(handoff.status).not.toBe("complete");
+      expect(await page.locator("#create").isDisabled()).toBe(true);
     } finally {
       await finishProvisionSession(started.session_id);
       await context.close();

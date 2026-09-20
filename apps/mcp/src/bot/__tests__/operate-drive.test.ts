@@ -1402,6 +1402,20 @@ describe("form-fill assignment helpers", () => {
     ).not.toContain("WAIT");
   });
 
+  it("keeps a non-DONE answer when every listed control is suppressed", () => {
+    // A stalled form: consent already ticked, submit disabled while the server
+    // validates. Both rows are withheld from CLICK, so offering DONE alone
+    // would force a false "complete" on an unfinished signup.
+    const stalled: WireRow[] = [
+      ["@e:cb", "c", "I agree to the terms|s=c"],
+      ["@e:go", "b", "Create account|s=d"],
+    ];
+    const sets = driveTargetSets(stalled, {}, false);
+    expect(sets.CLICK).toEqual([]);
+    expect(sets.operations).toContain("WAIT");
+    expect(sets.operations).toContain("BLOCKED");
+  });
+
   it("plans an inbox read after submit even when no OTP field is listed", () => {
     const otp: WireRow = ["@e:code", "t", "@verification-code|f=otp"];
     expect(inboxSpecialPlan(ROWS, "stuck", true, 0)).toBeUndefined();

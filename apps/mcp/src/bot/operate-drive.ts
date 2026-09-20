@@ -1878,7 +1878,11 @@ export function driveTargetSets(
   if (typeText.length > 0) operations.push("TYPE_TEXT");
   if (select.length > 0) operations.push("SELECT");
   if (scroll.length > 0) operations.push("SCROLL");
-  const listedWork = pageHasListedWork(rows, typeText.length, select.length);
+  // Listed work only counts while some of it is actually offered: when every
+  // candidate is suppressed, withholding WAIT and BLOCKED too would leave DONE
+  // as the only admissible answer and force a false "complete".
+  const listedWork =
+    operations.length > 0 && pageHasListedWork(rows, typeText.length, select.length);
   if (allowWait && !listedWork && !skipped.has("WAIT")) operations.push("WAIT");
   operations.push("DONE");
   if (!listedWork) operations.push("BLOCKED");
