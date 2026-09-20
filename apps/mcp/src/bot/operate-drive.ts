@@ -1872,10 +1872,7 @@ export function driveTargetSets(
     clickableCandidates(rows, includePayment, skippedClickRefs),
     remaining,
   );
-  const scroll = takeCapped(
-    scrollTargets(rows).filter((candidate) => !skipped.has(candidate.ref)),
-    remaining,
-  );
+  const scroll = takeCapped(scrollTargets(rows), remaining);
   const operations: DriveOperation[] = [];
   if (click.length > 0) operations.push("CLICK");
   if (typeText.length > 0) operations.push("TYPE_TEXT");
@@ -3286,6 +3283,7 @@ async function driveLoop(input: {
     fingerprint: string,
     nextFingerprint: string,
     actionKey: string,
+    deadKeyBaseline?: string,
   ): Promise<DriveHandoff | "continue"> => {
     let confirmed = nextFingerprint;
     if (confirmed === fingerprint) {
@@ -3297,6 +3295,14 @@ async function driveLoop(input: {
     drive.staleNonWait = confirmed === fingerprint ? drive.staleNonWait + 1 : 0;
     drive.lastFingerprint = confirmed;
     drive.lastActionKey = actionKey;
+    if (
+      deadKeyBaseline !== undefined &&
+      confirmed === fingerprint &&
+      pageProgressKey(observation.url, rows, drive.filledRefs) === deadKeyBaseline
+    ) {
+      const dead = markDead(actionKey);
+      if (dead !== "continue") return dead;
+    }
     if (drive.staleNonWait >= DRIVE_STALE_LIMIT) return finish("no_progress");
     return "continue";
   };
@@ -3310,9 +3316,15 @@ async function driveLoop(input: {
     return "continue";
   };
 
+  // The repeat-cap is a model-facing budget: it withholds an operation the
+  // model already tried. The loop's own probes (combobox pre-fill, settle
+  // wait, inbox read) have their own guards, so recording them here both
+  // collapsed the settle budget to one wait and withdrew a probe the model
+  // had never been offered.
   const applyDecision = async (
     decision: DriveDecision,
     jevMs?: number,
+    modelChosen = false,
   ): Promise<DriveHandoff | "continue"> => {
     if (decision.kind === "complete") {
       const completeSnap = await snapshotOrTimeout(framesIfNeeded());
@@ -3371,6 +3383,7 @@ async function driveLoop(input: {
       drive.lastActionKey = "WAIT";
       drive.consumedActionKey = null;
       if (
+        modelChosen &&
         rows.length > 0 &&
         pageProgressKey(observation.url, rows, drive.filledRefs) === beforeKey
       ) {
@@ -3653,8 +3666,10 @@ async function driveLoop(input: {
       }
       const staleSnap = await snapshotOrTimeout(framesIfNeeded());
       if (staleSnap !== "ok") return staleSnap;
-      const dead = markDead(decision.actionKey);
-      if (dead !== "continue") return dead;
+      if (modelChosen) {
+        const dead = markDead(decision.actionKey);
+        if (dead !== "continue") return dead;
+      }
       return "continue";
     }
     let actMs = Date.now() - actStarted;
@@ -3742,11 +3757,12 @@ async function driveLoop(input: {
       fingerprint_after: nextFingerprint,
       ...(driveTraceEnabled() ? { native_selects_after: await nativeSelectSnapshot(session) } : {}),
     });
-    if (pageProgressKey(observation.url, rows, drive.filledRefs) === beforeKey) {
-      const dead = markDead(decision.actionKey);
-      if (dead !== "continue") return dead;
-    }
-    return await noteProgress(fingerprint, nextFingerprint, decision.actionKey);
+    return await noteProgress(
+      fingerprint,
+      nextFingerprint,
+      decision.actionKey,
+      modelChosen ? beforeKey : undefined,
+    );
   };
 
   if (args.answer !== undefined) {
@@ -4067,13 +4083,10 @@ async function driveLoop(input: {
       !staleWait,
       skippedActions,
     );
-    const actionable = sets.operations.filter((op) => op !== "DONE" && op !== "BLOCKED");
-    if (
-      (drive.exhaustedActionKeys ?? []).length > 0 &&
-      (actionable.length === 0 ||
-        terminalOnly ||
-        (drive.exhaustedActionKeys ?? []).length >= DRIVE_EXHAUSTED_ACTION_LIMIT)
-    ) {
+    const actionable = sets.operations.filter(
+      (op) => op !== "DONE" && op !== "BLOCKED" && op !== "WAIT",
+    );
+    if (!terminalOnly && (drive.exhaustedActionKeys ?? []).length > 0 && actionable.length === 0) {
       return finish("no_progress", {
         reason: deadActionReason(drive.exhaustedActionKeys ?? [], observation.url),
       });
@@ -4212,7 +4225,7 @@ async function driveLoop(input: {
       lastNonWaitWasClick(drive.trajectory),
       remainingFills.length,
       observation.url,
-      pageTextFromObservation(observation),
+      pageTextFromObservation(observation, [observation.dom ?? ""]),
     );
     if (inboxPlan !== undefined) {
       const lastClick = [...drive.trajectory]
@@ -4235,7 +4248,7 @@ async function driveLoop(input: {
       steps += 1;
       continue;
     }
-    const applied = await applyDecision(decision, jevMs);
+    const applied = await applyDecision(decision, jevMs, true);
     if (applied !== "continue") return applied;
     steps += 1;
   }

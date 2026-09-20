@@ -217,6 +217,10 @@ function jevFromQuestions(
   return { attempts: 1, elapsedMs: 12, result: { answers } };
 }
 
+function choiceCriteria(question: JevQuestion | undefined): Record<string, string> {
+  return question?.type === "choice" ? question.criteria : {};
+}
+
 function deps(ask: DriveDependencies["askJev"]): DriveDependencies {
   return {
     askJev: ask,
@@ -1417,13 +1421,13 @@ describe("operate_drive real-browser fixture", () => {
             ? (state as { page: { url: string } }).page.url
             : "";
         if (pageUrl.includes("/verified")) return jevFromQuestions(questions, true);
-        const typeKeys = Object.keys(questions.TYPE_TEXT_target?.criteria ?? {});
+        const typeKeys = Object.keys(choiceCriteria(questions.TYPE_TEXT_target));
         if (typeKeys.length > 0) return jevFromQuestions(questions);
-        const clickCriteria = questions.CLICK_target?.criteria ?? {};
+        const clickCriteria = choiceCriteria(questions.CLICK_target);
         const continueKey = Object.keys(clickCriteria).find((key) =>
           (clickCriteria[key] ?? "").toLowerCase().includes("continue"),
         );
-        const opKeys = Object.keys(questions.operation?.criteria ?? {});
+        const opKeys = Object.keys(choiceCriteria(questions.operation));
         if (continueKey !== undefined) {
           return {
             attempts: 1,
@@ -1510,13 +1514,13 @@ describe("operate_drive real-browser fixture", () => {
             ? (state as { page: { url: string } }).page.url
             : "";
         if (pageUrl.includes("/verified")) return jevFromQuestions(questions, true);
-        const typeKeys = Object.keys(questions.TYPE_TEXT_target?.criteria ?? {});
+        const typeKeys = Object.keys(choiceCriteria(questions.TYPE_TEXT_target));
         if (typeKeys.length > 0) return jevFromQuestions(questions);
-        const clickCriteria = questions.CLICK_target?.criteria ?? {};
+        const clickCriteria = choiceCriteria(questions.CLICK_target);
         const continueKey = Object.keys(clickCriteria).find((key) =>
           (clickCriteria[key] ?? "").toLowerCase().includes("continue"),
         );
-        const opKeys = Object.keys(questions.operation?.criteria ?? {});
+        const opKeys = Object.keys(choiceCriteria(questions.operation));
         if (continueKey !== undefined) {
           return {
             attempts: 1,
@@ -1612,13 +1616,13 @@ describe("operate_drive real-browser fixture", () => {
             ? (state as { page: { url: string } }).page.url
             : "";
         if (pageUrl.includes("/verified")) return jevFromQuestions(questions, true);
-        const typeKeys = Object.keys(questions.TYPE_TEXT_target?.criteria ?? {});
+        const typeKeys = Object.keys(choiceCriteria(questions.TYPE_TEXT_target));
         if (typeKeys.length > 0) return jevFromQuestions(questions);
-        const clickCriteria = questions.CLICK_target?.criteria ?? {};
+        const clickCriteria = choiceCriteria(questions.CLICK_target);
         const continueKey = Object.keys(clickCriteria).find((key) =>
           (clickCriteria[key] ?? "").toLowerCase().includes("continue"),
         );
-        const opKeys = Object.keys(questions.operation?.criteria ?? {});
+        const opKeys = Object.keys(choiceCriteria(questions.operation));
         if (continueKey !== undefined) {
           return {
             attempts: 1,
