@@ -19,6 +19,7 @@ import {
   type TwoCaptchaVaultProxy,
   detectCaptchaVariant,
   recaptchaEvidenceDiag,
+  recaptchaPageProceeded,
   extractHcaptchaResponseKeyFromToken,
   extractHcaptchaSitekey,
   extractRecaptchaSitekey,
@@ -191,11 +192,18 @@ export async function injectCaptchaToken(
           ? injectRecaptchaToken
           : null;
   if (inject === null) return { solved: false, outcome: "unsupported_variant" };
+  const urlBefore = page?.url() ?? browser.currentUrl();
   if (!(await inject(browser, token, page))) return { solved: false, outcome: "inject_failed" };
   const solved = await waitForCaptchaResponseToken(browser, 2_000, page);
   if (solved) {
     const after = await detectCaptchaVariant(browser, page);
-    if (after.challengeRendered) {
+    // A visible challenge frame is not a failed solve when the page
+    // proceeded (submit enabled or navigated). Keep the failure only
+    // when the submit is still locked and nothing moved.
+    const proceeded =
+      (variant === "recaptcha_v2" || variant === "recaptcha_v3") &&
+      (await recaptchaPageProceeded(page, urlBefore));
+    if (after.challengeRendered && !proceeded) {
       return { solved: false, outcome: "challenge_still_rendered" };
     }
   }

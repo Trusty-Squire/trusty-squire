@@ -751,13 +751,29 @@ export async function extractRecaptchaSitekey(
   }
 }
 
+export type RecaptchaInjectDiag = {
+  ok: boolean;
+  textareas: number;
+  clients: number;
+  callbacksFunction: number;
+  callbacksString: number;
+  callbacksFired: number;
+  dataCallbackHosts: number;
+  dataCallbackFired: number;
+  submitClicked: boolean;
+  error: string | null;
+};
+
 // Inject a 2Captcha-resolved token into the page's hidden
 // g-recaptcha-response textarea AND fire any onSuccess callback
-// the widget registered with grecaptcha.render(). Without firing
-// the callback the page often doesn't "see" the token even though
-// the DOM input is populated.
+// the widget registered with grecaptcha.render(). Sites commonly
+// register that callback as a STRING name (`data-callback="onSubmit"`,
+// `{ callback: "onSubmit" }`); a function-only walk skips those
+// silently and the submit never enables. Resolve the name on window
+// (dotted paths included). If nothing fired, click the submit once
+// so a page that only reads the textarea at submit time can proceed.
 //
-// Returns true on success, false if no recaptcha widget present.
+// Returns true when a response textarea was populated.
 export async function injectRecaptchaToken(
   browser: BrowserController,
   token: string,
@@ -765,15 +781,27 @@ export async function injectRecaptchaToken(
 ): Promise<boolean> {
   if (!page) throw new Error("Browser not started");
   try {
-    const injected = await page.evaluate((tok: string) => {
-      // 1. Populate every g-recaptcha-response textarea on the page
-      //    (some pages render multiple widgets).
+    const diag = await page.evaluate((tok: string): RecaptchaInjectDiag => {
+      const empty: RecaptchaInjectDiag = {
+        ok: false,
+        textareas: 0,
+        clients: 0,
+        callbacksFunction: 0,
+        callbacksString: 0,
+        callbacksFired: 0,
+        dataCallbackHosts: 0,
+        dataCallbackFired: 0,
+        submitClicked: false,
+        error: null,
+      };
       const inputs = Array.from(
         document.querySelectorAll<HTMLTextAreaElement>(
           'textarea[name="g-recaptcha-response"], textarea[id^="g-recaptcha-response"]',
         ),
       );
-      if (inputs.length === 0) return false;
+      if (inputs.length === 0) return empty;
+      empty.textareas = inputs.length;
+      empty.ok = true;
       for (const input of inputs) {
         input.value = tok;
         input.dispatchEvent(new Event("input", { bubbles: true }));
@@ -789,42 +817,114 @@ export async function injectRecaptchaToken(
       const form = inputs[0]?.closest("form");
       form?.dispatchEvent(new Event("input", { bubbles: true }));
       form?.dispatchEvent(new Event("change", { bubbles: true }));
-      // 2. Fire the widget's onSuccess callback if registered. The
-      //    callbacks are stored on `___grecaptcha_cfg.clients`; the
-      //    exact tree is undocumented and shifts across versions
-      //    so a defensive walk is the only reliable way.
+
+      const win = window as unknown as Record<string, unknown>;
+      const resolvePath = (path: string): unknown => {
+        let cur: unknown = win;
+        for (const part of path.split(".")) {
+          if (part.length === 0) return undefined;
+          if (cur === null || typeof cur !== "object") return undefined;
+          cur = (cur as Record<string, unknown>)[part];
+        }
+        return cur;
+      };
+      const invoke = (fn: unknown): boolean => {
+        if (typeof fn !== "function") return false;
+        try {
+          (fn as (t: string) => void)(tok);
+          empty.callbacksFired += 1;
+          return true;
+        } catch (err) {
+          empty.error = err instanceof Error ? err.message : String(err);
+          return false;
+        }
+      };
+      const invokeNamed = (name: string): boolean => {
+        empty.callbacksString += 1;
+        return invoke(resolvePath(name));
+      };
+
       try {
-        const cfg = (
-          window as unknown as {
-            ___grecaptcha_cfg?: { clients?: Record<string, unknown> };
-          }
-        ).___grecaptcha_cfg;
-        if (cfg !== undefined && cfg.clients !== undefined) {
-          const fire = (obj: unknown): void => {
-            if (obj === null || typeof obj !== "object") return;
-            for (const [, v] of Object.entries(obj as Record<string, unknown>)) {
-              if (v === null || typeof v !== "object") continue;
-              if ("callback" in v && typeof (v as { callback: unknown }).callback === "function") {
-                try {
-                  (v as { callback: (t: string) => void }).callback(tok);
-                } catch {
-                  // best-effort — at worst we miss the callback,
-                  // but the DOM input is populated which most
-                  // sites' server-side validation reads.
+        const cfg = (win.___grecaptcha_cfg ?? undefined) as
+          | { clients?: Record<string, unknown> }
+          | undefined;
+        const clients = cfg?.clients;
+        if (clients !== undefined) {
+          empty.clients = Object.keys(clients).length;
+          const walk = (obj: unknown, depth: number): void => {
+            if (obj === null || typeof obj !== "object" || depth > 8) return;
+            for (const [key, v] of Object.entries(obj as Record<string, unknown>)) {
+              const normalized = key.toLowerCase();
+              if (
+                normalized === "callback" ||
+                normalized === "success-callback" ||
+                normalized === "successcallback"
+              ) {
+                if (typeof v === "function") {
+                  empty.callbacksFunction += 1;
+                  invoke(v);
+                } else if (typeof v === "string" && v.length > 0) {
+                  invokeNamed(v);
                 }
+                continue;
               }
-              fire(v);
+              if (v !== null && typeof v === "object") walk(v, depth + 1);
             }
           };
-          fire(cfg.clients);
+          walk(clients, 0);
         }
-      } catch {
-        // grecaptcha not on window — page may use a wrapper
-        // (Stytch, Clerk). DOM injection is still in place.
+      } catch (err) {
+        empty.error = err instanceof Error ? err.message : String(err);
       }
-      return true;
+
+      if (empty.callbacksFired === 0) {
+        const hosts = Array.from(document.querySelectorAll<HTMLElement>("[data-callback]"));
+        empty.dataCallbackHosts = hosts.length;
+        for (const host of hosts) {
+          const name = host.getAttribute("data-callback");
+          if (name !== null && name.length > 0 && invokeNamed(name)) {
+            empty.dataCallbackFired += 1;
+          }
+        }
+      }
+
+      if (empty.callbacksFired === 0) {
+        const scoped = form ?? document;
+        const submit = scoped.querySelector<HTMLButtonElement | HTMLInputElement>(
+          'button[type="submit"], input[type="submit"], button:not([type])',
+        );
+        if (submit !== null) {
+          submit.click();
+          empty.submitClicked = true;
+        }
+      }
+      return empty;
     }, token);
-    return injected;
+    console.error(
+      `[captcha-inject-diag] textareas=${diag.textareas} clients=${diag.clients} callbacks_function=${diag.callbacksFunction} callbacks_string=${diag.callbacksString} callbacks_fired=${diag.callbacksFired} data_callback_hosts=${diag.dataCallbackHosts} data_callback_fired=${diag.dataCallbackFired} submit_clicked=${diag.submitClicked} error=${diag.error ?? "none"}`,
+    );
+    return diag.ok;
+  } catch {
+    return false;
+  }
+}
+
+/** The page moved on after a token write: submit enabled or the URL changed. */
+export async function recaptchaPageProceeded(
+  page: Page | undefined,
+  urlBefore: string,
+): Promise<boolean> {
+  if (page === undefined) return false;
+  try {
+    if (page.url() !== urlBefore) return true;
+    return await page.evaluate(() => {
+      const nodes = Array.from(
+        document.querySelectorAll<HTMLButtonElement | HTMLInputElement>(
+          'button[type="submit"], input[type="submit"], button:not([type])',
+        ),
+      );
+      return nodes.some((el) => !el.disabled);
+    });
   } catch {
     return false;
   }
