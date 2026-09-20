@@ -648,9 +648,10 @@ function cardExpiryFactFor(row: WireRow): string {
   const month = /month|mm/.test(hay);
   const year = /year|yy/.test(hay);
   if (month && !year) return "exp_month";
-  // A control that spells its width as YY cannot hold "2030": the extra
-  // characters are dropped and the card is declined with nothing to read.
-  if (year && !month) return /yyyy/.test(hay) || !/yy/.test(hay) ? "exp_year" : EXP_YEAR_SHORT_FACT;
+  // A control declaring maxlength=2 drops the leading digits of "2030" and the
+  // card is declined with nothing to read. The control's own declared width
+  // decides this, never how the merchant spelled the label.
+  if (year && !month) return rowWidth(row) === 2 ? EXP_YEAR_SHORT_FACT : "exp_year";
   return CARD_EXPIRY_FACT;
 }
 
@@ -1296,6 +1297,13 @@ function takeCapped<T>(items: readonly T[], remaining: { n: number }): T[] {
   return [...slice];
 }
 
+function rowWidth(row: WireRow): number | undefined {
+  const match = /(?:^|\|)w=(\d+)/.exec(row[2] ?? "");
+  if (match === null) return undefined;
+  const width = Number.parseInt(match[1]!, 10);
+  return Number.isFinite(width) && width > 0 ? width : undefined;
+}
+
 function rowCurrentValue(row: WireRow): string | undefined {
   const match = /(?:^|\|)n=([^|]+)/.exec(row[2] ?? "");
   return match?.[1];
@@ -1352,7 +1360,7 @@ export function requiredFillableMissingFact(
     if (isOffscreenRow(row) && !allowOffscreen) continue;
     if (isPaymentRow(row) || isCvvRow(row) || isOtpRow(row) || allowsGoalValueAssignment(row))
       continue;
-    if (isExpiryRow(row) || isCardholderNameRow(row)) continue;
+    if (facts.card_ref !== undefined && (isExpiryRow(row) || isCardholderNameRow(row))) continue;
     if (!isRequiredRow(row)) continue;
     if (matchingFactKeys(facts, row).length > 0) continue;
     const role = ROLE_LETTERS[row[1]] ?? row[1];

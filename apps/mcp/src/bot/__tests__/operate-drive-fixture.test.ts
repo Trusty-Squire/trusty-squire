@@ -15,8 +15,11 @@ import {
   DRIVE_CONFIDENCE_THRESHOLD,
   DRIVE_EMPTY_SNAPSHOT_WAITS,
   DRIVE_WAIT_MS,
+  applyReleasedCardFacts,
+  matchingFactKeys,
   runOperateDrive,
   type DriveDependencies,
+  type WireRow,
 } from "../operate-drive.js";
 import { finishProvisionSession, startHarnessProvisionSession } from "../provision-session.js";
 import {
@@ -935,6 +938,51 @@ describe("operate_drive real-browser fixture", () => {
       await context.close();
     }
   }, 60_000);
+
+  it("carries a real control's maxlength through the snapshot into the expiry write", async () => {
+    // A split year input that can only hold two digits. Written with "2030" the
+    // browser keeps "20", the gateway declines, and nothing in the drive
+    // records a reason — so the width has to reach the fact routing.
+    const SPLIT_EXPIRY_HTML = `<!doctype html><meta charset="utf-8"><title>Split expiry</title>
+<main>
+  <label>Card number <input id="pan" autocomplete="cc-number"></label>
+  <label>Expiration month <input id="m" maxlength="2"></label>
+  <label>Expiration year <input id="y" maxlength="2"></label>
+  <label>Name <input id="n"></label>
+</main>`;
+    const { context, page, started } = await openFixture(SPLIT_EXPIRY_HTML, "split-expiry.test");
+    try {
+      const snap = await captureFrameSnapshot(page, [], 0);
+      expect(snap).not.toBeNull();
+      if (snap === null) return;
+      const rows = driveRowsFromSnapshot(snap) as unknown as WireRow[];
+      const yearRow = rows.find((row) => (row[2] ?? "").includes("Expiration year"));
+      const nameRow = rows.find((row) => (row[2] ?? "").includes("Name"));
+      expect(yearRow).toBeDefined();
+      expect(nameRow).toBeDefined();
+      if (yearRow === undefined || nameRow === undefined) return;
+      // The declared width reaches the row; a control without one carries none.
+      expect(yearRow[2]).toContain("w=2");
+      expect(nameRow[2]).not.toContain("w=");
+
+      const facts = applyReleasedCardFacts(
+        { card_ref: "card-1" },
+        { exp_month: "12", exp_year: "2030", name: "Ada" },
+      );
+      const key = matchingFactKeys(facts, yearRow)[0];
+      expect(key).toBeDefined();
+      const value = facts[key!]!;
+      expect(value).toBe("30");
+
+      const typed = await driveActOnPage(page, { kind: "type", target: yearRow[0], text: value });
+      expect(typed.kind).toBe("ok");
+      await settleDriveStep(page, typed.kind === "ok" && typed.combobox);
+      expect(await page.locator("#y").inputValue()).toBe("30");
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
 
   it("snapshots visible-text labels and all headings, then acts through the registry", async () => {
     const { context, page, started } = await openFixture(SIGNUP_HTML, "signup-snapshot.test");

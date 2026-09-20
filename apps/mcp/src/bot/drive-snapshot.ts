@@ -30,6 +30,8 @@ export interface DriveSnapshotElement {
   required?: boolean;
   offscreen?: boolean;
   picker?: boolean;
+  /** The control's own `maxlength`, when it declares one. */
+  width?: number;
   operations: Array<"click" | "fill" | "select">;
   options?: DriveSnapshotOption[];
   frameOrdinal: number;
@@ -143,6 +145,7 @@ export function driveRowsFromSnapshot(snapshot: DriveSnapshot): SnapshotRow[] {
     if (element.value !== undefined && element.value.length > 0) {
       facts.push(`n=${element.value.replace(/\|/g, " ").slice(0, 80)}`);
     }
+    if (element.width !== undefined) facts.push(`w=${element.width}`);
     const choice = optionOrdinal.get(element.ref);
     if (choice !== undefined) facts.push(`q=${choice.index}/${choice.total}`);
     const roleLetter =
@@ -470,6 +473,11 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
     ) {
       value = (element.textContent ?? "").replace(/\s+/g, " ").trim().slice(0, 80);
     }
+    const width =
+      (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) &&
+      element.maxLength > 0
+        ? element.maxLength
+        : undefined;
     const options =
       element instanceof HTMLSelectElement
         ? Array.from(element.options)
@@ -493,6 +501,7 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
       ...(required ? { required: true } : {}),
       ...(inViewport ? {} : { offscreen: true }),
       ...(picker ? { picker: true } : {}),
+      ...(width === undefined ? {} : { width }),
       ...(options === undefined ? {} : { options }),
     };
     if (inViewport) inView.push(row);

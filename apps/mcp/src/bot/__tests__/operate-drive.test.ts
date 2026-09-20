@@ -365,32 +365,33 @@ describe("decideAfterJev stop reasons", () => {
     expect(requiredFillableMissingFact(ROWS, missingFacts)?.ref).toBe("@e:email");
   });
 
-  it("never halts on a card expiry control, with or without a card in play", () => {
+  it("defers a card expiry control only while a card is in play", () => {
     const expiry: WireRow = ["@e:exp", "t", "Expiration date (MM / YY)|s=r"];
     expect(isExpiryRow(expiry)).toBe(true);
+    // With a card, the control is the card path's business and is filled after
+    // release, so reporting it missing would halt the purchase early.
     expect(
       requiredFillableMissingFact([expiry, PAYMENT, EMAIL], {
         email: "a@b.test",
         card_ref: "card-1",
       })?.ref,
     ).toBeUndefined();
-    // No card_ref: the control can never be filled from a released card, so it
-    // must not be reported as a missing fact either.
-    expect(requiredFillableMissingFact([expiry, PAYMENT], {})?.ref).toBeUndefined();
-    expect(requiredFillableMissingFact([expiry, PAYMENT, EMAIL], {})?.ref).toBe("@e:email");
+    // Without a card there is no release to wait for. A trial signup that asks
+    // for one must still be told which field it needs.
+    expect(requiredFillableMissingFact([expiry, PAYMENT], {})?.ref).toBe("@e:exp");
   });
 
-  it("never halts on a name-on-card control, with or without a card in play", () => {
+  it("defers a name-on-card control only while a card is in play", () => {
     const cardName: WireRow = ["@e:ncard", "t", "Name on card|s=r"];
     expect(isCardholderNameRow(cardName)).toBe(true);
     expect(
       requiredFillableMissingFact([cardName, EMAIL], { email: "a@b.test", card_ref: "card-1" })
         ?.ref,
     ).toBeUndefined();
-    // "Name on card" matches no ordinary alias, so without the skip a drive
-    // carrying no card would stop on a field it can never fill.
-    expect(requiredFillableMissingFact([cardName], {})?.ref).toBeUndefined();
-    expect(requiredFillableMissingFact([cardName, EMAIL], {})?.ref).toBe("@e:email");
+    // "Name on card" matches no ordinary alias, so a no-card drive can only
+    // fill it if the host is told the field's name and resumes with a fact.
+    expect(requiredFillableMissingFact([cardName], {})?.ref).toBe("@e:ncard");
+    expect(requiredFillableMissingFact([cardName], { name_on_card: "Ada" })?.ref).toBeUndefined();
   });
 
   it("fills a cardholder-name control from the shipping name when the drive has no card", () => {
@@ -497,20 +498,22 @@ describe("decideAfterJev stop reasons", () => {
     });
   });
 
-  it("writes a two-digit year into a control that spells its width as YY", () => {
+  it("sizes the year write from the control's declared width, not its label", () => {
     const facts = applyReleasedCardFacts(
       { card_ref: "card-1" },
       { exp_month: "12", exp_year: "2030", name: "Ada" },
     );
-    const yy: WireRow = ["@e:yy", "t", "Expiration year (YY)|f=date"];
-    const yyyy: WireRow = ["@e:yyyy", "t", "Expiration year (YYYY)|f=date"];
-    const plain: WireRow = ["@e:y", "t", "Expiration year|f=date"];
     const valueFor = (row: WireRow): string | undefined => facts[matchingFactKeys(facts, row)[0]!];
     // A maxlength=2 input silently keeps "20" out of "2030" and the card is
     // declined with nothing to read anywhere in the drive.
-    expect(valueFor(yy)).toBe("30");
-    expect(valueFor(yyyy)).toBe("2030");
-    expect(valueFor(plain)).toBe("2030");
+    expect(valueFor(["@e:y2", "t", "Expiration year|f=date|w=2"])).toBe("30");
+    expect(valueFor(["@e:y4", "t", "Expiration year|f=date|w=4"])).toBe("2030");
+    // How the merchant spelled the label decides nothing: the same wording
+    // resolves either way once the control declares its own width.
+    expect(valueFor(["@e:yy", "t", "Expiration year (YY)|f=date|w=4"])).toBe("2030");
+    expect(valueFor(["@e:yyyy", "t", "Expiration year (YYYY)|f=date|w=2"])).toBe("30");
+    // No declared width is no signal, so the card's own spelling is written.
+    expect(valueFor(["@e:y", "t", "Expiration year|f=date"])).toBe("2030");
   });
 
   it("leaves a non-card expiry on a card page to the ordinary aliases", () => {
