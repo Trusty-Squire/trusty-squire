@@ -339,6 +339,22 @@ const defaultDependencies: DriveDependencies = {
   injectCard: defaultInjectCard,
 };
 
+export function resetDriveGoalMemory(drive: SessionDriveState): void {
+  drive.seenProgressKeys = [];
+  drive.leftProgressKeys = [];
+  drive.progressReturnCounts = {};
+  drive.exhaustedProgressKey = null;
+  drive.exhaustedActionKeys = [];
+  drive.failedActionKeys = [];
+  drive.staleClickRefs = [];
+  drive.staleNonWait = 0;
+  drive.consumedActionKey = null;
+  drive.boundFingerprint = null;
+  drive.lastFingerprint = null;
+  drive.lastActionKey = null;
+  drive.visitedSectionKeys = [];
+}
+
 export function emptyDriveState(goal: string, facts: Record<string, string>): SessionDriveState {
   return {
     running: false,
@@ -363,6 +379,7 @@ export function emptyDriveState(goal: string, facts: Record<string, string>): Se
     lastActProfile: null,
     maskedValueRefs: [],
     lastDocumentEpoch: null,
+    visitedSectionKeys: [],
   };
 }
 
@@ -868,6 +885,7 @@ function isLoginRow(row: WireRow): boolean {
 }
 
 function isKeyNavRow(row: WireRow): boolean {
+  if (isListFilterRow(row)) return false;
   const label = readableLabel(row).toLowerCase();
   return /api\s*key|access\s*token|create\s+(?:a\s+)?(?:key|token)|credentials?|settings/.test(
     label,
@@ -939,6 +957,16 @@ export function candidateAimScore(
   }
   if (isNavChromeRow(row) && (phase === "signup" || phase === "onboarding" || phase === "login")) {
     score -= 10;
+  }
+  if (isAlreadyHereNav(row, input.pageUrl ?? "")) score -= 80;
+  if (isListFilterRow(row) && goalWantsKey(input.goal)) score -= 50;
+  if (
+    goalWantsKey(input.goal) &&
+    isSectionNavRow(row) &&
+    !isAlreadyHereNav(row, input.pageUrl ?? "") &&
+    !rowMatchesGoalSeek(row, input.goal ?? "")
+  ) {
+    score += 40;
   }
   return score;
 }
@@ -1103,12 +1131,120 @@ export function goalSeeksKey(goal: string): boolean {
   return /api\s*key|access\s*token|credential/.test(goal.toLowerCase());
 }
 
-export function rowMatchesGoalSeek(row: WireRow, goal: string): boolean {
-  if (!goalSeeksKey(goal) || isConsentRow(row)) return false;
+export function isListFilterRow(row: WireRow): boolean {
   const label = readableLabel(row).toLowerCase();
-  return /api\s*key|access\s*token|create\s+(?:a\s+)?(?:key|token)|credentials?|\bsettings\b|\b(?:api[-_]?keys?|tokens?)\b/.test(
+  const chooser =
+    row[1] === "c" ||
+    row[1] === "combobox" ||
+    row[1] === "s" ||
+    row[1] === "select" ||
+    isPickerRow(row);
+  if (!chooser) return /^(?:all|any|filter|sort)\b/.test(label);
+  return (
+    /\b(?:all|filter|sort|search)\b/.test(label) || /api\s*key|access\s*token|credential/.test(label)
+  );
+}
+
+export function rowHref(row: WireRow): string | undefined {
+  const match = /(?:^|\|)u=([^|]+)/.exec(row[2] ?? "");
+  return match?.[1];
+}
+
+export function isCodeSampleRow(row: WireRow): boolean {
+  const label = readableLabel(row);
+  return (
+    /^(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\b/.test(label) ||
+    /\b(?:curl|endpoint)\b/i.test(label)
+  );
+}
+
+export function isOffProductNavRow(row: WireRow, pageUrl: string): boolean {
+  if (isCodeSampleRow(row)) return true;
+  const label = readableLabel(row).toLowerCase();
+  if (/\b(?:docs?|documentation|api[- ]?reference|reference|help|blog|guide|tutorial)\b/.test(label)) {
+    return true;
+  }
+  const href = rowHref(row);
+  if (href === undefined) return false;
+  try {
+    const target = new URL(href, pageUrl);
+    const page = new URL(pageUrl);
+    if (target.origin !== page.origin) return true;
+    return /\/(?:docs?|documentation|reference|help|blog|guides?)(?:\/|$)/.test(target.pathname);
+  } catch {
+    return /\/(?:docs?|documentation|reference|help|blog|guides?)(?:\/|$)/.test(href);
+  }
+}
+
+export function isGoalDestinationRow(row: WireRow): boolean {
+  if (isListFilterRow(row) || isFillableRow(row) || isConsentRow(row) || isCodeSampleRow(row)) {
+    return false;
+  }
+  return (
+    row[1] === "l" ||
+    row[1] === "link" ||
+    row[1] === "b" ||
+    row[1] === "button" ||
+    row[1] === "tb" ||
+    row[1] === "tab"
+  );
+}
+
+const SECTION_NAV_SKIP =
+  /home|docs|documentation|logout|sign\s*out|help|pricing|blog|status|privacy|terms/;
+
+export function isSectionNavRow(row: WireRow): boolean {
+  if (
+    isListFilterRow(row) ||
+    isFillableRow(row) ||
+    isSubmitLikeRow(row) ||
+    isOauthChromeRow(row) ||
+    isConsentRow(row)
+  ) {
+    return false;
+  }
+  const label = readableLabel(row).toLowerCase();
+  if (SECTION_NAV_SKIP.test(label)) return false;
+  if (row[1] === "tb" || row[1] === "tab") return true;
+  return row[1] === "l" || row[1] === "link";
+}
+
+export function isAlreadyHereNav(row: WireRow, pageUrl: string): boolean {
+  const label = normalizeKey(readableLabel(row));
+  if (label.length === 0) return false;
+  const path = normalizeKey(urlPathname(pageUrl));
+  if (label.includes("setting") && path.includes("setting")) return true;
+  const segments = urlPathname(pageUrl)
+    .split("/")
+    .filter((part) => part.length > 0)
+    .map((part) => normalizeKey(part));
+  return segments.some((segment) => segment === label);
+}
+
+export function unvisitedSectionNavRows(
+  rows: readonly WireRow[],
+  visitedKeys: readonly string[],
+  pageUrl: string,
+): WireRow[] {
+  const visited = new Set(visitedKeys);
+  return rows.filter((row) => {
+    if (!isSectionNavRow(row) || isAlreadyHereNav(row, pageUrl)) return false;
+    return !visited.has(stableControlKey(row, pageUrl));
+  });
+}
+
+export function rowCarriesGoalNoun(row: WireRow, goal: string): boolean {
+  if (!goalSeeksKey(goal) || isConsentRow(row) || isListFilterRow(row)) return false;
+  const label = readableLabel(row).toLowerCase();
+  return /api\s*key|access\s*token|create\s+(?:a\s+)?(?:key|token)|credentials?|\b(?:api[-_]?keys?|tokens?)\b/.test(
     label,
   );
+}
+
+export function rowMatchesGoalSeek(row: WireRow, goal: string): boolean {
+  if (rowCarriesGoalNoun(row, goal)) return true;
+  if (!goalSeeksKey(goal) || isConsentRow(row) || isListFilterRow(row)) return false;
+  return /\bsettings\b/.test(readableLabel(row).toLowerCase());
 }
 
 export function pageIsPostAuthSetup(url: string): boolean {
@@ -1126,7 +1262,11 @@ export function clickGoalSeekScore(row: WireRow, goal: string, pageUrl: string):
   const onSetup = pageIsPostAuthSetup(pageUrl);
   const onKeys = pageLooksLikeKeyDestination(pageUrl);
   if (!onSetup && !onKeys) return 0;
-  if (rowMatchesGoalSeek(row, goal)) return 2;
+  if (isListFilterRow(row) || isAlreadyHereNav(row, pageUrl) || isOffProductNavRow(row, pageUrl)) {
+    return 0;
+  }
+  if (rowMatchesGoalSeek(row, goal) && isGoalDestinationRow(row)) return 2;
+  if (rowMatchesGoalSeek(row, goal)) return 1;
   if (onSetup && isSubmitLikeRow(row) && !isDisabledRow(row)) return 1;
   return 0;
 }
@@ -1548,9 +1688,32 @@ function aliasKeysFor(token: string): string[] {
   return [field];
 }
 
+export function looksLikeEmailAddress(value: string): boolean {
+  return /[^\s@]+@[^\s@]+\.[a-z]{2,}/i.test(value);
+}
+
+export function rowPlaceholder(row: WireRow): string | undefined {
+  const match = /(?:^|\|)ph=([^|]+)/.exec(row[2] ?? "");
+  return match?.[1];
+}
+
+export function rowLooksLikeEmail(row: WireRow): boolean {
+  if (rowField(row) === "email") return true;
+  const label = readableLabel(row);
+  const placeholder = rowPlaceholder(row);
+  if (looksLikeEmailAddress(label) || (placeholder !== undefined && looksLikeEmailAddress(placeholder))) {
+    return true;
+  }
+  return /e_?mail/.test(`${normalizeKey(fieldNameForRow(row))} ${normalizeKey(label)}`);
+}
+
 export function matchingFactKeys(facts: Record<string, string>, row: WireRow): string[] {
   const keys = Object.keys(facts);
   if (keys.length === 0) return [];
+  if (rowLooksLikeEmail(row)) {
+    const emailKeys = new Set(aliasKeysFor("email").map((key) => normalizeKey(key)));
+    return keys.filter((key) => emailKeys.has(normalizeKey(key)));
+  }
   // Card controls take the released card's own values and nothing else — the
   // shipping name and the cardholder name are different values, and a
   // host-supplied travel `date` must not outrank the card expiry. Only on a
@@ -2567,6 +2730,19 @@ export function driveTargetSets(
 ): DriveTargetSets {
   const remaining = { n: DRIVE_MAX_CANDIDATES };
   const skipped = new Set(skippedClickRefs);
+  const hideFilters = goalSeeksKey(aim.goal ?? "");
+  const hasInAppNoun = rows.some(
+    (row) =>
+      rowCarriesGoalNoun(row, aim.goal ?? "") &&
+      isGoalDestinationRow(row) &&
+      !isOffProductNavRow(row, pageUrl),
+  );
+  const keepRow = (row: WireRow): boolean => {
+    if (isCodeSampleRow(row)) return false;
+    if (hideFilters && isListFilterRow(row)) return false;
+    if (hasInAppNoun && isOffProductNavRow(row, pageUrl)) return false;
+    return true;
+  };
   const aimInput = {
     rows,
     filledRefs,
@@ -2578,7 +2754,7 @@ export function driveTargetSets(
   const typeText = takeCapped(
     rankDriveCandidates(
       typeableCandidates(rows, facts, includePayment, filledRefs, pageUrl).filter(
-        (candidate) => !skipped.has(candidate.ref),
+        (candidate) => !skipped.has(candidate.ref) && keepRow(candidate.row),
       ),
       aimInput,
     ),
@@ -2588,7 +2764,7 @@ export function driveTargetSets(
     rankDriveCandidates(
       selectTargets(
         selectCandidates(rows, facts, includePayment, filledRefs, pageUrl).filter(
-          (candidate) => !skipped.has(candidate.ref),
+          (candidate) => !skipped.has(candidate.ref) && keepRow(candidate.row),
         ),
         facts,
         pageOptions,
@@ -2600,7 +2776,9 @@ export function driveTargetSets(
   );
   const click = takeCapped(
     rankDriveCandidates(
-      clickableCandidates(rows, includePayment, skippedClickRefs, pageUrl, filledRefs),
+      clickableCandidates(rows, includePayment, skippedClickRefs, pageUrl, filledRefs).filter(
+        (candidate) => keepRow(candidate.row),
+      ),
       aimInput,
     )
       .map((candidate, index) => ({
@@ -3962,8 +4140,10 @@ export async function runOperateDrive(
   if (drive.exhaustedProgressKey === undefined) drive.exhaustedProgressKey = null;
   if (!Array.isArray(drive.exhaustedActionKeys)) drive.exhaustedActionKeys = [];
   if (!Array.isArray(drive.failedActionKeys)) drive.failedActionKeys = [];
+  if (!Array.isArray(drive.visitedSectionKeys)) drive.visitedSectionKeys = [];
   if (drive.boundFingerprint === undefined) drive.boundFingerprint = null;
   if (drive.consumedActionKey === undefined) drive.consumedActionKey = null;
+  if (drive.goal !== args.goal) resetDriveGoalMemory(drive);
   drive.running = true;
   drive.goal = args.goal;
   drive.facts = facts;
@@ -4170,6 +4350,15 @@ async function driveLoop(input: {
       observation.semantic?.headings ?? [],
     );
     if (recordProgressCycle(drive, nextProgress) === "cycle") {
+      if (
+        unvisitedSectionNavRows(
+          rows,
+          drive.visitedSectionKeys ?? [],
+          observation.url,
+        ).length > 0
+      ) {
+        return "continue";
+      }
       return finish("no_progress", { reason: cycleReason(observation.url) });
     }
     if (
@@ -4180,7 +4369,18 @@ async function driveLoop(input: {
       const dead = markDead(actionKey);
       if (dead !== "continue") return dead;
     }
-    if (drive.staleNonWait >= DRIVE_STALE_LIMIT) return finish("no_progress");
+    if (drive.staleNonWait >= DRIVE_STALE_LIMIT) {
+      if (
+        unvisitedSectionNavRows(
+          rows,
+          drive.visitedSectionKeys ?? [],
+          observation.url,
+        ).length > 0
+      ) {
+        return "continue";
+      }
+      return finish("no_progress");
+    }
     return "continue";
   };
   const markDead = (actionKey: string): DriveHandoff | "continue" => {
@@ -4631,6 +4831,14 @@ async function driveLoop(input: {
         }
       }
     }
+    if (decision.action.kind === "click" || decision.action.kind === "oauth_login") {
+      const clicked = findRow(rows, decision.actionKey, observation.url);
+      if (clicked !== undefined && isSectionNavRow(clicked)) {
+        drive.visitedSectionKeys ??= [];
+        const key = stableControlKey(clicked, observation.url);
+        if (!drive.visitedSectionKeys.includes(key)) drive.visitedSectionKeys.push(key);
+      }
+    }
     drive.trajectory.push({
       action: decision.action.kind,
       target: decision.actionKey,
@@ -5072,6 +5280,33 @@ async function driveLoop(input: {
 
     if (goalExcludesOauth(args.goal) && pageOffersOnlyThirdPartySignup(rows)) {
       return finish("stuck", { reason: noOtherSignupPathReason() });
+    }
+
+    const hasGoalDestination = rows.some(
+      (row) =>
+        rowCarriesGoalNoun(row, args.goal) &&
+        isGoalDestinationRow(row) &&
+        !isOffProductNavRow(row, pageUrl),
+    );
+    if (goalSeeksKey(args.goal) && !hasGoalDestination) {
+      const nextSection = unvisitedSectionNavRows(
+        rows,
+        drive.visitedSectionKeys ?? [],
+        pageUrl,
+      )[0];
+      if (nextSection !== undefined) {
+        drive.boundFingerprint = driveProgressFingerprint(observation, rows, drive, session);
+        drive.consumedActionKey = null;
+        const applied = await applyDecision({
+          kind: "act",
+          action: { kind: "click", target: nextSection[0] },
+          actionKey: nextSection[0],
+          confidence: 1,
+        });
+        if (applied !== "continue") return applied;
+        steps += 1;
+        continue;
+      }
     }
 
     if (drive.jevCalls >= DRIVE_MAX_JEV_CALLS) {

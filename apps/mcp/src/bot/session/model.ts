@@ -218,6 +218,8 @@ export interface SessionDriveState {
   leftProgressKeys?: string[];
   progressReturnCounts?: Record<string, number>;
   silentSubmitKeys?: string[];
+  /** Section tabs / sidebar / app entries already opened this drive. */
+  visitedSectionKeys?: string[];
 }
 
 // The last extracted elements are resealed on every retain so each retained
