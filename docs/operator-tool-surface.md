@@ -125,7 +125,7 @@ browser-use/jev-ultrafast (MIT) adoptions live in `operate-drive.ts`. Mapping:
 | --- | --- | --- |
 | 1 | Two heads: `operation` plus `<operation>_target`; unused heads cannot act | `buildDriveQuestions`, `decideAfterJev` |
 | 2 | Structured `state` `{page, elements, recent_actions}` and `instructions` `{goal, rules}` | `DriveJevState`, `buildJevState`, `pageTextFromObservation` |
-| 3 | Per-element `operations` plus checked/disabled/required/acted and live `value` from the drive snapshot | `elementState`, `operationsForRow`, `drive-snapshot.ts` |
+| 3 | Per-element `operations` plus checked/disabled/required/acted/invalid, live `value`, and the control's own declared `maxlength`, placeholder, pattern, and inputmode from the drive snapshot | `elementState`, `operationsForRow`, `drive-snapshot.ts` |
 | 4 | `validate_choice`: offered id, exact keys, finite [0,1], sum ±0.02, argmax. Malformed answers are `invalid_answer` (reason + confidence), not `low_confidence`; one same-observation retry | `validateChoiceReason`, `admitsChoice` |
 | 5 | SELECT option is a target (`slug:option`) | `selectTargets`, `selectTargetKey`, `lastSelectOptions` |
 | 6 | WAIT when the needed control is absent/disabled or results are loading | `DRIVE_RULES`, `{kind:"wait"}`, `DRIVE_WAIT_MS` |
