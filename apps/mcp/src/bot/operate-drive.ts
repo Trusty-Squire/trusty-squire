@@ -596,11 +596,6 @@ const CARD_EXPIRY_FACT = "card_expiry";
 const CARD_EXPIRY_LONG_FACT = "card_expiry_long";
 const CARD_NAME_FACT = "card_name";
 const EXP_YEAR_SHORT_FACT = "exp_year_short";
-// The widest a two-digit combined expiry ever gets: two month digits, a
-// spaced " / " separator, two year digits. A control this wide or narrower
-// could be that mask or MM/YYYY, so only a strictly wider one unambiguously
-// asks for four year digits.
-const CARD_EXPIRY_SHORT_MAX_WIDTH = 2 + 3 + 2;
 /** Facts only a card release may write. A host cannot supply them and they
  * never outlive the release that produced them. */
 const CARD_DERIVED_FACTS = new Set([
@@ -642,23 +637,85 @@ export function isExpiryRow(row: WireRow): boolean {
   return !hay.split(/[\s_]+/).some((word) => NON_CARD_EXPIRY_OWNERS.has(word));
 }
 
+function expiryFormatHay(row: WireRow): string {
+  return `${row[2] ?? ""} ${readableLabel(row)}`;
+}
+
+/** The year length the control itself states, or undefined when it does not.
+ *
+ * Width / maxlength is not a format. Seven characters fits both "MM/YYYY" and
+ * "MM / YY", so a declared width must never pick the year length.
+ */
+function statedCombinedExpiryFact(row: WireRow): string | undefined {
+  const hay = expiryFormatHay(row);
+  if (/yyyy|\\d\{4\}/i.test(hay)) return CARD_EXPIRY_LONG_FACT;
+  if (
+    /\bmm\s*\/\s*yy\b/i.test(hay) ||
+    /\(yy\)/i.test(hay) ||
+    /(?:^|[^y])yy(?:[^y]|$)/i.test(hay) ||
+    /\\d\{2\}/i.test(hay)
+  ) {
+    return CARD_EXPIRY_FACT;
+  }
+  return undefined;
+}
+
 function cardExpiryFactFor(row: WireRow): string {
   const hay = rowHay(row);
   const month = /month|mm/.test(hay);
   const year = /year|yy/.test(hay);
   if (month && !year) return "exp_month";
-  // A control declaring maxlength=2 drops the leading digits of "2030" and the
-  // card is declined with nothing to read. The control's own declared width
-  // decides this, never how the merchant spelled the label.
+  // Year-only: a maxlength=2 control drops the leading digits of "2030".
+  // Combined expiry never uses width — see statedCombinedExpiryFact.
   if (year && !month) return rowWidth(row) === 2 ? EXP_YEAR_SHORT_FACT : "exp_year";
-  // Only the control's own declared width decides the year length, and only
-  // when it cannot also be a spaced two-digit mask. A masked input takes
-  // "12/2030" without erroring, reformats it to "12 / 20" and drops the rest,
-  // submitting an expiry that is already past.
-  const width = rowWidth(row);
-  return width !== undefined && width > CARD_EXPIRY_SHORT_MAX_WIDTH
-    ? CARD_EXPIRY_LONG_FACT
-    : CARD_EXPIRY_FACT;
+  return statedCombinedExpiryFact(row) ?? CARD_EXPIRY_FACT;
+}
+
+function rowIsInvalid(row: WireRow): boolean {
+  return /(?:^|\|)s=[^|]*i/.test(row[2] ?? "");
+}
+
+function expiryDigits(value: string): string {
+  return value.replace(/\D/g, "");
+}
+
+function expiryWriteRejectedOrTruncated(
+  row: WireRow,
+  written: string,
+  long: string,
+): boolean {
+  const current = rowCurrentValue(row);
+  if (current === undefined || current.length === 0) return true;
+  if (factValuesMatch(current, long) || factValuesMatch(current, written)) {
+    return rowIsInvalid(row);
+  }
+  const currentDigits = expiryDigits(current);
+  const writtenDigits = expiryDigits(written);
+  const longDigits = expiryDigits(long);
+  if (currentDigits === longDigits) return false;
+  return currentDigits.length < writtenDigits.length || currentDigits !== writtenDigits;
+}
+
+/** After a two-digit combined expiry write, try the four-digit year if the
+ * field rejected or truncated what we typed. Width never decided the first
+ * write; this read-back is the only escalation.
+ */
+export function requiredExpiryLongRewriteAction(
+  rows: readonly WireRow[],
+  facts: Record<string, string>,
+  shortWrittenRefs: readonly string[],
+): { target: string; text: string } | undefined {
+  const written = new Set(shortWrittenRefs);
+  const short = facts[CARD_EXPIRY_FACT];
+  const long = facts[CARD_EXPIRY_LONG_FACT];
+  if (short === undefined || long === undefined || written.size === 0) return undefined;
+  for (const row of rows) {
+    if (!written.has(row[0]) || !isExpiryRow(row)) continue;
+    if (factValuesMatch(rowCurrentValue(row) ?? "", long)) continue;
+    if (!expiryWriteRejectedOrTruncated(row, short, long)) continue;
+    return { target: row[0], text: long };
+  }
+  return undefined;
 }
 
 export function isCardholderNameRow(row: WireRow): boolean {
@@ -2926,6 +2983,8 @@ async function driveLoop(input: {
   const selectAttempts = new Set<string>();
   let selectMustYield = false;
   const typeAttempts = new Set<string>();
+  const expiryShortWrittenRefs = new Set<string>();
+  const expiryLongAttempts = new Set<string>();
   let typeMustYield = false;
   let emptySnapshotWaits = 0;
 
@@ -3448,14 +3507,45 @@ async function driveLoop(input: {
       steps += 1;
       continue;
     }
+    const expiryRewrite = typeMustYield
+      ? undefined
+      : requiredExpiryLongRewriteAction(rows, drive.facts, [...expiryShortWrittenRefs]);
     const typeFill = typeMustYield
       ? undefined
       : requiredFactTypeAction(rows, drive.facts, drive.filledRefs, pageUrl);
     typeMustYield = false;
+    const rewriteTarget = expiryRewrite?.target;
+    if (
+      expiryRewrite !== undefined &&
+      rewriteTarget !== undefined &&
+      !expiryLongAttempts.has(rewriteTarget)
+    ) {
+      expiryLongAttempts.add(rewriteTarget);
+      drive.boundFingerprint = progressFingerprint(
+        observation.url,
+        rows,
+        drive,
+        session,
+        observation.dom ?? "",
+      );
+      drive.consumedActionKey = null;
+      const applied = await applyDecision({
+        kind: "act",
+        action: { kind: "type", target: expiryRewrite.target, text: expiryRewrite.text },
+        actionKey: expiryRewrite.target,
+        confidence: 1,
+      });
+      if (applied !== "continue") return applied;
+      steps += 1;
+      continue;
+    }
     const typeAttemptKey =
       typeFill === undefined ? undefined : `${comboboxObservation}\t${typeFill.target}`;
     if (typeFill !== undefined && typeAttemptKey !== undefined && !typeAttempts.has(typeAttemptKey)) {
       typeAttempts.add(typeAttemptKey);
+      if (typeFill.text === drive.facts[CARD_EXPIRY_FACT]) {
+        expiryShortWrittenRefs.add(typeFill.target);
+      }
       drive.boundFingerprint = progressFingerprint(
         observation.url,
         rows,

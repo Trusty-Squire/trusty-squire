@@ -44,6 +44,7 @@ import {
   requiredFactComboboxAction,
   requiredFactSelectAction,
   requiredFactTypeAction,
+  requiredExpiryLongRewriteAction,
   isRequiredRow,
   requiredFillableMissingFact,
   applyReleasedCardFacts,
@@ -693,26 +694,25 @@ describe("decideAfterJev stop reasons", () => {
     expect(blankName.card_name).toBeUndefined();
   });
 
-  it("sizes a combined expiry write from the control's declared width", () => {
+  it("sizes a combined expiry write from the control's stated format, not its width", () => {
     const facts = applyReleasedCardFacts(
       { card_ref: "card-1" },
       { exp_month: "12", exp_year: "2030", name: "Ada" },
     );
     const valueFor = (row: WireRow): string | undefined => facts[matchingFactKeys(facts, row)[0]!];
-    // Only a width no two-digit mask could need asks for four year digits.
-    expect(valueFor(["@e:l", "t", "Expiration date (MM/YYYY)|f=date|w=9"])).toBe("12/2030");
-    expect(valueFor(["@e:s", "t", "Expiration date (MM / YY)|f=date|w=5"])).toBe("12/30");
-    // No declared width is no signal, so the near-universal MM/YY is written.
+    // Placeholder, pattern, or label that names MM/YYYY vs MM/YY is the signal.
+    expect(valueFor(["@e:l", "t", "Expiration date|f=date|ph=MM/YYYY|w=7"])).toBe("12/2030");
+    expect(valueFor(["@e:p", "t", "Expiration date|f=date|pt=\\d{2}/\\d{4}"])).toBe("12/2030");
+    expect(valueFor(["@e:s", "t", "Expiration date (MM / YY)|f=date|w=9"])).toBe("12/30");
     expect(valueFor(["@e:u", "t", "Expiration date (MM / YY)|f=date"])).toBe("12/30");
-    // The label's spelling decides nothing either way.
-    expect(valueFor(["@e:x", "t", "Expiration date (MM/YYYY)|f=date|w=5"])).toBe("12/30");
+    // A label that names four digits wins even on a short maxlength.
+    expect(valueFor(["@e:x", "t", "Expiration date (MM/YYYY)|f=date|w=5"])).toBe("12/2030");
   });
 
-  it("writes the two-digit expiry into a seven-character masked control", () => {
-    // `<input maxlength="7" placeholder="MM / YY">` with a client-side mask is
-    // the common hand-rolled shape, and it is exactly as wide as MM/YYYY. Sent
-    // "12/2030" the mask reformats to "12 / 20", hits maxlength and drops the
-    // rest, submitting an expiry that is already past — with nothing to read.
+  it("writes the two-digit expiry when the control states no year length", () => {
+    // maxlength 7 fits both "MM/YYYY" and "MM / YY". Mapping the width to a
+    // format is what sent "12/2030" into a two-digit mask, which reformatted
+    // it to "12 / 20" and submitted an expiry that is already past.
     const facts = applyReleasedCardFacts(
       { card_ref: "card-1" },
       { exp_month: "12", exp_year: "2030", name: "Ada" },
@@ -720,8 +720,33 @@ describe("decideAfterJev stop reasons", () => {
     const valueFor = (row: WireRow): string | undefined => facts[matchingFactKeys(facts, row)[0]!];
     expect(valueFor(["@e:m", "t", "Expiration date (MM / YY)|f=date|w=7"])).toBe("12/30");
     expect(valueFor(["@e:m2", "t", "Expiration date|f=date|w=7"])).toBe("12/30");
-    // A control wider than any two-digit mask is still unambiguous.
-    expect(valueFor(["@e:m3", "t", "Expiration date|f=date|w=8"])).toBe("12/2030");
+    expect(valueFor(["@e:m3", "t", "Expiration date|f=date|w=8"])).toBe("12/30");
+    expect(valueFor(["@e:m9", "t", "Expiration date|f=date|w=9"])).toBe("12/30");
+  });
+
+  it("rewrites a rejected or truncated two-digit expiry with the four-digit year", () => {
+    const facts = applyReleasedCardFacts(
+      { card_ref: "card-1" },
+      { exp_month: "12", exp_year: "2030", name: "Ada" },
+    );
+    const emptyAfter: WireRow = ["@e:exp", "t", "Expiration date|f=date|s=r"];
+    expect(requiredExpiryLongRewriteAction([emptyAfter], facts, ["@e:exp"])).toEqual({
+      target: "@e:exp",
+      text: "12/2030",
+    });
+    const truncated: WireRow = ["@e:exp", "t", "Expiration date|f=date|s=r|n=12/2"];
+    expect(requiredExpiryLongRewriteAction([truncated], facts, ["@e:exp"])).toEqual({
+      target: "@e:exp",
+      text: "12/2030",
+    });
+    const invalid: WireRow = ["@e:exp", "t", "Expiration date|f=date|s=ri|n=12/30"];
+    expect(requiredExpiryLongRewriteAction([invalid], facts, ["@e:exp"])).toEqual({
+      target: "@e:exp",
+      text: "12/2030",
+    });
+    const accepted: WireRow = ["@e:exp", "t", "Expiration date (MM / YY)|f=date|s=r|n=12/30"];
+    expect(requiredExpiryLongRewriteAction([accepted], facts, ["@e:exp"])).toBeUndefined();
+    expect(requiredExpiryLongRewriteAction([emptyAfter], facts, [])).toBeUndefined();
   });
 
   it("keeps a caller-supplied card fact rather than discarding it silently", () => {
@@ -774,20 +799,18 @@ describe("decideAfterJev stop reasons", () => {
     const valueFor = (row: WireRow): string | undefined => facts[matchingFactKeys(facts, row)[0]!];
     expect(valueFor(["@e:y", "t", "Expiration year|f=date|w=4"])).toBe("2030");
     expect(valueFor(["@e:y2", "t", "Expiration year|f=date|w=2"])).toBe("30");
-    expect(valueFor(["@e:c", "t", "Expiration date|f=date|w=9"])).toBe("12/2030");
+    expect(valueFor(["@e:c", "t", "Expiration date|f=date|w=9"])).toBe("12/30");
   });
 
-  it("writes the two-digit combined expiry when the control declares no width", () => {
+  it("writes the two-digit combined expiry when the control states no year length", () => {
     const facts = applyReleasedCardFacts(
       { card_ref: "card-1" },
       { exp_month: "12", exp_year: "2030", name: "Ada" },
     );
     const valueFor = (row: WireRow): string | undefined => facts[matchingFactKeys(facts, row)[0]!];
-    // No declared maxlength is no signal, and MM/YY is what almost every
-    // checkout takes.
     expect(valueFor(["@e:c", "t", "Expiration date (MM / YY)|f=date"])).toBe("12/30");
     expect(valueFor(["@e:c5", "t", "Expiration date|f=date|w=5"])).toBe("12/30");
-    expect(valueFor(["@e:c8", "t", "Expiration date|f=date|w=8"])).toBe("12/2030");
+    expect(valueFor(["@e:c8", "t", "Expiration date|f=date|w=8"])).toBe("12/30");
   });
 
   it("sizes the year write from the control's declared width, not its label", () => {

@@ -179,6 +179,35 @@ describe("drive snapshot conversion", () => {
     expect(rows[1]?.[2]).toContain("a=picker");
   });
 
+  it("serializes placeholder, pattern, inputmode, and invalid onto the row", () => {
+    const rows = driveRowsFromSnapshot(
+      snapshot({
+        elements: [
+          {
+            ref: "@e:exp",
+            role: "textbox",
+            label: "Expiration date",
+            placeholder: "MM/YYYY",
+            pattern: "\\d{2}/\\d{4}",
+            inputMode: "numeric",
+            invalid: true,
+            required: true,
+            operations: ["fill"],
+            frameOrdinal: 0,
+          },
+        ],
+      }),
+    );
+    expect(rows[0]?.[2]).toContain("Expiration date");
+    expect(rows[0]?.[2]).toContain("ph=MM/YYYY");
+    expect(rows[0]?.[2]).toContain("pt=\\d{2}/\\d{4}");
+    expect(rows[0]?.[2]).toContain("im=numeric");
+    expect(rows[0]?.[2]).toMatch(/(?:^|\|)s=[^|]*i/);
+    expect(matchingFactKeys({ card_ref: "card-1", card_expiry_long: "12/2030", card_expiry: "12/30" }, rows[0]!)).toEqual([
+      "card_expiry_long",
+    ]);
+  });
+
   it("maps a fillable combobox to a text field, not a select", () => {
     const rows = driveRowsFromSnapshot(
       snapshot({

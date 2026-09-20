@@ -1007,6 +1007,57 @@ describe("operate_drive real-browser fixture", () => {
     }
   }, 60_000);
 
+  it("rewrites a rejected two-digit expiry with the four-digit year", async () => {
+    const html = `<!doctype html><meta charset="utf-8"><title>Long expiry</title>
+<main>
+  <label>Card number <input id="pan" autocomplete="cc-number"></label>
+  <label>CVV <input id="cvv" autocomplete="cc-csc"></label>
+  <label>Expiration date <input id="exp" required pattern="\\d{2}/\\d{4}"></label>
+</main>`;
+    const { context, page, started } = await openFixture(html, "expiry-rewrite.test");
+    try {
+      const session = sessionForCall(started.session_id)!;
+      const card = {
+        pan: "4111111111111111",
+        cvv: "739",
+        exp_month: "12",
+        exp_year: "2030",
+        name: "Ada",
+        billing: { line1: "1 Main St", city: "Boston", postal_code: "02110", country: "US" },
+      };
+      session.releasedPaymentCard = {
+        approvalId: "approved",
+        approvalUrl: "https://approval.test",
+        checkout: {
+          merchant: "fixture.test",
+          checkout_origin: "https://expiry-rewrite.test",
+          amount_cents: 100,
+          currency: "USD",
+        },
+        cardRef: "card-1",
+        last4: "1111",
+        deadline: Date.now() + 60_000,
+        card,
+      };
+      const result = await runOperateDrive(
+        {
+          session_id: started.session_id,
+          goal: "fill the card expiry",
+          facts: { card_ref: "card-1" },
+          max_steps: 4,
+        },
+        api(),
+        undefined,
+        deps(async (_api, _state, questions) => jevFromQuestions(questions, true)),
+      );
+      expect(result.status).not.toBe("stuck");
+      expect(await page.locator("#exp").inputValue()).toBe("12/2030");
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
   it("carries a real control's maxlength through the snapshot into the expiry write", async () => {
     // A split year input that can only hold two digits. Written with "2030" the
     // browser keeps "20", the gateway declines, and nothing in the drive

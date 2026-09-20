@@ -32,6 +32,10 @@ export interface DriveSnapshotElement {
   picker?: boolean;
   /** The control's own `maxlength`, when it declares one. */
   width?: number;
+  placeholder?: string;
+  pattern?: string;
+  inputMode?: string;
+  invalid?: boolean;
   operations: Array<"click" | "fill" | "select">;
   options?: DriveSnapshotOption[];
   frameOrdinal: number;
@@ -135,6 +139,7 @@ export function driveRowsFromSnapshot(snapshot: DriveSnapshot): SnapshotRow[] {
     const states: string[] = [];
     if (element.required === true) states.push("r");
     if (element.disabled === true) states.push("d");
+    if (element.invalid === true) states.push("i");
     if (element.checked === true) states.push("c");
     if (element.checked === false && (element.role === "checkbox" || element.role === "radio")) {
       states.push("u");
@@ -146,6 +151,15 @@ export function driveRowsFromSnapshot(snapshot: DriveSnapshot): SnapshotRow[] {
       facts.push(`n=${element.value.replace(/\|/g, " ").slice(0, 80)}`);
     }
     if (element.width !== undefined) facts.push(`w=${element.width}`);
+    if (element.placeholder !== undefined && element.placeholder.length > 0) {
+      facts.push(`ph=${element.placeholder.replace(/\|/g, " ").slice(0, 40)}`);
+    }
+    if (element.pattern !== undefined && element.pattern.length > 0) {
+      facts.push(`pt=${element.pattern.replace(/\|/g, " ").slice(0, 40)}`);
+    }
+    if (element.inputMode !== undefined && element.inputMode.length > 0) {
+      facts.push(`im=${element.inputMode.replace(/\|/g, " ").slice(0, 20)}`);
+    }
     const choice = optionOrdinal.get(element.ref);
     if (choice !== undefined) facts.push(`q=${choice.index}/${choice.total}`);
     const roleLetter =
@@ -478,6 +492,14 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
       element.maxLength > 0
         ? element.maxLength
         : undefined;
+    const placeholder = element.getAttribute("placeholder")?.trim() ?? "";
+    const pattern = element instanceof HTMLInputElement ? element.pattern.trim() : "";
+    const inputMode = element.getAttribute("inputmode")?.trim() ?? "";
+    const invalid =
+      element.getAttribute("aria-invalid") === "true" ||
+      ((element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) &&
+        element.value.length > 0 &&
+        !element.validity.valid);
     const options =
       element instanceof HTMLSelectElement
         ? Array.from(element.options)
@@ -502,6 +524,10 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
       ...(inViewport ? {} : { offscreen: true }),
       ...(picker ? { picker: true } : {}),
       ...(width === undefined ? {} : { width }),
+      ...(placeholder.length > 0 ? { placeholder } : {}),
+      ...(pattern.length > 0 ? { pattern } : {}),
+      ...(inputMode.length > 0 ? { inputMode } : {}),
+      ...(invalid ? { invalid: true } : {}),
       ...(options === undefined ? {} : { options }),
     };
     if (inViewport) inView.push(row);
