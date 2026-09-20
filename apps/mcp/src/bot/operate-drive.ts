@@ -161,6 +161,7 @@ export const DRIVE_RULES: readonly string[] = [
   "If a needed control is covered, act on whatever covers it first.",
   "Prefer controls that match the current page phase implied by the URL and headings.",
   "A disabled submit means a required field is still empty until every fillable is populated. Disable is not a gate.",
+  "If the goal names an API key or token, open the control that leads there before stopping on onboarding or a dashboard.",
 ];
 // Drive rules above adapt browser-use/jev-ultrafast (MIT) NEXT_ACTION / TARGET prose.
 
@@ -982,6 +983,38 @@ function urlPathname(url: string): string {
 
 export function isCheckoutUrl(url: string): boolean {
   return /(?:^|\/)(?:checkouts?|payment)(?:\/|$)/.test(urlPathname(url));
+}
+
+export function goalSeeksKey(goal: string): boolean {
+  return /api\s*key|access\s*token|credential/.test(goal.toLowerCase());
+}
+
+export function rowMatchesGoalSeek(row: WireRow, goal: string): boolean {
+  if (!goalSeeksKey(goal) || isConsentRow(row)) return false;
+  const label = readableLabel(row).toLowerCase();
+  return /api\s*key|access\s*token|create\s+(?:a\s+)?(?:key|token)|credentials?|\bsettings\b|\b(?:api[-_]?keys?|tokens?)\b/.test(
+    label,
+  );
+}
+
+export function pageIsPostAuthSetup(url: string): boolean {
+  return /(?:^|\/)(?:welcome|onboarding|getting[-_]?started|confirm|dashboard|console|home|teams|app)(?:\/|$)/.test(
+    urlPathname(url),
+  );
+}
+
+export function pageLooksLikeKeyDestination(url: string): boolean {
+  return /(?:^|\/)(?:api[-_]?keys?|tokens?|credentials?|settings)(?:\/|$)/.test(urlPathname(url));
+}
+
+export function clickGoalSeekScore(row: WireRow, goal: string, pageUrl: string): number {
+  if (!goalSeeksKey(goal)) return 0;
+  const onSetup = pageIsPostAuthSetup(pageUrl);
+  const onKeys = pageLooksLikeKeyDestination(pageUrl);
+  if (!onSetup && !onKeys) return 0;
+  if (rowMatchesGoalSeek(row, goal)) return 2;
+  if (onSetup && isSubmitLikeRow(row) && !isDisabledRow(row)) return 1;
+  return 0;
 }
 
 export function isCandidateRow(
@@ -2320,7 +2353,14 @@ export function driveTargetSets(
     rankDriveCandidates(
       clickableCandidates(rows, includePayment, skippedClickRefs, pageUrl, filledRefs),
       aimInput,
-    ),
+    )
+      .map((candidate, index) => ({
+        candidate,
+        index,
+        score: clickGoalSeekScore(candidate.row, aim.goal ?? "", pageUrl),
+      }))
+      .sort((left, right) => right.score - left.score || left.index - right.index)
+      .map((entry) => entry.candidate),
     remaining,
   );
   const scroll = takeCapped(rankDriveCandidates(scrollTargets(rows), aimInput), remaining);
@@ -2332,8 +2372,18 @@ export function driveTargetSets(
   // Listed work only counts while some of it is actually offered: when every
   // candidate is suppressed, withholding WAIT and BLOCKED too would leave DONE
   // as the only admissible answer and force a false "complete".
+  const goalWork =
+    (pageIsPostAuthSetup(pageUrl) || pageLooksLikeKeyDestination(pageUrl)) &&
+    rows.some(
+      (row) =>
+        !isDisabledRow(row) &&
+        !isOffscreenRow(row) &&
+        rowMatchesGoalSeek(row, aim.goal ?? "") &&
+        click.some((candidate) => candidate.ref === row[0]),
+    );
   const listedWork =
-    operations.length > 0 && pageHasListedWork(rows, typeText.length, select.length);
+    operations.length > 0 &&
+    (pageHasListedWork(rows, typeText.length, select.length) || goalWork);
   // WAIT is withheld only where the repeat-cap recorded it as dead — a
   // model-chosen wait that left a page with rows unchanged. An empty snapshot
   // never records one, so a payment settling behind a blank processor screen
@@ -2707,6 +2757,9 @@ export function decideAfterJev(input: {
       input.filledRefs ?? [],
       input.pageUrl ?? "",
       input.pageOptions ?? new Map(),
+      (text) => text,
+      [],
+      { goal: input.goal },
     );
   const questions =
     input.questions ??
@@ -3485,7 +3538,9 @@ function resumeAction(
   if (answer === "WAIT" || answer === "wait") return { kind: "wait", confidence: 1 };
   const includePayment = cardRef !== undefined;
   const questions = buildDriveQuestions(rows, facts, goal, includePayment, [], pageUrl);
-  const sets = driveTargetSets(rows, facts, includePayment, [], pageUrl);
+  const sets = driveTargetSets(rows, facts, includePayment, [], pageUrl, new Map(), (text) => text, [], {
+    goal,
+  });
   const row = findRow(rows, answer, pageUrl);
   if (row === undefined) {
     return {
