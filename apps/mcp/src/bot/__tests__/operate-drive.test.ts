@@ -1523,7 +1523,7 @@ describe("form-fill assignment helpers", () => {
     expect(isSubmitLikeRow(fireworksInFlight[2]!)).toBe(false);
     expect(isProgressSubmitRow(fireworksInFlight[3]!)).toBe(false);
     expect(snapshotNeedsSettle(fireworksInFlight, 0)).toBe(false);
-    expect(disabledSubmitKind(fireworksInFlight, 0)).toBe("widget_unready");
+    expect(disabledSubmitKind(fireworksInFlight, 0)).toBe("needs_fill");
     expect(pageHasListedWork(fireworksInFlight, 0, 0)).toBe(false);
   });
 
@@ -1561,8 +1561,17 @@ describe("form-fill assignment helpers", () => {
       ["@e:email", "t", "Email|f=email|n=a@b.test"],
       ["@e:go", "b", "Sign Up|s=d"],
     ];
-    expect(disabledSubmitKind(staticDisabled, 0)).toBe("widget_unready");
+    expect(disabledSubmitKind(staticDisabled, 0)).toBe("none");
+    expect(disabledSubmitKind(staticDisabled, 0, [], true)).toBe("widget_unready");
     expect(snapshotNeedsSettle(staticDisabled, 0)).toBe(false);
+    const emptyPassword: WireRow[] = [
+      ["@e:email", "t", "Email|f=email|n=a@b.test"],
+      ["@e:pw", "t", "Password|f=password"],
+      ["@e:go", "b", "Create account|s=d"],
+    ];
+    expect(outstandingRequiredFill(emptyPassword)?.[0]).toBe("@e:pw");
+    expect(disabledSubmitKind(emptyPassword, 0)).toBe("needs_fill");
+    expect(clickableCandidates(emptyPassword, false).map((c) => c.ref)).not.toContain("@e:go");
     expect(
       disabledSubmitKind(
         [
@@ -1853,9 +1862,13 @@ describe("facts, fingerprint, compact merge", () => {
     expect(driveCandidates([last, SUBMIT], false).map((c) => c.ref)).toEqual(["@e:go"]);
   });
 
-  it("keeps a disabled continue/submit in the clickable set", () => {
+  it("withholds a disabled submit while a field is still empty", () => {
     const cont: WireRow = ["@e:go", "b", "@continue|s=d"];
-    expect(clickableCandidates([EMAIL, cont], false).map((c) => c.ref)).toEqual(["@e:go"]);
+    expect(clickableCandidates([EMAIL, cont], false).map((c) => c.ref)).toEqual([]);
+    const filledEmail: WireRow = ["@e:email", "t", "@email|f=email|s=r|n=a@b.test"];
+    expect(
+      clickableCandidates([filledEmail, cont], false, [], "", ["@e:email"]).map((c) => c.ref),
+    ).toEqual(["@e:go"]);
   });
 
   it("omits a click that just came back stale so the overlay can be chosen", () => {
