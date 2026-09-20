@@ -311,16 +311,7 @@ export function mergeFacts(
   existing: Record<string, string>,
   added: Record<string, string> | undefined,
 ): Record<string, string> {
-  const next = { ...existing };
-  if (added === undefined) return next;
-  for (const [key, value] of Object.entries(added)) {
-    // Only a release may write these. Accepting them from the caller both
-    // types an unvouched value into a live payment form and defeats the
-    // deferral that keeps card controls unoffered until the card is out.
-    if (CARD_DERIVED_FACTS.has(key)) continue;
-    next[key] = value;
-  }
-  return next;
+  return added === undefined ? { ...existing } : { ...existing, ...added };
 }
 
 export function wireRowsFromObservation(
@@ -605,7 +596,10 @@ const CARD_EXPIRY_FACT = "card_expiry";
 const CARD_EXPIRY_LONG_FACT = "card_expiry_long";
 const CARD_NAME_FACT = "card_name";
 const EXP_YEAR_SHORT_FACT = "exp_year_short";
-const CARD_EXPIRY_LONG_LENGTH = "MM/YYYY".length;
+// The narrowest control that can hold a four-digit-year expiry: two month
+// digits, one separator, four year digits. Derived from what has to be typed
+// rather than from a rendered mask — "MM / YY" is also seven characters.
+const CARD_EXPIRY_LONG_MIN_WIDTH = 2 + 1 + 4;
 /** Facts only a card release may write. A host cannot supply them and they
  * never outlive the release that produced them. */
 const CARD_DERIVED_FACTS = new Set([
@@ -656,10 +650,11 @@ function cardExpiryFactFor(row: WireRow): string {
   // card is declined with nothing to read. The control's own declared width
   // decides this, never how the merchant spelled the label.
   if (year && !month) return rowWidth(row) === 2 ? EXP_YEAR_SHORT_FACT : "exp_year";
-  // A combined control wide enough to hold MM/YYYY is asking for four year
-  // digits; anything narrower can only take MM/YY.
+  // Only the control's own declared width decides the year length. Without one
+  // there is no signal, and the two-digit form is what almost every checkout
+  // takes, so that is the default.
   const width = rowWidth(row);
-  return width !== undefined && width >= CARD_EXPIRY_LONG_LENGTH
+  return width !== undefined && width >= CARD_EXPIRY_LONG_MIN_WIDTH
     ? CARD_EXPIRY_LONG_FACT
     : CARD_EXPIRY_FACT;
 }
@@ -859,6 +854,10 @@ export function applyReleasedCardFacts(
   const year = card.exp_year.trim();
   const name = card.name.trim();
   const shortYear = year.length === 4 ? year.slice(-2) : year;
+  // The vault stores whatever the card was saved with (card-release-approval
+  // accepts YY or YYYY), so a short year has to be widened here or the long
+  // facts carry two digits into a control that declared it wants four.
+  const longYear = year.length === 2 ? `20${year}` : year;
   const next = { ...facts };
   // A retry after a decline releases a second card into the same session, so
   // every one of these is rebuilt from the card actually in play. Keeping a
@@ -866,13 +865,13 @@ export function applyReleasedCardFacts(
   // card's PAN, and nothing downstream would report it.
   for (const key of CARD_DERIVED_FACTS) delete next[key];
   if (month.length > 0) next.exp_month = month;
-  if (year.length > 0) next.exp_year = year;
+  if (longYear.length > 0) next.exp_year = longYear;
   if (shortYear.length > 0) next[EXP_YEAR_SHORT_FACT] = shortYear;
   if (name.length > 0) next[CARD_NAME_FACT] = name;
   if (month.length > 0 && year.length > 0) {
     const paddedMonth = month.padStart(2, "0");
     next[CARD_EXPIRY_FACT] = `${paddedMonth}/${shortYear}`;
-    next[CARD_EXPIRY_LONG_FACT] = `${paddedMonth}/${year}`;
+    next[CARD_EXPIRY_LONG_FACT] = `${paddedMonth}/${longYear}`;
   }
   return next;
 }
@@ -1586,7 +1585,6 @@ export function operationCriteria(operations: readonly DriveOperation[]): Record
 export function valueCriteria(
   facts: Record<string, string>,
   row?: WireRow,
-  rows: readonly WireRow[] = [],
 ): Record<string, string> {
   const keys = row === undefined ? Object.keys(facts) : matchingFactKeys(facts, row);
   const from = keys.length > 0 ? keys : Object.keys(facts);

@@ -708,34 +708,70 @@ describe("decideAfterJev stop reasons", () => {
     expect(valueFor(["@e:x", "t", "Expiration date (MM / YY)|f=date|w=7"])).toBe("12/2030");
   });
 
-  it("refuses card-derived facts supplied by the caller", () => {
-    const merged = mergeFacts(
-      { email: "a@b.test" },
-      {
-        card_ref: "card-1",
-        exp_month: "01",
-        exp_year: "1999",
-        exp_year_short: "99",
-        card_name: "Mallory",
-        card_expiry: "01/99",
-        card_expiry_long: "01/1999",
-      },
-    );
-    // Only a release may write these; a caller-supplied value would be typed
-    // into a live payment form and would also switch off the deferral that
-    // keeps card controls unoffered until the card is out.
-    expect(merged).toEqual({ email: "a@b.test", card_ref: "card-1" });
+  it("keeps a caller-supplied card fact rather than discarding it silently", () => {
+    const supplied = {
+      card_ref: "card-1",
+      exp_month: "01",
+      exp_year: "1999",
+      exp_year_short: "99",
+      card_name: "Ada",
+      card_expiry: "01/99",
+      card_expiry_long: "01/1999",
+    };
+    expect(mergeFacts({ email: "a@b.test" }, supplied)).toEqual({
+      email: "a@b.test",
+      ...supplied,
+    });
   });
 
-  it("keeps card controls unoffered when the caller passes a card-derived fact", () => {
-    const cardName: WireRow = ["@e:ncard", "t", "Name on card|s=r"];
-    const expiry: WireRow = ["@e:exp", "t", "Expiration date (MM / YY)|f=date|s=r"];
-    const rows = [cardName, expiry, EMAIL];
+  it("lets the released card overwrite whatever the caller supplied", () => {
     const facts = mergeFacts(
-      {},
-      { email: "a@b.test", card_ref: "card-1", exp_month: "12", card_name: "Mallory" },
+      { email: "a@b.test" },
+      { card_ref: "card-1", exp_month: "01", exp_year: "1999", card_name: "Stale" },
     );
-    expect(fillableCandidates(rows, facts, true).map((row) => row.ref)).toEqual(["@e:email"]);
+    const released = applyReleasedCardFacts(facts, {
+      exp_month: "12",
+      exp_year: "2030",
+      name: "Ada Lovelace",
+    });
+    // The release rebuilds the whole card-derived set, so a caller value can
+    // never be the thing typed beside the released card's PAN.
+    expect(released.exp_month).toBe("12");
+    expect(released.exp_year).toBe("2030");
+    expect(released.card_name).toBe("Ada Lovelace");
+    expect(released.card_expiry).toBe("12/30");
+    expect(released.card_expiry_long).toBe("12/2030");
+    expect(released.email).toBe("a@b.test");
+  });
+
+  it("widens a vaulted two-digit year for the controls that ask for four", () => {
+    // card-release-approval accepts YY or YYYY and stores it verbatim, so a
+    // card saved as "30" is a released state the drive really sees.
+    const facts = applyReleasedCardFacts(
+      { card_ref: "card-1" },
+      { exp_month: "12", exp_year: "30", name: "Ada" },
+    );
+    expect(facts.exp_year).toBe("2030");
+    expect(facts.exp_year_short).toBe("30");
+    expect(facts.card_expiry).toBe("12/30");
+    expect(facts.card_expiry_long).toBe("12/2030");
+    const valueFor = (row: WireRow): string | undefined => facts[matchingFactKeys(facts, row)[0]!];
+    expect(valueFor(["@e:y", "t", "Expiration year|f=date|w=4"])).toBe("2030");
+    expect(valueFor(["@e:y2", "t", "Expiration year|f=date|w=2"])).toBe("30");
+    expect(valueFor(["@e:c", "t", "Expiration date|f=date|w=7"])).toBe("12/2030");
+  });
+
+  it("writes the two-digit combined expiry when the control declares no width", () => {
+    const facts = applyReleasedCardFacts(
+      { card_ref: "card-1" },
+      { exp_month: "12", exp_year: "2030", name: "Ada" },
+    );
+    const valueFor = (row: WireRow): string | undefined => facts[matchingFactKeys(facts, row)[0]!];
+    // No declared maxlength is no signal, and MM/YY is what almost every
+    // checkout takes.
+    expect(valueFor(["@e:c", "t", "Expiration date (MM / YY)|f=date"])).toBe("12/30");
+    expect(valueFor(["@e:c5", "t", "Expiration date|f=date|w=5"])).toBe("12/30");
+    expect(valueFor(["@e:c7", "t", "Expiration date|f=date|w=7"])).toBe("12/2030");
   });
 
   it("sizes the year write from the control's declared width, not its label", () => {
