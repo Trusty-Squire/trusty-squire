@@ -94,13 +94,18 @@ function parseDisplayedNumber(value: string, minorDigits: number): number | null
 }
 
 const cjkLetter = String.raw`\p{sc=Han}\p{sc=Hiragana}\p{sc=Katakana}`;
+/** Several optional tokens sit between the label and the number, so an
+ * unbounded run between each lets the engine distribute one stretch of
+ * whitespace across them — cubic backtracking on a failing tail, synchronous,
+ * over merchant-controlled page text. A bounded gap spans every real layout. */
+const gap = String.raw`\s{0,8}`;
 const checkoutTotalLabel =
   String.raw`(?:\b(?:order\s+total|grand\s+total|total\s+due|amount\s+due|total)\b` +
   String.raw`|(?<![${cjkLetter}])(?:ご注文合計|ご注文金額|お支払い合計|お支払合計|お支払い金額|お支払金額|ご請求金額|ご請求額` +
   String.raw`|税込(?:み)?(?:合計|総額|金額|価格)?|総合計|総計|総額|合計金額|合計|小計|注文合計|注文金額|支払い金額|支払金額|請求金額|請求額)(?![${cjkLetter}]))`;
 const checkoutTotalPattern = new RegExp(
   checkoutTotalLabel +
-    String.raw`(?:\s*[（(]税込み?[）)])?\s*[:：]?\s*(?:(\p{L}{1,4}\p{Sc}?)\s*)?(\p{Sc})?\s*(${checkoutGroupedNumber}|[0-9](?:[0-9.,]*[0-9])?)(?![0-9.,'’])(?:[^\S\r\n]*(\p{L}{1,4}\p{Sc}?|\p{Sc})(?=\s|$|[.,;:!?)（）(。、]))?(?![${cjkLetter}])`,
+    String.raw`(?:${gap}[（(]税込み?[）)])?${gap}[:：]?${gap}(?:(\p{L}{1,4}\p{Sc}?)${gap})?(\p{Sc})?${gap}(${checkoutGroupedNumber}|[0-9](?:[0-9.,]*[0-9])?)(?![0-9.,'’])(?:[^\S\r\n]*(\p{L}{1,4}\p{Sc}?|\p{Sc})(?=\s|$|[.,;:!?)（）(。、]))?(?![${cjkLetter}])`,
   "giu",
 );
 
@@ -175,23 +180,25 @@ function checkoutTextHasFreeShipping(text: string): boolean {
   return /(?:送料|配送料)\s*[:：]?\s*送料無料/u.test(text);
 }
 
-/** Null means the match is not a payable total line at all — a running or
- * tax-exclusive figure, a counted quantity, or a number carrying no currency. */
-function payableTotalCurrency(
-  text: string,
-  match: RegExpMatchArray,
-  factCurrency?: string,
-): string | null {
+/** A labelled line that is not a payable total at all — a tax-exclusive
+ * figure, a counted quantity, or a running subtotal — is passed over. Every
+ * other labelled total answers for the amount the human is shown. */
+function nonPayableTotalLine(text: string, match: RegExpMatchArray): boolean {
   const matchEnd = (match.index ?? 0) + match[0].length;
   const trailingLine = text.slice(matchEnd).split(/\r?\n/u, 1)[0] ?? "";
-  if (
+  return (
+    (match[0].startsWith("小計") && !checkoutTextHasFreeShipping(text)) ||
     CHECKOUT_TAX_EXCLUSIVE_PATTERN.test(match[1] ?? "") ||
     CHECKOUT_TAX_EXCLUSIVE_PATTERN.test(match[4] ?? "") ||
-    CHECKOUT_TAX_EXCLUSIVE_PATTERN.test(trailingLine)
-  ) {
-    return null;
-  }
-  if (isCheckoutCountSuffix(match[4])) return null;
+    CHECKOUT_TAX_EXCLUSIVE_PATTERN.test(trailingLine) ||
+    isCheckoutCountSuffix(match[4])
+  );
+}
+
+/** Null means this IS a payable total whose currency the page never named, so
+ * the caller owes the human an unknown total rather than a running figure from
+ * higher up the summary. */
+function payableTotalCurrency(match: RegExpMatchArray, factCurrency?: string): string | null {
   const prefix = resolveCheckoutCurrencyToken(match[1]);
   const symbol = resolveCheckoutCurrencyToken(match[2]);
   const suffix = resolveCheckoutCurrencyToken(match[4]);
@@ -200,9 +207,8 @@ function payableTotalCurrency(
   return !pageCurrency.unique && factCurrency !== undefined ? factCurrency : pageCurrency.code;
 }
 
-/** Null here means the opposite: this IS the payable total and its number
- * cannot be read, so the caller owes the human an unknown total rather than a
- * running figure from higher up the summary. */
+/** Null here says the same about the number: this IS the payable total and it
+ * cannot be read. */
 function payableTotalCents(displayed: string, currency: string): number | null {
   const minorDigits = currencyMinorDigits(currency);
   const value = displayed.replaceAll(checkoutGroupSeparatorPattern, "");
@@ -225,11 +231,10 @@ export function parseCheckoutAmount(
     let payable: CheckoutAmount | null = null;
     let unreadable = false;
     for (const match of text.matchAll(checkoutTotalPattern)) {
-      if (match[0].startsWith("小計") && !checkoutTextHasFreeShipping(text)) continue;
-      const currency = payableTotalCurrency(text, match, factCurrency);
-      if (currency === null) continue;
-      const cents = payableTotalCents(match[3] ?? "", currency);
-      if (cents === null) {
+      if (nonPayableTotalLine(text, match)) continue;
+      const currency = payableTotalCurrency(match, factCurrency);
+      const cents = currency === null ? null : payableTotalCents(match[3] ?? "", currency);
+      if (currency === null || cents === null) {
         unreadable = true;
         payable = null;
         continue;

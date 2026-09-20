@@ -219,6 +219,21 @@ $76.00 USD`;
     ).toMatchObject({ amount_cents: 7600, currency: "JPY" });
   });
 
+  it("reports a payable total the page never named a currency for as unknown", () => {
+    expect(
+      resolveDriveApprovalAmount(["Item total $68.00\nShipping $8.00\nTotal\n76.00\nUSD"], {}),
+    ).toMatchObject({ amount_cents: 0, note: CHECKOUT_TOTAL_UNREADABLE });
+    expect(
+      resolveDriveApprovalAmount(["Item total $68.00\nShipping $8.00\nOrder total A$76.00"], {}),
+    ).toMatchObject({ amount_cents: 0, note: CHECKOUT_TOTAL_UNREADABLE });
+  });
+
+  it("parses a label followed by a long whitespace run without stalling the process", () => {
+    const started = performance.now();
+    expect(parseCheckoutAmount([`Total${" ".repeat(4000)}x`])).toBeNull();
+    expect(performance.now() - started).toBeLessThan(1_000);
+  });
+
   it("degrades a wedged renderer to an unknown total without cancelling the drive request", async () => {
     vi.useFakeTimers();
     const wedged = wedgedPage();
