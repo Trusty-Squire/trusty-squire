@@ -355,6 +355,9 @@ export function resetDriveGoalMemory(drive: SessionDriveState): void {
   drive.visitedSectionKeys = [];
   drive.seenDestinations = [];
   drive.awaitingDecideAfterExplore = false;
+  drive.lastActBinding = null;
+  drive.submittedThisDrive = false;
+  drive.preexistingRestarted = false;
 }
 
 export function emptyDriveState(goal: string, facts: Record<string, string>): SessionDriveState {
@@ -384,6 +387,9 @@ export function emptyDriveState(goal: string, facts: Record<string, string>): Se
     visitedSectionKeys: [],
     seenDestinations: [],
     awaitingDecideAfterExplore: false,
+    lastActBinding: null,
+    submittedThisDrive: false,
+    preexistingRestarted: false,
   };
 }
 
@@ -985,6 +991,12 @@ export function candidateAimScore(
   ) {
     score -= 80;
   }
+  if (isCreateEntryRow(row) && listedItemRows(input.rows, input.pageUrl ?? "").length > 0) {
+    score -= 50;
+  }
+  if (listedItemRows(input.rows, input.pageUrl ?? "").some((entry) => entry[0] === row[0])) {
+    score += 50;
+  }
   if (isListFilterRow(row) && goalWantsKey(input.goal)) score -= 50;
   if (
     goalWantsKey(input.goal) &&
@@ -1288,7 +1300,92 @@ export function isEligibleSectionNavRow(row: WireRow, pageUrl: string): boolean 
   const label = readableLabel(row);
   if (!isCompactSectionLabel(label)) return false;
   if (SECTION_NAV_NOTICE.test(label.toLowerCase())) return false;
+  if (isCreateEntryRow(row)) return false;
   return true;
+}
+
+export function isCreateEntryRow(row: WireRow): boolean {
+  if (isFillableRow(row) || isConsentRow(row) || isOauthChromeRow(row)) return false;
+  const label = readableLabel(row)
+    .toLowerCase()
+    .replace(/^\+\s*/, "")
+    .trim();
+  return /^(?:add|new|create)(?:\s+(?:an?\s+)?)?(?:app|application|project|workspace|site|instance|team|item)?s?$/.test(
+    label,
+  );
+}
+
+export function listedItemRows(rows: readonly WireRow[], pageUrl: string): WireRow[] {
+  if (!rows.some((row) => isCreateEntryRow(row))) return [];
+  return rows.filter((row) => {
+    if (isCreateEntryRow(row)) return false;
+    if (isFillableRow(row) || isSubmitLikeRow(row) || isConsentRow(row) || isOauthChromeRow(row)) {
+      return false;
+    }
+    if (row[1] !== "l" && row[1] !== "link") return false;
+    if (isOffProductNavRow(row, pageUrl) || isAppRootOrLogoRow(row, pageUrl)) return false;
+    if (isSamePageAnchorRow(row, pageUrl)) return false;
+    if (isAlreadyHereNav(row, pageUrl)) return false;
+    if (SECTION_NAV_SKIP.test(readableLabel(row).toLowerCase())) return false;
+    return true;
+  });
+}
+
+export function isEntityNameRow(row: WireRow): boolean {
+  const label = normalizeKey(readableLabel(row));
+  const field = normalizeKey(fieldNameForRow(row));
+  if (/(?:user|last|first|file|cardholder|full)_?name/.test(label) && !/(?:app|project|workspace|site|team)_name/.test(label)) {
+    return false;
+  }
+  return (
+    label === "name" ||
+    field === "name" ||
+    /(?:app|project|workspace|site|team|application)_name$/.test(label) ||
+    /(?:app|project|workspace|site|team)_name$/.test(field)
+  );
+}
+
+export function isLogoutRow(row: WireRow): boolean {
+  return /log\s*out|sign\s*out|signout|logout/.test(readableLabel(row).toLowerCase());
+}
+
+export function alreadySignedInReason(): string {
+  return "already signed in as another account";
+}
+
+export function decisionTargetBinding(row: WireRow, pageUrl: string): string {
+  const href = rowHref(row);
+  let dest = "";
+  if (href !== undefined && href.length > 0 && !href.startsWith("#")) {
+    try {
+      const target = new URL(href, pageUrl);
+      dest = `${target.origin}${target.pathname}`;
+    } catch {
+      dest = href.split("#")[0] ?? "";
+    }
+  }
+  return [normalizeKey(readableLabel(row)), dest, row[1]].join("\t");
+}
+
+export function rowMatchesDecisionBinding(
+  row: WireRow | undefined,
+  binding: string,
+  pageUrl: string,
+): boolean {
+  if (row === undefined || binding.length === 0) return false;
+  return decisionTargetBinding(row, pageUrl) === binding;
+}
+
+export function isReissuedRef(
+  actionKey: string,
+  live: WireRow | undefined,
+  pageUrl: string,
+  prior: { ref: string; binding: string; url: string } | null | undefined,
+): boolean {
+  if (prior === undefined || prior === null || live === undefined) return false;
+  if (prior.ref !== actionKey) return false;
+  if (pagePathKey(prior.url) === pagePathKey(pageUrl)) return false;
+  return decisionTargetBinding(live, pageUrl) !== prior.binding;
 }
 
 export function sectionIdentity(row: WireRow, pageUrl: string): string {
@@ -1865,6 +1962,15 @@ export function matchingFactKeys(facts: Record<string, string>, row: WireRow): s
   }
   if (label.includes("first") && label.includes("name")) {
     for (const alias of aliasKeysFor("first_name")) wanted.add(alias);
+  }
+  if (isEntityNameRow(row)) {
+    for (const alias of [
+      ...aliasKeysFor("name"),
+      ...aliasKeysFor("company"),
+      ...aliasKeysFor("first_name"),
+    ]) {
+      wanted.add(alias);
+    }
   }
   if (label.includes("search") || normalizeKey(fieldNameForRow(row)).includes("search")) {
     for (const alias of aliasKeysFor("query")) wanted.add(alias);
@@ -2862,6 +2968,7 @@ export function driveTargetSets(
     if (hideFilters && isListFilterRow(row)) return false;
     if (hasInAppNoun && isOffProductNavRow(row, pageUrl)) return false;
     if (isAppRootOrLogoRow(row, pageUrl) || isSamePageAnchorRow(row, pageUrl)) return false;
+    if (isCreateEntryRow(row) && listedItemRows(rows, pageUrl).length > 0) return false;
     return true;
   };
   const aimInput = {
@@ -3206,6 +3313,7 @@ export function inboxSpecialPlan(
   pageUrl: string = "",
   pageText: string = "",
   goal: string = "",
+  submittedThisDrive: boolean = false,
 ): InboxSpecialPlan | undefined {
   if (decisionKind !== "stuck" && decisionKind !== "wait") return undefined;
   const waitingForMail = pageSuggestsInboxWait(rows, pageUrl, pageText);
@@ -3218,10 +3326,10 @@ export function inboxSpecialPlan(
   }
   const otp = rows.find((row) => isOtpRow(row) && isFillableRow(row));
   if (otp !== undefined) return { kind: "otp", target: otp[0] };
-  // A check-email heading or confirm URL is the next act even with no click
-  // in this drive (a resumed session) and even when leftover signup fields
-  // still count as empty.
-  if (waitingForMail) return { kind: "link" };
+  if (waitingForMail) {
+    if (submittedThisDrive || clicked || goalSeeksVerification(goal)) return { kind: "link" };
+    return undefined;
+  }
   if (remainingFillCount > 0) return undefined;
   // Still looking at the signup form with no confirm text: wait for the SPA
   // unless we just submitted and the goal is the verification mail.
@@ -4645,6 +4753,43 @@ async function driveLoop(input: {
     }
     drive.consumedActionKey = decision.actionKey;
 
+    const decidedRow = findRow(rows, decision.actionKey, observation.url);
+    const targetBinding =
+      decidedRow === undefined ? "" : decisionTargetBinding(decidedRow, observation.url);
+    if (session.browser.page !== null) {
+      const liveEpoch = await documentEpochOf(session.browser.page);
+      if (
+        typeof drive.lastDocumentEpoch === "string" &&
+        drive.lastDocumentEpoch.length > 0 &&
+        liveEpoch.length > 0 &&
+        liveEpoch !== drive.lastDocumentEpoch
+      ) {
+        const snap = await snapshotOrTimeout(framesIfNeeded());
+        if (snap !== "ok") return snap;
+      }
+    }
+    const liveRow = findRow(rows, decision.actionKey, observation.url);
+    if (
+      targetBinding.length > 0 &&
+      !rowMatchesDecisionBinding(liveRow, targetBinding, observation.url)
+    ) {
+      drive.staleClickRefs ??= [];
+      if (!drive.staleClickRefs.includes(decision.actionKey)) {
+        drive.staleClickRefs.push(decision.actionKey);
+      }
+      drive.consumedActionKey = null;
+      return "continue";
+    }
+    if (
+      (decision.action.kind === "click" || decision.action.kind === "oauth_login") &&
+      liveRow !== undefined &&
+      isSubmitLikeRow(liveRow) &&
+      outstandingEmptyFill(rows, drive.filledRefs) !== undefined
+    ) {
+      drive.consumedActionKey = null;
+      return "continue";
+    }
+
     if (decision.special === "card") {
       if (api === null) {
         return finish("jev_unavailable", {
@@ -4986,6 +5131,14 @@ async function driveLoop(input: {
         const key = sectionIdentity(clicked, urlBeforeClick);
         if (!drive.visitedSectionKeys.includes(key)) drive.visitedSectionKeys.push(key);
       }
+      if (clicked !== undefined) {
+        drive.lastActBinding = {
+          ref: clicked[0],
+          binding: decisionTargetBinding(clicked, urlBeforeClick),
+          url: urlBeforeClick,
+        };
+        if (isSubmitLikeRow(clicked)) drive.submittedThisDrive = true;
+      }
     }
     drive.trajectory.push({
       action: decision.action.kind,
@@ -5209,6 +5362,42 @@ async function driveLoop(input: {
       drive.filledRefs,
       pageUrl,
     );
+    if (
+      drive.submittedThisDrive !== true &&
+      !goalSeeksVerification(args.goal) &&
+      pageSuggestsInboxWait(
+        rows,
+        pageUrl,
+        pageTextFromObservation(observation, [observation.dom ?? ""]),
+      )
+    ) {
+      if (drive.preexistingRestarted === true || rows.find((row) => isLogoutRow(row)) === undefined) {
+        return finish("stuck", { reason: alreadySignedInReason() });
+      }
+      const logout = rows.find((row) => isLogoutRow(row));
+      if (logout === undefined) {
+        return finish("stuck", { reason: alreadySignedInReason() });
+      }
+      drive.preexistingRestarted = true;
+      drive.boundFingerprint = driveProgressFingerprint(observation, rows, drive, session);
+      drive.consumedActionKey = null;
+      const applied = await applyDecision({
+        kind: "act",
+        action: { kind: "click", target: logout[0] },
+        actionKey: logout[0],
+        confidence: 1,
+      });
+      if (applied !== "continue") return applied;
+      observation = await actSafely(dependencies, sessionId, {
+        kind: "goto",
+        url: session.startUrl,
+      });
+      if (observation.needs_user !== undefined) return finishOnWall(observation.needs_user);
+      const restarted = await snapshotOrTimeout(framesIfNeeded());
+      if (restarted !== "ok") return restarted;
+      steps += 1;
+      continue;
+    }
     let terminalOnly = false;
     // A same-document stage swap (Shopify one-page checkout) and a hydrating
     // checkout both leave the snapshot empty for a while, so spend the
@@ -5440,11 +5629,13 @@ async function driveLoop(input: {
       if (drive.awaitingDecideAfterExplore === true) {
         drive.awaitingDecideAfterExplore = false;
       } else {
-        const nextSection = unvisitedSectionNavRows(
-          rows,
-          drive.visitedSectionKeys ?? [],
-          pageUrl,
-        )[0];
+        const visited = drive.visitedSectionKeys ?? [];
+        const nextEntry = listedItemRows(rows, pageUrl).find(
+          (row) => !visited.includes(sectionIdentity(row, pageUrl)),
+        );
+        const nextSection =
+          nextEntry ??
+          unvisitedSectionNavRows(rows, visited, pageUrl)[0];
         if (nextSection !== undefined) {
           drive.awaitingDecideAfterExplore = true;
           drive.boundFingerprint = driveProgressFingerprint(observation, rows, drive, session);
@@ -5643,6 +5834,7 @@ async function driveLoop(input: {
       observation.url,
       pageTextFromObservation(observation, [observation.dom ?? ""]),
       drive.goal,
+      drive.submittedThisDrive === true,
     );
     if (inboxPlan !== undefined) {
       const lastClick = [...drive.trajectory]

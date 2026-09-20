@@ -985,6 +985,193 @@ describe("operate_drive real-browser fixture", () => {
     }
   }, 30_000);
 
+  it("does not click a reminted ordinal after navigation", async () => {
+    const decoys = Array.from(
+      { length: 5 },
+      (_, i) => `<a id="d${i}" href="#d${i}">Decoy ${i}</a>`,
+    ).join("");
+    const startHtml = `<!doctype html><meta charset="utf-8"><title>Start</title>
+<nav>${decoys}<a id="go" href="/next">Continue</a></nav>`;
+    const nextHtml = `<!doctype html><meta charset="utf-8"><title>Next</title>
+<nav>${decoys}<a id="trap" href="/trap">Create app</a><a id="keys" href="/keys">API Keys</a></nav>`;
+    const trapHtml = `<!doctype html><meta charset="utf-8"><title>Trap</title><p>trapped</p>`;
+    const keysHtml = `<!doctype html><meta charset="utf-8"><title>API Keys</title>
+<main><h1>API Keys</h1><p id="key">sk_live_fixture</p></main>`;
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await page.route("**/*", (route) => {
+      const url = route.request().url();
+      const body = url.includes("/trap")
+        ? trapHtml
+        : url.includes("/keys")
+          ? keysHtml
+          : url.includes("/next")
+            ? nextHtml
+            : startHtml;
+      route.fulfill({ contentType: "text/html", body });
+    });
+    const startUrl = "https://stale-ref.test/start";
+    await page.goto(startUrl);
+    const started = await startHarnessProvisionSession({
+      browser: BrowserController.fromHarnessPage(page),
+      serviceUrl: startUrl,
+      format: "compact",
+      initialObservation: "standard",
+    });
+    let staleRef: string | undefined;
+    try {
+      const dependencies = deps(async (_api, _state, questions) => {
+        const click = questions.CLICK_target;
+        const criteria = click?.type === "choice" ? click.criteria : {};
+        if (staleRef === undefined) {
+          staleRef = Object.keys(criteria).find((key) => /continue/i.test(criteria[key] ?? ""));
+        }
+        const pick = staleRef ?? Object.keys(criteria)[0];
+        const outcome = jevFromQuestions(questions);
+        if (pick !== undefined && outcome.result.answers.CLICK_target !== undefined) {
+          outcome.result.answers.CLICK_target = {
+            choice: pick,
+            confidence: 0.93,
+            probabilities: peaked(Object.keys(criteria), pick),
+          };
+        }
+        return outcome;
+      });
+      await runOperateDrive(
+        { session_id: started.session_id, goal: "extract an API key", max_steps: 8 },
+        api(),
+        undefined,
+        dependencies,
+      );
+      expect(page.url()).not.toMatch(/\/trap/);
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
+  it("opens an existing entry or fills the name before Create", async () => {
+    const listHtml = `<!doctype html><meta charset="utf-8"><title>Apps</title>
+<section>
+  <a id="one" href="/apps/one">payments-api</a>
+  <a id="two" href="/apps/two">billing-api</a>
+  <a id="new" href="/apps/new">+ New app</a>
+</section>`;
+    const entryHtml = `<!doctype html><meta charset="utf-8"><title>App</title>
+<main><h1>API Keys</h1><p id="key">sk_live_fixture</p></main>`;
+    const createHtml = `<!doctype html><meta charset="utf-8"><title>New app</title>
+<main>
+  <label>App name <input id="name" name="name" required></label>
+  <button type="button" id="create" onclick="
+    const name = document.getElementById('name').value;
+    if (!name) { document.getElementById('err').textContent = 'Name is required'; return; }
+    location.href = '/apps/one';
+  ">Create</button>
+  <p id="err"></p>
+</main>`;
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await page.route("**/*", (route) => {
+      const url = route.request().url();
+      const body = url.includes("/apps/new")
+        ? createHtml
+        : url.includes("/apps/")
+          ? entryHtml
+          : listHtml;
+      route.fulfill({ contentType: "text/html", body });
+    });
+    const startUrl = "https://listed-entry.test/apps";
+    await page.goto(startUrl);
+    const started = await startHarnessProvisionSession({
+      browser: BrowserController.fromHarnessPage(page),
+      serviceUrl: startUrl,
+      format: "compact",
+      initialObservation: "standard",
+    });
+    try {
+      const dependencies = deps(async (_api, _state, questions) => jevFromQuestions(questions));
+      await runOperateDrive(
+        {
+          session_id: started.session_id,
+          goal: "extract an API key",
+          facts: { company: "Acme" },
+          max_steps: 8,
+        },
+        api(),
+        undefined,
+        dependencies,
+      );
+      expect(page.url()).toMatch(/\/apps\/(?:one|two)/);
+      if (page.url().includes("/apps/new")) {
+        expect(await page.locator("#name").inputValue()).not.toBe("");
+      }
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
+  it("logs out of a pre-existing verification page or reports already signed in", async () => {
+    const registerHtml = `<!doctype html><meta charset="utf-8"><title>Register</title>
+<main>
+  <label>Email <input id="email" name="email" type="email"></label>
+  <button type="button" id="go">Create account</button>
+</main>`;
+    const verifyHtml = `<!doctype html><meta charset="utf-8"><title>Verify</title>
+<main>
+  <h1>Check your email</h1>
+  <a id="logout" href="/logged-out">Log out</a>
+</main>`;
+    const outHtml = `<!doctype html><meta charset="utf-8"><title>Out</title><p>signed out</p>`;
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    let signedIn = true;
+    await page.route("**/*", (route) => {
+      const url = route.request().url();
+      if (url.includes("/logged-out")) {
+        signedIn = false;
+        route.fulfill({ contentType: "text/html", body: outHtml });
+        return;
+      }
+      if (url.includes("/register") && signedIn) {
+        route.fulfill({ contentType: "text/html", body: verifyHtml });
+        return;
+      }
+      route.fulfill({
+        contentType: "text/html",
+        body: url.includes("/register") ? registerHtml : verifyHtml,
+      });
+    });
+    const startUrl = "https://preexisting-session.test/register";
+    await page.goto(startUrl);
+    const started = await startHarnessProvisionSession({
+      browser: BrowserController.fromHarnessPage(page),
+      serviceUrl: startUrl,
+      format: "compact",
+      initialObservation: "standard",
+    });
+    try {
+      const dependencies = deps(async (_api, _state, questions) => jevFromQuestions(questions));
+      const startedAt = Date.now();
+      const result = await runOperateDrive(
+        { session_id: started.session_id, goal: "sign up and extract an API key", max_steps: 6 },
+        api(),
+        undefined,
+        dependencies,
+      );
+      expect(Date.now() - startedAt).toBeLessThan(20_000);
+      expect(result.trajectory.some((step) => step.action === "inbox")).toBe(false);
+      expect(
+        result.reason?.match(/already signed in/i) ||
+          page.url().includes("/register") ||
+          page.url().includes("/logged-out"),
+      ).toBeTruthy();
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
   it("starts a new goal on the same session without inheriting cycle memory", async () => {
     const html = `<!doctype html><meta charset="utf-8"><title>Settings</title>
 <nav><a id="settings" href="/settings">Settings</a></nav>
