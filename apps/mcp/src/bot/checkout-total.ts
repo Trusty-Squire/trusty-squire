@@ -147,9 +147,9 @@ function resolveCheckoutCurrencyToken(token: string | undefined): PageCurrency |
     : { code: symbolCode, unique: !AMBIGUOUS_CURRENCY_SYMBOLS.has(symbolKey) };
 }
 
-/** A currency fact that disagrees with the fractional scale the page displays
+/** A currency whose minor digits disagree with the fraction the page displays
  * would rescale the number, so the total is unreadable rather than rewritten. */
-function factCurrencyScaleMismatches(raw: string, minorDigits: number): boolean {
+function displayedScaleMismatches(raw: string, minorDigits: number): boolean {
   const value = raw.replace(/\s/g, "");
   const comma = value.lastIndexOf(",");
   const dot = value.lastIndexOf(".");
@@ -184,10 +184,10 @@ function parseCheckoutAmountMatch(
   const suffix = resolveCheckoutCurrencyToken(match[4]);
   const pageCurrency = prefix ?? suffix ?? symbol;
   if (pageCurrency === undefined) return null;
-  const overridden = !pageCurrency.unique && factCurrency !== undefined;
-  const currency = overridden ? factCurrency : pageCurrency.code;
+  const currency =
+    !pageCurrency.unique && factCurrency !== undefined ? factCurrency : pageCurrency.code;
   const minorDigits = currencyMinorDigits(currency);
-  if (overridden && factCurrencyScaleMismatches(match[3] ?? "", minorDigits)) return null;
+  if (displayedScaleMismatches(match[3] ?? "", minorDigits)) return null;
   const amount = parseDisplayedNumber(match[3] ?? "", minorDigits);
   if (amount === null) return null;
   const scale = 10 ** minorDigits;

@@ -123,6 +123,25 @@ $76.00 USD`;
     });
   });
 
+  it("refuses a page currency whose scale disagrees with the fraction shown", () => {
+    expect(resolveDriveApprovalAmount(["Total ¥76.00"], {})).toMatchObject({
+      amount_cents: 0,
+      note: CHECKOUT_TOTAL_UNREADABLE,
+    });
+    expect(resolveDriveApprovalAmount(["Total ¥1,234.56"], {})).toMatchObject({
+      amount_cents: 0,
+      note: CHECKOUT_TOTAL_UNREADABLE,
+    });
+    expect(resolveDriveApprovalAmount(["Total ¥7,600"], {})).toMatchObject({
+      amount_cents: 7600,
+      currency: "JPY",
+    });
+    expect(resolveDriveApprovalAmount(["Total ¥76.00"], { currency: "CNY" })).toMatchObject({
+      amount_cents: 7600,
+      currency: "CNY",
+    });
+  });
+
   it("degrades a wedged renderer to an unknown total without cancelling the drive request", async () => {
     vi.useFakeTimers();
     const wedged = wedgedPage();
