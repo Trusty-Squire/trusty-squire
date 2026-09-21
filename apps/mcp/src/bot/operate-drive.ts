@@ -4917,18 +4917,33 @@ async function snapshotDriveSession(
     snapshotWallMs: wallMs,
     timedOut,
   });
+  // A fallback return still has to leave the epoch describing the document the
+  // loop just accounted for. Left pointing at the previous one it reads as
+  // "changed" on every later step, and the pre-act bound then ends the drive
+  // over an act it never dispatched.
+  const fellBack = async (
+    observation: Observation,
+    rows: WireRow[],
+    scriptMs = 0,
+    wallMs = Date.now() - started,
+    timedOut = false,
+  ): Promise<ReturnType<typeof timed>> => {
+    const live = session.browser.page;
+    if (live !== null) drive.lastDocumentEpoch = await documentEpochOf(live);
+    return timed(observation, rows, scriptMs, wallMs, timedOut);
+  };
   if (deps.snapshot !== undefined) {
     const observation = await deps.snapshot(sessionId, maskedRefsOf(drive));
     const compactRows = mergeCompactTable([], observation);
     const finalized = await finalizeSnapshotOutputs(session, sessionId, observation, compactRows);
-    return timed(finalized.observation, finalized.rows);
+    return await fellBack(finalized.observation, finalized.rows);
   }
   const page = session.browser.page;
   if (page === null) {
     const observation = await deps.observe(sessionId, "compact");
     const compactRows = mergeCompactTable([], observation);
     const finalized = await finalizeSnapshotOutputs(session, sessionId, observation, compactRows);
-    return timed(finalized.observation, finalized.rows);
+    return await fellBack(finalized.observation, finalized.rows);
   }
   ensureFrameCacheInvalidation(session);
   const omit = maskedRefsOf(drive);
@@ -4938,7 +4953,7 @@ async function snapshotDriveSession(
     const observation = await deps.observe(sessionId, "compact");
     const compactRows = mergeCompactTable([], observation);
     const finalized = await finalizeSnapshotOutputs(session, sessionId, observation, compactRows);
-    return timed(finalized.observation, finalized.rows);
+    return await fellBack(finalized.observation, finalized.rows);
   }
   if (main.timedOut === true) {
     const finalized = await finalizeSnapshotOutputs(
@@ -4947,7 +4962,7 @@ async function snapshotDriveSession(
       snapshotToObservation(main, sessionId, []),
       [],
     );
-    return timed(finalized.observation, finalized.rows, 0, main.wallMs, true);
+    return await fellBack(finalized.observation, finalized.rows, 0, main.wallMs, true);
   }
   const parts: DriveSnapshot[] = [main];
   if (needFrames) {

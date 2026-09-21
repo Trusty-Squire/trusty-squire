@@ -4515,57 +4515,57 @@ describe("drive review regressions", () => {
     30_000,
   );
 
-  it.each(["detached", "timeout"])(
-    "does not type when reselection is %s",
-    async (failure) => {
-      const { context, page, started } = await openFixture(
-        '<label>Email <input id="email" value="original"></label><input id="other">',
-        "reselect.test",
+  it("does not type when the target is gone at act time", async () => {
+    const { context, page, started } = await openFixture(
+      '<label>Email <input id="email" value="original"></label><input id="other">',
+      "reselect.test",
+    );
+    try {
+      const snapshot = await captureFrameSnapshot(page, [], 0);
+      const target = snapshot!.elements.find((element) => element.label.includes("Email"))!;
+      await page.evaluate(() => document.querySelector("#email")?.remove());
+      const result = await actThroughShared(
+        started.session_id,
+        { kind: "type", target: target.ref, text: "new value" },
+        snapshot,
       );
+      expect(result.kind).toBe("stale");
+      expect(await page.locator("#other").inputValue()).toBe("");
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
+  it("does not type when the in-page identity read times out", async () => {
+    const { context, page, started } = await openFixture(
+      '<label>Email <input id="email" value="original"></label><input id="other">',
+      "reselect-timeout.test",
+    );
+    try {
+      const snapshot = await captureFrameSnapshot(page, [], 0);
+      const target = snapshot!.elements.find((element) => element.label.includes("Email"))!;
+      const frame = page.mainFrame();
+      const spy = vi
+        .spyOn(frame, "evaluate")
+        .mockRejectedValueOnce(new DriveEvaluateTimeout(1) as never);
       try {
-        const snapshot = await captureFrameSnapshot(page, [], 0);
-        const target = snapshot!.elements.find((element) => element.label.includes("Email"))!;
-        const frame = page.mainFrame();
-        const original = frame.evaluate.bind(frame);
-        const spy =
-          failure === "timeout"
-            ? vi
-                .spyOn(frame, "evaluate")
-                .mockImplementationOnce(original)
-                .mockRejectedValueOnce(new DriveEvaluateTimeout(1))
-            : undefined;
-        if (failure === "detached") {
-          await page.locator("#email").evaluate((element) =>
-            element.addEventListener("click", () => {
-              element.remove();
-              document.querySelector<HTMLInputElement>("#other")!.focus();
-            }),
-          );
-        }
-        try {
-          const result = await actThroughShared(
-            started.session_id,
-            {
-              kind: "type",
-              target: target.ref,
-              text: "new value",
-            },
-            snapshot,
-          );
-          expect(result.kind).toBe("stale");
-          expect(await page.locator("#other").inputValue()).toBe("");
-          if (failure === "timeout")
-            expect(await page.locator("#email").inputValue()).toBe("original");
-        } finally {
-          spy?.mockRestore();
-        }
+        const result = await actThroughShared(
+          started.session_id,
+          { kind: "type", target: target.ref, text: "new value" },
+          snapshot,
+        );
+        expect(result.kind).toBe("stale");
       } finally {
-        await finishProvisionSession(started.session_id);
-        await context.close();
+        spy.mockRestore();
       }
-    },
-    30_000,
-  );
+      expect(await page.locator("#other").inputValue()).toBe("");
+      expect(await page.locator("#email").inputValue()).toBe("original");
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
 });
 
 describe("operate_drive feedback loop", () => {

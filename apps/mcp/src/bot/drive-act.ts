@@ -301,6 +301,56 @@ export async function clickCrossOriginFrameTarget(
   }
 }
 
+// The drive's own select: the option is resolved and committed in the page, and
+// a target that is not a real <select> is refused in milliseconds instead of
+// falling into the tools' combobox machinery (label resolution, a 10s
+// waitForSelector, and clicks on an option row the drive never planned).
+function inPageSelectOption(input: {
+  selector: string;
+  text: string;
+}): "ok" | "not_select" | "option_missing" | "missing" {
+  const element = document.querySelector(input.selector);
+  if (element === null || !element.isConnected) return "missing";
+  if (!(element instanceof HTMLSelectElement)) return "not_select";
+  const wanted = input.text;
+  const wantedLower = wanted.toLowerCase();
+  const options = Array.from(element.options);
+  // Match exactly first — by value, label, or trimmed visible text, then
+  // case-insensitively — before falling back to a partial substring. A
+  // substring "V" must not select "Visa" when the page offers an exact
+  // option named "V"; two-pass ordering keeps exact matches authoritative.
+  const match =
+    options.find(
+      (option) =>
+        option.value === wanted ||
+        option.label === wanted ||
+        (option.textContent ?? "").trim() === wanted,
+    ) ??
+    options.find(
+      (option) =>
+        option.value.toLowerCase() === wantedLower ||
+        option.label.toLowerCase() === wantedLower ||
+        (option.textContent ?? "").trim().toLowerCase() === wantedLower,
+    ) ??
+    options.find((option) =>
+      (option.textContent ?? "").trim().toLowerCase().includes(wantedLower),
+    );
+  if (match === undefined) return "option_missing";
+  element.value = match.value;
+  element.dispatchEvent(new Event("input", { bubbles: true }));
+  element.dispatchEvent(new Event("change", { bubbles: true }));
+  return "ok";
+}
+
+export async function selectDriveOption(
+  scope: Page | Frame,
+  selector: string,
+  text: string,
+): Promise<{ outcome: "ok" | "not_select" | "option_missing" | "missing"; committed: string }> {
+  const outcome = await evaluateBound(scope, inPageSelectOption, { selector, text });
+  return { outcome, committed: outcome === "ok" ? text : "" };
+}
+
 export async function reenterDriveField(
   scope: Page | Frame,
   selector: string,

@@ -99,6 +99,7 @@ import { evaluateBound } from "../drive-evaluate.js";
 import {
   clickCrossOriginFrameTarget,
   commitDriveListOption,
+  selectDriveOption,
   overlayOptionLabels,
   waitForOpenedOverlay,
   waitForOverlayOptionsToChange,
@@ -925,11 +926,15 @@ async function executeAct(
             true,
           )
         ).el;
-        const committedText = await browser.select(
-          actDriverTarget(el),
-          action.text,
-          compactV2ActionPage,
-        );
+        const driveSelectPage = compactV2ActionPage ?? browser.page;
+        const committedText =
+          options?.drive === true && driveSelectPage !== null && driveSelectPage !== undefined
+            ? await selectDriveOptionOrRefuse(
+                scopeForElement(driveSelectPage, el),
+                el.selector,
+                action.text ?? "",
+              )
+            : await browser.select(actDriverTarget(el), action.text, compactV2ActionPage);
         session.committedSelectValues.set(
           compactV2CommittedSelectKey(session, el.selector),
           compactV2CommittedSelectValue(session, committedText),
@@ -1314,6 +1319,17 @@ async function executeAct(
   };
 }
 
+async function selectDriveOptionOrRefuse(
+  scope: Page | Frame,
+  selector: string,
+  text: string,
+): Promise<string> {
+  const { outcome, committed } = await selectDriveOption(scope, selector, text);
+  if (outcome === "ok") return committed;
+  if (outcome === "missing") throw new CompactV2StaleRefError("stale_ref");
+  throw new CompactV2ActionFailureError(outcome);
+}
+
 async function guardDriveOauthTarget(
   sessionId: string,
   target: string,
@@ -1381,7 +1397,7 @@ export async function dispatchDriveAct(
     // drive must not blame the ref and retire it. A ref that went stale before
     // the select was ever attempted stays stale.
     if (action.kind === "select" && !/stale_ref|reobserve_required/i.test(message)) {
-      return { kind: "stale", reason: "option_missing" };
+      return { kind: "stale", reason: message === "not_select" ? "not_select" : "option_missing" };
     }
     return {
       kind: "stale",
