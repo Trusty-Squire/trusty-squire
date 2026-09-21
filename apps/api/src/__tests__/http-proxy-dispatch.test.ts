@@ -237,6 +237,37 @@ describe("HttpProxyExecutor.executeStream", () => {
     }
   });
 
+  it("returns an empty body for a bodyless response that still advertises gzip", async () => {
+    // A CDN answers a conditional GET with 304 + content-encoding: gzip and no
+    // bytes. Handing that empty stream to a decompressor fails with zlib's
+    // "unexpected end of file"; there is nothing to decode.
+    const server = createServer((_req, res) => {
+      res.writeHead(304, { "content-type": "application/json", "content-encoding": "gzip" });
+      res.end();
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const addr = server.address();
+    const port = typeof addr === "object" && addr !== null ? addr.port : 0;
+    const proxy = new HttpProxyExecutor({ blockPrivate: false, allowInsecureHttp: true });
+    const http = { method: "GET", url: `http://127.0.0.1:${port}/cached`, headers: {} };
+    try {
+      const buffered = await proxy.execute({ accountId: "acct-test", http, fields: {} });
+      expect(buffered.status).toBe(304);
+      expect(buffered.body).toBe("");
+
+      const streamed = await proxy.executeStream({ accountId: "acct-test", http, fields: {} });
+      expect(streamed.status).toBe(304);
+      const chunks: Buffer[] = [];
+      for await (const chunk of streamed.body) {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
+      }
+      expect(Buffer.concat(chunks).toString("utf8")).toBe("");
+      await expect(streamed.bytesOut).resolves.toBe(0);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
   it("still stops a compressed body that expands past the decompression ceiling", async () => {
     // ~1MB of zeros compresses to a couple of KB — the classic bomb shape.
     const bomb = gzipSync(Buffer.alloc(1024 * 1024, 0x61));

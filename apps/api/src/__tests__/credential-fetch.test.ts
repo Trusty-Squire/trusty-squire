@@ -20,6 +20,7 @@ import {
 } from "../services/vouch-mandate.js";
 import { buildServer } from "../server.js";
 import { HttpProxyExecutor } from "../services/http-proxy.js";
+import { streamOf } from "./dispatch-fixture.js";
 
 const SESSION_SECRET = "credential-fetch-test-session-secret";
 const AUDIENCE = "credential-fetch-test-customer";
@@ -983,7 +984,7 @@ describe("the never-exposed paths are unchanged by fetch_credential", () => {
           return {
             status: 200,
             headers: { "content-type": "application/json" },
-            body: JSON.stringify({ ok: true }),
+            bodyStream: streamOf(JSON.stringify({ ok: true })),
             truncated: false,
           };
         },

@@ -19,6 +19,7 @@ import {
   type EgressGrant,
   type EgressGrantStore,
 } from "../services/egress-grant.js";
+import { streamOf } from "./dispatch-fixture.js";
 
 const SESSION_SECRET = "dev-test-secret-do-not-use-anywhere-else";
 
@@ -43,7 +44,7 @@ function fakeExecutor(): HttpProxyExecutor {
       return {
         status: 200,
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ ok: true }),
+        bodyStream: streamOf(JSON.stringify({ ok: true })),
         truncated: false,
       };
     },
@@ -832,7 +833,7 @@ describe("Egress Grants — /v1/egress", () => {
         return {
           status: 200,
           headers: { "content-type": "text/event-stream", "x-request-id": "up-1" },
-          body: "data: hello\n\n",
+          bodyStream: streamOf("data: hello\n\n"),
           truncated: false,
         };
       },
@@ -863,7 +864,7 @@ describe("Egress Grants — /v1/egress", () => {
       dispatch: async () => ({
         status: 200,
         headers: { "content-type": "application/json", "set-cookie": "session=secret" },
-        body: '{"ok":true}',
+        bodyStream: streamOf('{"ok":true}'),
         truncated: false,
       }),
     });
@@ -893,7 +894,6 @@ describe("Egress Grants — /v1/egress", () => {
       dispatch: async () => ({
         status: 200,
         headers: { "content-type": "text/event-stream" },
-        body: "",
         truncated: false,
         bodyStream: upstream,
       }),

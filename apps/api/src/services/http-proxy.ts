@@ -24,7 +24,8 @@ import { lookup as dnsLookup } from "node:dns";
 import { request as httpsRequest } from "node:https";
 import { request as httpRequest } from "node:http";
 import { isIP } from "node:net";
-import { PassThrough, Readable, Transform, pipeline } from "node:stream";
+import { PassThrough, Transform, pipeline } from "node:stream";
+import type { Readable } from "node:stream";
 import {
   createBrotliDecompress,
   createGunzip,
@@ -292,11 +293,10 @@ export interface DispatchInput {
 export interface DispatchResult {
   status: number;
   headers: Record<string, string | string[]>;
-  body: string;
   truncated: boolean;
-  // Present when the real dispatcher (or a streaming test fake) is handing
-  // the upstream body through instead of buffering it. `body` is then "".
-  bodyStream?: Readable;
+  // The live upstream body. A dispatcher resolves as soon as headers arrive,
+  // so every response — buffered or streamed — is read from here.
+  bodyStream: Readable;
 }
 
 export interface HttpProxyExecutorOptions {
@@ -341,19 +341,19 @@ export class HttpProxyExecutor {
     // scanned or substituted. use_credential leaves this unset.
     bodyVerbatim?: boolean;
   }): Promise<ProxyResult> {
-    const dispatched = await this.dispatch(await this.buildDispatchInput(input));
-    if (dispatched.bodyStream !== undefined) {
-      try {
-        const headers = this.sanitiseHeaders(dispatched.headers);
-        const piped = this.pipeBody(dispatched.bodyStream, headers, this.maxResponseBytes);
-        const body = await readBodyStream(piped.body);
-        return { status: dispatched.status, headers, body, truncated: dispatched.truncated };
-      } catch (err) {
-        dispatched.bodyStream.destroy();
-        throw err;
-      }
+    const dispatchInput = await this.buildDispatchInput(input);
+    const dispatched = await this.dispatch(dispatchInput);
+    try {
+      const headers = this.sanitiseHeaders(dispatched.headers);
+      const piped = this.pipeBody(dispatched.bodyStream, headers, this.maxResponseBytes, {
+        canHaveBody: responseCanHaveBody(dispatchInput.method, dispatched),
+      });
+      const body = await readBodyStream(piped.body);
+      return { status: dispatched.status, headers, body, truncated: dispatched.truncated };
+    } catch (err) {
+      dispatched.bodyStream.destroy();
+      throw err;
     }
-    return this.sanitiseResponse(dispatched);
   }
 
   // Resolves as soon as upstream headers arrive so a caller can start
@@ -368,11 +368,13 @@ export class HttpProxyExecutor {
     fields: Record<string, string>;
     bodyVerbatim?: boolean;
   }): Promise<StreamedProxyResult> {
-    const dispatched = await this.dispatch(await this.buildDispatchInput(input));
-    const source = dispatched.bodyStream ?? Readable.from([dispatched.body]);
+    const dispatchInput = await this.buildDispatchInput(input);
+    const dispatched = await this.dispatch(dispatchInput);
     try {
       const headers = this.headersForStream(dispatched.headers);
-      const piped = this.pipeBody(source, headers, Number.POSITIVE_INFINITY);
+      const piped = this.pipeBody(dispatched.bodyStream, headers, Number.POSITIVE_INFINITY, {
+        canHaveBody: responseCanHaveBody(dispatchInput.method, dispatched),
+      });
       return {
         status: dispatched.status,
         headers,
@@ -381,7 +383,7 @@ export class HttpProxyExecutor {
         bytesOut: piped.bytesOut,
       };
     } catch (err) {
-      source.destroy();
+      dispatched.bodyStream.destroy();
       throw err;
     }
   }
@@ -458,15 +460,6 @@ export class HttpProxyExecutor {
     return resolved;
   }
 
-  private sanitiseResponse(d: DispatchResult): ProxyResult {
-    return {
-      status: d.status,
-      headers: this.sanitiseHeaders(d.headers),
-      body: d.body,
-      truncated: d.truncated,
-    };
-  }
-
   private sanitiseHeaders(raw: Record<string, string | string[]>): Record<string, string> {
     const headers: Record<string, string> = {};
     let contentType = "";
@@ -492,10 +485,12 @@ export class HttpProxyExecutor {
     source: Readable,
     headers: Record<string, string>,
     maxBytes: number,
+    opts: { canHaveBody: boolean },
   ): PipedResponseBody {
     return pipeResponseBody(source, headers, {
       maxBytes,
       maxDecompressedBytes: this.maxDecompressedBytes,
+      canHaveBody: opts.canHaveBody,
     });
   }
 
@@ -553,7 +548,6 @@ function defaultDispatch(input: DispatchInput): Promise<DispatchResult> {
         resolve({
           status: res.statusCode ?? 0,
           headers: { ...res.headers } as Record<string, string | string[]>,
-          body: "",
           truncated: false,
           bodyStream: res,
         });
@@ -577,6 +571,20 @@ function decoderForEncoding(enc: string): Transform | undefined {
   return undefined;
 }
 
+// 204/304, an informational status, and any response to HEAD carry no body by
+// definition, and a declared zero length says the same. Handing an empty byte
+// stream to a decompressor makes zlib fail with "unexpected end of file".
+function responseCanHaveBody(
+  method: string,
+  dispatched: Pick<DispatchResult, "status" | "headers">,
+): boolean {
+  if (method.toUpperCase() === "HEAD") return false;
+  const { status } = dispatched;
+  if (status === 204 || status === 304 || (status >= 100 && status < 200)) return false;
+  const declared = dispatched.headers["content-length"];
+  return (Array.isArray(declared) ? declared[0] : declared) !== "0";
+}
+
 interface PipedResponseBody {
   body: Readable;
   bytesOut: Promise<number>;
@@ -590,10 +598,13 @@ interface PipedResponseBody {
 function pipeResponseBody(
   source: Readable,
   headers: Record<string, string>,
-  limits: { maxBytes: number; maxDecompressedBytes: number },
+  limits: { maxBytes: number; maxDecompressedBytes: number; canHaveBody: boolean },
 ): PipedResponseBody {
   const enc = (headers["content-encoding"] ?? "").trim().toLowerCase();
-  const decoder = enc !== "" && enc !== "identity" ? decoderForEncoding(enc) : undefined;
+  const decoder =
+    limits.canHaveBody && enc !== "" && enc !== "identity"
+      ? decoderForEncoding(enc)
+      : undefined;
   if (decoder !== undefined) {
     // Body will be plaintext; these headers no longer describe it.
     delete headers["content-encoding"];
