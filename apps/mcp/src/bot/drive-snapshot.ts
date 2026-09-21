@@ -3,6 +3,7 @@
 // node registry keyed by our refs. Used only inside operate_drive.
 
 import type { Frame, Page } from "playwright";
+import { frameOriginOf } from "./browser-use-capture.js";
 import { DriveEvaluateTimeout, evaluateBound } from "./drive-evaluate.js";
 import type { Observation } from "./provision-session.js";
 
@@ -37,6 +38,10 @@ export interface DriveSnapshotElement {
   name?: string;
   /** The input `type` (`email`, `text`, …), when the node is an input. */
   inputType?: string;
+  /** Live CSS/Playwright selector for the node, used to re-resolve identity. */
+  selector?: string;
+  frameUrl?: string;
+  frameOrigin?: string;
   /** Resolved href for a link, used to prefer in-app paths over docs. */
   href?: string;
   pattern?: string;
@@ -445,6 +450,51 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
     }
     return null;
   };
+  const selectorFor = (node: Element): string => {
+    const tag = node.tagName.toLowerCase();
+    const testId =
+      node.getAttribute("data-testid") ??
+      node.getAttribute("data-test-id") ??
+      node.getAttribute("data-test") ??
+      node.getAttribute("data-cy") ??
+      node.getAttribute("data-qa");
+    const id = node.getAttribute("id");
+    const name = node.getAttribute("name");
+    if (testId !== null && testId.length > 0) {
+      const attr = node.hasAttribute("data-testid")
+        ? "data-testid"
+        : node.hasAttribute("data-test-id")
+          ? "data-test-id"
+          : node.hasAttribute("data-test")
+            ? "data-test"
+            : node.hasAttribute("data-cy")
+              ? "data-cy"
+              : "data-qa";
+      return `[${attr}="${CSS.escape(testId)}"]`;
+    }
+    if (id !== null && /^[A-Za-z][\w-]*$/.test(id)) return `#${id}`;
+    if (name !== null && name.length > 0) {
+      return `${tag}[name="${name.replace(/"/g, '\\"')}"]`;
+    }
+    const parts: string[] = [];
+    let walk: Element | null = node;
+    for (let depth = 0; depth < 4 && walk !== null; depth += 1) {
+      const cur: Element = walk;
+      const t = cur.tagName.toLowerCase();
+      const parent: Element | null = cur.parentElement;
+      if (parent === null) {
+        parts.unshift(t);
+        break;
+      }
+      const sibs = Array.from(parent.children).filter(
+        (child): child is Element => child.tagName === cur.tagName,
+      );
+      const idx = sibs.indexOf(cur) + 1;
+      parts.unshift(sibs.length > 1 ? `${t}:nth-of-type(${idx})` : t);
+      walk = parent;
+    }
+    return parts.join(" > ");
+  };
   const formIds = new WeakMap<Element, number>();
   let nextForm = 1;
   const formIdOf = (element: Element): number | undefined => {
@@ -603,6 +653,7 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
       label,
       operations,
       frameOrdinal,
+      selector: selectorFor(element),
       ...(value === undefined ? {} : { value }),
       ...(checked === undefined ? {} : { checked }),
       ...(selected === undefined ? {} : { selected }),
@@ -818,7 +869,17 @@ export async function captureFrameSnapshot(
     });
     const wallMs = Date.now() - wallStarted;
     if (raw === null) return null;
-    return { ...raw, wallMs };
+    const frameUrl = target.url();
+    const frameOrigin = frameOriginOf(target);
+    return {
+      ...raw,
+      wallMs,
+      elements: raw.elements.map((element) => ({
+        ...element,
+        frameUrl,
+        frameOrigin,
+      })),
+    };
   } catch (error) {
     if (!(error instanceof DriveEvaluateTimeout)) return null;
     return {

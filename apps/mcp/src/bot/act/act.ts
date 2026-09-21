@@ -88,6 +88,26 @@ import {
 // Type-only cycle back to the facade is fine; no runtime import.
 import type { Observation, ProvisionAction } from "../provision-session.js";
 import type { Session } from "../session/model.js";
+import { resolveControlIdentity, resolveLiveControlIdentity, sessionActIdentities } from "./identity.js";
+
+export type ActObserveAfter = "full" | "none";
+
+export type ActExecutorOptions = {
+  observeAfter?: ActObserveAfter;
+};
+
+export type DriveActTimings = {
+  guardScriptMs: number;
+  guardWallMs: number;
+  cdpMs: number;
+};
+
+export type DriveActResult =
+  | ({ kind: "ok"; combobox: boolean; searchSubmit: boolean } & DriveActTimings)
+  | ({ kind: "stale"; reason: string } & DriveActTimings)
+  | { kind: "unsupported" };
+
+const ZERO_ACT_TIMINGS: DriveActTimings = { guardScriptMs: 0, guardWallMs: 0, cdpMs: 0 };
 
 async function withOAuthActionBoundary(
   session: Session,
@@ -291,6 +311,9 @@ export interface InternalActResult {
   outcome: {
     selectedOption?: string;
   };
+  staleReason?: string;
+  combobox?: boolean;
+  searchSubmit?: boolean;
 }
 
 // Fix C: the honest, non-throwing "still waiting on a human" outcome for an
@@ -366,6 +389,7 @@ export async function actInternally(
   detail: ObserveDetail = "compact",
   compactV2Authorization?: CompactV2TargetAuthorization,
   operationPage?: Page,
+  options?: ActExecutorOptions,
 ): Promise<InternalActResult> {
   const session = sessionForCall(sessionId);
   const capturedOperationPage =
@@ -384,6 +408,10 @@ export async function actInternally(
           deadline,
           capturedOperationPage,
           false,
+          undefined,
+          "full",
+          true,
+          options?.observeAfter ?? "full",
         );
       return (action.kind === "click" ||
         action.kind === "js_click" ||
@@ -539,6 +567,23 @@ function actDriverTarget(el: InteractiveElement): DriverTarget {
   return { kind: "selector", selector: el.selector };
 }
 
+function driveActionFacts(el: InteractiveElement): { combobox: boolean; searchSubmit: boolean } {
+  const role = (el.role ?? "").toLowerCase();
+  const type = (el.type ?? "").toLowerCase();
+  const hay = `${el.ariaLabel ?? ""} ${el.placeholder ?? ""} ${el.name ?? ""}`;
+  return {
+    combobox:
+      role === "combobox" ||
+      role === "searchbox" ||
+      type === "search" ||
+      type === "date" ||
+      type === "datetime-local" ||
+      type === "month",
+    searchSubmit:
+      role === "searchbox" || type === "search" || el.name === "q" || /search/i.test(hay),
+  };
+}
+
 // Re-resolve against FRESH elements — never trust a stale index. Shared by the
 // type_secret / select / click-group ref paths; `internalLabel`/`noMatchPrefix`
 // keep each caller's error wording, `withVisibleCandidates` its candidate list.
@@ -554,6 +599,29 @@ async function resolveFreshActTarget(
   actionTarget: string,
   withVisibleCandidates: boolean,
 ): Promise<{ el: InteractiveElement; fresh: InteractiveElement[] }> {
+  const driveIdentity = sessionActIdentities(session)?.get(resolutionTarget);
+  const livePage = compactV2ActionPage ?? browser.page;
+  if (driveIdentity !== undefined && livePage !== null) {
+    const live = await resolveLiveControlIdentity(livePage, driveIdentity);
+    if (live.kind === "match") return { el: live.el, fresh: session.lastElements };
+    if (live.kind === "missing") {
+      const extracted = (await browser.extractBrowserUseObservation(compactV2ActionPage)).elements;
+      retainSessionElements(session, extracted);
+      const matched = resolveControlIdentity(
+        extracted,
+        driveIdentity,
+        compactV2ActionPage?.url() ?? browser.currentUrl(),
+      );
+      if (matched !== null) return { el: matched, fresh: extracted };
+    }
+    if (session.compactV2Active) {
+      if (!internalAccess) throwCompactV2StaleRef();
+      throw new CompactV2StaleRefError("stale_ref");
+    }
+    const stale = staleTargetError(session, actionTarget, session.lastElements);
+    if (stale !== null) throw stale;
+    throw new CompactV2StaleRefError("stale_ref");
+  }
   const fresh = (await browser.extractBrowserUseObservation(compactV2ActionPage)).elements;
   retainSessionElements(session, fresh);
   // resolveTarget recomputes identities (incl. volatile positional-group
@@ -593,6 +661,7 @@ async function executeAct(
   onScreenshotDispatched?: () => void,
   outputFormat: "compact" | "full" = "full",
   compactMapEmitted = true,
+  observeAfter: ActObserveAfter = "full",
 ): Promise<InternalActResult> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
@@ -600,8 +669,10 @@ async function executeAct(
   const compactV2ActionPage = operationPage ?? operationPageForSession(session);
   const driveSettle =
     session.drive !== null && action.kind !== "oauth_login" && action.kind !== "oauth_click";
+  const skipToolSettle = observeAfter === "none";
   let settleMs = 0;
   const settle = async (combobox = false) => {
+    if (skipToolSettle) return;
     const started = Date.now();
     await settleAfterStateChange(browser, compactV2ActionPage, {
       drive: driveSettle,
@@ -610,6 +681,8 @@ async function executeAct(
     settleMs += Date.now() - started;
   };
   const actStarted = Date.now();
+  let actedCombobox = false;
+  let actedSearchSubmit = false;
   let actionPageAfter = compactV2ActionPage;
   let completedAction: ProvisionAction = action;
   let resolutionTarget: string | undefined;
@@ -910,6 +983,12 @@ async function executeAct(
           action.target,
           true,
         );
+        const facts = driveActionFacts(el);
+        const storedIdentity = (session.drive?.identities ?? session.actIdentities)?.get(
+          resolutionTarget!,
+        );
+        actedCombobox = facts.combobox || storedIdentity?.picker === true;
+        actedSearchSubmit = facts.searchSubmit;
         // Preserve frame identity (origin + path) for the frame-scoped fill.
         if (action.kind === "click" || action.kind === "js_click") {
           actionPageAfter =
@@ -919,7 +998,19 @@ async function executeAct(
         } else if (action.kind === "type") {
           clearCommittedSelectValue(session, el.selector);
           const actTarget = actDriverTarget(el);
-          await actType(actTarget, typedText!, false);
+          if (observeAfter === "none" && actedCombobox && compactV2ActionPage !== undefined) {
+            await actClick({ ...actTarget, method: "click" });
+            await settleAfterDriveAction(compactV2ActionPage, true);
+            await compactV2ActionPage.keyboard.insertText(typedText ?? "");
+            if (actedSearchSubmit) {
+              await compactV2ActionPage.keyboard.press("Enter").catch(() => undefined);
+            }
+          } else {
+            await actType(actTarget, typedText!, false);
+            if (observeAfter === "none" && actedSearchSubmit && compactV2ActionPage !== undefined) {
+              await compactV2ActionPage.keyboard.press("Enter").catch(() => undefined);
+            }
+          }
           // #635 fix (not a gate on typing): Shopify only enables delivery-rate
           // selection after the required address line is committed by
           // blur/change, not merely after the raw keystrokes land.
@@ -1035,7 +1126,7 @@ async function executeAct(
   const observation =
     terminalOAuthCompletionUrl !== null
       ? terminalOAuthCompletionObservation(session, terminalOAuthCompletionUrl)
-      : detail === "none" && action.kind !== "oauth_login"
+      : (observeAfter === "none" || detail === "none") && action.kind !== "oauth_login"
         ? compactV2PublicObservation(session, {
             stage: safeStageV2(
               actionObservationPage?.url() ?? browser.currentUrl(),
@@ -1089,7 +1180,68 @@ async function executeAct(
     outcome: {
       ...(completedAction.kind === "select" ? { selectedOption: completedAction.text } : {}),
     },
+    combobox: actedCombobox,
+    searchSubmit: actedSearchSubmit,
   };
+}
+
+export async function dispatchDriveAct(
+  sessionId: string,
+  action: ProvisionAction,
+): Promise<DriveActResult> {
+  if (action.kind === "oauth_login") return { kind: "unsupported" };
+  if (
+    action.kind !== "click" &&
+    action.kind !== "type" &&
+    action.kind !== "select" &&
+    action.kind !== "scroll"
+  ) {
+    return { kind: "unsupported" };
+  }
+  const started = Date.now();
+  try {
+    const result = await actInternally(
+      sessionId,
+      action,
+      "none",
+      undefined,
+      undefined,
+      { observeAfter: "none" },
+    );
+    if (result.staleReason !== undefined) {
+      return {
+        kind: "stale",
+        reason: result.staleReason,
+        ...ZERO_ACT_TIMINGS,
+        guardWallMs: Date.now() - started,
+      };
+    }
+    return {
+      kind: "ok",
+      combobox: result.combobox === true,
+      searchSubmit: result.searchSubmit === true,
+      ...ZERO_ACT_TIMINGS,
+      guardWallMs: Date.now() - started,
+    };
+  } catch (error) {
+    if (error instanceof CompactV2StaleRefError || error instanceof TargetStaleError) {
+      return {
+        kind: "stale",
+        reason: error instanceof CompactV2StaleRefError ? "stale_ref" : "stale",
+        ...ZERO_ACT_TIMINGS,
+        guardWallMs: Date.now() - started,
+      };
+    }
+    if (error instanceof CompactV2ActionFailureError && error.message === "stale_ref") {
+      return {
+        kind: "stale",
+        reason: "stale_ref",
+        ...ZERO_ACT_TIMINGS,
+        guardWallMs: Date.now() - started,
+      };
+    }
+    return { kind: "unsupported" };
+  }
 }
 
 export function compactV2SelectionFailureReason(error: unknown): string {

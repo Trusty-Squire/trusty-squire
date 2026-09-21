@@ -15,6 +15,7 @@
 // the tool layer passed none.
 import { createHmac, randomBytes } from "node:crypto";
 import type { Buffer } from "node:buffer";
+import type { ActControlIdentity } from "../act/identity.js";
 import type { BrowserController, CheckoutCard, InteractiveElement } from "../browser.js";
 import type { PendingApprovalWait } from "../card-release-approval.js";
 import {
@@ -137,6 +138,8 @@ export interface Session {
   // clears it. `running` is the busy lock so a second in-flight drive refuses
   // instead of interleaving.
   drive: SessionDriveState | null;
+  /** Identity behind each drive `@e:` token; set by the drive snapshot. */
+  actIdentities?: Map<string, ActControlIdentity>;
 }
 
 export interface DriveActProfile {
@@ -204,6 +207,8 @@ export interface SessionDriveState {
   boundFingerprint: string | null;
   consumedActionKey: string | null;
   lastActProfile: DriveActProfile | null;
+  /** Identity stored behind each drive `@e:` token for this snapshot. */
+  identities?: Map<string, ActControlIdentity>;
   maskedValueRefs?: string[];
   lastDocumentEpoch?: string | null;
   resumeCompactRows?: Array<[string, string, string?]>;
