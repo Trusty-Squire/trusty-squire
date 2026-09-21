@@ -1240,6 +1240,20 @@ export async function dispatchDriveAct(
         guardWallMs: Date.now() - started,
       };
     }
+    const message = error instanceof Error ? error.message : String(error);
+    if (
+      error instanceof BrowserClickDispatchError ||
+      /stale_ref|internal live target changed|reobserve_required|target_stale|intercepts pointer|not visible|Timeout/i.test(
+        message,
+      )
+    ) {
+      return {
+        kind: "stale",
+        reason: /intercepts pointer/i.test(message) ? "occluded" : "stale_ref",
+        ...ZERO_ACT_TIMINGS,
+        guardWallMs: Date.now() - started,
+      };
+    }
     return { kind: "unsupported" };
   }
 }

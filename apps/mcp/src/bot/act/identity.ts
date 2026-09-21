@@ -272,26 +272,8 @@ export async function resolveLiveControlIdentity(
         labelled ||
         (node.textContent ?? "").replace(/\s+/g, " ").trim();
       const href = node instanceof HTMLAnchorElement ? node.href : "";
-      const box = node.getBoundingClientRect();
-      const inView =
-        box.width > 0 &&
-        box.height > 0 &&
-        box.x + box.width / 2 >= 0 &&
-        box.y + box.height / 2 >= 0 &&
-        box.x + box.width / 2 <= window.innerWidth &&
-        box.y + box.height / 2 <= window.innerHeight;
-      const top = inView
-        ? document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2)
-        : null;
-      const covered =
-        inView &&
-        top !== null &&
-        top !== node &&
-        !node.contains(top) &&
-        !top.contains(node);
-      return { role, label, href, covered };
+      return { role, label, href };
     });
-    if (live.covered) return { kind: "stale" };
     const actual: ActControlIdentity = {
       selector: identity.selector,
       frameUrl: identity.frameUrl,
