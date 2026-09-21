@@ -61,16 +61,23 @@ import {
 import { DriveEvaluateTimeout, evaluateBound } from "./drive-evaluate.js";
 import type { BrowserController } from "./browser.js";
 import { dispatchDriveAct, type DriveActResult } from "./act/act.js";
+import { frameOriginOf } from "./browser-use-capture.js";
 import {
   documentEpochOf,
   documentOriginOf,
+  overlayOptionLabels,
   pageFingerprintOf,
   reenterDriveField,
   settleDriveStep,
   waitForInPageChange,
   waitForNavigationIdle,
 } from "./drive-act.js";
-import { rememberDriveIdentities, resolveControlIdentity } from "./act/identity.js";
+import {
+  driveRefScope,
+  canonicalIndexForDriveRef,
+  rememberDriveIdentities,
+  resolveLiveControlIdentity,
+} from "./act/identity.js";
 import { provisionElementRefs } from "./observe/refs.js";
 import {
   approvalItemWithNote,
@@ -4555,9 +4562,6 @@ function takeActProfile(
   | "observe_ms"
   | "snapshot_script_ms"
   | "snapshot_wall_ms"
-  | "guard_script_ms"
-  | "guard_wall_ms"
-  | "cdp_ms"
   | "prepare_ms"
   | "dispatch_ms"
   | "jev_question_count"
@@ -4726,10 +4730,12 @@ const DRIVE_REF_RE = /^@e:f\d+d\d+$/;
 
 /** Translate drive snapshot refs into canonical provision refs.
  *
- * Drive `@e:` tokens name an identity (selector, frame, role, label,
- * destination), not a snapshot ordinal. Re-extract live interactive elements,
- * resolve that identity, and mint the canonical ref. Refs that fail to
- * translate are omitted so the primitive reports not_found honestly.
+ * The two extractors name the same control differently — the canonical one
+ * prefers the `name` attribute where the drive reads an accessible name — so
+ * the bridge between them is the NODE, not a recomputed label: re-extract live
+ * interactive elements and ask the page which canonical selector resolves to
+ * the node the drive ref registered. Refs that fail to translate are omitted
+ * so the primitive reports not_found honestly.
  */
 async function canonicalDriveRefs(
   session: Session,
@@ -4751,12 +4757,24 @@ async function canonicalDriveRefs(
   }
   if (!Array.isArray(fresh) || fresh.length === 0) return translated;
   const canonical = provisionElementRefs(fresh);
-  const pageUrl = page.url();
   for (const ref of driveRefs) {
-    const identity = session.drive?.identities?.get(ref);
-    if (identity === undefined) continue;
-    const match = resolveControlIdentity(fresh, identity, pageUrl);
-    const canonicalRef = match === undefined || match === null ? undefined : canonical.get(match);
+    const scope = driveRefScope(page, ref);
+    const frameUrl = scope.url();
+    const frameOrigin = frameOriginOf(scope);
+    const isMain = scope === page.mainFrame();
+    const candidates = fresh.flatMap((element, index) =>
+      (
+        element.frameUrl == null
+          ? isMain
+          : element.frameUrl === frameUrl && element.frameOrigin === frameOrigin
+      )
+        ? [{ index, selector: element.selector }]
+        : [],
+    );
+    if (candidates.length === 0) continue;
+    const index = await evaluateBound(scope, canonicalIndexForDriveRef, { ref, candidates });
+    const match = index >= 0 ? fresh[index] : undefined;
+    const canonicalRef = match === undefined ? undefined : canonical.get(match);
     if (canonicalRef !== undefined) {
       if (session.compactV2Active) session.compactV2Refs.set(canonicalRef, canonicalRef);
       translated.set(ref, canonicalRef);
@@ -4928,7 +4946,8 @@ async function snapshotDriveSession(
     driveFrameCache.set(session, cache);
   }
   const snapshot = mergeSnapshots(parts);
-  session.actIdentities = rememberDriveIdentities(drive, snapshot.elements, snapshot.url);
+  rememberDriveIdentities(drive, snapshot.elements, snapshot.url);
+  drive.snapshotPageFingerprint = await pageFingerprintOf(page);
   const rawRows = driveRowsFromSnapshot(snapshot);
   lastSelectOptions.set(session, snapshotSelectOptions(snapshot));
   const previousEpoch = drive.lastDocumentEpoch;
@@ -5830,14 +5849,23 @@ async function driveLoop(input: {
     const decidedRow = findRow(rows, decision.actionKey, observation.url);
     const targetBinding =
       decidedRow === undefined ? "" : decisionTargetBinding(decidedRow, observation.url);
+    // Before acting, check the page against the snapshot the decision came
+    // from: unchanged, act; changed, re-snapshot so the binding check below
+    // rules on what is there now instead of acting into a re-render.
     if (session.browser.page !== null) {
       const liveEpoch = await documentEpochOf(session.browser.page);
-      if (
+      const livePageFingerprint = await pageFingerprintOf(session.browser.page);
+      const documentChanged =
         typeof drive.lastDocumentEpoch === "string" &&
         drive.lastDocumentEpoch.length > 0 &&
         liveEpoch.length > 0 &&
-        liveEpoch !== drive.lastDocumentEpoch
-      ) {
+        liveEpoch !== drive.lastDocumentEpoch;
+      const contentChanged =
+        typeof drive.snapshotPageFingerprint === "string" &&
+        drive.snapshotPageFingerprint.length > 0 &&
+        livePageFingerprint.length > 0 &&
+        livePageFingerprint !== drive.snapshotPageFingerprint;
+      if (documentChanged || contentChanged) {
         const snap = await snapshotOrTimeout(framesIfNeeded());
         if (snap !== "ok") return snap;
       }
@@ -6081,6 +6109,13 @@ async function driveLoop(input: {
       (session.browser.page === null ? "" : await documentEpochOf(session.browser.page));
     const beforePageFingerprint =
       session.browser.page === null ? "" : await pageFingerprintOf(session.browser.page);
+    // Baseline for the post-type refresh wait: an autocomplete keeps the
+    // pre-type rows until its network round trip lands, so option PRESENCE
+    // alone would hand the model the previous query's suggestions.
+    const overlayBefore =
+      decision.action.kind === "type" && session.browser.page !== null
+        ? await overlayOptionLabels(session.browser.page)
+        : undefined;
     const actStarted = Date.now();
     const beforeKey = pageProgressKey(
       observation.url,
@@ -6191,7 +6226,7 @@ async function driveLoop(input: {
       if (bounced !== undefined) return bounced;
     } else {
       if (page !== null) {
-        settleMs = await settleDriveStep(page, acted.combobox);
+        settleMs = await settleDriveStep(page, acted.combobox, overlayBefore);
         const afterEpoch = await documentEpochOf(page);
         if (
           beforeEpoch.length > 0 &&
@@ -6285,13 +6320,6 @@ async function driveLoop(input: {
         observe_ms: snap.snapshotMs,
         snapshot_script_ms: snap.snapshotScriptMs,
         snapshot_wall_ms: snap.snapshotWallMs,
-        ...(acted.kind === "ok"
-          ? {
-              guard_script_ms: acted.guardScriptMs,
-              guard_wall_ms: acted.guardWallMs,
-              cdp_ms: acted.cdpMs,
-            }
-          : {}),
       };
     }
     if (decision.action.kind === "type") {
@@ -6307,9 +6335,17 @@ async function driveLoop(input: {
       ) {
         const pageForRetry = session.browser.page;
         if (pageForRetry !== null) {
-          const selector = session.drive?.identities?.get(decision.actionKey)?.selector ?? "";
-          if (selector.length > 0) {
-            await reenterDriveField(pageForRetry, selector, intended);
+          const identity = drive.identities?.get(decision.actionKey);
+          const live =
+            identity === undefined
+              ? null
+              : await resolveLiveControlIdentity(pageForRetry, decision.actionKey, identity);
+          if (identity !== undefined && live !== null) {
+            await reenterDriveField(
+              driveRefScope(pageForRetry, decision.actionKey),
+              identity.selector,
+              intended,
+            );
           }
           const retrySnap = await refreshSnapshot(framesIfNeeded());
           if (retrySnap.timedOut)
@@ -7069,13 +7105,6 @@ async function driveLoop(input: {
       ...(priorProfile?.snapshot_wall_ms === undefined
         ? {}
         : { snapshot_wall_ms: priorProfile.snapshot_wall_ms }),
-      ...(priorProfile?.guard_script_ms === undefined
-        ? {}
-        : { guard_script_ms: priorProfile.guard_script_ms }),
-      ...(priorProfile?.guard_wall_ms === undefined
-        ? {}
-        : { guard_wall_ms: priorProfile.guard_wall_ms }),
-      ...(priorProfile?.cdp_ms === undefined ? {} : { cdp_ms: priorProfile.cdp_ms }),
       prepare_ms: prepareMs,
       dispatch_ms: Date.now() - dispatchStarted,
       jev_question_count: questionCount,

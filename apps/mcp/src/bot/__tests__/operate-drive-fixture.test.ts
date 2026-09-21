@@ -22,6 +22,7 @@ import {
   DRIVE_WAIT_MS,
   applyReleasedCardFacts,
   matchingFactKeys,
+  emptyDriveState,
   runOperateDrive,
   type DriveDependencies,
   type WireRow,
@@ -424,8 +425,8 @@ async function actThroughShared(
 ): Promise<Awaited<ReturnType<typeof dispatchDriveAct>>> {
   const session = sessionForCall(sessionId);
   if (session !== undefined && snap !== undefined && snap !== null) {
-    session.actIdentities = rememberDriveIdentities(session.drive ?? {}, snap.elements, snap.url);
-    if (session.drive !== null) session.drive.identities = session.actIdentities;
+    session.drive ??= emptyDriveState("fixture", {});
+    rememberDriveIdentities(session.drive, snap.elements, snap.url);
   }
   return await dispatchDriveAct(sessionId, action);
 }
@@ -2533,9 +2534,6 @@ describe("operate_drive real-browser fixture", () => {
           return {
             kind: "stale",
             reason: "card frame remounted",
-            guardScriptMs: 0,
-            guardWallMs: 0,
-            cdpMs: 0,
           };
         }
         return await actThroughShared(started.session_id, action);
@@ -4643,7 +4641,7 @@ describe("operate_drive feedback loop", () => {
       });
       dependencies.driveAct = async (_sessionId, action) => {
         if (action.kind === "click" && action.target === brokenRef) {
-          return { kind: "stale", reason: "occluded", guardScriptMs: 0, guardWallMs: 0, cdpMs: 0 };
+          return { kind: "stale", reason: "occluded" };
         }
         return await actThroughShared(started.session_id, action);
       };
@@ -4914,7 +4912,7 @@ describe("operate_drive feedback loop", () => {
       });
       dependencies.driveAct = async (_sessionId, action) => {
         clicks.push(action);
-        return { kind: "stale", reason: "detached", guardScriptMs: 0, guardWallMs: 0, cdpMs: 0 };
+        return { kind: "stale", reason: "detached" };
       };
       const handoff = await runOperateDrive(
         { session_id: started.session_id, goal: "extract an API key", max_steps: 8 },

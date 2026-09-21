@@ -88,7 +88,7 @@ import {
 // Type-only cycle back to the facade is fine; no runtime import.
 import type { Observation, ProvisionAction } from "../provision-session.js";
 import type { Session } from "../session/model.js";
-import { resolveControlIdentity, resolveLiveControlIdentity, sessionActIdentities } from "./identity.js";
+import { resolveLiveControlIdentity } from "./identity.js";
 
 export type ActObserveAfter = "full" | "none";
 
@@ -96,18 +96,10 @@ export type ActExecutorOptions = {
   observeAfter?: ActObserveAfter;
 };
 
-export type DriveActTimings = {
-  guardScriptMs: number;
-  guardWallMs: number;
-  cdpMs: number;
-};
-
 export type DriveActResult =
-  | ({ kind: "ok"; combobox: boolean; searchSubmit: boolean } & DriveActTimings)
-  | ({ kind: "stale"; reason: string } & DriveActTimings)
+  | { kind: "ok"; combobox: boolean }
+  | { kind: "stale"; reason: string }
   | { kind: "unsupported" };
-
-const ZERO_ACT_TIMINGS: DriveActTimings = { guardScriptMs: 0, guardWallMs: 0, cdpMs: 0 };
 
 async function withOAuthActionBoundary(
   session: Session,
@@ -311,9 +303,7 @@ export interface InternalActResult {
   outcome: {
     selectedOption?: string;
   };
-  staleReason?: string;
   combobox?: boolean;
-  searchSubmit?: boolean;
 }
 
 // Fix C: the honest, non-throwing "still waiting on a human" outcome for an
@@ -567,21 +557,19 @@ function actDriverTarget(el: InteractiveElement): DriverTarget {
   return { kind: "selector", selector: el.selector };
 }
 
-function driveActionFacts(el: InteractiveElement): { combobox: boolean; searchSubmit: boolean } {
+// Typing into an overlay-opening control is decided by the CONTROL, never by
+// who called: the drive and the tools must not type the same page differently.
+function actsThroughOverlay(el: InteractiveElement): boolean {
   const role = (el.role ?? "").toLowerCase();
   const type = (el.type ?? "").toLowerCase();
-  const hay = `${el.ariaLabel ?? ""} ${el.placeholder ?? ""} ${el.name ?? ""}`;
-  return {
-    combobox:
-      role === "combobox" ||
-      role === "searchbox" ||
-      type === "search" ||
-      type === "date" ||
-      type === "datetime-local" ||
-      type === "month",
-    searchSubmit:
-      role === "searchbox" || type === "search" || el.name === "q" || /search/i.test(hay),
-  };
+  return (
+    role === "combobox" ||
+    role === "searchbox" ||
+    type === "search" ||
+    type === "date" ||
+    type === "datetime-local" ||
+    type === "month"
+  );
 }
 
 // Re-resolve against FRESH elements — never trust a stale index. Shared by the
@@ -599,21 +587,11 @@ async function resolveFreshActTarget(
   actionTarget: string,
   withVisibleCandidates: boolean,
 ): Promise<{ el: InteractiveElement; fresh: InteractiveElement[] }> {
-  const driveIdentity = sessionActIdentities(session)?.get(resolutionTarget);
+  const driveIdentity = session.drive?.identities?.get(resolutionTarget);
   const livePage = compactV2ActionPage ?? browser.page;
   if (driveIdentity !== undefined && livePage !== null) {
-    const live = await resolveLiveControlIdentity(livePage, driveIdentity);
-    if (live.kind === "match") return { el: live.el, fresh: session.lastElements };
-    if (live.kind === "missing") {
-      const extracted = (await browser.extractBrowserUseObservation(compactV2ActionPage)).elements;
-      retainSessionElements(session, extracted);
-      const matched = resolveControlIdentity(
-        extracted,
-        driveIdentity,
-        compactV2ActionPage?.url() ?? browser.currentUrl(),
-      );
-      if (matched !== null) return { el: matched, fresh: extracted };
-    }
+    const live = await resolveLiveControlIdentity(livePage, resolutionTarget, driveIdentity);
+    if (live !== null) return { el: live, fresh: session.lastElements };
     if (session.compactV2Active) {
       if (!internalAccess) throwCompactV2StaleRef();
       throw new CompactV2StaleRefError("stale_ref");
@@ -682,7 +660,6 @@ async function executeAct(
   };
   const actStarted = Date.now();
   let actedCombobox = false;
-  let actedSearchSubmit = false;
   let actionPageAfter = compactV2ActionPage;
   let completedAction: ProvisionAction = action;
   let resolutionTarget: string | undefined;
@@ -983,12 +960,7 @@ async function executeAct(
           action.target,
           true,
         );
-        const facts = driveActionFacts(el);
-        const storedIdentity = (session.drive?.identities ?? session.actIdentities)?.get(
-          resolutionTarget!,
-        );
-        actedCombobox = facts.combobox || storedIdentity?.picker === true;
-        actedSearchSubmit = facts.searchSubmit;
+        actedCombobox = actsThroughOverlay(el);
         // Preserve frame identity (origin + path) for the frame-scoped fill.
         if (action.kind === "click" || action.kind === "js_click") {
           actionPageAfter =
@@ -998,18 +970,16 @@ async function executeAct(
         } else if (action.kind === "type") {
           clearCommittedSelectValue(session, el.selector);
           const actTarget = actDriverTarget(el);
-          if (observeAfter === "none" && actedCombobox && compactV2ActionPage !== undefined) {
+          if (actedCombobox && compactV2ActionPage !== undefined) {
+            // The click may remount the field into an overlay that takes focus,
+            // so the text goes to whatever is focused — after an explicit
+            // select-all, because insertText alone APPENDS to a committed value.
             await actClick({ ...actTarget, method: "click" });
             await settleAfterDriveAction(compactV2ActionPage, true);
+            await compactV2ActionPage.keyboard.press("ControlOrMeta+a");
             await compactV2ActionPage.keyboard.insertText(typedText ?? "");
-            if (actedSearchSubmit) {
-              await compactV2ActionPage.keyboard.press("Enter").catch(() => undefined);
-            }
           } else {
             await actType(actTarget, typedText!, false);
-            if (observeAfter === "none" && actedSearchSubmit && compactV2ActionPage !== undefined) {
-              await compactV2ActionPage.keyboard.press("Enter").catch(() => undefined);
-            }
           }
           // #635 fix (not a gate on typing): Shopify only enables delivery-rate
           // selection after the required address line is committed by
@@ -1181,7 +1151,6 @@ async function executeAct(
       ...(completedAction.kind === "select" ? { selectedOption: completedAction.text } : {}),
     },
     combobox: actedCombobox,
-    searchSubmit: actedSearchSubmit,
   };
 }
 
@@ -1189,7 +1158,9 @@ export async function dispatchDriveAct(
   sessionId: string,
   action: ProvisionAction,
 ): Promise<DriveActResult> {
-  if (action.kind === "oauth_login") return { kind: "unsupported" };
+  // "unsupported" means the shared executor has no drive verb for this action
+  // and the caller should fall back to the tools path. A DISPATCH failure is a
+  // different thing — the act did not land on the control, which is stale.
   if (
     action.kind !== "click" &&
     action.kind !== "type" &&
@@ -1198,63 +1169,16 @@ export async function dispatchDriveAct(
   ) {
     return { kind: "unsupported" };
   }
-  const started = Date.now();
   try {
-    const result = await actInternally(
-      sessionId,
-      action,
-      "none",
-      undefined,
-      undefined,
-      { observeAfter: "none" },
-    );
-    if (result.staleReason !== undefined) {
-      return {
-        kind: "stale",
-        reason: result.staleReason,
-        ...ZERO_ACT_TIMINGS,
-        guardWallMs: Date.now() - started,
-      };
-    }
-    return {
-      kind: "ok",
-      combobox: result.combobox === true,
-      searchSubmit: result.searchSubmit === true,
-      ...ZERO_ACT_TIMINGS,
-      guardWallMs: Date.now() - started,
-    };
+    const result = await actInternally(sessionId, action, "none", undefined, undefined, {
+      observeAfter: "none",
+    });
+    return { kind: "ok", combobox: result.combobox === true };
   } catch (error) {
-    if (error instanceof CompactV2StaleRefError || error instanceof TargetStaleError) {
-      return {
-        kind: "stale",
-        reason: error instanceof CompactV2StaleRefError ? "stale_ref" : "stale",
-        ...ZERO_ACT_TIMINGS,
-        guardWallMs: Date.now() - started,
-      };
-    }
-    if (error instanceof CompactV2ActionFailureError && error.message === "stale_ref") {
-      return {
-        kind: "stale",
-        reason: "stale_ref",
-        ...ZERO_ACT_TIMINGS,
-        guardWallMs: Date.now() - started,
-      };
-    }
+    if (error instanceof CompactV2StaleRefError) return { kind: "stale", reason: "stale_ref" };
+    if (error instanceof TargetStaleError) return { kind: "stale", reason: "stale" };
     const message = error instanceof Error ? error.message : String(error);
-    if (
-      error instanceof BrowserClickDispatchError ||
-      /stale_ref|internal live target changed|reobserve_required|target_stale|intercepts pointer|not visible|Timeout/i.test(
-        message,
-      )
-    ) {
-      return {
-        kind: "stale",
-        reason: /intercepts pointer/i.test(message) ? "occluded" : "stale_ref",
-        ...ZERO_ACT_TIMINGS,
-        guardWallMs: Date.now() - started,
-      };
-    }
-    return { kind: "unsupported" };
+    return { kind: "stale", reason: /intercepts pointer/i.test(message) ? "occluded" : "stale_ref" };
   }
 }
 

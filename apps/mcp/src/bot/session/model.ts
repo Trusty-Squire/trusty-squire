@@ -138,8 +138,6 @@ export interface Session {
   // clears it. `running` is the busy lock so a second in-flight drive refuses
   // instead of interleaving.
   drive: SessionDriveState | null;
-  /** Identity behind each drive `@e:` token; set by the drive snapshot. */
-  actIdentities?: Map<string, ActControlIdentity>;
 }
 
 export interface DriveActProfile {
@@ -148,9 +146,6 @@ export interface DriveActProfile {
   observe_ms: number;
   snapshot_script_ms?: number;
   snapshot_wall_ms?: number;
-  guard_script_ms?: number;
-  guard_wall_ms?: number;
-  cdp_ms?: number;
   prepare_ms?: number;
   dispatch_ms?: number;
   jev_question_count?: number;
@@ -170,9 +165,6 @@ export interface DriveTrajectoryStep {
   observe_ms?: number;
   snapshot_script_ms?: number;
   snapshot_wall_ms?: number;
-  guard_script_ms?: number;
-  guard_wall_ms?: number;
-  cdp_ms?: number;
   prepare_ms?: number;
   dispatch_ms?: number;
   jev_question_count?: number;
@@ -209,6 +201,8 @@ export interface SessionDriveState {
   lastActProfile: DriveActProfile | null;
   /** Identity stored behind each drive `@e:` token for this snapshot. */
   identities?: Map<string, ActControlIdentity>;
+  /** Page content at the snapshot the current decision was made from. */
+  snapshotPageFingerprint?: string;
   maskedValueRefs?: string[];
   lastDocumentEpoch?: string | null;
   resumeCompactRows?: Array<[string, string, string?]>;

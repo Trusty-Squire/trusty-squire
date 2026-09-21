@@ -1,35 +1,16 @@
 // Drive-loop settle and page-change helpers. Click/type/select dispatch lives
 // in the shared executor (`dispatchDriveAct` / `executeAct`).
 
-import type { Page } from "playwright";
+import type { Frame, Page } from "playwright";
 import { evaluateBound } from "./drive-evaluate.js";
 
 export const DRIVE_SETTLE_MS = 50;
 export const DRIVE_COMBOBOX_WAIT_MS = 400;
-export const DRIVE_OVERLAY_REFRESH_WAIT_MS = 2000;
+const OVERLAY_REFRESH_WAIT_MS = 2000;
 export const DRIVE_NAVIGATION_WAIT_MS = 300;
 export const DRIVE_IN_PAGE_SETTLE_MS = 800;
 
-export type { DriveActResult, DriveActTimings } from "./act/act.js";
-
-export function drivePointerUsesCdp(reachedTop: boolean, frameIsMain: boolean): boolean {
-  return !reachedTop && !frameIsMain;
-}
-
-export function listOptionIdentity(
-  role: string | null,
-  inListbox: boolean,
-  inMenu: boolean,
-  text: string,
-): { text: string; role: "option" | "menuitem" } | null {
-  const trimmed = text.replace(/\s+/g, " ").trim();
-  if (trimmed.length === 0) return null;
-  if (role === "option" || (inListbox && role !== "combobox" && role !== "listbox")) {
-    return { text: trimmed.slice(0, 80), role: "option" };
-  }
-  if (role === "menuitem" || inMenu) return { text: trimmed.slice(0, 80), role: "menuitem" };
-  return null;
-}
+export type { DriveActResult } from "./act/act.js";
 
 const OVERLAY_OPTION_SELECTOR =
   '[role="option"],[role="listbox"] a,[role="listbox"] [role="option"],.suggestions a,.suggestion-link,.suggestions-dropdown a,[aria-selected],[role="grid"] button,[role="grid"] [role="gridcell"],[role="gridcell"],[role="dialog"] [role="gridcell"],[role="dialog"] [role="grid"] button';
@@ -59,13 +40,70 @@ async function waitForOpenedOverlay(page: Page): Promise<void> {
   );
 }
 
+/** Visible suggestion rows right now, as the baseline for a refresh wait. */
+export async function overlayOptionLabels(page: Page): Promise<string[]> {
+  return evaluateBound(
+    page,
+    (selector: string) => {
+      const visible = (node: Element): boolean => {
+        if (node.closest('[aria-hidden="true"],[inert]') !== null) return false;
+        if (typeof node.checkVisibility === "function") {
+          return node.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true });
+        }
+        const style = getComputedStyle(node);
+        return style.display !== "none" && style.visibility !== "hidden";
+      };
+      return Array.from(document.querySelectorAll(selector))
+        .filter(visible)
+        .map((node) => (node.textContent ?? "").replace(/\s+/g, " ").trim());
+    },
+    OVERLAY_OPTION_SELECTOR,
+  ).catch(() => [] as string[]);
+}
+
+// Autocomplete keeps the pre-type rows until the network refresh (~110ms on
+// Flights). Returning at first option PRESENCE snapshots the stale set and the
+// model reads the previous city's suggestions.
+async function waitForOverlayOptionsToChange(page: Page, before: readonly string[]): Promise<void> {
+  await evaluateBound(
+    page,
+    async (input) => {
+      const visibleSuggestion = (node: Element): boolean => {
+        if (node.closest('[aria-hidden="true"],[inert]') !== null) return false;
+        if (typeof node.checkVisibility === "function") {
+          return node.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true });
+        }
+        const style = getComputedStyle(node);
+        return style.display !== "none" && style.visibility !== "hidden";
+      };
+      const read = (): string[] =>
+        Array.from(document.querySelectorAll(input.selector))
+          .filter(visibleSuggestion)
+          .map((node) => (node.textContent ?? "").replace(/\s+/g, " ").trim());
+      const same = (left: string[], right: string[]): boolean => {
+        if (left.length !== right.length) return false;
+        const a = left.slice().sort();
+        const b = right.slice().sort();
+        return a.every((value, index) => value === b[index]);
+      };
+      const start = performance.now();
+      while (performance.now() - start < input.cap) {
+        const labels = read();
+        if (labels.length > 0 && !same(labels, input.before)) return;
+        await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      }
+    },
+    { selector: OVERLAY_OPTION_SELECTOR, before: [...before], cap: OVERLAY_REFRESH_WAIT_MS },
+  ).catch(() => undefined);
+}
+
 export async function reenterDriveField(
-  page: Page,
+  scope: Page | Frame,
   selector: string,
   text: string,
 ): Promise<boolean> {
   if (selector.length === 0) return false;
-  const locator = page.locator(selector).first();
+  const locator = scope.locator(selector);
   try {
     await locator.scrollIntoViewIfNeeded().catch(() => undefined);
     await locator.click({ timeout: 5000 });
@@ -76,7 +114,11 @@ export async function reenterDriveField(
   }
 }
 
-export async function settleDriveStep(page: Page, combobox: boolean): Promise<number> {
+export async function settleDriveStep(
+  page: Page,
+  combobox: boolean,
+  overlayBefore?: readonly string[],
+): Promise<number> {
   const started = Date.now();
   try {
     const frames = page
@@ -101,7 +143,10 @@ export async function settleDriveStep(page: Page, combobox: boolean): Promise<nu
       }),
     ]);
     if (timer !== undefined) clearTimeout(timer);
-    if (combobox) await waitForOpenedOverlay(page);
+    if (combobox) {
+      await waitForOpenedOverlay(page);
+      if (overlayBefore !== undefined) await waitForOverlayOptionsToChange(page, overlayBefore);
+    }
   } catch {
     return Date.now() - started;
   }

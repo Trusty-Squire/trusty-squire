@@ -450,35 +450,36 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
     }
     return null;
   };
+  // Dispatch resolves this selector strictly and act-time identity requires it
+  // to name exactly one node, so a shorthand is only taken when it is already
+  // unique; otherwise the path is walked to the document root, which is.
   const selectorFor = (node: Element): string => {
+    const namesOnlyThisNode = (candidate: string): boolean => {
+      try {
+        const found = document.querySelectorAll(candidate);
+        return found.length === 1 && found[0] === node;
+      } catch {
+        return false;
+      }
+    };
+    const quoted = (value: string): string => value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
     const tag = node.tagName.toLowerCase();
-    const testId =
-      node.getAttribute("data-testid") ??
-      node.getAttribute("data-test-id") ??
-      node.getAttribute("data-test") ??
-      node.getAttribute("data-cy") ??
-      node.getAttribute("data-qa");
-    const id = node.getAttribute("id");
-    const name = node.getAttribute("name");
-    if (testId !== null && testId.length > 0) {
-      const attr = node.hasAttribute("data-testid")
-        ? "data-testid"
-        : node.hasAttribute("data-test-id")
-          ? "data-test-id"
-          : node.hasAttribute("data-test")
-            ? "data-test"
-            : node.hasAttribute("data-cy")
-              ? "data-cy"
-              : "data-qa";
-      return `[${attr}="${CSS.escape(testId)}"]`;
+    for (const attr of ["data-testid", "data-test-id", "data-test", "data-cy", "data-qa"]) {
+      const value = node.getAttribute(attr);
+      if (value === null || value.length === 0) continue;
+      const candidate = `[${attr}="${quoted(value)}"]`;
+      if (namesOnlyThisNode(candidate)) return candidate;
     }
-    if (id !== null && /^[A-Za-z][\w-]*$/.test(id)) return `#${id}`;
+    const id = node.getAttribute("id");
+    if (id !== null && /^[A-Za-z][\w-]*$/.test(id) && namesOnlyThisNode(`#${id}`)) return `#${id}`;
+    const name = node.getAttribute("name");
     if (name !== null && name.length > 0) {
-      return `${tag}[name="${name.replace(/"/g, '\\"')}"]`;
+      const candidate = `${tag}[name="${quoted(name)}"]`;
+      if (namesOnlyThisNode(candidate)) return candidate;
     }
     const parts: string[] = [];
     let walk: Element | null = node;
-    for (let depth = 0; depth < 4 && walk !== null; depth += 1) {
+    while (walk !== null) {
       const cur: Element = walk;
       const t = cur.tagName.toLowerCase();
       const parent: Element | null = cur.parentElement;
@@ -489,8 +490,7 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
       const sibs = Array.from(parent.children).filter(
         (child): child is Element => child.tagName === cur.tagName,
       );
-      const idx = sibs.indexOf(cur) + 1;
-      parts.unshift(sibs.length > 1 ? `${t}:nth-of-type(${idx})` : t);
+      parts.unshift(sibs.length > 1 ? `${t}:nth-of-type(${sibs.indexOf(cur) + 1})` : t);
       walk = parent;
     }
     return parts.join(" > ");

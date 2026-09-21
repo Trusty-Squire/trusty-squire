@@ -1,122 +1,85 @@
 import { describe, expect, it } from "vitest";
-import type { InteractiveElement } from "../browser.js";
 import {
-  identityFromInteractiveElement,
-  identityKey,
-  resolveControlIdentity,
-  sameControlIdentity,
-  type ActControlIdentity,
+  canonicalIndexForDriveRef,
+  driveRefFrameOrdinal,
+  identityFromDriveElement,
+  interactiveFromIdentity,
+  rememberDriveIdentities,
 } from "../act/identity.js";
 
-function el(partial: Partial<InteractiveElement> & Pick<InteractiveElement, "selector">): InteractiveElement {
-  return {
-    index: 0,
-    tag: "a",
-    type: null,
-    id: null,
-    name: null,
-    placeholder: null,
-    ariaLabel: null,
-    role: "link",
-    labelText: null,
-    visibleText: "Reputation",
-    visible: true,
-    inViewport: true,
-    inConsentWidget: false,
-    ...partial,
-  };
-}
-
-const reputation: ActControlIdentity = {
-  selector: "#rep",
-  frameUrl: "https://app.example.test/dash",
-  frameOrigin: "https://app.example.test",
-  role: "link",
-  label: "Reputation",
-  href: "https://app.example.test/reputation",
-};
-
 describe("act control identity", () => {
-  it("resolves the same control after a remint, not the ordinal's new occupant", () => {
-    const reminted = el({
-      selector: "#rep",
-      visibleText: "Reputation",
-      href: "https://app.example.test/reputation",
-      frameUrl: "https://app.example.test/dash",
-      frameOrigin: "https://app.example.test",
-    });
-    const trap = el({
-      selector: "#new",
-      visibleText: "Create app",
-      href: "https://app.example.test/new",
-      frameUrl: "https://app.example.test/dash",
-      frameOrigin: "https://app.example.test",
-    });
-    expect(resolveControlIdentity([trap, reminted], reputation, "https://app.example.test/dash")).toBe(
-      reminted,
+  it("keeps a checkbox a checkbox so the act does not read it as a textbox", () => {
+    const identity = identityFromDriveElement(
+      { selector: "#terms", role: "checkbox", label: "I agree" },
+      "https://app.example.test/signup",
     );
-    expect(
-      resolveControlIdentity(
-        [trap],
-        { ...reputation, selector: "#new" },
-        "https://app.example.test/dash",
-      ),
-    ).toBeNull();
+    expect(identity.role).toBe("checkbox");
+    expect(interactiveFromIdentity(identity).role).toBe("checkbox");
   });
 
-  it("returns null after navigation so the old page's ref cannot act", () => {
-    const otherPage = el({
-      selector: "#rep",
-      visibleText: "Reputation",
-      href: "https://app.example.test/reputation",
-      frameUrl: "https://app.example.test/settings",
-      frameOrigin: "https://app.example.test",
-    });
-    expect(
-      resolveControlIdentity([otherPage], reputation, "https://app.example.test/settings"),
-    ).toBeNull();
+  it("carries the frame a drive element was captured in", () => {
+    const identities = rememberDriveIdentities(
+      {},
+      [
+        {
+          ref: "@e:f1d4",
+          selector: "#pan",
+          role: "textbox",
+          label: "Card number",
+          frameUrl: "https://pay.example.test/fields",
+          frameOrigin: "https://pay.example.test",
+        },
+      ],
+      "https://shop.example.test/checkout",
+    );
+    const el = interactiveFromIdentity(identities.get("@e:f1d4")!, { framePath: "0" });
+    expect(el.frameUrl).toBe("https://pay.example.test/fields");
+    expect(el.frameOrigin).toBe("https://pay.example.test");
+    expect(el.framePath).toBe("0");
   });
 
-  it("treats a unique selector as the same control when labels are read differently", () => {
-    expect(
-      sameControlIdentity(
-        reputation,
-        { ...reputation, label: "" },
-        "https://app.example.test/dash",
-      ),
-    ).toBe(true);
-    expect(
-      sameControlIdentity(
-        reputation,
-        { ...reputation, selector: "#new", label: "Create app", href: "https://app.example.test/new" },
-        "https://app.example.test/dash",
-      ),
-    ).toBe(false);
+  it("reads the frame ordinal the drive minted the ref in", () => {
+    expect(driveRefFrameOrdinal("@e:f0d6")).toBe(0);
+    expect(driveRefFrameOrdinal("@e:f2d13")).toBe(2);
+    expect(driveRefFrameOrdinal("not-a-drive-ref")).toBe(0);
   });
 
-  it("treats two same-label links as distinct when destinations differ", () => {
-    const a = identityFromInteractiveElement(
-      el({
-        selector: "#one",
-        visibleText: "Docs",
-        href: "https://app.example.test/docs",
-        frameUrl: "https://app.example.test/",
-        frameOrigin: "https://app.example.test",
-      }),
-      "https://app.example.test/",
-    );
-    const b = identityFromInteractiveElement(
-      el({
-        selector: "#two",
-        visibleText: "Docs",
-        href: "https://help.example.test/docs",
-        frameUrl: "https://app.example.test/",
-        frameOrigin: "https://app.example.test",
-      }),
-      "https://app.example.test/",
-    );
-    expect(identityKey(a, "https://app.example.test/")).not.toBe(
-      identityKey(b, "https://app.example.test/"),
-    );
+  it("translates a drive ref by node, not by a recomputed label", () => {
+    const pan = { tagName: "INPUT", isConnected: true };
+    const other = { tagName: "INPUT", isConnected: true };
+    const selectors = new Map<string, unknown>([
+      ["html > body > input", pan],
+      ["html > body > input:nth-of-type(2)", other],
+    ]);
+    const restore = {
+      registry: (globalThis as Record<string, unknown>).window,
+      document: (globalThis as Record<string, unknown>).document,
+    };
+    (globalThis as Record<string, unknown>).window = {
+      __tsDriveRegistry: { nodes: new Map([["@e:f0d3", pan]]) },
+    };
+    (globalThis as Record<string, unknown>).document = {
+      querySelector: (selector: string) => selectors.get(selector) ?? null,
+    };
+    try {
+      expect(
+        canonicalIndexForDriveRef({
+          ref: "@e:f0d3",
+          candidates: [
+            { index: 0, selector: "html > body > input:nth-of-type(2)" },
+            { index: 1, selector: "html > body > input" },
+          ],
+        }),
+      ).toBe(1);
+      expect(
+        canonicalIndexForDriveRef({
+          ref: "@e:f0d9",
+          candidates: [{ index: 0, selector: "html > body > input" }],
+        }),
+      ).toBe(-1);
+    } finally {
+      (globalThis as Record<string, unknown>).window = restore.registry;
+      (globalThis as Record<string, unknown>).document = restore.document;
+    }
   });
 });
