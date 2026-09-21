@@ -64,7 +64,7 @@ import {
   teardownRemoteLoginRig,
   type RemoteLoginRig,
 } from "./remote-login-display.js";
-import { hasDisplay, hostDisplayAcceptsConnections } from "./display-env.js";
+import { drawsWindowsNatively, hasDisplay, hostDisplayAcceptsConnections } from "./display-env.js";
 export { extractOAuthScopes, scopesAreBasic, scrapeGoogleScopePhrases } from "./oauth-scope.js";
 
 const require = createRequire(import.meta.url);
@@ -706,25 +706,25 @@ export interface LoginRunResult {
   closeState: ProfileCloseState;
 }
 
-// The broker's Chrome uses the machine screen when the daemon can see one,
-// and a private Xvfb otherwise. A ceremony tab on the machine screen is
-// already visible. A tab on the owned Xvfb is invisible until this process
-// exposes that display over noVNC — the same x11vnc +
-// websockify + tunnel stack the standalone remote login uses. Discovery
-// prefers the tracked launch display, then the browser process tree's
-// environment (/proc on Linux); the helpers this call spawns are reaped at
-// the ceremony's lease boundary and never touch the display or the browser
+// The ceremony has to land where the PERSON RUNNING CONNECT can see it, and
+// that is the only question this answers. The broker's own environment does
+// not decide: its Chrome may sit on the machine's screen while connect runs
+// over SSH, or on a private Xvfb while connect runs at the desk. So the tab
+// counts as visible only when the holder is on the machine's own screen AND
+// this connect is at that machine; every other display gets noVNC — the same
+// x11vnc + websockify + tunnel stack the standalone remote login uses.
+// Discovery prefers the tracked launch display, then the browser process
+// tree's environment (/proc on Linux); the helpers this call spawns are reaped
+// at the ceremony's lease boundary and never touch the display or the browser
 // itself.
 //
 // The result names WHY there is no noVNC exposure, because the ceremony
 // must treat the states differently (round-12 review-3): "unshowable"
 // means the tab provably cannot be shown to anyone (no discoverable
-// display on a headless host, or the noVNC attach failed) and the ceremony
-// fails immediately instead of silently polling to its deadline;
-// "already_visible" means the tab is NOT on a display this repository
-// created, so it sits on the machine's own screen, which the user may be
-// looking at right now. Neither failure path ever touches the display or
-// the browser.
+// display, or the noVNC attach failed) and the ceremony fails immediately
+// instead of silently polling to its deadline; "already_visible" means the
+// person running connect is already looking at the screen the tab is on.
+// Neither failure path ever touches the display or the browser.
 export type SharedCeremonyExposure =
   | { kind: "exposed"; stop: () => Promise<void> }
   | { kind: "already_visible"; reason: string }
@@ -735,22 +735,27 @@ export async function exposeSharedBrokerCeremonyDisplay(
   label: string,
 ): Promise<SharedCeremonyExposure> {
   const holder = holderCeremonyDisplay(profileDir);
-  if (holder.kind === "host_display")
+  // Nothing to name. Where windows are drawn natively there is no X display to
+  // discover and no rig this repo could have made, so the tab is on the screen
+  // in front of whoever ran connect; anywhere else, an unnamed display is one
+  // nothing here can show, and saying otherwise burns the deadline in silence.
+  if (holder.kind === "unnamed")
+    return drawsWindowsNatively()
+      ? { kind: "already_visible", reason: "this machine draws its windows natively" }
+      : { kind: "unshowable", reason: holder.reason };
+  if (!holder.owned && hasDisplay())
     return {
       kind: "already_visible",
-      reason:
-        "it runs on a display this repository did not create, which may already be visible " +
-        "on this machine's own screen",
+      reason: "it runs on this machine's own screen, which you are signed in at",
     };
-  // Discovery could not name the holder's display. A host with its own screen
-  // is showing that Chrome on it — macOS and Windows keep no DISPLAY to find,
-  // and a Linux desktop need not export XAUTHORITY — so the ceremony is
-  // visible and must not be failed. Only a headless host has no screen to
-  // fall back on, and only it hears the discovery failure.
-  if (holder.kind === "undiscoverable")
-    return hasDisplay()
-      ? { kind: "already_visible", reason: "this machine has its own screen" }
-      : { kind: "unshowable", reason: holder.reason };
+  if (holder.authFile === null)
+    return {
+      kind: "unshowable",
+      reason:
+        "the browser holding the profile runs on a display with no XAUTHORITY in its launch " +
+        "record or process tree, so nothing here can authorize a noVNC attach to it",
+    };
+  const authFile = holder.authFile;
   let rig: RemoteLoginRig | undefined;
   try {
     rig = createRemoteLoginRig();
@@ -759,7 +764,7 @@ export async function exposeSharedBrokerCeremonyDisplay(
     // Xvfb.
     createRemoteLoginVncSecrets(rig);
     rig.display = holder.display;
-    rig.authFile = holder.authFile;
+    rig.authFile = authFile;
   } catch (err) {
     if (rig !== undefined) await teardownRemoteLoginRig(rig).catch(() => undefined);
     return {
@@ -789,38 +794,41 @@ export async function exposeSharedBrokerCeremonyDisplay(
   };
 }
 
-// Where the browser holding the profile is drawing: a login rig this repo
-// created (hidden unless noVNC attaches to it), the machine's own screen, or
-// nothing this process can name. Discovery prefers the tracked launch record
-// and falls back to the holder's process tree.
+// Where the browser holding the profile is drawing, read off that browser and
+// nothing else. Discovery prefers the tracked launch record and falls back to
+// the holder's process tree. `owned` says the display is a login rig this repo
+// created, which is hidden until noVNC attaches to it.
 type HolderCeremonyDisplay =
-  | { kind: "owned_rig"; display: string; authFile: string }
-  | { kind: "host_display" }
-  | { kind: "undiscoverable"; reason: string };
+  | { kind: "named"; display: string; authFile: string | null; owned: boolean }
+  | { kind: "unnamed"; reason: string };
 
 function holderCeremonyDisplay(profileDir: string): HolderCeremonyDisplay {
   const holderPid = currentProfileHolderPid(profileDir);
   if (holderPid === null)
     return {
-      kind: "undiscoverable",
+      kind: "unnamed",
       reason: "no live browser process holds the profile, so its display could not be discovered",
     };
   const tracked = ownerTrackedBrowserDisplay(profileDir, holderPid);
   const env = tracked === null ? readProcessTreeDisplay(holderPid) : null;
   const display = tracked?.display ?? env?.DISPLAY;
   const authFile = tracked?.authFile ?? env?.XAUTHORITY;
-  if (display === undefined || authFile === undefined)
+  if (display === undefined)
     return {
-      kind: "undiscoverable",
+      kind: "unnamed",
       reason:
-        "the browser holding the profile runs without a DISPLAY/XAUTHORITY in its launch record or process tree",
+        "the browser holding the profile runs without a DISPLAY in its launch record or process tree",
     };
   // The rig's private-dir name is the ownership proof, tracked launch record
-  // or not: a host XAUTHORITY (not a tsq-login- dir) is the machine's own
-  // screen.
-  return isOwnedLoginRigXauthority(authFile)
-    ? { kind: "owned_rig", display, authFile }
-    : { kind: "host_display" };
+  // or not. A host XAUTHORITY (not a tsq-login- dir) is the machine's own
+  // screen, and so is NO XAUTHORITY at all: every rig this repo starts sets
+  // both vars, so a display missing one is provably not one of ours.
+  return {
+    kind: "named",
+    display,
+    authFile: authFile ?? null,
+    owned: authFile !== undefined && isOwnedLoginRigXauthority(authFile),
+  };
 }
 
 // The ownership signal for any holder display, tracked launch record or not:
@@ -839,11 +847,16 @@ function isOwnedLoginRigXauthority(authFile: string): boolean {
 function readProcessTreeDisplay(holderPid: number): NodeJS.ProcessEnv | null {
   const pending = [holderPid];
   const seen = new Set<number>();
+  // A DISPLAY with no XAUTHORITY beside it is the host's own screen — several
+  // display managers never export one — so it answers the question, but keep
+  // looking for a descendant carrying both before settling for it.
+  let displayOnly: NodeJS.ProcessEnv | null = null;
   for (const pid of pending) {
     if (seen.has(pid)) continue;
     seen.add(pid);
     const env = readProcessEnvironment(pid);
     if (env?.DISPLAY !== undefined && env.XAUTHORITY !== undefined) return env;
+    if (env?.DISPLAY !== undefined) displayOnly ??= env;
     try {
       for (const tid of readdirSync(`/proc/${pid}/task`)) {
         try {
@@ -857,7 +870,7 @@ function readProcessTreeDisplay(holderPid: number): NodeJS.ProcessEnv | null {
       // Process exited, or /proc is unavailable.
     }
   }
-  return null;
+  return displayOnly;
 }
 
 // Linux's exec-time environment is NUL-separated; other platforms have no
@@ -889,10 +902,10 @@ const GITHUB_SIGN_OUT_CONTROL_NAME = "Sign out";
 // Disclosure, not softening: the URL shows the whole shared display for the
 // ceremony deadline — sibling sessions' tabs included — and is single-use.
 const SHARED_DISPLAY_LABEL =
-  "This URL shows the shared browser's WHOLE display — every tab it is " +
-  "running, not only the sign-in — for as long as this ceremony runs. It is " +
-  "single-use: the URL and its password exist for this ceremony only and " +
-  "stop working when it ends.";
+  "This URL shows the WHOLE display that browser is running on — every window " +
+  "on it, not only the sign-in, and on a machine with its own screen that is " +
+  "that screen — for as long as this ceremony runs. It is single-use: the URL " +
+  "and its password exist for this ceremony only and stop working when it ends.";
 
 async function operateCommand(
   client: BrokerClient,

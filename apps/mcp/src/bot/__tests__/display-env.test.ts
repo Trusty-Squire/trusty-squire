@@ -5,9 +5,11 @@
 // be the live answer, while a screen that IS live must never be mistaken for a
 // headless host and pushed onto an Xvfb.
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createServer, type Server } from "node:net";
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   displayProbeSocket,
   hasDisplay,
@@ -15,33 +17,29 @@ import {
   X11_SOCKET_DIR,
 } from "../display-env.js";
 
+// The fixture serves its displays out of its own directory: /tmp/.X11-unix is
+// shared system state every X server on the box uses, and a crashed run must
+// not leave sockets — or a directory it created with the wrong ownership —
+// behind there.
+let socketDir: string;
 const listening: Server[] = [];
-const sockets: string[] = [];
+
+beforeEach(() => {
+  socketDir = mkdtempSync(join(tmpdir(), "ts-display-probe-"));
+});
 
 afterEach(async () => {
   for (const server of listening.splice(0))
     await new Promise<void>((resolve) => server.close(() => resolve()));
-  for (const path of sockets.splice(0)) rmSync(path, { force: true });
+  rmSync(socketDir, { recursive: true, force: true });
 });
 
-// A display number nothing on this machine serves, so the probe has a real
-// absent display to answer about.
-function freeDisplayNumber(): number {
-  for (let candidate = 4200; candidate < 4300; candidate += 1) {
-    if (!existsSync(`${X11_SOCKET_DIR}/X${candidate}`)) return candidate;
-  }
-  throw new Error("no free X display number for the probe fixture");
-}
-
 async function serveDisplay(display: number): Promise<void> {
-  mkdirSync(X11_SOCKET_DIR, { recursive: true });
-  const path = `${X11_SOCKET_DIR}/X${display}`;
   const server = createServer((socket) => socket.end());
   listening.push(server);
-  sockets.push(path);
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
-    server.listen(path, resolve);
+    server.listen(`${socketDir}/X${display}`, resolve);
   });
 }
 
@@ -60,29 +58,28 @@ describe("display probe socket", () => {
 
 describe("live display detection", () => {
   it("accepts a display that is actually serving", async () => {
-    const display = freeDisplayNumber();
-    await serveDisplay(display);
-    const env = { DISPLAY: `:${display}`, XDG_SESSION_TYPE: "x11" };
+    await serveDisplay(7);
+    const env = { DISPLAY: ":7", XDG_SESSION_TYPE: "x11" };
     expect(hasDisplay("linux", env)).toBe(true);
-    await expect(hostDisplayAcceptsConnections("linux", env)).resolves.toBe(true);
+    await expect(hostDisplayAcceptsConnections("linux", env, socketDir)).resolves.toBe(true);
   });
 
   it("refuses a DISPLAY whose X session is gone", async () => {
-    const env = { DISPLAY: `:${freeDisplayNumber()}`, XDG_SESSION_TYPE: "x11" };
+    const env = { DISPLAY: ":7", XDG_SESSION_TYPE: "x11" };
     // The env still says "this host has a screen" — only asking the display
     // itself separates a live session from one that ended under a daemon.
     expect(hasDisplay("linux", env)).toBe(true);
-    await expect(hostDisplayAcceptsConnections("linux", env)).resolves.toBe(false);
+    await expect(hostDisplayAcceptsConnections("linux", env, socketDir)).resolves.toBe(false);
   });
 
   it("keeps a remote display spelling usable rather than reading it as headless", async () => {
     const env = { DISPLAY: "somehost:0", XDG_SESSION_TYPE: "x11" };
-    await expect(hostDisplayAcceptsConnections("linux", env)).resolves.toBe(true);
+    await expect(hostDisplayAcceptsConnections("linux", env, socketDir)).resolves.toBe(true);
   });
 
   it("answers for native windowing without probing, and for no DISPLAY at all", async () => {
-    await expect(hostDisplayAcceptsConnections("darwin", {})).resolves.toBe(true);
-    await expect(hostDisplayAcceptsConnections("win32", {})).resolves.toBe(true);
-    await expect(hostDisplayAcceptsConnections("linux", {})).resolves.toBe(false);
+    await expect(hostDisplayAcceptsConnections("darwin", {}, socketDir)).resolves.toBe(true);
+    await expect(hostDisplayAcceptsConnections("win32", {}, socketDir)).resolves.toBe(true);
+    await expect(hostDisplayAcceptsConnections("linux", {}, socketDir)).resolves.toBe(false);
   });
 });

@@ -98,14 +98,25 @@ ceremony needs. Headless hosts likewise use the broker's private Xvfb and
 connect exposes it over noVNC for the ceremony (same x11vnc + websockify +
 tunnel stack as the standalone remote login, reaped at the ceremony's lease
 boundary) — a tab no human can see is a tab no human can complete.
+The ceremony lands where the PERSON RUNNING CONNECT can see it, and the
+broker's own environment never decides that: its Chrome may sit on the
+machine's screen while connect runs over SSH, or on a private Xvfb while
+connect runs at the desk. The tab counts as already visible only when the
+holder is on the machine's own screen AND this connect has one (`hasDisplay()`
+in `apps/mcp/src/bot/display-env.ts`); every other named display — the
+broker's Xvfb, or the host's screen seen from a screenless connect — is
+exposed over noVNC. The noVNC URL therefore shows whatever that display is
+carrying, the machine's own desktop included; the disclosure label says so.
 Display discovery first reads the holder profile's tracked launch display from
 the owner-reaper manifest, then falls back to the holder's process tree: Chrome
 can erase its main process environment while children retain DISPLAY/XAUTHORITY.
-A display outside the repo-owned rig is treated as already visible, and so is
-missing display evidence on a host that has its own screen — macOS and Windows
-keep no DISPLAY to discover, and a Linux desktop need not export XAUTHORITY.
-Missing display evidence on a headless host, or a failed noVNC exposure, stops
-the ceremony immediately.
+The holder's own evidence classifies its display: every rig this repo starts
+sets DISPLAY and XAUTHORITY together, so a holder carrying DISPLAY without
+XAUTHORITY is provably on the machine's screen (startx/xinit, WSLg and several
+display managers do not export it). A display no evidence can name is
+unshowable and stops the ceremony immediately — except where windows are drawn
+natively (macOS, Windows), which has no X display to discover and no rig it
+could be hiding on. A failed noVNC exposure stops it immediately too.
 Cleanup removes the ceremony's helpers and tab, preserving the broker's browser
 and display even on setup failure. The self-launch path closes its own browser
 and rig, including when initial page setup fails.
