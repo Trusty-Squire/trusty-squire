@@ -7,7 +7,7 @@
 // re-exporting the tool layer's import surface; this module imports only from
 // the rest of the tree, never from provision-session.
 
-import { getDomain } from "tldts";
+import { getDomain, parse as parseHost } from "tldts";
 import type { Page } from "playwright";
 import type { BrowserController } from "../browser.js";
 import { withOAuthActionLease } from "../oauth-login.js";
@@ -363,24 +363,34 @@ export function registrableMailDomain(value: string | null | undefined): string 
   return domain !== null && domain.length > 0 ? domain.toLowerCase() : null;
 }
 
+/**
+ * The service host to scope mail matching by, or undefined when the host is
+ * unmatchable by construction: an IP literal or localhost can never appear in
+ * any From address, display name, or registrable domain, so scoping on it
+ * drops every candidate and protects nothing. Every other host keeps its
+ * scoping — a single-label intranet name such as "gitlab" IS matchable through
+ * mailRowMatchesSender's substring and token checks, so it must not be widened
+ * away here. Shared by every consumer of the session's service host so one
+ * normalization decides scoping on all of them.
+ */
+export function scopeableServiceHost(value: string | null | undefined): string | undefined {
+  const host = (value ?? "").trim().toLowerCase();
+  if (host.length === 0) return undefined;
+  if (host === "localhost") return undefined;
+  // URL.hostname spells an IPv6 literal bracketed ("[::1]"); tldts accepts both.
+  return parseHost(host).isIp === true ? undefined : host;
+}
+
 export function sessionCandidateReason(
   row: MailResultRow,
   opts: { recipient?: string; serviceHost?: string; listingScopedToRecipient?: boolean },
 ): { ok: boolean; reason: string } {
   const recipient = opts.recipient?.trim();
-  // An IP/localhost host can never match any From domain, registrable domain,
-  // or display name, so domain scoping there blocks every candidate and
-  // protects nothing. Treat it as having no service host: rows stay
-  // candidates and the newest-row pick runs. Real hostnames keep the scoping.
   const rawServiceHost = opts.serviceHost?.trim();
   const hasServiceHost = rawServiceHost !== undefined && rawServiceHost.length > 0;
-  const serviceHost =
-    rawServiceHost !== undefined && registrableMailDomain(rawServiceHost) === null
-      ? undefined
-      : rawServiceHost;
+  const serviceHost = scopeableServiceHost(rawServiceHost);
   const visibleRecip = mailRowMatchesRecipient(row, recipient);
-  const serviceMatch =
-    serviceHost !== undefined && serviceHost.length > 0 && mailRowMatchesSender(row, serviceHost);
+  const serviceMatch = serviceHost !== undefined && mailRowMatchesSender(row, serviceHost);
   if (recipient !== undefined && recipient.length > 0 && hasServiceHost) {
     // Listing rows omit To. A to:-scoped search already filtered by recipient,
     // so those rows are openable even when From does not substring-match the
@@ -398,8 +408,9 @@ export function sessionCandidateReason(
     return { ok: false, reason: "recipient_not_visible" };
   }
   if (hasServiceHost) {
-    // Host present but unscopeable (IP/localhost — normalized away above):
-    // there is no domain to match, so the row stays a candidate.
+    // Host present but unscopeable (IP/localhost — see scopeableServiceHost):
+    // there is nothing a From could match, so the row stays a candidate and
+    // the newest-row pick runs.
     if (serviceHost === undefined) return { ok: true, reason: "unscopeable_host" };
     return serviceMatch
       ? { ok: true, reason: "service_host" }
@@ -575,9 +586,9 @@ export function pickOpenedMailMessage(
     // the newest To match. Never return another recipient's message.
     return matching.length > 0 ? dated(matching) : null;
   }
-  const serviceHost = opts.serviceHost?.trim();
+  const serviceHost = scopeableServiceHost(opts.serviceHost);
   const pool =
-    serviceHost !== undefined && serviceHost.length > 0
+    serviceHost !== undefined
       ? messages.filter((m) =>
           mailRowMatchesSender(
             { fromEmail: m.fromEmail, fromName: m.fromName, subject: null },
