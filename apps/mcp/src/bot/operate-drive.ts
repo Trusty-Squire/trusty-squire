@@ -83,6 +83,7 @@ import {
 import { attemptOperateCaptchaAutoSolve } from "./captcha-solve.js";
 import { RES_POLL_INTERVAL_MS, RES_TIMEOUT_MS } from "./captcha.js";
 import { findCredentialTokens, isMaskedDisplay } from "./credential-shape.js";
+import { extractCredentials } from "./capture/capture.js";
 import {
   DRIVE_FIXED_GO_BACK,
   DRIVE_FIXED_NONE_OF_THESE,
@@ -90,7 +91,6 @@ import {
   DRIVE_TRAIL_STORE_CAP,
   classifyDriveOutcome,
   composeDrivePageText,
-  drySecretCandidates,
   feedbackPagePath,
   goalDoneWhen,
   goalPhase,
@@ -1605,24 +1605,8 @@ export function isRevealOrCopyRow(row: WireRow): boolean {
 
 export const REVEALED_SECRET_REF = "@key-value";
 
-export function revealedSecretMarkerRow(length: number, unmasked = false): WireRow {
-  return [
-    REVEALED_SECRET_REF,
-    "h1",
-    `@key-value|secret=1|len=${length}${unmasked ? "|value=1" : ""}`,
-  ];
-}
-
-/** The marker carries whether the secret was seen unmasked. `value=1` is set
- * only when the canonical extractor found a real token (attachRevealedSecretMarker
- * redacts the token itself, so this fact is the surviving evidence). */
-export function rowShowsUnmaskedSecretMarker(row: WireRow): boolean {
-  const facts = row[2] ?? "";
-  return (
-    row[0] === REVEALED_SECRET_REF &&
-    /(?:^|\|)secret=1(?:\||$)/.test(facts) &&
-    /(?:^|\|)value=1(?:\||$)/.test(facts)
-  );
+export function revealedSecretMarkerRow(length: number): WireRow {
+  return [REVEALED_SECRET_REF, "h1", `@key-value|secret=1|len=${length}`];
 }
 
 const MASKED_SECRET_DISPLAY = /(?:^|[\s=|"'])[A-Za-z][A-Za-z0-9]{1,12}[_-][A-Za-z0-9_-]*[•●⬤*]{3,}/;
@@ -1644,46 +1628,20 @@ export function pageShowsRevealedKey(rows: readonly WireRow[], _pageText: string
   return rows.some((row) => rowShowsSecretEvidence(row));
 }
 
-/** The blobs the dry extraction reads: visible page text, headings, notices,
- * and the row facts the model is shown. */
-export function driveSecretBlobs(
-  observation: {
-    dom?: string;
-    semantic?: { title?: string; headings?: string[]; blockers?: Array<{ text: string }> };
-  },
-  rows: readonly WireRow[],
-): string[] {
-  return [
-    observation.dom ?? "",
-    observation.semantic?.title ?? "",
-    ...(observation.semantic?.headings ?? []),
-    ...(observation.semantic?.blockers ?? []).map((blocker) => blocker.text),
-    ...rows.map((row) => row[2] ?? ""),
-  ].filter((blob) => blob.length > 0);
-}
-
-/** What the dry extraction (the operate_extract predicates run without
- * mutating the page) can see: an unmasked secret, a masked one, or neither. */
-export function driveSecretEvidence(
-  observation: {
-    dom?: string;
-    semantic?: { title?: string; headings?: string[]; blockers?: Array<{ text: string }> };
-  },
-  rows: readonly WireRow[],
-): { unmasked: boolean; masked: boolean } {
-  const blobs = driveSecretBlobs(observation, rows);
-  const candidates = drySecretCandidates(blobs);
-  const unmasked =
-    candidates.some((candidate) => !candidate.masked) ||
-    rows.some((row) => rowShowsUnmaskedSecretMarker(row));
-  const masked =
-    !unmasked &&
-    (rows.some((row) => {
-      if (row[0] === REVEALED_SECRET_REF) return rowShowsSecretEvidence(row);
-      return looksLikeMaskedSecretDisplay(row[2] ?? "");
-    }) ||
-      (observation.dom ?? "").split(/\n+/).some((line) => MASKED_SECRET_DISPLAY.test(line)));
-  return { unmasked, masked };
+/** The drive's key-goal evidence and DONE condition: the capture flow
+ * `operate_extract` runs, called as-is. Reveal-masked-values, near-copy tokens,
+ * named fields, same-family `api_key_2..n` extras and sanitize stay in
+ * capture.ts; the drive only asks whether it returned at least one storable
+ * credential, and never keeps a second policy. */
+export async function driveKeyCredentials(sessionId: string): Promise<Record<string, string>> {
+  try {
+    const extracted = await extractCredentials(sessionId);
+    return extracted.credentials;
+  } catch {
+    // The completion check must never crash the loop; an unavailable page is
+    // simply "no credential yet", and the loop carries on.
+    return {};
+  }
 }
 
 /** The control that must come before a key goal can finish: a reveal/show
@@ -1732,9 +1690,8 @@ export function driveSecretsPresent(rows: readonly WireRow[]): DriveSecretsPrese
   const seen = new Set<string>();
   for (const row of rows) {
     const marker = row[0] === REVEALED_SECRET_REF;
-    const unmasked = marker && rowShowsUnmaskedSecretMarker(row);
-    const masked = marker ? !unmasked : looksLikeMaskedSecretDisplay(row[2] ?? "");
-    if (!masked && !unmasked) continue;
+    const masked = looksLikeMaskedSecretDisplay(row[2] ?? "");
+    if (!marker && !masked && !rowShowsSecretEvidence(row)) continue;
     const near = marker ? "the revealed secret value" : readableLabel(row);
     const key = `${near}\t${masked}`;
     if (seen.has(key)) continue;
@@ -1833,7 +1790,6 @@ export function attachRevealedSecretMarker(
     return { observation, rows: [...rows], attached: false };
   }
   const length = lengths.length > 0 ? Math.max(...lengths) : 16;
-  const unmasked = lengths.length > 0;
   const redact = (text: string): string => redactSecretShapedTokens(text).text;
   const nextRows = rows.map((row) => {
     const role = redact(row[1]);
@@ -1842,11 +1798,11 @@ export function attachRevealedSecretMarker(
     return (facts === undefined ? [row[0], role] : [row[0], role, facts]) as WireRow;
   });
   if (!nextRows.some((row) => row[0] === REVEALED_SECRET_REF)) {
-    nextRows.push(revealedSecretMarkerRow(length, unmasked));
+    nextRows.push(revealedSecretMarkerRow(length));
   }
   const headings = [
     ...(observation.semantic?.headings ?? []).map(redact),
-    `@key-value|secret=1|len=${length}${unmasked ? "|value=1" : ""}`,
+    `@key-value|secret=1|len=${length}`,
   ];
   return {
     observation: {
@@ -5696,12 +5652,11 @@ async function driveLoop(input: {
         drive.consumedActionKey = null;
         return "continue";
       }
-      // A key goal is only complete when the dry extraction — the
-      // operate_extract predicates run without touching the page — finds an
-      // unmasked secret-shaped value. A masked value means a key exists but
-      // the drive has not seen it; try the reveal control, then a
+      // A key goal is only complete when the capture flow operate_extract runs
+      // returns at least one storable credential. A masked value means a key
+      // exists but the drive has not seen it; try the reveal control, then a
       // create/generate control, then report honestly.
-      if (isKeyGoal(drive.goal) && !driveSecretEvidence(observation, rows).unmasked) {
+      if (isKeyGoal(drive.goal) && Object.keys(await driveKeyCredentials(sessionId)).length === 0) {
         noteOutcome({
           beforeUrl: observation.url,
           afterUrl: observation.url,
@@ -5712,7 +5667,7 @@ async function driveLoop(input: {
           beforeFingerprint: drive.boundFingerprint ?? fresh,
           afterFingerprint: fresh,
         });
-        drive.history.push("DONE refused: no unmasked secret on the page");
+        drive.history.push("DONE refused: extraction stored no credential");
         drive.consumedActionKey = null;
         const stallKey = pageProgressKey(
           observation.url,
@@ -5723,7 +5678,7 @@ async function driveLoop(input: {
         drive.stallKeys ??= [];
         if (drive.stallKeys.includes(stallKey)) {
           return finish("stuck", {
-            reason: "no unmasked secret-shaped value is on the page",
+            reason: "no stored credential is on the page",
           });
         }
         drive.stallKeys.push(stallKey);
@@ -6280,7 +6235,11 @@ async function driveLoop(input: {
       observation = attached.observation;
       rows = attached.rows;
       actMs = Date.now() - actStarted;
-      if (isKeyGoal(drive.goal) && driveSecretEvidence(observation, rows).unmasked) {
+      if (isKeyGoal(drive.goal) && Object.keys(await driveKeyCredentials(sessionId)).length > 0) {
+        // The capture flow reveals masked values, so re-snapshot before the
+        // handoff: the returned observation must show what extraction read.
+        const finalSnap = await snapshotOrTimeout(framesIfNeeded());
+        if (finalSnap !== "ok") return finalSnap;
         return finish("complete");
       }
       const bounced = finishIfOauthBounced();
@@ -6313,7 +6272,11 @@ async function driveLoop(input: {
       const snap = await refreshSnapshot(framesIfNeeded());
       if (snap.timedOut)
         return finish("evaluate_timeout", { reason: "in-page evaluate exceeded budget" });
-      if (isKeyGoal(drive.goal) && driveSecretEvidence(observation, rows).unmasked) {
+      if (isKeyGoal(drive.goal) && Object.keys(await driveKeyCredentials(sessionId)).length > 0) {
+        // Same as the unsupported branch: extraction may have revealed a
+        // masked value, so the handoff needs a snapshot of what it read.
+        const finalSnap = await snapshotOrTimeout(framesIfNeeded());
+        if (finalSnap !== "ok") return finalSnap;
         return finish("complete");
       }
       const bounced = finishIfOauthBounced();
@@ -6960,34 +6923,33 @@ async function driveLoop(input: {
       ...new Set([...(drive.exhaustedActionKeys ?? []), ...(drive.staleClickRefs ?? [])]),
     ];
     if (isKeyGoal(drive.goal)) {
-      const evidence = driveSecretEvidence(observation, rows);
-      if (evidence.unmasked) {
+      const credentials = await driveKeyCredentials(sessionId);
+      if (Object.keys(credentials).length > 0) {
         const applied = await applyDecision({ kind: "complete", confidence: 1 });
         if (applied !== "continue") return applied;
         steps += 1;
         continue;
       }
-      if (evidence.masked) {
-        // A masked value means a key exists but has not been read. The next
-        // controls, in order, are a reveal/show toggle beside it, then a
-        // create/generate control.
-        const advance = keyGoalSecretAdvance(rows, skippedActions, {
-          pageUrl,
-          triedStableKeys: drive.triedHere ?? [],
+      // Extraction stored nothing: the next controls, in order, are a
+      // reveal/show toggle beside a masked value, then a create/generate
+      // control. A control already tried on this page+goal is skipped, so
+      // this cannot spin.
+      const advance = keyGoalSecretAdvance(rows, skippedActions, {
+        pageUrl,
+        triedStableKeys: drive.triedHere ?? [],
+      });
+      if (advance !== undefined) {
+        drive.boundFingerprint = driveProgressFingerprint(observation, rows, drive, session);
+        drive.consumedActionKey = null;
+        const applied = await applyDecision({
+          kind: "act",
+          action: { kind: "click", target: advance[0] },
+          actionKey: advance[0],
+          confidence: 1,
         });
-        if (advance !== undefined) {
-          drive.boundFingerprint = driveProgressFingerprint(observation, rows, drive, session);
-          drive.consumedActionKey = null;
-          const applied = await applyDecision({
-            kind: "act",
-            action: { kind: "click", target: advance[0] },
-            actionKey: advance[0],
-            confidence: 1,
-          });
-          if (applied !== "continue") return applied;
-          steps += 1;
-          continue;
-        }
+        if (applied !== "continue") return applied;
+        steps += 1;
+        continue;
       }
     }
     const sets = driveTargetSets(
@@ -7105,12 +7067,13 @@ async function driveLoop(input: {
       decision = decide(answers);
     }
     // goal_complete is a candidate for verification, never completion: for a
-    // key goal the dry extraction is the only thing that can finish the drive.
+    // key goal the capture flow operate_extract runs is the only thing that
+    // can finish the drive.
     if (
       decision.kind !== "complete" &&
       isKeyGoal(drive.goal) &&
       confidenceOf(answers.goal_complete) >= DRIVE_CONFIDENCE_THRESHOLD &&
-      driveSecretEvidence(observation, rows).unmasked
+      Object.keys(await driveKeyCredentials(sessionId)).length > 0
     ) {
       const applied = await applyDecision(
         { kind: "complete", confidence: confidenceOf(answers.goal_complete) },

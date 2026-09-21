@@ -11,20 +11,13 @@
 //     infer it from prose.
 //   • goal phase + done_when — stated as concrete conditions over the page,
 //     never "advance the goal".
-//   • dry extraction — the canonical credential predicates (the same ones
-//     operate_extract uses) run without mutating the page, so "DONE" for a key
-//     goal needs an unmasked secret-shaped value in hand.
 //
-// Browser-free. Credential predicates are shared with capture/capture.ts so a
-// dry read and the real extraction cannot drift.
-
-import {
-  findCredentialTokens,
-  isCredentialNoise,
-  isMaskedDisplay,
-  looksLikeCodeIdentifier,
-} from "./credential-shape.js";
-import { extractApiKeyFromText, isTruncatedCapture } from "./credential-text.js";
+// The key-goal evidence and DONE condition are not a drive-local check: the
+// drive calls the capture flow operate_extract runs (`driveKeyCredentials` in
+// operate-drive.ts, which calls capture.ts's `extractCredentials`). No second
+// credential policy lives here.
+//
+// Browser-free.
 
 export const DRIVE_TRAIL_CAP = 8;
 export const DRIVE_TRAIL_STORE_CAP = 32;
@@ -179,56 +172,6 @@ export function classifyDriveOutcome(input: DriveOutcomeInput): string {
   const appeared = freshDriveText(input.beforeText ?? "", input.afterText ?? "", input.notices);
   if (appeared !== undefined) return `text_appeared:${appeared}`;
   return "no_change";
-}
-
-export interface DriveSecretCandidate {
-  value: string;
-  masked: boolean;
-}
-
-/** Dry credential extraction: the same predicates operate_extract runs, over
- * page text and row facts, with no reveal clicks and no page mutation.
- *
- * A candidate is a real secret only when it is NOT masked, NOT a truncated
- * display, NOT page noise, and NOT a code identifier. Masked displays are
- * reported separately so the caller can prefer a reveal control over a
- * false "done". */
-export function drySecretCandidates(blobs: readonly string[]): DriveSecretCandidate[] {
-  const out: DriveSecretCandidate[] = [];
-  const seen = new Set<string>();
-  const push = (value: string, masked: boolean): void => {
-    const key = value.trim();
-    if (key.length === 0 || seen.has(key)) return;
-    seen.add(key);
-    out.push({ value: key, masked });
-  };
-  for (const blob of blobs) {
-    if (typeof blob !== "string" || blob.length === 0) continue;
-    const extracted = extractApiKeyFromText(blob);
-    if (
-      extracted !== null &&
-      extracted.trim().length >= 12 &&
-      !isCredentialNoise(extracted) &&
-      !looksLikeCodeIdentifier(extracted) &&
-      !isMaskedDisplay(extracted) &&
-      !isTruncatedCapture(blob, extracted)
-    ) {
-      push(extracted, false);
-    }
-    for (const token of findCredentialTokens(blob)) {
-      if (isCredentialNoise(token) || looksLikeCodeIdentifier(token) || isMaskedDisplay(token)) {
-        continue;
-      }
-      if (isTruncatedCapture(blob, token)) continue;
-      push(token, false);
-    }
-  }
-  return out;
-}
-
-/** True when the dry extraction found at least one unmasked secret. */
-export function hasUnmaskedSecret(blobs: readonly string[]): boolean {
-  return drySecretCandidates(blobs).some((candidate) => !candidate.masked);
 }
 
 /** Compose the visible text the decider may see: notices first, then the page
