@@ -23,11 +23,12 @@
 // Chrome-shaped cookie store. Only the network API is faked — a genuine process
 // boundary.
 
-import nodeFs, { promises as fs } from "node:fs";
+import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 
+import { captureMachineChannel } from "../../__tests__/machine-channel.js";
 import { connect } from "../cli.js";
 import { listenBroker } from "../../bot/broker/transport.js";
 import {
@@ -94,32 +95,6 @@ async function writeProfileCookies(
     profileDir,
     cookies.map((cookie) => ({ ...cookie, expires })),
   );
-}
-
-/**
- * The machine channel is stdout's DESCRIPTOR, written synchronously so an
- * immediate `process.exit` cannot drop it. Point that descriptor at a file
- * for the duration and read back exactly the bytes a caller would pipe.
- */
-function captureMachineChannel(): {
-  read: () => string;
-  restore: () => void;
-} {
-  const file = path.join(socketRoot, `machine-${Math.random().toString(36).slice(2)}.json`);
-  const fd = nodeFs.openSync(file, "w+");
-  const original = process.stdout.fd;
-  Object.defineProperty(process.stdout, "fd", { value: fd, configurable: true, writable: true });
-  return {
-    read: () => nodeFs.readFileSync(file, "utf8"),
-    restore: () => {
-      Object.defineProperty(process.stdout, "fd", {
-        value: original,
-        configurable: true,
-        writable: true,
-      });
-      nodeFs.closeSync(fd);
-    },
-  };
 }
 
 let tmpHome: string;

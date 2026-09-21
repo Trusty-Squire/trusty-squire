@@ -53,7 +53,10 @@ export type ConnectBrowserLocation =
 
 export interface ConnectAccount {
   id: string;
-  providers: OAuthProviderId[];
+  // What the run's provider probe actually saw. `[]` means it read the profile
+  // and found nothing; `null` means it could not read the profile at all, which
+  // is a different answer and must not be flattened into "none".
+  providers: OAuthProviderId[] | null;
 }
 
 interface ConnectReportFields {
@@ -72,7 +75,8 @@ interface ConnectReportFields {
  * anyone. A `no-browser` run may also still hold a live URL (the ceremony
  * could not be shown here, but the install is still open). `account` is set
  * whenever the run proved which account this machine is bound to, which is
- * not only when it ends `connected`; `reason` is null when the other fields
+ * not only when it ends `connected`, and its `providers` says what the probe
+ * saw — `null` when it could not look; `reason` is null when the other fields
  * already say everything there is to say.
  */
 export type ConnectReport =
@@ -131,7 +135,7 @@ function signInOutstanding(input: ConnectReportInput, sign_in_url: string): Conn
   };
 }
 
-function connectedAccount(account_id: string, providers: OAuthProviderId[]): ConnectAccount {
+function connectedAccount(account_id: string, providers: OAuthProviderId[] | null): ConnectAccount {
   return { id: account_id, providers };
 }
 
@@ -154,30 +158,38 @@ export function buildConnectReport(input: ConnectReportInput): ConnectReport {
       const gate = decideConnectComplete(outcome.providers, outcome.requested_provider);
       if (gate.ok) {
         return settled("connected", null, input, {
-          account: connectedAccount(outcome.account_id, outcome.providers ?? []),
+          account: connectedAccount(outcome.account_id, outcome.providers),
         });
       }
-      if (gate.reason === "probe_failed") return settled("busy", "profile_unverifiable", input);
+      // The ceremony claimed the install and the session was written, so the
+      // binding is proven even though the probe could not read the profile.
+      if (gate.reason === "probe_failed") {
+        return settled("busy", "profile_unverifiable", input, {
+          account: connectedAccount(outcome.account_id, outcome.providers),
+        });
+      }
       // The run fails and exits non-zero on this gate, so the machine channel
       // must not answer `connected`: the browser is not signed in the way the
       // caller asked for, and the reason names the gap.
       if (gate.reason === "requested_provider_missing") {
         return settled("no-browser", "requested_provider_missing", input, {
-          account: connectedAccount(outcome.account_id, outcome.providers ?? []),
+          account: connectedAccount(outcome.account_id, outcome.providers),
         });
       }
       // The session was written and the agent config rebound before the probe
       // ran, so this machine IS bound to that account — the empty provider
       // list is the observation, not a reason to drop the binding.
       return settled("no-browser", "provider_session_missing", input, {
-        account: connectedAccount(outcome.account_id, outcome.providers ?? []),
+        account: connectedAccount(outcome.account_id, outcome.providers),
       });
     }
     case "unverified":
+      // The preflight probe threw, so no provider session was observed either
+      // way — that is `null`, not an empty list.
       return settled("busy", "profile_unverifiable", input, {
         ...(outcome.account_id === null
           ? {}
-          : { account: connectedAccount(outcome.account_id, []) }),
+          : { account: connectedAccount(outcome.account_id, null) }),
       });
     case "profile_busy":
       return settled("busy", null, input);

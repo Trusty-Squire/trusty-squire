@@ -14,7 +14,7 @@
 // This file proves the install pipeline drives the right writer for
 // each --target value.
 
-import nodeFs, { promises as fs } from "node:fs";
+import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -120,6 +120,7 @@ import { clearBrowserProfile, clearProviderCookies } from "../bot/login-state.js
 import { ProfileBusyError } from "../bot/profile.js";
 import { BrokerRefusal } from "../bot/broker/refusal.js";
 import { installInitiate, installPoll } from "../api-client.js";
+import { captureMachineChannel } from "./machine-channel.js";
 import { connect, resolveServerLaunch } from "../install/cli.js";
 import { AGENTS } from "../install/agents.js";
 import { openSessionStorage } from "../session.js";
@@ -523,29 +524,6 @@ describe("connect --target=<agent> writes a valid config", () => {
     expect(deadline - before).toBeGreaterThan(9 * 60_000);
     expect(deadline - Date.now()).toBeLessThanOrEqual(10 * 60_000);
   });
-
-  /**
-   * The machine channel is stdout's DESCRIPTOR — `emitConnectReport` writes it
-   * synchronously so an immediate `process.exit` cannot drop it. Point that
-   * descriptor at a file and read back exactly what a caller would pipe.
-   */
-  function captureMachineChannel(): { read: () => string; restore: () => void } {
-    const file = path.join(tmpHome, `machine-${Math.random().toString(36).slice(2)}.json`);
-    const fd = nodeFs.openSync(file, "w+");
-    const original = process.stdout.fd;
-    Object.defineProperty(process.stdout, "fd", { value: fd, configurable: true, writable: true });
-    return {
-      read: () => nodeFs.readFileSync(file, "utf8"),
-      restore: () => {
-        Object.defineProperty(process.stdout, "fd", {
-          value: original,
-          configurable: true,
-          writable: true,
-        });
-        nodeFs.closeSync(fd);
-      },
-    };
-  }
 
   // The ceremony waits exactly as long as the pairing token lives, so reaching
   // that deadline means the link is dead. Handing it back as `needs-sign-in`

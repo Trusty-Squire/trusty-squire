@@ -801,7 +801,8 @@ Read this file. Follow the rules. Run the verify script. Paste the output. Then 
   `profile_busy`) — reaches connect typed and reports `busy` with the holder,
   read from Chrome's lock OR the operation lease. Every other refusal code is
   the run breaking, not contention, and reports `run_failed`. `account` carries
-  the binding whenever the run proved one, `connected` or not. A rejected flag is answered as a
+  the binding whenever the run proved one, `connected` or not, and its
+  `providers` is `null` — not `[]` — when the probe could not read the profile. A rejected flag is answered as a
   usage error, never as a connection state. Do not add a report variant no path
   emits.
 - **Never quit a Chrome whose profile state you still need with SIGTERM.** Chrome

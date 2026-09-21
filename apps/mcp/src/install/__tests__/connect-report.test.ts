@@ -89,7 +89,10 @@ describe("buildConnectReport", () => {
     });
     expect(report.state).toBe("busy");
     expect(report.reason).toBe("profile_unverifiable");
-    expect(report.account).toBeNull();
+    // The ceremony claimed the install and the session was written before the
+    // probe threw, so the binding is proven; `providers: null` is the probe
+    // saying it could not look, which is not the same as seeing none.
+    expect(report.account).toEqual({ id: "acc_1", providers: null });
   });
 
   it("puts the still-live sign-in URL in its own field, never mixed with other links", () => {
@@ -237,7 +240,22 @@ describe("buildConnectReport", () => {
     const report = classify({ outcome: { kind: "unverified", account_id: "acc_1" } });
     expect(report.state).toBe("busy");
     expect(report.reason).toBe("profile_unverifiable");
-    expect(report.account).toEqual({ id: "acc_1", providers: [] });
+    expect(report.account).toEqual({ id: "acc_1", providers: null });
+  });
+
+  // `[]` and `null` are different answers: one says the profile was read and
+  // held no provider session, the other says it could not be read. Collapsing
+  // them tells a caller checking `providers.includes("google")` that a live
+  // session is absent when the run never looked.
+  it("distinguishes a probe that saw nothing from one that could not look", () => {
+    const sawNothing = classify({
+      outcome: { kind: "ceremony_complete", account_id: "acc_1", providers: [] },
+    });
+    const couldNotLook = classify({
+      outcome: { kind: "ceremony_complete", account_id: "acc_1", providers: null },
+    });
+    expect(sawNothing.account?.providers).toEqual([]);
+    expect(couldNotLook.account?.providers).toBeNull();
   });
 
   // This gate makes the run print a failure and exit 1. Answering `connected`
