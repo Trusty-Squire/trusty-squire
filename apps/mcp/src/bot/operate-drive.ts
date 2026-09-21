@@ -82,7 +82,7 @@ import {
 } from "./checkout-total.js";
 import { attemptOperateCaptchaAutoSolve } from "./captcha-solve.js";
 import { RES_POLL_INTERVAL_MS, RES_TIMEOUT_MS } from "./captcha.js";
-import { findCredentialTokens, isMaskedDisplay } from "./credential-shape.js";
+import { findCredentialTokens, isMaskedDisplay, looksLikeCredentialValue } from "./credential-shape.js";
 
 export interface DriveCallContext {
   notifyUser?: (message: string, data?: Record<string, unknown>) => Promise<void>;
@@ -326,6 +326,7 @@ export interface DriveDependencies {
   awaitVerification: typeof awaitVerification;
   injectCard: InjectCardFn;
   now?: () => number;
+  dryExtract?: (sessionId: string) => Promise<{ found: boolean; candidate_count: number }>;
   attemptCaptchaAutoSolve?: (
     session: Session,
     page?: Page,
@@ -921,7 +922,7 @@ export function cycleReason(url: string, repeated: readonly string[] = []): stri
 }
 
 export function isPendingPageAction(row: WireRow, goal: string = ""): boolean {
-  if (isRevealOrCopyRow(row) || isCreateEntryRow(row)) return true;
+  if (isRevealOrCopyRow(row) || isCreateEntryRow(row) || isCreateOrGenerateKeyRow(row)) return true;
   if (isSubmitLikeRow(row) && !isProgressSubmitRow(row) && !isOauthChromeRow(row)) return true;
   return goal.length > 0 && rowCarriesGoalNoun(row, goal) && isClickableRow(row) && !isSectionNavRow(row);
 }
@@ -1177,6 +1178,7 @@ export function isSubmitLikeRow(row: WireRow): boolean {
   // made Fireworks listedWork stay true after the passwords, so settle never
   // waited on the still-disabled Create Account.
   if (/\b(?:next|previous|prev)\s+slide\b/.test(label)) return false;
+  if (isCreateOrGenerateKeyRow(row)) return false;
   return /submit|continue|creat(?:e|ing)|loading|sign[- ]?up|register|\bnext\b|pay[- ]?now|place[- ]?order|get[- ]?started/.test(
     label,
   );
@@ -1487,7 +1489,19 @@ export function isCreateEntryRow(row: WireRow): boolean {
     .toLowerCase()
     .replace(/^\+\s*/, "")
     .trim();
+  if (isCreateOrGenerateKeyRow(row)) return true;
   return /^(?:add|new|create)(?:\s+(?:an?\s+)?)?(?:app|application|project|workspace|site|instance|team|item)?s?$/.test(
+    label,
+  );
+}
+
+export function isCreateOrGenerateKeyRow(row: WireRow): boolean {
+  if (isFillableRow(row) || isConsentRow(row) || isOauthChromeRow(row)) return false;
+  const label = readableLabel(row)
+    .toLowerCase()
+    .replace(/^\+\s*/, "")
+    .trim();
+  return /^(?:create|generate|new|add)(?:\s+(?:an?\s+)?)?(?:api[- ]?)?(?:key|token|secret)s?$/.test(
     label,
   );
 }
@@ -1571,20 +1585,51 @@ export function looksLikeMaskedSecretDisplay(text: string): boolean {
   return MASKED_SECRET_DISPLAY.test(text) || (isMaskedDisplay(text) && /[_-]/.test(text));
 }
 
-export function rowShowsSecretEvidence(row: WireRow): boolean {
+export function rowShowsMaskedKey(row: WireRow): boolean {
+  const facts = `${row[1]}\t${row[2] ?? ""}`;
+  return looksLikeMaskedSecretDisplay(facts) || isMaskedDisplay(facts);
+}
+
+export function rowShowsUnmaskedSecret(row: WireRow): boolean {
   const facts = `${row[1]}\t${row[2] ?? ""}`;
   if (row[0] === REVEALED_SECRET_REF || /(?:^|\|)secret=1(?:\||$)/.test(row[2] ?? "")) {
     return true;
   }
-  if (findCredentialTokens(facts).length > 0) return true;
-  return looksLikeMaskedSecretDisplay(facts);
+  return findCredentialTokens(facts).length > 0;
+}
+
+export function rowShowsSecretEvidence(row: WireRow): boolean {
+  return rowShowsUnmaskedSecret(row);
+}
+
+export function pageShowsMaskedKey(rows: readonly WireRow[]): boolean {
+  return rows.some((row) => rowShowsMaskedKey(row));
 }
 
 export function pageShowsRevealedKey(
   rows: readonly WireRow[],
   _pageText: string = "",
 ): boolean {
-  return rows.some((row) => rowShowsSecretEvidence(row));
+  return rows.some((row) => rowShowsUnmaskedSecret(row));
+}
+
+export function pageNeedsKeyRevealOrCreate(rows: readonly WireRow[]): boolean {
+  return pageShowsMaskedKey(rows) && !pageShowsRevealedKey(rows);
+}
+
+export function observationHasUnmaskedCredential(
+  observation: Pick<Observation, "dom">,
+  rows: readonly WireRow[],
+): boolean {
+  if (pageNeedsKeyRevealOrCreate(rows)) return false;
+  if (pageShowsRevealedKey(rows)) return true;
+  const blobs = [observation.dom ?? "", ...rows.map((row) => `${row[1]}\t${row[2] ?? ""}`)];
+  for (const blob of blobs) {
+    for (const token of findCredentialTokens(blob)) {
+      if (!isMaskedDisplay(token) && looksLikeCredentialValue(token)) return true;
+    }
+  }
+  return false;
 }
 
 function headingCopy(rows: readonly WireRow[]): string {
@@ -1628,8 +1673,7 @@ export function attachRevealedSecretMarker(
   for (const blob of blobs) {
     for (const token of findCredentialTokens(blob)) lengths.push(token.length);
   }
-  const maskedEvidence = rows.some((row) => rowShowsSecretEvidence(row));
-  if (lengths.length === 0 && !maskedEvidence) {
+  if (lengths.length === 0) {
     return { observation, rows: [...rows], attached: false };
   }
   const length = lengths.length > 0 ? Math.max(...lengths) : 16;
@@ -1682,8 +1726,8 @@ export function isEntityNameRow(row: WireRow): boolean {
   return (
     label === "name" ||
     field === "name" ||
-    /(?:app|project|workspace|site|team|application)_name$/.test(label) ||
-    /(?:app|project|workspace|site|team)_name$/.test(field)
+    /(?:app|project|workspace|site|team|application|key|token|secret)_name$/.test(label) ||
+    /(?:app|project|workspace|site|team|key|token)_name$/.test(field)
   );
 }
 
@@ -1921,7 +1965,12 @@ export function pageLooksLikeKeyDestination(url: string): boolean {
   return /(?:^|\/)(?:api[-_]?keys?|tokens?|credentials?|settings)(?:\/|$)/.test(urlPathname(url));
 }
 
-export function clickGoalSeekScore(row: WireRow, goal: string, pageUrl: string): number {
+export function clickGoalSeekScore(
+  row: WireRow,
+  goal: string,
+  pageUrl: string,
+  rows: readonly WireRow[] = [],
+): number {
   if (!goalSeeksKey(goal)) return 0;
   const onSetup = pageIsPostAuthSetup(pageUrl);
   const onKeys = pageLooksLikeKeyDestination(pageUrl);
@@ -1933,7 +1982,9 @@ export function clickGoalSeekScore(row: WireRow, goal: string, pageUrl: string):
   ) {
     return 0;
   }
-  if (isRevealOrCopyRow(row)) return 3;
+  const maskedOnly = pageNeedsKeyRevealOrCreate(rows);
+  if (isRevealOrCopyRow(row)) return maskedOnly ? 5 : 3;
+  if (isCreateOrGenerateKeyRow(row)) return maskedOnly ? 4 : 2;
   if (isDeeperDestination(rowHref(row), pageUrl) || isListedEntityRow(row)) return 2;
   if (rowMatchesGoalSeek(row, goal) && isGoalDestinationRow(row)) return 2;
   if (rowMatchesGoalSeek(row, goal)) return 1;
@@ -3422,6 +3473,10 @@ export function driveTargetSets(
   const untriedEntries = hideFilters ? untriedListedItemRows(rows, visited, pageUrl) : [];
   const layer = pageOcclusionLayer(rows);
   const failed = new Set(aim.failedKeys ?? []);
+  const maskedOnly = hideFilters && pageNeedsKeyRevealOrCreate(rows);
+  const hasRevealOrCreate = rows.some(
+    (row) => isRevealOrCopyRow(row) || isCreateOrGenerateKeyRow(row),
+  );
   const keepRow = (row: WireRow): boolean => {
     if (isCodeSampleRow(row)) return false;
     if (failed.has(actionFailureKey(row, pageUrl)) || failed.has(row[0])) return false;
@@ -3430,8 +3485,21 @@ export function driveTargetSets(
     if (hasInAppWork && isOffProductNavRow(row, pageUrl)) return false;
     if (isAppRootOrLogoRow(row, pageUrl) || isSamePageAnchorRow(row, pageUrl)) return false;
     if (visited.includes(sectionIdentity(row, pageUrl))) return false;
-    if (isCreateEntryRow(row) && listedItemRows(rows, pageUrl).length > 0) return false;
+    if (
+      isCreateEntryRow(row) &&
+      listedItemRows(rows, pageUrl).length > 0 &&
+      !(maskedOnly && isCreateOrGenerateKeyRow(row))
+    ) {
+      return false;
+    }
     if (hideFilters && untriedEntries.length > 0 && isSiblingSectionNavRow(row, pageUrl, rows)) {
+      return false;
+    }
+    if (maskedOnly && hasRevealOrCreate) {
+      if (isRevealOrCopyRow(row) || isCreateOrGenerateKeyRow(row) || isFillableRow(row)) {
+        return true;
+      }
+      if (layer !== undefined && isLayerCandidateRow(row, rows, layer)) return true;
       return false;
     }
     return true;
@@ -3477,7 +3545,7 @@ export function driveTargetSets(
       .map((candidate, index) => ({
         candidate,
         index,
-        score: clickGoalSeekScore(candidate.row, aim.goal ?? "", pageUrl),
+        score: clickGoalSeekScore(candidate.row, aim.goal ?? "", pageUrl, rows),
       }))
       .sort((left, right) => right.score - left.score || left.index - right.index)
       .map((entry) => entry.candidate),
@@ -3516,7 +3584,7 @@ export function driveTargetSets(
   // never records one, so a payment settling behind a blank processor screen
   // keeps its wait for as long as the budgets allow.
   if (!listedWork && !inboxReady && !skipped.has("WAIT")) operations.push("WAIT");
-  operations.push("DONE");
+  if (!(maskedOnly && hasRevealOrCreate)) operations.push("DONE");
   if (!listedWork && !inboxReady) operations.push("BLOCKED");
   return { operations, TYPE_TEXT: typeText, SELECT: select, CLICK: click, SCROLL: scroll };
 }
@@ -5141,6 +5209,18 @@ async function driveLoop(input: {
     return "continue";
   };
 
+  const unmaskedExtractReady = async (): Promise<boolean> => {
+    if (pageNeedsKeyRevealOrCreate(rows)) return false;
+    if (dependencies.dryExtract !== undefined) {
+      try {
+        return (await dependencies.dryExtract(sessionId)).found;
+      } catch {
+        return false;
+      }
+    }
+    return observationHasUnmaskedCredential(observation, rows);
+  };
+
   // The repeat-cap is a model-facing budget: it withholds an operation the
   // model already tried. The loop's own probes (combobox pre-fill, settle
   // wait, inbox read) have their own guards, so recording them here both
@@ -5155,6 +5235,13 @@ async function driveLoop(input: {
       const completeSnap = await snapshotOrTimeout(framesIfNeeded());
       if (completeSnap !== "ok") return completeSnap;
       const fresh = driveProgressFingerprint(observation, rows, drive, session);
+      if (goalSeeksKey(drive.goal)) {
+        if (await unmaskedExtractReady()) return finish("complete");
+        if (drive.boundFingerprint !== null && fresh !== drive.boundFingerprint) {
+          drive.consumedActionKey = null;
+        }
+        return "continue";
+      }
       if (drive.boundFingerprint !== null && fresh !== drive.boundFingerprint) {
         drive.consumedActionKey = null;
         return "continue";
@@ -5585,9 +5672,6 @@ async function driveLoop(input: {
       observation = attached.observation;
       rows = attached.rows;
       actMs = Date.now() - actStarted;
-      if (pageShowsRevealedKey(rows) && goalSeeksKey(drive.goal)) {
-        return finish("complete");
-      }
       const bounced = finishIfOauthBounced();
       if (bounced !== undefined) return bounced;
     } else {
@@ -5618,9 +5702,6 @@ async function driveLoop(input: {
       const snap = await refreshSnapshot(framesIfNeeded());
       if (snap.timedOut)
         return finish("evaluate_timeout", { reason: "in-page evaluate exceeded budget" });
-      if (pageShowsRevealedKey(rows) && goalSeeksKey(drive.goal)) {
-        return finish("complete");
-      }
       const bounced = finishIfOauthBounced();
       if (bounced !== undefined) return bounced;
       if (pagePathKey(observation.url) !== pagePathKey(urlBeforeClick)) {

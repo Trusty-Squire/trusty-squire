@@ -3900,21 +3900,66 @@ describe("operate_drive real-browser fixture", () => {
     }
   }, 30_000);
 
-  it("finishes complete on a dialog that already shows a masked secret and never repeats Create API key", async () => {
-    const html = `<!doctype html><meta charset="utf-8"><title>Keys</title>
+  it("clicks Create key on a masked list and finishes only after an unmasked value appears", async () => {
+    const html = `<!doctype html><meta charset="utf-8"><title>API Keys</title>
 <main>
-  <button type="button" id="create">Create API key</button>
-  <dialog id="dlg" open>
-    <label>API key <input id="key" value="tvly-dev-****abcd"></label>
-    <button type="button" id="copy">Copy</button>
-    <button type="button" id="close">Close</button>
-  </dialog>
+  <h1>API Keys</h1>
+  <p>Default <code id="masked">sk_live_****abcd</code></p>
+  <button type="button" id="create">Create key</button>
 </main>
 <script>
-  window.createClicks = 0;
-  document.getElementById("create").onclick = () => { window.createClicks += 1; };
+  document.getElementById("create").onclick = () => {
+    const secret = ["sk", "live", "fixturekey01"].join("_");
+    document.querySelector("main").innerHTML = '<p id="secret">' + secret + '</p>';
+  };
 </script>`;
-    const { context, page, started } = await openFixture(html, "dialog-key.test", "drive");
+    const { context, page, started } = await openFixture(
+      html,
+      "masked-keys-create.test",
+      "drive",
+      "/settings/keys",
+    );
+    try {
+      const dependencies = deps(async (_api, _state, questions) => jevFromQuestions(questions));
+      const result = await runOperateDrive(
+        {
+          session_id: started.session_id,
+          goal: "extract an API key",
+          facts: { name: "Fixture key" },
+          max_steps: 8,
+        },
+        api(),
+        undefined,
+        dependencies,
+      );
+      expect(result.status).toBe("complete");
+      expect(await page.locator("#secret").count()).toBe(1);
+      expect(result.trajectory.some((step) => step.action === "click")).toBe(true);
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
+  it("clicks Reveal on a home page with a masked value before finishing", async () => {
+    const html = `<!doctype html><meta charset="utf-8"><title>Home</title>
+<main>
+  <h1>Home</h1>
+  <p>API key <span id="key">sk_live_****abcd</span></p>
+  <button type="button" id="reveal">Reveal</button>
+</main>
+<script>
+  document.getElementById("reveal").onclick = () => {
+    document.getElementById("key").textContent = ["sk", "live", "fixturekey01"].join("_");
+    document.getElementById("reveal").remove();
+  };
+</script>`;
+    const { context, page, started } = await openFixture(
+      html,
+      "masked-home-reveal.test",
+      "drive",
+      "/home",
+    );
     try {
       const dependencies = deps(async (_api, _state, questions) => jevFromQuestions(questions));
       const result = await runOperateDrive(
@@ -3923,10 +3968,10 @@ describe("operate_drive real-browser fixture", () => {
         undefined,
         dependencies,
       );
-      expect(await page.evaluate(() => (window as unknown as { createClicks: number }).createClicks)).toBe(0);
       expect(result.status).toBe("complete");
-      const creates = result.trajectory.filter((step) => step.target.includes("Create") || /create/i.test(step.reason ?? ""));
-      expect(creates.filter((step) => step.action === "click" && step.reason === undefined).length).toBe(0);
+      expect(await page.locator("#reveal").count()).toBe(0);
+      expect(await page.locator("#key").innerText()).toBe(["sk", "live", "fixturekey01"].join("_"));
+      expect(result.trajectory.some((step) => step.action === "click")).toBe(true);
     } finally {
       await finishProvisionSession(started.session_id);
       await context.close();

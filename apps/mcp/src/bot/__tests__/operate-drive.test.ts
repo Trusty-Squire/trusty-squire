@@ -3,6 +3,7 @@
 // handoff shape, and resume-answer execution. No browser.
 
 import { describe, expect, it } from "vitest";
+import { extractHasUnmaskedCredential } from "../capture/capture.js";
 import {
   DRIVE_CONFIDENCE_THRESHOLD,
   DRIVE_DEFAULT_MAX_STEPS,
@@ -140,7 +141,9 @@ import {
   isSiblingSectionNavRow,
   isDeeperDestination,
   isRevealOrCopyRow,
+  isCreateOrGenerateKeyRow,
   pageShowsRevealedKey,
+  pageShowsMaskedKey,
   revealedSecretMarkerRow,
   attachRevealedSecretMarker,
   redactSecretShapedTokens,
@@ -3328,8 +3331,9 @@ describe("post-confirmation navigation", () => {
     expect(pageShowsRevealedKey([marker])).toBe(true);
     expect(pageShowsRevealedKey([["@e:show", "b", "Reveal"]], "••••••••••••")).toBe(false);
     expect(looksLikeMaskedSecretDisplay("tvly-dev-****abcd")).toBe(true);
-    expect(rowShowsSecretEvidence(["@e:key", "t", "API key|n=tvly-dev-****abcd"])).toBe(true);
-    expect(pageShowsRevealedKey([["@e:key", "t", "API key|n=tvly-dev-****abcd"]])).toBe(true);
+    expect(rowShowsSecretEvidence(["@e:key", "t", "API key|n=tvly-dev-****abcd"])).toBe(false);
+    expect(pageShowsMaskedKey([["@e:key", "t", "API key|n=tvly-dev-****abcd"]])).toBe(true);
+    expect(pageShowsRevealedKey([["@e:key", "t", "API key|n=tvly-dev-****abcd"]])).toBe(false);
     expect(redactSecretShapedTokens("prefix sk_live_fixturekey01 suffix").text).toBe(
       "prefix @key-value suffix",
     );
@@ -3824,6 +3828,38 @@ describe("dialog overlay secret and oauth bounce rules", () => {
       [select],
     );
     expect(JSON.stringify(attached.observation)).not.toContain("sk_live_fixturekey01");
+  });
+
+  it("treats a masked value as existing, not revealed, and offers reveal then create", () => {
+    const masked: WireRow = ["@e:key", "t", "API key|n=sk_live_****abcd"];
+    const reveal: WireRow = ["@e:show", "b", "Reveal"];
+    const create: WireRow = ["@e:new", "b", "Create key"];
+    const listed: WireRow = [
+      "@e:one",
+      "l",
+      "default|u=https://app.example.test/settings/keys/1",
+    ];
+    expect(isCreateOrGenerateKeyRow(create)).toBe(true);
+    expect(isSubmitLikeRow(create)).toBe(false);
+    expect(pageShowsMaskedKey([masked])).toBe(true);
+    expect(pageShowsRevealedKey([masked])).toBe(false);
+    const url = "https://app.example.test/settings/keys";
+    const offered = driveTargetSets(
+      [masked, reveal, create, listed],
+      { name: "Fixture" },
+      false,
+      [],
+      url,
+      new Map(),
+      (text) => text,
+      [],
+      { goal: "extract an API key" },
+    );
+    expect(offered.CLICK.map((entry) => entry.ref)).toEqual(["@e:show", "@e:new"]);
+    expect(isEntityNameRow(["@e:name", "t", "Key name|f=name|s=r"])).toBe(true);
+    expect(extractHasUnmaskedCredential({ api_key: "sk_live_fixturekey01" })).toBe(true);
+    expect(extractHasUnmaskedCredential({ api_key_truncated: "sk_live_****abcd" })).toBe(false);
+    expect(extractHasUnmaskedCredential({})).toBe(false);
   });
 
   it("does not treat re-entering a keys page as a cycle while Create key is untried", () => {

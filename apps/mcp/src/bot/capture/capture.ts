@@ -15,6 +15,7 @@ import {
   looksLikeCodeIdentifier,
   looksLikeCredentialValue,
   isCredentialNoise,
+  isMaskedDisplay,
   findCredentialTokens,
   keyFamilyPrefix,
   pickRelaxedNearCopyCredential,
@@ -649,7 +650,19 @@ export async function captureCredentialSource(
   return await resolveCaptureSourceOnce(page, source);
 }
 
-export async function extractCredentials(sessionId: string): Promise<ExtractResult> {
+export function extractHasUnmaskedCredential(credentials: Record<string, string>): boolean {
+  return Object.entries(credentials).some(([key, value]) => {
+    if (key.endsWith("_truncated")) return false;
+    if (typeof value !== "string" || value.length === 0) return false;
+    if (isMaskedDisplay(value)) return false;
+    return looksLikeCredentialValue(value);
+  });
+}
+
+export async function extractCredentials(
+  sessionId: string,
+  options: { revealMasked?: boolean } = {},
+): Promise<ExtractResult> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
   const { browser } = session;
@@ -657,7 +670,10 @@ export async function extractCredentials(sessionId: string): Promise<ExtractResu
   invalidateCompactV2Snapshot(session);
 
   // The masked-display trap: click reveal/show toggles before reading.
-  await browser.revealMaskedCredentials(page);
+  // A dry DONE check skips that click so the drive still has to reveal or create.
+  if (options.revealMasked !== false) {
+    await browser.revealMaskedCredentials(page);
+  }
 
   const labeled = await browser.extractLabeledCredentialCandidates(page);
   const inputs = await browser.extractAllInputValues(page);
@@ -761,6 +777,17 @@ export async function extractCredentials(sessionId: string): Promise<ExtractResu
     url: page?.url() ?? browser.currentUrl(),
     credentials: sanitized,
     candidate_count: labeled.length,
+  };
+}
+
+export async function dryExtractUnmasked(sessionId: string): Promise<{
+  found: boolean;
+  candidate_count: number;
+}> {
+  const extracted = await extractCredentials(sessionId, { revealMasked: false });
+  return {
+    found: extractHasUnmaskedCredential(extracted.credentials),
+    candidate_count: extracted.candidate_count,
   };
 }
 
