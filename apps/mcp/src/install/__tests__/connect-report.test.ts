@@ -67,7 +67,10 @@ describe("buildConnectReport", () => {
   });
 
   it("never reports connected from an unverified machine claim", () => {
-    const report = classify({ outcome: { kind: "unverified" }, holder: otherHolder });
+    const report = classify({
+      outcome: { kind: "unverified", account_id: null },
+      holder: otherHolder,
+    });
     expect(report.state).toBe("busy");
     expect(report.reason).toBe("profile_unverifiable");
     expect(report.account).toBeNull();
@@ -137,7 +140,7 @@ describe("buildConnectReport", () => {
   it("never reports needs-sign-in without the URL, for any outcome", () => {
     const outcomes: ConnectReportInput["outcome"][] = [
       { kind: "provisioned", account_id: "a", providers: ["google"] },
-      { kind: "unverified" },
+      { kind: "unverified", account_id: null },
       { kind: "ceremony_complete", account_id: "a", providers: null },
       { kind: "ceremony_complete", account_id: "a", providers: [] },
       {
@@ -183,7 +186,7 @@ describe("buildConnectReport", () => {
   it("reports the holder it observed, never a guess, on every busy outcome", () => {
     for (const outcome of [
       { kind: "profile_busy" },
-      { kind: "unverified" },
+      { kind: "unverified", account_id: null },
       { kind: "cookie_clear_failed" },
     ] as const) {
       expect(classify({ outcome }).holder, outcome.kind).toEqual({ kind: "none" });
@@ -221,7 +224,20 @@ describe("buildConnectReport", () => {
     });
     expect(report.state).toBe("no-browser");
     expect(report.reason).toBe("provider_session_missing");
-    expect(report.account).toBeNull();
+    // The run bound this machine to that account before the probe answered —
+    // reporting no account would deny a binding connect had just written.
+    // The empty provider list is what the probe actually saw.
+    expect(report.account).toEqual({ id: "acc_1", providers: [] });
+  });
+
+  // The preflight could not read the profile, but the stored session names the
+  // account this machine is bound to. Intent item 3 asks which account is
+  // connected when one is; that is knowable here without claiming a session.
+  it("keeps the bound account on an unverifiable preflight", () => {
+    const report = classify({ outcome: { kind: "unverified", account_id: "acc_1" } });
+    expect(report.state).toBe("busy");
+    expect(report.reason).toBe("profile_unverifiable");
+    expect(report.account).toEqual({ id: "acc_1", providers: [] });
   });
 
   // This gate makes the run print a failure and exit 1. Answering `connected`

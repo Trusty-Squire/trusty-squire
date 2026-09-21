@@ -797,8 +797,11 @@ Read this file. Follow the rules. Run the verify script. Paste the output. Then 
   dead when the report is read: the noVNC tunnel dies with the ceremony, so a
   run that did not claim reports `unreachable` rather than naming a display
   nothing can reach. A refusal that means another session holds the browser —
-  `ProfileBusyError` or a `BrokerRefusal` — reaches connect typed and reports
-  `busy` with the holder, read from Chrome's lock OR the operation lease. A rejected flag is answered as a
+  `ProfileBusyError` or a contention `BrokerRefusal` (`broker_unavailable`,
+  `profile_busy`) — reaches connect typed and reports `busy` with the holder,
+  read from Chrome's lock OR the operation lease. Every other refusal code is
+  the run breaking, not contention, and reports `run_failed`. `account` carries
+  the binding whenever the run proved one, `connected` or not. A rejected flag is answered as a
   usage error, never as a connection state. Do not add a report variant no path
   emits.
 - **Never quit a Chrome whose profile state you still need with SIGTERM.** Chrome

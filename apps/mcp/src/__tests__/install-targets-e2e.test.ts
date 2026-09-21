@@ -661,11 +661,60 @@ describe("connect --target=<agent> writes a valid config", () => {
           json: true,
         }),
       ).rejects.toThrow("exit:1");
-      const report = JSON.parse(machine.read()) as { state: string; sign_in_url: string | null };
+      const report = JSON.parse(machine.read()) as {
+        state: string;
+        reason: string | null;
+        sign_in_url: string | null;
+      };
       expect(report.state).toBe("busy");
+      expect(report.reason).toBeNull();
       expect(report.sign_in_url).toBeNull();
     } finally {
       exit.mockRestore();
+      error.mockRestore();
+      machine.restore();
+    }
+  });
+
+  // Not every BrokerRefusal is contention: the wire mints `broker_lost` when
+  // the daemon dies mid-ceremony and `launch_timeout` when its Chrome never
+  // came up. Reporting those as `busy` told a caller to wait for a holder that
+  // does not exist, on a run that actually broke.
+  it("reports a broker that died mid-ceremony as a failed run, not as busy", async () => {
+    vi.mocked(openInstallConfirmInBotChrome).mockRejectedValueOnce(
+      new BrokerRefusal("broker_lost", "Broker connection is closed"),
+    );
+    const machine = captureMachineChannel();
+    const human: string[] = [];
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const warn = vi.spyOn(console, "warn").mockImplementation((message?: unknown) => {
+      human.push(String(message));
+    });
+    const exit = vi.spyOn(process, "exit").mockImplementation((code) => {
+      throw new Error(`exit:${code}`);
+    });
+    try {
+      await expect(
+        connect({
+          command: "connect",
+          target: "hermes",
+          apiBase: "https://test.invalid",
+          skipBrowser: false,
+          forceRelogin: false,
+          noRegistry: false,
+          noInteractive: true,
+          json: true,
+        }),
+      ).rejects.toThrow("exit:1");
+      const report = JSON.parse(machine.read()) as { state: string; reason: string | null };
+      expect(report.state).toBe("no-browser");
+      expect(report.reason).toBe("run_failed");
+      // The human copy is unchanged: the refusal's own message names the
+      // recovery, and it has always been printed this way.
+      expect(human.join("\n")).toContain("Broker connection is closed");
+    } finally {
+      exit.mockRestore();
+      warn.mockRestore();
       error.mockRestore();
       machine.restore();
     }

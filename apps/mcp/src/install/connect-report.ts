@@ -84,7 +84,7 @@ export type ConnectReport =
 
 export type ConnectOutcome =
   | { kind: "provisioned"; account_id: string; providers: OAuthProviderId[] }
-  | { kind: "unverified" }
+  | { kind: "unverified"; account_id: string | null }
   | {
       kind: "ceremony_complete";
       account_id: string;
@@ -166,10 +166,19 @@ export function buildConnectReport(input: ConnectReportInput): ConnectReport {
           account: connectedAccount(outcome.account_id, outcome.providers ?? []),
         });
       }
-      return settled("no-browser", "provider_session_missing", input);
+      // The session was written and the agent config rebound before the probe
+      // ran, so this machine IS bound to that account — the empty provider
+      // list is the observation, not a reason to drop the binding.
+      return settled("no-browser", "provider_session_missing", input, {
+        account: connectedAccount(outcome.account_id, outcome.providers ?? []),
+      });
     }
     case "unverified":
-      return settled("busy", "profile_unverifiable", input);
+      return settled("busy", "profile_unverifiable", input, {
+        ...(outcome.account_id === null
+          ? {}
+          : { account: connectedAccount(outcome.account_id, []) }),
+      });
     case "profile_busy":
       return settled("busy", null, input);
     case "install_unclaimed":

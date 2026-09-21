@@ -65,6 +65,7 @@ import {
   withProfileOperationGuard,
 } from "../bot/profile.js";
 import { VERSION } from "../version.js";
+import { isBrowserContentionRefusal } from "../bot/broker/discovery.js";
 import { BrokerRefusal } from "../bot/broker/refusal.js";
 import { ensureLatestVersion, VersionUpdateRequiredError } from "./version-check.js";
 import * as ui from "./ui.js";
@@ -583,12 +584,15 @@ async function connect(args: Argv, argv: readonly string[] = []): Promise<void> 
       },
     );
   } catch (err) {
-    // Both refusals mean the same thing to a caller: another session has the
-    // browser. The broker's own message names the resident and the recovery,
-    // so it stays the human copy it has always been.
+    // The broker's own message names the resident and the recovery, so it
+    // stays the human copy it has always been. Only the refusals that mean
+    // another session HAS the browser report `busy`: a broker that died
+    // mid-ceremony is this run failing, and telling a caller to wait for a
+    // holder that does not exist is worse than naming the failure.
     if (err instanceof ProfileBusyError || err instanceof BrokerRefusal) {
+      const contended = err instanceof ProfileBusyError || isBrowserContentionRefusal(err);
       emitConnectStatus(args, {
-        outcome: { kind: "profile_busy" },
+        outcome: contended ? { kind: "profile_busy" } : { kind: "run_failed" },
         profileDir: reportProfileDir,
         browser_location: placed.value ?? { kind: "none" },
       });
@@ -764,7 +768,7 @@ async function settleAlreadyConnected(
     });
     await maybeStoreTwoCaptchaKey(args, preflight.session);
     emitConnectStatus(args, {
-      outcome: { kind: "unverified" },
+      outcome: { kind: "unverified", account_id: preflight.session.account_id ?? null },
       profileDir,
       browser_location: { kind: "none" },
     });
