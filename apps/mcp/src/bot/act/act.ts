@@ -91,6 +91,7 @@ import {
 import type { Observation, ProvisionAction } from "../provision-session.js";
 import type { Session } from "../session/model.js";
 import { resolveLiveControlIdentity, type ActControlIdentity } from "./identity.js";
+import { evaluateBound } from "../drive-evaluate.js";
 import {
   clickCrossOriginFrameTarget,
   commitDriveListOption,
@@ -632,8 +633,9 @@ function scopeForElement(page: Page, el: InteractiveElement): Page | Frame {
 // still reports a dispatch, so the caller records a step that never landed.
 // Absent a box (still loading) it says nothing and the actionability waits rule.
 async function clickTargetOccluded(scope: Page | Frame, selector: string): Promise<boolean> {
-  return await scope
-    .evaluate((sel: string) => {
+  return await evaluateBound(
+    scope,
+    (sel: string) => {
       const element = document.querySelector(sel);
       if (element === null) return false;
       // The snapshot keeps offscreen fillables so the model can name them, and
@@ -656,8 +658,9 @@ async function clickTargetOccluded(scope: Page | Frame, selector: string): Promi
       if (rect.width <= 0 || rect.height <= 0) return false;
       const hit = document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2);
       return hit !== null && hit !== element && !element.contains(hit) && !hit.contains(element);
-    }, selector)
-    .catch(() => false);
+    },
+    selector,
+  ).catch(() => false);
 }
 
 // Re-resolve against FRESH elements — never trust a stale index. Shared by the
@@ -754,7 +757,6 @@ async function executeAct(
   };
   const actStarted = Date.now();
   let actedCombobox = false;
-  let crossOriginClicked = false;
   let actionPageAfter = compactV2ActionPage;
   let completedAction: ProvisionAction = action;
   let resolutionTarget: string | undefined;
@@ -1076,38 +1078,44 @@ async function executeAct(
               "click target is occluded by an overlay",
             );
           }
-          const committedOption =
+          // One adoption arm/grace around whichever dispatch runs: an option row
+          // or a cross-origin coordinate click can open a target=_blank tab
+          // just as an ordinary click can, and paying the grace per candidate
+          // would charge every click for the branches that declined.
+          const commitsListOption =
             action.kind === "click" &&
             options?.commitListOptions === true &&
             clickPage !== null &&
             clickPage !== undefined &&
-            clickScope !== undefined
-              ? await commitDriveListOption(clickPage, clickScope, el.selector)
-              : false;
-          const coordinateClicked =
-            !committedOption &&
+            clickScope !== undefined;
+          const crossOriginScope =
             action.kind === "click" &&
             options?.coordinateFallbackForCrossOriginFrame === true &&
-            clickPage !== null &&
-            clickPage !== undefined &&
-            clickScope !== undefined
-              ? await adoptTabOpenedByClick(session, browser, async () => {
-                  crossOriginClicked = await clickCrossOriginFrameTarget(
-                    clickPage,
-                    clickScope,
-                    el.selector,
-                  );
-                }).then((adopted) => {
-                  if (crossOriginClicked && adopted !== null) actionPageAfter = adopted;
-                  return crossOriginClicked;
-                })
-              : false;
-          if (!committedOption && !coordinateClicked) {
-            actionPageAfter =
-              (await adoptTabOpenedByClick(session, browser, async () => {
-                await actClick({ ...actDriverTarget(el), method: action.kind });
-              })) ?? actionPageAfter;
-          }
+            clickScope !== undefined &&
+            "parentFrame" in clickScope
+              ? clickScope
+              : undefined;
+          actionPageAfter =
+            (await adoptTabOpenedByClick(session, browser, async () => {
+              if (
+                commitsListOption &&
+                clickPage !== null &&
+                clickPage !== undefined &&
+                clickScope !== undefined &&
+                (await commitDriveListOption(clickPage, clickScope, el.selector))
+              ) {
+                return;
+              }
+              if (
+                crossOriginScope !== undefined &&
+                clickPage !== null &&
+                clickPage !== undefined &&
+                (await clickCrossOriginFrameTarget(clickPage, crossOriginScope, el.selector))
+              ) {
+                return;
+              }
+              await actClick({ ...actDriverTarget(el), method: action.kind });
+            })) ?? actionPageAfter;
         } else if (action.kind === "type") {
           clearCommittedSelectValue(session, el.selector);
           const actTarget = actDriverTarget(el);

@@ -4728,6 +4728,9 @@ export function paymentArgs(
 
 const DRIVE_REF_RE = /^@e:f\d+d\d+$/;
 
+/** Consecutive pre-act re-decides one decision may cost before the drive stops. */
+const DRIVE_PRE_ACT_REDECIDE_LIMIT = 2;
+
 /** Translate drive snapshot refs into canonical provision refs.
  *
  * The two extractors name the same control differently — the canonical one
@@ -5889,11 +5892,20 @@ async function driveLoop(input: {
         liveControls.length > 0 &&
         liveControls !== drive.snapshotControlDigest;
       if (documentChanged || controlsChanged) {
+        // consumedActionKey stays set: clearing it here would make the stall
+        // detector above unreachable, so a page that never settles could spend
+        // every remaining step re-deciding without ever acting.
+        drive.preActRedecides = (drive.preActRedecides ?? 0) + 1;
+        if (drive.preActRedecides > DRIVE_PRE_ACT_REDECIDE_LIMIT) {
+          return finish("no_progress", {
+            reason: "the page kept changing between the snapshot and the act",
+          });
+        }
         const snap = await snapshotOrTimeout(framesIfNeeded());
         if (snap !== "ok") return snap;
-        drive.consumedActionKey = null;
         return "continue";
       }
+      drive.preActRedecides = 0;
     }
     const liveRow = findRow(rows, decision.actionKey, observation.url);
     if (

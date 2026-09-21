@@ -350,8 +350,11 @@ export async function settleDriveStep(page: Page, combobox: boolean): Promise<nu
   return Date.now() - started;
 }
 
-/** The controls' own state — what a decision was made about, without the page
- *  text that ticks on its own (countdown, relative timestamp, live price). */
+/** Which controls are there and whether they can be acted on — deliberately NOT
+ *  their values. A value the decision does not name moves on its own (a
+ *  reCAPTCHA token textarea refreshing, an input mask reformatting what was just
+ *  typed, a hold timer rendered into a readonly input) and must not cancel it;
+ *  the decided control's own staleness is covered by the identity check. */
 export async function driveControlDigest(page: Page): Promise<string> {
   try {
     return await evaluateBound(page, () => {
@@ -363,7 +366,7 @@ export async function driveControlDigest(page: Page): Promise<string> {
         .filter((element) => !(element instanceof HTMLInputElement && element.type === "hidden"))
         .map(
           (element) =>
-            `${element.tagName}:${element.type}:${element.value}:${
+            `${element.tagName}:${element.type}:${element.name}:${
               element instanceof HTMLInputElement ? element.checked : ""
             }:${element.disabled}`,
         )

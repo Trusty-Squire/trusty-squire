@@ -204,6 +204,8 @@ export interface SessionDriveState {
   /** Control state at the snapshot the current decision was made from.
    *  `null` means the snapshot fell back and never read it. */
   snapshotControlDigest?: string | null;
+  /** Consecutive pre-act re-decides spent on the current decision. */
+  preActRedecides?: number;
   maskedValueRefs?: string[];
   lastDocumentEpoch?: string | null;
   resumeCompactRows?: Array<[string, string, string?]>;
