@@ -27,6 +27,7 @@ import {
   type WireRow,
 } from "../operate-drive.js";
 import { finishProvisionSession, startHarnessProvisionSession } from "../provision-session.js";
+import { extractCredentials } from "../capture/capture.js";
 import type { Observation, ProvisionAction } from "../provision-session.js";
 import {
   act,
@@ -318,6 +319,10 @@ afterAll(async () => {
 function api(): ApiClient {
   return { useCredential: vi.fn() } as unknown as ApiClient;
 }
+
+// A key `extractApiKeyFromText` recognizes, built by concatenation so no
+// contiguous Stripe-shaped literal sits in this file.
+const DRIVE_FIXTURE_KEY = "sk" + "_live_fixtureKey" + "1234567890abcde";
 
 function peaked(ids: string[], pick: string, peak = 0.91): Record<string, number> {
   const out: Record<string, number> = {};
@@ -1388,7 +1393,7 @@ describe("operate_drive real-browser fixture", () => {
     }
   }, 30_000);
 
-  it("opens a listed entry and clicks reveal to capture the key", async () => {
+  it("opens a listed entry and captures the revealed key", async () => {
     const settingsHtml = `<!doctype html><meta charset="utf-8"><title>Settings</title>
 <div role="tablist">
   <button type="button" role="tab" id="apps">Apps</button>
@@ -1407,7 +1412,7 @@ describe("operate_drive real-browser fixture", () => {
 </main>
 <script>
   document.getElementById("reveal").onclick = () => {
-    document.getElementById("secret").textContent = "sk_live_fixturekey01";
+    document.getElementById("secret").textContent = "${DRIVE_FIXTURE_KEY}";
     document.getElementById("reveal").remove();
   };
 </script>`;
@@ -1437,10 +1442,14 @@ describe("operate_drive real-browser fixture", () => {
         dependencies,
       );
       expect(page.url()).toMatch(/\/settings\/apps\//);
-      expect(await page.locator("#secret").innerText()).toBe("sk_live_fixturekey01");
-      expect(result.trajectory.some((step) => step.action === "click")).toBe(true);
+      expect(await page.locator("#secret").innerText()).toBe(DRIVE_FIXTURE_KEY);
       expect(result.status).toBe("complete");
-      expect(JSON.stringify(result)).not.toContain("sk_live_fixturekey01");
+      // The capture flow reveals masked values itself, so the drive never has
+      // to click Reveal: the shared extractor is what stored the key.
+      expect((await extractCredentials(started.session_id)).credentials.api_key).toBe(
+        DRIVE_FIXTURE_KEY,
+      );
+      expect(JSON.stringify(result)).not.toContain(DRIVE_FIXTURE_KEY);
       expect(JSON.stringify(result.observation?.safe_table)).toMatch(/@key-value\|secret=1\|len=/);
     } finally {
       await finishProvisionSession(started.session_id);
@@ -1492,7 +1501,7 @@ describe("operate_drive real-browser fixture", () => {
 </main>
 <script>
   document.getElementById("reveal").onclick = () => {
-    document.getElementById("secret").textContent = "sk_live_fixturekey01";
+    document.getElementById("secret").textContent = "${DRIVE_FIXTURE_KEY}";
     document.getElementById("reveal").remove();
   };
 </script>`;
@@ -1526,9 +1535,9 @@ describe("operate_drive real-browser fixture", () => {
       );
       expect(tabClicks.length).toBeLessThan(2);
       expect(page.url()).toMatch(/\/settings\/apps\//);
-      expect(await page.locator("#secret").innerText()).toBe("sk_live_fixturekey01");
+      expect(await page.locator("#secret").innerText()).toBe(DRIVE_FIXTURE_KEY);
       expect(result.status).toBe("complete");
-      expect(JSON.stringify(result)).not.toContain("sk_live_fixturekey01");
+      expect(JSON.stringify(result)).not.toContain(DRIVE_FIXTURE_KEY);
       expect(JSON.stringify(result.observation?.safe_table)).toMatch(/@key-value\|secret=1\|len=/);
     } finally {
       await finishProvisionSession(started.session_id);
@@ -1572,7 +1581,7 @@ describe("operate_drive real-browser fixture", () => {
 </main>
 <script>
   document.getElementById("reveal").onclick = () => {
-    document.getElementById("secret").textContent = "sk_live_fixturekey01";
+    document.getElementById("secret").textContent = "${DRIVE_FIXTURE_KEY}";
     document.getElementById("reveal").remove();
   };
 </script>`;
@@ -1607,9 +1616,9 @@ describe("operate_drive real-browser fixture", () => {
       );
       expect(page.url()).not.toMatch(/\/docs/);
       expect(page.url()).toMatch(/\/settings\/apps\//);
-      expect(await page.locator("#secret").innerText()).toBe("sk_live_fixturekey01");
+      expect(await page.locator("#secret").innerText()).toBe(DRIVE_FIXTURE_KEY);
       expect(result.status).toBe("complete");
-      expect(JSON.stringify(result)).not.toContain("sk_live_fixturekey01");
+      expect(JSON.stringify(result)).not.toContain(DRIVE_FIXTURE_KEY);
       expect(JSON.stringify(result.observation?.safe_table)).toMatch(/@key-value\|secret=1\|len=/);
     } finally {
       await finishProvisionSession(started.session_id);
@@ -4015,12 +4024,12 @@ describe("operate_drive real-browser fixture", () => {
 
   it("masks a secret-shaped value in a select option", async () => {
     const html = `<!doctype html><meta charset="utf-8"><title>Tokens</title>
-<label>Token <select id="tok"><option>choose</option><option>sk_live_fixturekey01</option></select></label>`;
+<label>Token <select id="tok"><option>choose</option><option>${DRIVE_FIXTURE_KEY}</option></select></label>`;
     const { context, started } = await openFixture(html, "secret-option.test", "drive");
     try {
       let leaked = false;
       const dependencies = deps(async (_api, state, questions) => {
-        if (JSON.stringify({ state, questions }).includes("sk_live_fixturekey01")) leaked = true;
+        if (JSON.stringify({ state, questions }).includes(DRIVE_FIXTURE_KEY)) leaked = true;
         return jevFromQuestions(questions, true);
       });
       const result = await runOperateDrive(
@@ -4030,7 +4039,7 @@ describe("operate_drive real-browser fixture", () => {
         dependencies,
       );
       expect(leaked).toBe(false);
-      expect(JSON.stringify(result)).not.toContain("sk_live_fixturekey01");
+      expect(JSON.stringify(result)).not.toContain(DRIVE_FIXTURE_KEY);
     } finally {
       await finishProvisionSession(started.session_id);
       await context.close();
@@ -4057,11 +4066,11 @@ describe("operate_drive real-browser fixture", () => {
     document.getElementById("panel").innerHTML =
       '<button type="button" id="create">Create key</button>';
     document.getElementById("create").onclick = () => {
-      document.getElementById("panel").innerHTML = '<p id="secret">sk_live_fixturekey01</p>';
+      document.getElementById("panel").innerHTML = '<p id="secret">${DRIVE_FIXTURE_KEY}</p>';
     };
   };
   document.getElementById("create").onclick = () => {
-    document.getElementById("panel").innerHTML = '<p id="secret">sk_live_fixturekey01</p>';
+    document.getElementById("panel").innerHTML = '<p id="secret">${DRIVE_FIXTURE_KEY}</p>';
   };
 </script>`;
     const context = await browser.newContext();
@@ -4688,12 +4697,12 @@ describe("operate_drive feedback loop", () => {
     const html = `<!doctype html><meta charset="utf-8"><title>API keys</title>
 <main>
   <h1>API keys</h1>
-  <label>API key <input id="key" readonly value="tvly-dev-****abcd"></label>
+  <label>API key <input id="key" readonly value="re_****abcd"></label>
   <button id="reveal">Reveal</button>
 </main>
 <script>
   document.getElementById("reveal").addEventListener("click", () => {
-    document.getElementById("key").value = "tvly-dev-abc123def456ghi789jkl";
+    document.getElementById("key").value = "re_abcdefGHIJKLmnop1234567";
   });
 </script>`;
     const { context, page, started } = await openFixture(html, "reveal-masked-key.test");
@@ -4712,7 +4721,10 @@ describe("operate_drive feedback loop", () => {
       expect(handoff.status).toBe("complete");
       // The masked value never satisfied the dry extraction, so the drive had
       // to click Reveal before it could finish.
-      expect(await page.locator("#key").inputValue()).toBe("tvly-dev-abc123def456ghi789jkl");
+      expect(await page.locator("#key").inputValue()).toBe("re_abcdefGHIJKLmnop1234567");
+      // And the ordinary extraction flow the caller runs stores that same value.
+      const extracted = await extractCredentials(started.session_id);
+      expect(extracted.credentials.api_key).toBe("re_abcdefGHIJKLmnop1234567");
     } finally {
       await finishProvisionSession(started.session_id);
       await context.close();
@@ -4723,9 +4735,9 @@ describe("operate_drive feedback loop", () => {
     const html = `<!doctype html><meta charset="utf-8"><title>API keys</title>
 <main>
   <h1>API keys</h1>
-  <table><tr><td>key one</td><td>tvly-dev-****abcd</td></tr>
-  <tr><td>key two</td><td>tvly-dev-****efgh</td></tr></table>
-  <button id="create" onclick="document.querySelector('table').outerHTML='<input id=key readonly value=tvly-dev-xyz123abc456def789ghi>'">Create key</button>
+  <table><tr><td>key one</td><td>re_****abcd</td></tr>
+  <tr><td>key two</td><td>re_****efgh</td></tr></table>
+  <button id="create" onclick="window.createClicks=(window.createClicks||0)+1;document.querySelector('table').outerHTML='<label>API key <input id=key readonly value=re_createdKey1234567890abc></label>'">Create key</button>
 </main>`;
     const { context, page, started } = await openFixture(html, "create-key-masked-list.test");
     try {
@@ -4741,7 +4753,126 @@ describe("operate_drive feedback loop", () => {
       expect(handoff.status).toBe("complete");
       // The permanently masked rows never satisfied the dry extraction, so the
       // drive had to create a new key before it could finish.
-      expect(await page.locator("#key").inputValue()).toBe("tvly-dev-xyz123abc456def789ghi");
+      expect(await page.locator("#key").inputValue()).toBe("re_createdKey1234567890abc");
+      expect(
+        await page.evaluate(() => (window as unknown as { createClicks?: number }).createClicks),
+      ).toBe(1);
+      const extracted = await extractCredentials(started.session_id);
+      expect(extracted.credentials.api_key).toBe("re_createdKey1234567890abc");
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
+  it("does not complete on a dashboard whose only secret-shaped text is a masked placeholder", async () => {
+    const html = `<!doctype html><meta charset="utf-8"><title>Overview</title>
+<main>
+  <h1>Overview</h1>
+  <label>API key <input id="key" readonly placeholder="re_xxxxxxxxxxxxxxxxxxxxxxxx"></label>
+  <button id="copy" onclick="window.copyClicks=(window.copyClicks||0)+1">Copy</button>
+</main>`;
+    const { context, page, started } = await openFixture(html, "placeholder-dashboard.test");
+    const seen: Array<Record<string, unknown>> = [];
+    try {
+      const dependencies = deps(async (_api, state, questions) => {
+        seen.push(state as Record<string, unknown>);
+        return jevFromQuestions(questions, true);
+      });
+      const handoff = await runOperateDrive(
+        { session_id: started.session_id, goal: "extract an API key", max_steps: 8 },
+        api(),
+        undefined,
+        dependencies,
+      );
+      // The placeholder is not a storable credential, so the drive never
+      // reports the goal complete at step 0.
+      expect(seen.length).toBeGreaterThanOrEqual(1);
+      expect(handoff.status).not.toBe("complete");
+      expect(handoff.status).toBe("stuck");
+      expect(await page.locator("#key").inputValue()).toBe("");
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
+  it("completes on a real unmasked key and the ordinary extraction stores it", async () => {
+    const html = `<!doctype html><meta charset="utf-8"><title>API keys</title>
+<main>
+  <h1>API keys</h1>
+  <label>API key <input id="key" readonly value="re_abcdefGHIJKLmnop1234567"></label>
+</main>`;
+    const { context, page, started } = await openFixture(html, "real-unmasked-key.test");
+    try {
+      const dependencies = deps(async (_api, _state, questions) =>
+        jevFromQuestions(questions, true),
+      );
+      const handoff = await runOperateDrive(
+        { session_id: started.session_id, goal: "extract an API key", max_steps: 8 },
+        api(),
+        undefined,
+        dependencies,
+      );
+      expect(handoff.status).toBe("complete");
+      const extracted = await extractCredentials(started.session_id);
+      expect(extracted.credentials.api_key).toBe("re_abcdefGHIJKLmnop1234567");
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
+  it("captures both same-family keys on a multi-key page", async () => {
+    const html = `<!doctype html><meta charset="utf-8"><title>Sandbox keys</title>
+<main>
+  <h1>Sandbox keys</h1>
+  <label>Sandbox read <input id="read" readonly value="vsk_sandbox_read_Abc123def456Ghi789"></label>
+  <label>Sandbox write <input id="write" readonly value="vsk_sandbox_write_Zyx987wvu654Tsr321"></label>
+</main>`;
+    const { context, started } = await openFixture(html, "two-family-keys.test");
+    try {
+      const dependencies = deps(async (_api, _state, questions) =>
+        jevFromQuestions(questions, true),
+      );
+      const handoff = await runOperateDrive(
+        { session_id: started.session_id, goal: "extract an API key", max_steps: 8 },
+        api(),
+        undefined,
+        dependencies,
+      );
+      expect(handoff.status).toBe("complete");
+      const extracted = await extractCredentials(started.session_id);
+      expect(extracted.credentials.sandbox_read_key).toBe("vsk_sandbox_read_Abc123def456Ghi789");
+      expect(extracted.credentials.sandbox_write_key).toBe("vsk_sandbox_write_Zyx987wvu654Tsr321");
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
+  it("captures only the real key, not a cross-family widget token on the same page", async () => {
+    const html = `<!doctype html><meta charset="utf-8"><title>API keys</title>
+<main>
+  <h1>API keys</h1>
+  <label>API key <input id="key" readonly value="re_abcdefGHIJKLmnop1234567"></label>
+  <label>Widget token <input id="widget" readonly value="mcp-4Y7FDyM9kL2pQ8rT6vW3xZ1"></label>
+</main>`;
+    const { context, started } = await openFixture(html, "cross-family-widget.test");
+    try {
+      const dependencies = deps(async (_api, _state, questions) =>
+        jevFromQuestions(questions, true),
+      );
+      const handoff = await runOperateDrive(
+        { session_id: started.session_id, goal: "extract an API key", max_steps: 8 },
+        api(),
+        undefined,
+        dependencies,
+      );
+      expect(handoff.status).toBe("complete");
+      const extracted = await extractCredentials(started.session_id);
+      expect(extracted.credentials.api_key).toBe("re_abcdefGHIJKLmnop1234567");
+      expect(Object.keys(extracted.credentials).sort()).toEqual(["api_key"]);
     } finally {
       await finishProvisionSession(started.session_id);
       await context.close();
