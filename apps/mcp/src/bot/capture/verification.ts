@@ -368,16 +368,20 @@ export function sessionCandidateReason(
   opts: { recipient?: string; serviceHost?: string; listingScopedToRecipient?: boolean },
 ): { ok: boolean; reason: string } {
   const recipient = opts.recipient?.trim();
-  const serviceHost = opts.serviceHost?.trim();
+  // An IP/localhost host can never match any From domain, registrable domain,
+  // or display name, so domain scoping there blocks every candidate and
+  // protects nothing. Treat it as having no service host: rows stay
+  // candidates and the newest-row pick runs. Real hostnames keep the scoping.
+  const rawServiceHost = opts.serviceHost?.trim();
+  const hasServiceHost = rawServiceHost !== undefined && rawServiceHost.length > 0;
+  const serviceHost =
+    rawServiceHost !== undefined && registrableMailDomain(rawServiceHost) === null
+      ? undefined
+      : rawServiceHost;
   const visibleRecip = mailRowMatchesRecipient(row, recipient);
   const serviceMatch =
     serviceHost !== undefined && serviceHost.length > 0 && mailRowMatchesSender(row, serviceHost);
-  if (
-    recipient !== undefined &&
-    recipient.length > 0 &&
-    serviceHost !== undefined &&
-    serviceHost.length > 0
-  ) {
+  if (recipient !== undefined && recipient.length > 0 && hasServiceHost) {
     // Listing rows omit To. A to:-scoped search already filtered by recipient,
     // so those rows are openable even when From does not substring-match the
     // page host (app.service.test vs noreply@service.test). All Mail is not
@@ -393,7 +397,10 @@ export function sessionCandidateReason(
     if (opts.listingScopedToRecipient === true) return { ok: true, reason: "listing_scoped" };
     return { ok: false, reason: "recipient_not_visible" };
   }
-  if (serviceHost !== undefined && serviceHost.length > 0) {
+  if (hasServiceHost) {
+    // Host present but unscopeable (IP/localhost — normalized away above):
+    // there is no domain to match, so the row stays a candidate.
+    if (serviceHost === undefined) return { ok: true, reason: "unscopeable_host" };
     return serviceMatch
       ? { ok: true, reason: "service_host" }
       : { ok: false, reason: "service_host_mismatch" };

@@ -581,6 +581,42 @@ describe("session-scoped inbox candidates", () => {
     ).toBe(false);
   });
 
+  it("keeps domain scoping for a real hostname and ignores it for an IP/localhost host (#888 IP-host regression)", () => {
+    // A real hostname scopes: a foreign sender's mail is NOT a candidate.
+    const foreign = row({
+      fromEmail: "support@other.test",
+      subject: "Confirm your registration",
+      visibleText: "Confirm your registration",
+    });
+    expect(
+      sessionCandidateReason(foreign, { serviceHost: "app.example.test" }).reason,
+    ).toBe("service_host_mismatch");
+    expect(mailRowIsSessionCandidate(foreign, { serviceHost: "app.example.test" })).toBe(false);
+    // An IP/localhost start URL yields the IP as the service host; no From
+    // address can ever match it, so scoping there blocks every candidate and
+    // protects nothing. The row stays a candidate and the newest-row pick runs.
+    expect(serviceHostFromUrl("http://127.0.0.1:4173/signup")).toBe("127.0.0.1");
+    expect(registrableMailDomain("127.0.0.1")).toBeNull();
+    expect(
+      sessionCandidateReason(foreign, { serviceHost: "127.0.0.1" }).reason,
+    ).toBe("unscopeable_host");
+    expect(mailRowIsSessionCandidate(foreign, { serviceHost: "127.0.0.1" })).toBe(true);
+    expect(mailRowIsSessionCandidate(foreign, { serviceHost: "localhost" })).toBe(true);
+    // With a recipient too, an unscopeable host imposes no From requirement.
+    expect(
+      mailRowIsSessionCandidate(foreign, {
+        recipient: "ada+run1@example.test",
+        serviceHost: "127.0.0.1",
+      }),
+    ).toBe(false);
+    expect(
+      mailRowIsSessionCandidate(
+        row({ ...foreign, visibleText: "to ada+run1@example.test" }),
+        { recipient: "ada+run1@example.test", serviceHost: "127.0.0.1" },
+      ),
+    ).toBe(true);
+  });
+
   it("opens an unscoped same-service row and rejects the wrong plus-address after open", () => {
     // All Mail never shows To, so a same-service conversation is openable.
     // The wrong plus-address is dropped on the opened message, not the row.
