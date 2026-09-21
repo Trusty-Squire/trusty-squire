@@ -21,8 +21,10 @@ CI cannot complete an OAuth login. `connect` is the only sign-in pathway, so
 - [ ] With that same named tunnel configured but its local port already held
       by another listener, login prints one notice naming the busy port and
       completes over a one-off quick tunnel instead.
-- [ ] A normal automated `operate_start` session launches Chrome new-headless
-      and starts no Xvfb, x11vnc, websockify, or login tunnel.
+- [ ] A normal automated `operate_start` session launches Chrome headed on the
+      machine's own screen when one answers — starting no Xvfb there — and
+      starts no x11vnc, websockify, or login tunnel on any host. Only a host
+      with no live screen gets the operator's private Xvfb.
 - [ ] Starting a concurrent `connect` exits non-zero without
       waiting and prints `another Trusty Squire session is already using
       the browser — close it first`.
