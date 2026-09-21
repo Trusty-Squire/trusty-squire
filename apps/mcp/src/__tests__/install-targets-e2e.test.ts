@@ -570,6 +570,51 @@ describe("connect --target=<agent> writes a valid config", () => {
     }
   });
 
+  // The noVNC rig's owned lifetime tears the ceremony down and exits the
+  // process from inside the rig's own cleanup — no frame below connect()
+  // returns, so nothing there can report the run. Leaving the stream on the
+  // non-terminal `needs-sign-in` line makes a caller infer the outcome from
+  // an exit code, which is the thing the machine channel exists to delete.
+  it("ends the machine channel when the ceremony rig outlives its own bound", async () => {
+    vi.mocked(openInstallConfirmInBotChrome).mockImplementationOnce(async (options) => {
+      options.onCeremonyExpired?.();
+      return process.exit(1);
+    });
+    const machine = captureMachineChannel();
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const exit = vi.spyOn(process, "exit").mockImplementation((code) => {
+      throw new Error(`exit:${code}`);
+    });
+    try {
+      await expect(
+        connect({
+          command: "connect",
+          target: "hermes",
+          apiBase: "https://test.invalid",
+          skipBrowser: false,
+          forceRelogin: false,
+          noRegistry: false,
+          noInteractive: true,
+          json: true,
+        }),
+      ).rejects.toThrow("exit:1");
+      const lines = machine.reports<{
+        state: string;
+        reason: string | null;
+        terminal: boolean;
+      }>();
+      expect(lines[0]).toMatchObject({ state: "needs-sign-in", terminal: false });
+      expect(lines.filter((line) => line.terminal)).toHaveLength(1);
+      const report = machine.terminal<{ state: string; reason: string | null }>();
+      expect(report.state).toBe("no-browser");
+      expect(report.reason).toBe("install_expired");
+    } finally {
+      exit.mockRestore();
+      error.mockRestore();
+      machine.restore();
+    }
+  });
+
   // Intent item 4: "whether the profile/browser is currently held by another
   // session ... as a code". A ceremony the profile gate refuses is exactly
   // that. Flattening the refusal to a string made it `needs-sign-in` with a

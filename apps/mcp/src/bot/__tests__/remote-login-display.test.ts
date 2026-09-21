@@ -56,7 +56,6 @@ import {
 } from "../remote-login-display.js";
 import { synchronizeSelfManagedChromeTerminationSignalHandlers } from "../browser.js";
 import { spawnOwnerTrackedHelper } from "../owner-process-reaper.js";
-import { LOGIN_RIG_OWNED_LIFETIME_MS } from "../../pairing-ttl.js";
 
 function processIsLive(pid: number): boolean {
   try {
@@ -82,9 +81,7 @@ async function waitUntil(predicate: () => boolean, timeoutMs = 5_000): Promise<v
   if (!predicate()) throw new Error("condition did not become true");
 }
 
-function fakeCleanupRuntime(): NonNullable<
-  Parameters<typeof registerRemoteLoginRigCleanup>[2]
-> {
+function fakeCleanupRuntime(): NonNullable<Parameters<typeof registerRemoteLoginRigCleanup>[3]> {
   const handlers = new Map<string, (...args: never[]) => void>();
   const runtime = {
     on: vi.fn((event: string, listener: (...args: never[]) => void) => {
@@ -101,7 +98,7 @@ function fakeCleanupRuntime(): NonNullable<
     }),
     exit: vi.fn(),
   };
-  return runtime as unknown as NonNullable<Parameters<typeof registerRemoteLoginRigCleanup>[2]>;
+  return runtime as unknown as NonNullable<Parameters<typeof registerRemoteLoginRigCleanup>[3]>;
 }
 
 function fakeProcess(name: string, ignoreSigterm = false): ChildProcess {
@@ -631,10 +628,10 @@ process.exit(1);
         return runtime;
       }),
       exit: vi.fn(),
-    } as unknown as NonNullable<Parameters<typeof registerRemoteLoginRigCleanup>[2]>;
+    } as unknown as NonNullable<Parameters<typeof registerRemoteLoginRigCleanup>[3]>;
     const set = vi.fn();
 
-    const remove = registerRemoteLoginRigCleanup(rig, () => undefined, runtime, {
+    const remove = registerRemoteLoginRigCleanup(rig, () => undefined, {}, runtime, {
       enabled: () => false,
       set,
     });
@@ -691,10 +688,10 @@ process.exit(1);
         return runtime;
       }),
       exit: vi.fn(),
-    } as unknown as NonNullable<Parameters<typeof registerRemoteLoginRigCleanup>[2]>;
+    } as unknown as NonNullable<Parameters<typeof registerRemoteLoginRigCleanup>[3]>;
     const set = vi.fn();
 
-    registerRemoteLoginRigCleanup(rig, () => undefined, runtime, {
+    registerRemoteLoginRigCleanup(rig, () => undefined, {}, runtime, {
       enabled: () => true,
       set,
     });
@@ -708,33 +705,22 @@ process.exit(1);
     expect(set).toHaveBeenLastCalledWith(true);
   });
 
-  it("arms the owned lifetime at pairing-token wait plus a one-minute grace by default", () => {
-    const { rig } = rigWithProcesses();
-    const runtime = fakeCleanupRuntime();
-    const schedule = vi.fn(() => 1 as unknown as NodeJS.Timeout);
-    runtime.setTimeout = schedule;
-    const remove = registerRemoteLoginRigCleanup(
-      rig,
-      () => undefined,
-      runtime,
-      { enabled: () => false, set: vi.fn() },
-    );
-    expect(schedule).toHaveBeenCalledWith(expect.any(Function), LOGIN_RIG_OWNED_LIFETIME_MS);
-    remove();
-  });
-
-  it("tears the ceremony helpers down when the rig-owned lifetime elapses", async () => {
+  it("reports the expiry and tears the ceremony helpers down when the lifetime elapses", async () => {
     const { rig, processes } = rigWithProcesses();
     const runtime = fakeCleanupRuntime();
-    registerRemoteLoginRigCleanup(
-      rig,
-      () => undefined,
-      runtime,
-      { enabled: () => true, set: vi.fn() },
-      { lifetimeMs: 80 },
-    );
+    const onExpired = vi.fn();
+    registerRemoteLoginRigCleanup(rig, () => undefined, { lifetimeMs: 80, onExpired }, runtime, {
+      enabled: () => true,
+      set: vi.fn(),
+    });
     expect(processes[0]?.kill).not.toHaveBeenCalled();
     await vi.waitFor(() => expect(runtime.exit).toHaveBeenCalledWith(1));
+    // Reported BEFORE the exit: a caller reading the machine channel must not
+    // have to infer this run's outcome from the exit code alone.
+    expect(onExpired).toHaveBeenCalledTimes(1);
+    expect(onExpired.mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(runtime.exit).mock.invocationCallOrder[0] ?? 0,
+    );
     for (const child of processes) {
       expect(child.kill).toHaveBeenCalledWith("SIGTERM");
     }
@@ -746,9 +732,9 @@ process.exit(1);
     const remove = registerRemoteLoginRigCleanup(
       rig,
       () => undefined,
+      { lifetimeMs: 80 },
       runtime,
       { enabled: () => true, set: vi.fn() },
-      { lifetimeMs: 80 },
     );
     remove();
     await new Promise<void>((resolve) => setTimeout(resolve, 150));
@@ -783,7 +769,7 @@ const child = spawn(process.execPath, ${JSON.stringify(["--import", tsx, fixture
     ...process.env,
     HOME: ${JSON.stringify(home)},
     TRUSTY_SQUIRE_REAPER_DIR: ${JSON.stringify(reaperDir)},
-    TRUSTY_SQUIRE_LOGIN_RIG_LIFETIME_MS: ${JSON.stringify(String(lifetimeMs))},
+    LOGIN_RIG_FIXTURE_LIFETIME_MS: ${JSON.stringify(String(lifetimeMs))},
   },
 });
 if (child.pid === undefined) process.exit(2);

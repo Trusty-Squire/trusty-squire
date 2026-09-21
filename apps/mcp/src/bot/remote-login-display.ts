@@ -36,7 +36,7 @@ import {
   spawnOwnerTrackedHelper,
   waitForOwnerTrackedHelperExit,
 } from "./owner-process-reaper.js";
-import { loginRigOwnedLifetimeMs } from "../pairing-ttl.js";
+import { LOGIN_RIG_OWNED_LIFETIME_MS } from "../pairing-ttl.js";
 
 const LOGIN_WIDTH = Number(process.env.BOT_NOVNC_W) || 720;
 const LOGIN_HEIGHT = Number(process.env.BOT_NOVNC_H) || 1280;
@@ -870,10 +870,7 @@ export function teardownRemoteLoginRig(rig: RemoteLoginRig, graceMs = 1_000): Pr
   return teardown;
 }
 
-type LoginProcessRuntime = Pick<NodeJS.Process, "on" | "once" | "removeListener" | "exit"> & {
-  setTimeout?: typeof setTimeout;
-  clearTimeout?: typeof clearTimeout;
-};
+type LoginProcessRuntime = Pick<NodeJS.Process, "on" | "once" | "removeListener" | "exit">;
 
 export interface LoginSignalExitCoordination {
   enabled(): boolean;
@@ -882,6 +879,11 @@ export interface LoginSignalExitCoordination {
 
 export interface LoginRigCleanupOptions {
   lifetimeMs?: number;
+  // Called once, synchronously, when the owned lifetime expires — before the
+  // teardown-and-exit it triggers. `connect` reports its machine-readable
+  // terminal line here, because this exit never returns through the run's own
+  // reporting frame.
+  onExpired?: () => void;
 }
 
 const signalExitCoordination: LoginSignalExitCoordination = {
@@ -892,9 +894,9 @@ const signalExitCoordination: LoginSignalExitCoordination = {
 export function registerRemoteLoginRigCleanup(
   rig: RemoteLoginRig,
   activeBrowserTeardown: () => (() => Promise<void>) | undefined,
+  options: LoginRigCleanupOptions = {},
   runtime: LoginProcessRuntime = process,
   signalExit: LoginSignalExitCoordination = signalExitCoordination,
-  options: LoginRigCleanupOptions = {},
 ): () => void {
   let finishing = false;
   let signalExitSuspended = false;
@@ -945,12 +947,11 @@ export function registerRemoteLoginRigCleanup(
     exitAfterCleanup(1);
   };
   const onOwnedLifetime = (): void => {
-    console.error("[login] ceremony display exceeded its owned lifetime; tearing down the login rig");
-    if (signalExit.enabled() || signalExitSuspended) {
-      exitAfterCleanup(1);
-      return;
-    }
-    void teardownRemoteLoginRig(rig);
+    console.error(
+      "[login] ceremony display exceeded its owned lifetime; tearing down the login rig",
+    );
+    options.onExpired?.();
+    exitAfterCleanup(1);
   };
 
   runtime.once("exit", onExit);
@@ -969,12 +970,10 @@ export function registerRemoteLoginRigCleanup(
   // is when the ceremony claims the display, before pollUntil starts and
   // even if pollUntil never starts. Pairing-token wait plus grace; override
   // only for tests.
-  const schedule = runtime.setTimeout ?? setTimeout;
-  const cancelScheduled = runtime.clearTimeout ?? clearTimeout;
-  const lifetimeMs = options.lifetimeMs ?? loginRigOwnedLifetimeMs();
-  const lifetimeTimer = schedule(onOwnedLifetime, lifetimeMs);
+  const lifetimeMs = options.lifetimeMs ?? LOGIN_RIG_OWNED_LIFETIME_MS;
+  const lifetimeTimer = setTimeout(onOwnedLifetime, lifetimeMs);
   const cancelLifetime = (): void => {
-    cancelScheduled(lifetimeTimer);
+    clearTimeout(lifetimeTimer);
   };
   rigLifetimeCancels.set(rig, cancelLifetime);
 

@@ -941,6 +941,13 @@ async function runConnectInstall(
         browser_location,
         ownBrowserPid: placed.ownBrowserPid,
       }),
+    reportCeremonyExpired: () =>
+      emitConnectStatus(args, {
+        outcome: { kind: "install_expired" },
+        profileDir,
+        browser_location: placed.value ?? { kind: "none" },
+        ownBrowserPid: placed.ownBrowserPid,
+      }),
     ...(deferredReloginProviders.length ? { forceReloginProviders: deferredReloginProviders } : {}),
   });
   if (claim.kind === "confirm_failed") {
@@ -1374,6 +1381,10 @@ async function runInstallClaim(
     // Writes a non-terminal line naming the live pairing link and where the
     // browser is, before this run blocks on a human.
     reportSignInOpen: (confirm_url: string, browser_location: ConnectBrowserLocation) => void;
+    // Writes the run's terminal line when the ceremony rig outlives its own
+    // bound. That path exits the process from inside the rig's cleanup, so
+    // nothing below returns here to report it.
+    reportCeremonyExpired: () => void;
     // Providers whose cookie clear busy-failed and now rides the ceremony
     // (see the --force-relogin block in the caller).
     forceReloginProviders?: readonly OAuthProviderId[];
@@ -1496,6 +1507,7 @@ async function runInstallClaim(
       options.placed.ownBrowserPid = ownBrowserPid;
       options.reportSignInOpen(initiate.confirm_url, placement);
     },
+    onCeremonyExpired: options.reportCeremonyExpired,
     deadline: ceremonyDeadline,
     ...(options.forceReloginProviders?.length
       ? { forceReloginProviders: options.forceReloginProviders }
