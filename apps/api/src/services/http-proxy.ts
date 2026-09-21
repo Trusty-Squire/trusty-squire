@@ -26,6 +26,7 @@ import { request as httpRequest } from "node:http";
 import { isIP } from "node:net";
 import { PassThrough, Transform, pipeline } from "node:stream";
 import type { Readable } from "node:stream";
+import type { ProxyBodyOutcome } from "@trusty-squire/vault";
 import {
   createBrotliDecompress,
   createGunzip,
@@ -65,10 +66,10 @@ export interface StreamedProxyResult {
   headers: Record<string, string>;
   body: Readable;
   truncated: boolean;
-  // Settles with the number of body bytes that passed through, once the
-  // pass-through ends or is torn down. Counted on the wire, never buffered —
-  // it is what the audit row's response_size is amended to.
-  bytesOut: Promise<number>;
+  // Settles once the pass-through ends or is torn down: the byte count metered
+  // on the wire (never buffered) plus, when the body did not finish, what cut
+  // it short. This is what the audit row is amended with.
+  bodyComplete: Promise<ProxyBodyOutcome>;
 }
 
 export type ProxyErrorCode =
@@ -380,7 +381,7 @@ export class HttpProxyExecutor {
         headers,
         body: piped.body,
         truncated: dispatched.truncated,
-        bytesOut: piped.bytesOut,
+        bodyComplete: piped.bodyComplete,
       };
     } catch (err) {
       dispatched.bodyStream.destroy();
@@ -580,14 +581,14 @@ function responseCanHaveBody(
 ): boolean {
   if (method.toUpperCase() === "HEAD") return false;
   const { status } = dispatched;
-  if (status === 204 || status === 304 || (status >= 100 && status < 200)) return false;
+  if (status === 204 || status === 304) return false;
   const declared = dispatched.headers["content-length"];
   return (Array.isArray(declared) ? declared[0] : declared) !== "0";
 }
 
 interface PipedResponseBody {
   body: Readable;
-  bytesOut: Promise<number>;
+  bodyComplete: Promise<ProxyBodyOutcome>;
 }
 
 // Decode (when we know the encoding), meter what leaves, and bound it. Mutates
@@ -633,19 +634,21 @@ function pipeResponseBody(
   // only prevents a late socket teardown after the body already ended from
   // becoming an unhandled exception.
   dest.on("error", () => undefined);
-  let settleBytes: (bytes: number) => void = () => undefined;
-  const bytesOut = new Promise<number>((resolve) => {
-    settleBytes = resolve;
+  let settle: (outcome: ProxyBodyOutcome) => void = () => undefined;
+  const bodyComplete = new Promise<ProxyBodyOutcome>((resolve) => {
+    settle = resolve;
   });
-  // Settles on success AND on teardown: a client that hangs up mid-stream still
-  // gets its partial byte count into the audit row.
-  const onDone = (): void => settleBytes(total);
+  // Settles on success AND on teardown, carrying the reason in the latter case:
+  // a torn transfer must not read back as a completed one.
+  const onDone = (err: Error | null | undefined): void => {
+    settle({ bytes: total, ...(err != null ? { error: err.message } : {}) });
+  };
   if (decoder !== undefined) {
     pipeline(source, decoder, meter, dest, onDone);
   } else {
     pipeline(source, meter, dest, onDone);
   }
-  return { body: dest, bytesOut };
+  return { body: dest, bodyComplete };
 }
 
 async function readBodyStream(stream: Readable): Promise<string> {

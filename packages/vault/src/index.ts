@@ -43,6 +43,7 @@ export {
   type VaultCredentialExport,
   type DeviceAssertion,
   type ProxyHttpTemplate,
+  type ProxyBodyOutcome,
   type ProxyResponse,
   type ProxyExecutor,
 } from "./credential-vault.js";

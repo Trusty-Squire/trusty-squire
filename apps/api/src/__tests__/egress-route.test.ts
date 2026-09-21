@@ -968,5 +968,75 @@ describe("Egress Grants — /v1/egress", () => {
     expect(executed.response_size).toBe(expectedBytes);
     expect(executed.response_status).toBe(200);
     expect(executed.upstream_duration_ms).toBeGreaterThanOrEqual(150);
+    expect(executed.proxy_error).toBeUndefined();
+  });
+
+  it("marks the audit row when the upstream body is cut short mid-stream", async () => {
+    await h.server.close();
+    const upstream = new PassThrough();
+    const executor = new HttpProxyExecutor({
+      lookup: async () => ({ address: "203.0.113.9", family: 4 }),
+      dispatch: async () => ({
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+        truncated: false,
+        bodyStream: upstream,
+      }),
+    });
+    h.server = await buildServer({ deps: h.deps, proxyExecutor: executor });
+    const account = await h.deps.accountStore.createAccount("sse-torn@example.test", "S");
+    const cookie = await webCookie(h.deps, account.id);
+    const token = await agentToken(h.deps, account.id);
+    await storeCred(h, cookie, "OpenAI");
+    const { grant_id, egressToken } = await mintGrantHttp(h, token, { service: "OpenAI" });
+
+    await h.server.listen({ host: "127.0.0.1", port: 0 });
+    const addr = h.server.server.address();
+    const port = typeof addr === "object" && addr !== null ? addr.port : 0;
+
+    let sawHeaders: () => void = () => undefined;
+    const headersReady = new Promise<void>((resolve) => {
+      sawHeaders = resolve;
+    });
+    const settled = new Promise<void>((resolve) => {
+      const req = httpRequest(
+        {
+          host: "127.0.0.1",
+          port,
+          method: "POST",
+          path: `/v1/egress/${grant_id}/v1/chat/completions`,
+          headers: {
+            authorization: `Bearer ${egressToken}`,
+            "content-type": "application/json",
+          },
+        },
+        (res) => {
+          expect(res.statusCode).toBe(200);
+          sawHeaders();
+          res.on("data", () => undefined);
+          res.on("end", () => resolve());
+          res.on("error", () => resolve());
+        },
+      );
+      req.on("error", () => resolve());
+      req.write(JSON.stringify({ stream: true }));
+      req.end();
+    });
+
+    upstream.write("data: first\n\n");
+    await headersReady;
+    // The generation dies half-way: the caller already holds a 200, so only the
+    // ledger can say the transfer never finished.
+    upstream.destroy(new Error("upstream connection reset"));
+    await settled;
+
+    const executed = await pollAudit(
+      h.deps,
+      account.id,
+      (p) => p.grant_id === grant_id && p.proxy_error !== undefined,
+    );
+    expect(executed.response_status).toBe(200);
+    expect(executed.proxy_error).toContain("upstream connection reset");
+    expect(executed.response_size).toBe(Buffer.byteLength("data: first\n\n", "utf8"));
   });
 });

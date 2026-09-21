@@ -237,16 +237,23 @@ export interface ProxyHttpTemplate {
   // not in `url`). Passed through to the executor; host check uses `url`.
   query?: Record<string, string>;
 }
+// What actually left a streaming proxy. `error` is set when the body did not
+// finish — an upstream reset, a size ceiling, or a client that hung up — so a
+// truncated transfer is not indistinguishable from a completed one.
+export interface ProxyBodyOutcome {
+  bytes: number;
+  error?: string;
+}
 export interface ProxyResponse {
   status: number;
   headers: Record<string, string>;
   body: string;
   truncated: boolean;
-  // A STREAMING executor leaves `body` empty and settles this with the real
-  // byte count once the last body byte has left the proxy. The audit row is
-  // still written at dispatch — a crash mid-stream leaves one — and is then
-  // amended with that count and the true time-to-last-byte.
-  bodyComplete?: Promise<number>;
+  // A STREAMING executor leaves `body` empty and settles this once the last
+  // body byte has left the proxy. The audit row is still written at dispatch —
+  // a crash mid-stream leaves one — and is then amended with the real count,
+  // the true time-to-last-byte, and any teardown that cut the body short.
+  bodyComplete?: Promise<ProxyBodyOutcome>;
 }
 // The executor receives the decrypted field MAP and does the
 // ${SECRET.<field>} substitution + network dispatch (API layer).
@@ -1209,13 +1216,14 @@ export class CredentialVault implements VaultClient {
   private amendProxyAuditWhenBodyEnds(
     auditId: string,
     startedAt: number,
-    bodyComplete: Promise<number>,
+    bodyComplete: Promise<ProxyBodyOutcome>,
   ): void {
     void bodyComplete
-      .then((bytes) =>
+      .then((outcome) =>
         this.deps.audit.amend(auditId, {
-          response_size: bytes,
+          response_size: outcome.bytes,
           upstream_duration_ms: this.now().getTime() - startedAt,
+          ...(outcome.error !== undefined ? { proxy_error: outcome.error } : {}),
         }),
       )
       .catch(() => undefined);

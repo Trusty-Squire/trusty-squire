@@ -196,9 +196,9 @@ describe("HttpProxyExecutor.executeStream", () => {
       // arrival[0] would flake on a loaded runner; the GAP cannot.
       expect(arrivals.at(-1)!.at - arrivals[0]!.at).toBeGreaterThanOrEqual(150);
       expect(streamed.headers["content-length"]).toBeUndefined();
-      await expect(streamed.bytesOut).resolves.toBe(
-        Buffer.byteLength("data: first\n\ndata: second\n\n", "utf8"),
-      );
+      await expect(streamed.bodyComplete).resolves.toEqual({
+        bytes: Buffer.byteLength("data: first\n\ndata: second\n\n", "utf8"),
+      });
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
@@ -231,7 +231,40 @@ describe("HttpProxyExecutor.executeStream", () => {
         chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
       }
       expect(Buffer.concat(chunks).toString("utf8")).toBe(payload);
-      await expect(streamed.bytesOut).resolves.toBe(payload.length);
+      await expect(streamed.bodyComplete).resolves.toEqual({ bytes: payload.length });
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("reports the teardown reason when the upstream body never finishes", async () => {
+    const server = createServer((_req, res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write("data: first\n\n");
+      setTimeout(() => res.destroy(), 30);
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const addr = server.address();
+    const port = typeof addr === "object" && addr !== null ? addr.port : 0;
+    const proxy = new HttpProxyExecutor({ blockPrivate: false, allowInsecureHttp: true });
+    try {
+      const streamed = await proxy.executeStream({
+        accountId: "acct-test",
+        http: { method: "GET", url: `http://127.0.0.1:${port}/stream`, headers: {} },
+        fields: {},
+      });
+      let delivered = 0;
+      try {
+        for await (const chunk of streamed.body) {
+          delivered += (Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk))).length;
+        }
+      } catch {
+        // the reset surfaces to the consumer too; the outcome is what matters
+      }
+      const outcome = await streamed.bodyComplete;
+      expect(outcome.bytes).toBe(delivered);
+      expect(outcome.error).toBeTypeOf("string");
+      expect(outcome.error).not.toBe("");
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
@@ -262,7 +295,7 @@ describe("HttpProxyExecutor.executeStream", () => {
         chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
       }
       expect(Buffer.concat(chunks).toString("utf8")).toBe("");
-      await expect(streamed.bytesOut).resolves.toBe(0);
+      await expect(streamed.bodyComplete).resolves.toEqual({ bytes: 0 });
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }

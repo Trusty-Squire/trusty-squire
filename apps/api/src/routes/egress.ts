@@ -509,9 +509,9 @@ export const registerEgressRoutes: FastifyPluginAsync<{
               headers: streamed.headers,
               body: "",
               truncated: streamed.truncated,
-              // The audit row lands now with an empty body; bytesOut settles
-              // when the last byte leaves, and the vault amends the row.
-              bodyComplete: streamed.bytesOut,
+              // The audit row lands now with an empty body; this settles when
+              // the last byte leaves, and the vault amends the row.
+              bodyComplete: streamed.bodyComplete,
             };
           },
           {
