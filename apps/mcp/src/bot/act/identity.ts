@@ -4,7 +4,7 @@
 
 import type { Frame, Page } from "playwright";
 import { frameOriginOf } from "../browser-use-capture.js";
-import { evaluateBound } from "../drive-evaluate.js";
+import { DriveEvaluateTimeout, evaluateBound } from "../drive-evaluate.js";
 import type { InteractiveElement } from "../browser.js";
 
 export type ActControlIdentity = {
@@ -223,7 +223,12 @@ export async function resolveIdentityScope(
       label: identity.label,
       href: identity.href ?? "",
       compareLabel: identity.labelComparable === true,
-    }).catch(() => false);
+    }).catch((error: unknown) => {
+      // A stalled in-page read is the operator's abort, not a verdict that this
+      // is a different control: swallowing it would let the caller carry on.
+      if (error instanceof DriveEvaluateTimeout) throw error;
+      return false;
+    });
     if (same) return scope;
   }
   return null;

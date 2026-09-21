@@ -36,11 +36,7 @@ import {
   awaitVerification,
   injectCardIntoSessionTargets,
 } from "../provision-session.js";
-import {
-  captureFrameSnapshot,
-  driveRowsFromSnapshot,
-  snapshotToObservation,
-} from "../drive-snapshot.js";
+import { captureFrameSnapshot, driveRowsFromSnapshot } from "../drive-snapshot.js";
 import { dispatchDriveAct } from "../act/act.js";
 import { rememberDriveIdentities } from "../act/identity.js";
 import { settleDriveStep } from "../drive-act.js";
@@ -2216,9 +2212,8 @@ describe("operate_drive real-browser fixture", () => {
       const dependencies = deps(async (_api, _state, questions) =>
         jevFromQuestions(questions, true),
       );
-      dependencies.snapshot = async (sessionId) => {
+      dependencies.onSnapshot = () => {
         snapshots += 1;
-        return await observe(sessionId, "compact");
       };
       const result = await runOperateDrive(
         { session_id: started.session_id, goal: "confirm the page is open" },
@@ -2249,9 +2244,8 @@ describe("operate_drive real-browser fixture", () => {
         }
         return jevFromQuestions(questions, true);
       });
-      dependencies.snapshot = async (sessionId) => {
+      dependencies.onSnapshot = () => {
         snapshots += 1;
-        return await observe(sessionId, "compact");
       };
       const result = await runOperateDrive(
         { session_id: started.session_id, goal: "confirm the page is open" },
@@ -2323,21 +2317,13 @@ describe("operate_drive real-browser fixture", () => {
         if (decisions === 2) expect(JSON.stringify(state)).toMatch(/ready.now/i);
         return jevFromQuestions(questions, decisions > 1);
       });
-      dependencies.snapshot = async (sessionId) => {
-        const snapshot = await captureFrameSnapshot(page, [], 0);
-        if (snapshot === null) throw new Error("missing fixture snapshot");
-        const captured = snapshotToObservation(
-          snapshot,
-          sessionId,
-          driveRowsFromSnapshot(snapshot),
-        );
+      dependencies.onSnapshot = async () => {
         snapshots += 1;
         if (snapshots === 2) {
           await page.evaluate(() => {
             document.querySelector("button")!.textContent = "Ready now";
           });
         }
-        return captured;
       };
       const result = await runOperateDrive(
         { session_id: started.session_id, goal: "click and inspect" },

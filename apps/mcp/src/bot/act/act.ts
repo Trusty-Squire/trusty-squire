@@ -1368,6 +1368,16 @@ export async function dispatchDriveAct(
     if (action.kind === "oauth_login") return await guardDriveOauthTarget(sessionId, action.target);
     return { kind: "unsupported" };
   }
+  // A drive ref names the identity its own snapshot recorded. A target with no
+  // such record never came from a drive snapshot — a row from a fallback
+  // observation the drive did not capture — so it is the tools' to resolve.
+  // Dispatching it here would fail resolution and report a live control stale.
+  if (
+    action.kind !== "scroll" &&
+    sessionForCall(sessionId)?.drive?.identities?.get(action.target) === undefined
+  ) {
+    return { kind: "unsupported" };
+  }
   try {
     const result = await actInternally(
       sessionId,

@@ -345,7 +345,10 @@ export interface DriveDependencies {
   askJev: typeof askJev;
   act: typeof act;
   observe: typeof observe;
-  snapshot?: (sessionId: string, omitValueRefs?: readonly string[]) => Promise<Observation>;
+  // Fires once per completed drive snapshot. A test hooks the moment AFTER a
+  // capture; it cannot stand IN for one, because the rows and the identities
+  // their refs name have to come from the same capture.
+  onSnapshot?: () => Promise<void> | void;
   driveAct?: (sessionId: string, action: ProvisionAction) => Promise<DriveActResult>;
   startSession: typeof startProvisionSession;
   awaitVerification: typeof awaitVerification;
@@ -4884,7 +4887,7 @@ async function finalizeSnapshotOutputs(
   return maskSnapshotOutputs(session, next, rows);
 }
 
-async function snapshotDriveSession(
+async function captureDriveSession(
   session: Session,
   sessionId: string,
   drive: SessionDriveState,
@@ -4932,12 +4935,6 @@ async function snapshotDriveSession(
     if (live !== null) drive.lastDocumentEpoch = await documentEpochOf(live);
     return timed(observation, rows, scriptMs, wallMs, timedOut);
   };
-  if (deps.snapshot !== undefined) {
-    const observation = await deps.snapshot(sessionId, maskedRefsOf(drive));
-    const compactRows = mergeCompactTable([], observation);
-    const finalized = await finalizeSnapshotOutputs(session, sessionId, observation, compactRows);
-    return await fellBack(finalized.observation, finalized.rows);
-  }
   const page = session.browser.page;
   if (page === null) {
     const observation = await deps.observe(sessionId, "compact");
@@ -5033,6 +5030,18 @@ async function snapshotDriveSession(
     snapshot.wallMs,
     snapshot.timedOut === true,
   );
+}
+
+async function snapshotDriveSession(
+  session: Session,
+  sessionId: string,
+  drive: SessionDriveState,
+  deps: DriveDependencies,
+  needFrames: boolean,
+): Promise<Awaited<ReturnType<typeof captureDriveSession>>> {
+  const snap = await captureDriveSession(session, sessionId, drive, deps, needFrames);
+  if (deps.onSnapshot !== undefined) await deps.onSnapshot();
+  return snap;
 }
 
 function resolveResumeAnswer(
