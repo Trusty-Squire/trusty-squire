@@ -11,6 +11,7 @@ import {
   buildConsentRefusal,
   buildVerificationSearchQuery,
   mailRowIsSessionCandidate,
+  mailRowMatchedSession,
   mailRowMatchesRecipient,
   resolveInboxSearch,
   serviceHostFromUrl,
@@ -645,6 +646,30 @@ describe("session-scoped inbox candidates", () => {
         { recipient: "ada+run1@example.test", serviceHost: "127.0.0.1" },
       ),
     ).toBe(true);
+  });
+
+  it("counts a row as MATCHING the session only when it matched recipient or host", () => {
+    const foreign = row({
+      fromEmail: "support@other.test",
+      subject: "Confirm your registration",
+      visibleText: "Confirm your registration",
+    });
+    const own = row({
+      fromEmail: "hello@app.example.test",
+      subject: "Confirm your account",
+      visibleText: "Confirm your account",
+    });
+    expect(mailRowMatchedSession(own, { serviceHost: "app.example.test" })).toBe(true);
+    expect(
+      mailRowMatchedSession(row({ ...foreign, visibleText: "to ada+run1@example.test" }), {
+        recipient: "ada+run1@example.test",
+      }),
+    ).toBe(true);
+    // Admitted only because the host is unscopeable: a candidate, but it
+    // matched nothing about this session, so it is not stale-match evidence.
+    expect(mailRowIsSessionCandidate(foreign, { serviceHost: "127.0.0.1" })).toBe(true);
+    expect(mailRowMatchedSession(foreign, { serviceHost: "127.0.0.1" })).toBe(false);
+    expect(mailRowMatchedSession(foreign, { serviceHost: "app.example.test" })).toBe(false);
   });
 
   it("opens an unscoped same-service row and rejects the wrong plus-address after open", () => {

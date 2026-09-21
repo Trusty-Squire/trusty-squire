@@ -428,6 +428,21 @@ export function mailRowIsSessionCandidate(
   return sessionCandidateReason(row, opts).ok;
 }
 
+/**
+ * A candidate that matched something about THIS session — its recipient or its
+ * service host — as opposed to one admitted only because the host was
+ * unscopeable. Stale-match evidence must rest on a real match: an unscopeable
+ * host admits every row, so a predating row there says nothing about whether
+ * this task's mail was sent.
+ */
+export function mailRowMatchedSession(
+  row: MailResultRow,
+  opts: { recipient?: string; serviceHost?: string; listingScopedToRecipient?: boolean },
+): boolean {
+  const verdict = sessionCandidateReason(row, opts);
+  return verdict.ok && verdict.reason !== "unscopeable_host";
+}
+
 // The All Mail listing URL. Gmail's SEARCH results are eventually consistent:
 // a freshly delivered message can be absent from search results for seconds to
 // 15+ minutes. MEASURED 2026-09-17 (rc.35 craigslist gauntlet, #828): the
@@ -675,7 +690,9 @@ async function readAllMailMatchingRows(
   const matching = rows.filter(
     (r) => mailRowIsSessionCandidate(r, candidateOpts) && mailRowIsRecent(r, now),
   );
-  const staleMatchSeen = matching.some((r) => mailRowPredatesSession(r, sessionStartMs));
+  const staleMatchSeen = matching.some(
+    (r) => mailRowMatchedSession(r, candidateOpts) && mailRowPredatesSession(r, sessionStartMs),
+  );
   logInboxReaderListing("all", rows, matching, candidateOpts, sessionStartMs, recipient);
   // Recipient-scoped reads decide predates per opened message (listing dates
   // are the conversation's newest, minute-precision, and omit To). Sender-only
@@ -864,7 +881,13 @@ export async function awaitVerification(
           session.startedAt,
           search.recipient,
         );
-        if (searchRows.some((r) => mailRowPredatesSession(r, session.startedAt)))
+        if (
+          searchRows.some(
+            (r) =>
+              mailRowMatchedSession(r, searchCandidateOpts) &&
+              mailRowPredatesSession(r, session.startedAt),
+          )
+        )
           staleMatchSeen = true;
         // Recipient-scoped: listing date is the conversation's newest minute,
         // not the message To this plus-address. Open the newest candidate and
