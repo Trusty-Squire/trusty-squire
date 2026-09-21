@@ -2,7 +2,7 @@
 
 ## 1.1.16-rc.4 (2026-09-21)
 
-- feat(mcp): give connect a machine-readable --json report (#913)
+- `connect --json` writes newline-delimited typed reports on stdout — one complete report per line, whenever the run's answer changes, with the last line marked `terminal` — on every exit path (`state`, `sign_in_url`, `account`, `holder`, `browser_location`, plus a narrow `reason`) from the same value the human copy renders. the sign-in URL reaches the machine channel before the run starts waiting, `needs-sign-in` always carries its URL — the ceremony now waits no longer than the sign-in link lives, and a lapsed link reports `install_expired` instead. `browser_location` is reported by the path that placed the ceremony browser and survives into a failed run's report — a virtual display carries the noVNC address that reaches it, on a line written while that tunnel is up, and a ceremony that ends without any path reporting a placement is `unreachable` named with the failure — `holder` is reported as read — from Chrome's lock or the profile-operation lease, whichever holds it, and never the ceremony Chrome this run launched — and a ceremony refused by the profile gate or by a resident broker holding the browser reports `busy` rather than a sign-in (a broker that dies mid-ceremony reports `run_failed`, not a holder to wait for), `state` never says `connected` on a run that exits non-zero, a rejected flag answers `{"error":"usage"}` rather than a connection state, `account` carries the binding whenever a run proved one, with `account.providers` `null` when the provider probe could not read the profile rather than an empty list, `--json` implies `--no-interactive`, and human output is unchanged. (#913)
 - fix(mcp): never vault a control identifier, and report a still-masked sibling key (#912)
 - fix(mcp): key-goal completion reuses the capture flow, not a second policy (#911)
 - fix(mcp): close the drive decider feedback loop (#908 follow-up) (#910)
@@ -47,10 +47,6 @@
 - fix(api): exempt server-side vault use from account rate limits (#867)
 - fix(mcp): speed up drive startup by deferring to its first snapshot (#866)
 - feat(mcp): add resumable goal-driven browser automation (#859)
-
-## Unreleased
-
-- `connect --json` writes newline-delimited typed reports on stdout — one complete report per line, whenever the run's answer changes, with the last line marked `terminal` — on every exit path (`state`, `sign_in_url`, `account`, `holder`, `browser_location`, plus a narrow `reason`) from the same value the human copy renders. the sign-in URL reaches the machine channel before the run starts waiting, `needs-sign-in` always carries its URL — the ceremony now waits no longer than the sign-in link lives, and a lapsed link reports `install_expired` instead. `browser_location` is reported by the path that placed the ceremony browser and survives into a failed run's report — a virtual display carries the noVNC address that reaches it, on a line written while that tunnel is up, and a ceremony that ends without any path reporting a placement is `unreachable` named with the failure — `holder` is reported as read — from Chrome's lock or the profile-operation lease, whichever holds it, and never the ceremony Chrome this run launched — and a ceremony refused by the profile gate or by a resident broker holding the browser reports `busy` rather than a sign-in (a broker that dies mid-ceremony reports `run_failed`, not a holder to wait for), `state` never says `connected` on a run that exits non-zero, a rejected flag answers `{"error":"usage"}` rather than a connection state, `account` carries the binding whenever a run proved one, with `account.providers` `null` when the provider probe could not read the profile rather than an empty list, `--json` implies `--no-interactive`, and human output is unchanged.
 
 ## 1.1.14-rc.15 (2026-09-12)
 
