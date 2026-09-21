@@ -1,5 +1,13 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.16-rc.5 (2026-09-21)
+
+- fix(mcp): bound ceremony noVNC helpers to the pairing-token window plus grace (#919)
+- fix(mcp): resolve drive refs by control identity through the shared act executor (#918)
+- fix(api): stream egress proxy responses and forward upstream headers (#917)
+- ci(release): stop failing a good publish when the registry is slow (#916)
+- fix(mcp): restore inbox reads for IP and localhost service hosts (#915)
+
 ## Unreleased
 
 - Ceremony noVNC helpers now own a backstop lifetime at rig registration — pairing-token window plus one minute — so a wedged or never-polled `connect` still tears the display down even if nothing is waiting on the sign-in poll. Parent-death detection and a noVNC client heartbeat were considered and rejected: a live sign-in inside the token window must not be cut off because its spawner restarted. The bound is a constant, not an environment knob, and when it fires `connect --json` writes its terminal report before exiting so the machine channel never ends on a non-terminal line. Assessed and rejected as a cause of the separate full-CPU MCP-server wedge: that shares the simultaneous-daemon-restart trigger but contends between our own `mcp server` processes, not this display stack.
