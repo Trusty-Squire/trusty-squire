@@ -12,6 +12,7 @@ import { issueAgentSession } from "../auth/agent.js";
 import { issueSession, signSessionJwt, SESSION_COOKIE_NAME } from "../auth/session.js";
 import { buildInMemoryDeps, type ApiDeps } from "../services/deps.js";
 import { buildServer } from "../server.js";
+import { VAULT_AUDIT_TYPES, type VaultAuditPayload } from "@trusty-squire/vault";
 import { HttpProxyExecutor } from "../services/http-proxy.js";
 import {
   EgressGrantStoreUnavailableError,
@@ -52,6 +53,24 @@ function fakeExecutor(): HttpProxyExecutor {
 interface Harness {
   server: FastifyInstance;
   deps: ApiDeps;
+}
+// The streamed row's amendment is fire-and-forget by design (the route must not
+// wait on it), so read it back with a bounded poll rather than a fixed sleep.
+async function pollAudit(
+  deps: ApiDeps,
+  accountId: string,
+  match: (payload: VaultAuditPayload) => boolean,
+): Promise<VaultAuditPayload> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const rows = await deps.vaultAuditStore.list(accountId, {
+      type: VAULT_AUDIT_TYPES.proxyExecuted,
+      limit: 50,
+    });
+    const hit = rows.map((r) => r.payload).find(match);
+    if (hit !== undefined) return hit;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error("no matching vault.proxy_executed audit row");
 }
 async function setup(opts: { egressGrantStore?: EgressGrantStore } = {}): Promise<Harness> {
   const deps = buildInMemoryDeps({ sessionSecret: SESSION_SECRET });
@@ -923,7 +942,6 @@ describe("Egress Grants — /v1/egress", () => {
       req.end();
     });
 
-    const firstWriteAt = Date.now() - started;
     upstream.write("data: first\n\n");
     await headersReady;
     await new Promise((resolve) => setTimeout(resolve, 200));
@@ -933,8 +951,22 @@ describe("Egress Grants — /v1/egress", () => {
 
     expect(arrivals.length).toBeGreaterThanOrEqual(1);
     expect(arrivals[0]!.text).toContain("data: first");
-    expect(arrivals[0]!.at).toBeLessThan(firstWriteAt + 80);
     expect(arrivals.at(-1)!.text).toContain("data: second");
-    expect(arrivals.at(-1)!.at).toBeGreaterThanOrEqual(firstWriteAt + 180);
+    // Ordering is the property under test — the first event reached the client
+    // on its own, before the second was written. An absolute latency bound on
+    // arrival[0] would flake on a loaded runner; the GAP between them cannot.
+    expect(arrivals.at(-1)!.at - arrivals[0]!.at).toBeGreaterThanOrEqual(150);
+
+    // The audit row is written at dispatch (a crash mid-stream still leaves
+    // one) and amended with the true byte count once the body ends.
+    const expectedBytes = Buffer.byteLength("data: first\n\ndata: second\n\n", "utf8");
+    const executed = await pollAudit(
+      h.deps,
+      account.id,
+      (p) => p.grant_id === grant_id && p.response_size === expectedBytes,
+    );
+    expect(executed.response_size).toBe(expectedBytes);
+    expect(executed.response_status).toBe(200);
+    expect(executed.upstream_duration_ms).toBeGreaterThanOrEqual(150);
   });
 });

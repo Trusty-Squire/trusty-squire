@@ -271,6 +271,9 @@ export const VAULT_AUDIT_TYPES = {
 export type VaultAuditType = (typeof VAULT_AUDIT_TYPES)[keyof typeof VAULT_AUDIT_TYPES];
 
 export interface VaultAuditEventInput {
+  // Caller-chosen row id, and therefore also the idempotency key: recording
+  // the same key twice is a no-op. Pass one when the row must be `amend`-able
+  // later (the streaming proxy does — see below).
   idempotency_key?: string;
   account_id: string;
   type: VaultAuditType;
@@ -302,6 +305,11 @@ export interface VaultAuditListOptions {
 
 export interface VaultAuditStore {
   record(event: VaultAuditEventInput): Promise<void>;
+  // Merge a patch into an already-written row's payload. The streaming proxy
+  // writes its row when the request is dispatched — so a crash mid-stream
+  // still leaves one — and amends it with the true byte count and
+  // time-to-last-byte once the body ends. Unknown id: no-op.
+  amend(id: string, patch: Partial<VaultAuditPayload>): Promise<void>;
   countRecentRetrievals(accountId: string, since: Date): Promise<number>;
   // Newest-first audit trail for an account, for the activity timeline.
   list(accountId: string, opts?: VaultAuditListOptions): Promise<VaultAuditRecord[]>;

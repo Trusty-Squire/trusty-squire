@@ -145,13 +145,13 @@ export const registerEgressRoutes: FastifyPluginAsync<{
   now?: () => Date;
 }> = async (fastify, opts) => {
   // Egress is a WORKLOAD proxy (LLM SDKs, deployed apps), not the agent's
-  // snappy one-shot use_credential call — so it needs a much larger body cap
-  // (LLM JSON responses dwarf the 10KB default) and patient timeouts (a non-
-  // streaming completion's time-to-first-byte is tens of seconds, not 5s).
+  // snappy one-shot use_credential call — so it needs patient timeouts (a non-
+  // streaming completion's time-to-first-byte is tens of seconds, not 5s). The
+  // body is passed through rather than buffered, so it carries no size cap:
+  // truncating a long generation mid-body is worse than forwarding it.
   const executor =
     opts.proxyExecutor ??
     new HttpProxyExecutor({
-      maxResponseBytes: 16 * 1024 * 1024, // 16MB — full LLM JSON responses
       headersTimeoutMs: 120_000, // time-to-first-byte for slow completions
       bodyTimeoutMs: 120_000,
     });
@@ -509,6 +509,9 @@ export const registerEgressRoutes: FastifyPluginAsync<{
               headers: streamed.headers,
               body: "",
               truncated: streamed.truncated,
+              // The audit row lands now with an empty body; bytesOut settles
+              // when the last byte leaves, and the vault amends the row.
+              bodyComplete: streamed.bytesOut,
             };
           },
           {
@@ -519,10 +522,6 @@ export const registerEgressRoutes: FastifyPluginAsync<{
         );
         for (const [key, value] of Object.entries(response.headers)) {
           reply.header(key, value);
-        }
-        if (bodyStream === undefined) {
-          reply.code(response.status).send(response.body);
-          return;
         }
         return reply.code(response.status).send(bodyStream);
       } catch (err) {

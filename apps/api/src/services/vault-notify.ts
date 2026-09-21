@@ -168,6 +168,10 @@ export class NotifyingVaultAuditStore implements VaultAuditStore {
     await this.send(account.telegram_chat_id, formatVaultEventMessage(event, this.now()));
   }
 
+  amend(id: string, patch: Partial<VaultAuditPayload>): Promise<void> {
+    return this.inner.amend(id, patch);
+  }
+
   countRecentRetrievals(accountId: string, since: Date): Promise<number> {
     return this.inner.countRecentRetrievals(accountId, since);
   }

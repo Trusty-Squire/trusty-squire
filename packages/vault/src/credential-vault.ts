@@ -242,6 +242,11 @@ export interface ProxyResponse {
   headers: Record<string, string>;
   body: string;
   truncated: boolean;
+  // A STREAMING executor leaves `body` empty and settles this with the real
+  // byte count once the last body byte has left the proxy. The audit row is
+  // still written at dispatch — a crash mid-stream leaves one — and is then
+  // amended with that count and the true time-to-last-byte.
+  bodyComplete?: Promise<number>;
 }
 // The executor receives the decrypted field MAP and does the
 // ${SECRET.<field>} substitution + network dispatch (API layer).
@@ -925,23 +930,32 @@ export class CredentialVault implements VaultClient {
     const startedAt = this.now().getTime();
     try {
       const response = await executor({ accountId, http, fields });
+      const auditId = ulid();
       const markRetrieved = () =>
         this.runProxyAuditSideEffect(() => this.deps.store.markRetrieved(reference, this.now()));
       const recordExecuted = () =>
-        this.recordProxyAudit(accountId, VAULT_AUDIT_TYPES.proxyExecuted, {
-          reference,
-          requester: "agent",
-          ...audit,
-          target_host: targetHost,
-          response_status: response.status,
-          response_size: Buffer.byteLength(response.body, "utf8"),
-          upstream_duration_ms: this.now().getTime() - startedAt,
-        });
+        this.recordProxyAudit(
+          accountId,
+          VAULT_AUDIT_TYPES.proxyExecuted,
+          {
+            reference,
+            requester: "agent",
+            ...audit,
+            target_host: targetHost,
+            response_status: response.status,
+            response_size: Buffer.byteLength(response.body, "utf8"),
+            upstream_duration_ms: this.now().getTime() - startedAt,
+          },
+          auditId,
+        );
       if (this.deps.proxyAuditFailureMode === "best_effort") {
         await Promise.all([markRetrieved(), recordExecuted()]);
       } else {
         await markRetrieved();
         await recordExecuted();
+      }
+      if (response.bodyComplete !== undefined) {
+        this.amendProxyAuditWhenBodyEnds(auditId, startedAt, response.bodyComplete);
       }
       return response;
     } catch (err) {
@@ -1170,16 +1184,41 @@ export class CredentialVault implements VaultClient {
     accountId: string,
     type: VaultAuditType,
     payload: VaultAuditEventInput["payload"],
+    rowId?: string,
   ): Promise<void> {
-    await this.deps.audit.record({ account_id: accountId, type, payload });
+    await this.deps.audit.record({
+      account_id: accountId,
+      type,
+      payload,
+      ...(rowId !== undefined ? { idempotency_key: rowId } : {}),
+    });
   }
 
   private async recordProxyAudit(
     accountId: string,
     type: VaultAuditType,
     payload: VaultAuditEventInput["payload"],
+    rowId?: string,
   ): Promise<void> {
-    await this.runProxyAuditSideEffect(() => this.recordAudit(accountId, type, payload));
+    await this.runProxyAuditSideEffect(() => this.recordAudit(accountId, type, payload, rowId));
+  }
+
+  // The streamed row landed at dispatch with a placeholder size; the true
+  // count and time-to-last-byte only exist once the body ends. Fire-and-forget
+  // on purpose — the caller is already forwarding bytes and must not wait.
+  private amendProxyAuditWhenBodyEnds(
+    auditId: string,
+    startedAt: number,
+    bodyComplete: Promise<number>,
+  ): void {
+    void bodyComplete
+      .then((bytes) =>
+        this.deps.audit.amend(auditId, {
+          response_size: bytes,
+          upstream_duration_ms: this.now().getTime() - startedAt,
+        }),
+      )
+      .catch(() => undefined);
   }
 
   private async runProxyAuditSideEffect(fn: () => Promise<void>): Promise<void> {

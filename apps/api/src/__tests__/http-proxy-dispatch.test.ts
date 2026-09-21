@@ -190,32 +190,31 @@ describe("HttpProxyExecutor.executeStream", () => {
       }
       expect(arrivals.length).toBeGreaterThanOrEqual(1);
       expect(arrivals[0]!.text).toContain("data: first");
-      expect(arrivals[0]!.at).toBeLessThan(120);
       expect(arrivals.at(-1)!.text).toContain("data: second");
-      expect(arrivals.at(-1)!.at).toBeGreaterThanOrEqual(180);
+      // The load-bearing property is ordering: the first event is observed on
+      // its own, well before the second was even written. A wall-clock bound on
+      // arrival[0] would flake on a loaded runner; the GAP cannot.
+      expect(arrivals.at(-1)!.at - arrivals[0]!.at).toBeGreaterThanOrEqual(150);
+      expect(streamed.headers["content-length"]).toBeUndefined();
+      await expect(streamed.bytesOut).resolves.toBe(
+        Buffer.byteLength("data: first\n\ndata: second\n\n", "utf8"),
+      );
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
   });
 
-  it("aborts mid-stream when the size cap is exceeded rather than after buffering", async () => {
-    let writes = 0;
+  it("forwards a body far larger than the buffered cap intact", async () => {
+    const payload = "y".repeat(512 * 1024);
     const server = createServer((_req, res) => {
       res.writeHead(200, { "content-type": "text/plain" });
-      const tick = (): void => {
-        if (res.destroyed || writes >= 8) {
-          if (!res.writableEnded) res.end();
-          return;
-        }
-        writes += 1;
-        res.write("x".repeat(40));
-        setTimeout(tick, 20);
-      };
-      tick();
+      res.end(payload);
     });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     const addr = server.address();
     const port = typeof addr === "object" && addr !== null ? addr.port : 0;
+    // The buffered cap that use_credential lives under is 64 bytes here; the
+    // streaming pass-through buffers nothing, so it must not be gated by it.
     const proxy = new HttpProxyExecutor({
       blockPrivate: false,
       allowInsecureHttp: true,
@@ -227,16 +226,50 @@ describe("HttpProxyExecutor.executeStream", () => {
         http: { method: "GET", url: `http://127.0.0.1:${port}/big`, headers: {} },
         fields: {},
       });
-      let sawTooLarge = false;
+      const chunks: Buffer[] = [];
+      for await (const chunk of streamed.body) {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
+      }
+      expect(Buffer.concat(chunks).toString("utf8")).toBe(payload);
+      await expect(streamed.bytesOut).resolves.toBe(payload.length);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("still stops a compressed body that expands past the decompression ceiling", async () => {
+    // ~1MB of zeros compresses to a couple of KB — the classic bomb shape.
+    const bomb = gzipSync(Buffer.alloc(1024 * 1024, 0x61));
+    const server = createServer((_req, res) => {
+      res.writeHead(200, { "content-type": "text/plain", "content-encoding": "gzip" });
+      res.end(bomb);
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const addr = server.address();
+    const port = typeof addr === "object" && addr !== null ? addr.port : 0;
+    const proxy = new HttpProxyExecutor({
+      blockPrivate: false,
+      allowInsecureHttp: true,
+      maxDecompressedBytes: 4096,
+    });
+    try {
+      const streamed = await proxy.executeStream({
+        accountId: "acct-test",
+        http: { method: "GET", url: `http://127.0.0.1:${port}/bomb`, headers: {} },
+        fields: {},
+      });
+      let seen = 0;
+      let failure: unknown;
       try {
-        for await (const _chunk of streamed.body) {
-          // drain until the cap destroys the stream
+        for await (const chunk of streamed.body) {
+          seen += (Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk))).length;
         }
       } catch (err) {
-        sawTooLarge = err instanceof ProxyError && err.code === "response_too_large";
+        failure = err;
       }
-      expect(sawTooLarge).toBe(true);
-      expect(writes).toBeLessThan(8);
+      expect(failure).toBeInstanceOf(ProxyError);
+      expect((failure as ProxyError).code).toBe("response_too_large");
+      expect(seen).toBeLessThan(1024 * 1024);
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }

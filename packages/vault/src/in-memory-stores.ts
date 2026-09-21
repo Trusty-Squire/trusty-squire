@@ -219,6 +219,12 @@ export class InMemoryVaultAuditStore implements VaultAuditStore {
     });
   }
 
+  async amend(id: string, patch: Partial<VaultAuditPayload>): Promise<void> {
+    const entry = this.events.find((e) => e.id === id);
+    if (entry === undefined) return;
+    entry.payload = clonePayload({ ...entry.payload, ...patch });
+  }
+
   async countRecentRetrievals(accountId: string, since: Date): Promise<number> {
     return this.events.filter(
       (e) =>
