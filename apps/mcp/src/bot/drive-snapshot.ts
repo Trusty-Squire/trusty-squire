@@ -316,6 +316,7 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
     nodes: Map<string, Element>;
     next: number;
     describe?: (element: Element) => ControlDescription | null;
+    rowDigest?: () => string;
   };
   const root = window as Window & { __tsDriveRegistry?: DriveCache };
   const cache: DriveCache = root.__tsDriveRegistry ?? {
@@ -463,6 +464,33 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
     }
     return null;
   };
+  const disabledOf = (element: Element): boolean =>
+    element.matches(":disabled") ||
+    element.closest('[aria-disabled="true"]') !== null ||
+    element.getAttribute("aria-disabled") === "true";
+  const checkedOf = (element: Element): boolean | undefined =>
+    element instanceof HTMLInputElement && ["checkbox", "radio"].includes(element.type)
+      ? element.checked
+      : element.getAttribute("aria-checked") === "true"
+        ? true
+        : element.getAttribute("aria-checked") === "false"
+          ? false
+          : undefined;
+  // The pre-act change signal: the controls the snapshot actually rowed, by
+  // identity and actionability. Not their values (a countdown, a token refresh
+  // or an input mask reformatting churns those), and not every input in the
+  // document (an invisible one mounting during the model call would cost a
+  // step). Registered here so the act-time read is this same derivation.
+  cache.rowDigest = (): string => {
+    const parts: string[] = [];
+    for (const [ref, element] of cache.nodes) {
+      if (!element.isConnected) continue;
+      const role = roleOf(element);
+      if (role === null) continue;
+      parts.push(`${ref}:${role}:${disabledOf(element)}:${checkedOf(element) ?? ""}`);
+    }
+    return parts.sort().join("\n");
+  };
   // The label an act-time check can reproduce: the accessible name under a
   // budget it can re-arm. `truncated` says the walk ran out mid-element, so the
   // recorded spelling is a prefix nothing can derive again.
@@ -583,23 +611,13 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
     const named = offscreenLabel ? null : accessibleName(element, role);
     const label = named === null ? element.getAttribute("aria-label")?.trim() || role : named.label;
     const labelComparable = named !== null && !named.truncated;
-    const disabled =
-      element.matches(":disabled") ||
-      element.closest('[aria-disabled="true"]') !== null ||
-      element.getAttribute("aria-disabled") === "true";
+    const disabled = disabledOf(element);
     const required =
       (element instanceof HTMLInputElement ||
         element instanceof HTMLTextAreaElement ||
         element instanceof HTMLSelectElement) &&
       element.required;
-    const checked =
-      element instanceof HTMLInputElement && ["checkbox", "radio"].includes(element.type)
-        ? element.checked
-        : element.getAttribute("aria-checked") === "true"
-          ? true
-          : element.getAttribute("aria-checked") === "false"
-            ? false
-            : undefined;
+    const checked = checkedOf(element);
     const selected =
       element.getAttribute("aria-selected") === "true"
         ? true

@@ -5892,9 +5892,10 @@ async function driveLoop(input: {
         liveControls.length > 0 &&
         liveControls !== drive.snapshotControlDigest;
       if (documentChanged || controlsChanged) {
-        // consumedActionKey stays set: clearing it here would make the stall
-        // detector above unreachable, so a page that never settles could spend
-        // every remaining step re-deciding without ever acting.
+        // The re-decide bound below is what stops a page that never settles;
+        // holding the consumed key as well would let the stall detector end the
+        // drive over an action it never dispatched.
+        drive.consumedActionKey = null;
         drive.preActRedecides = (drive.preActRedecides ?? 0) + 1;
         if (drive.preActRedecides > DRIVE_PRE_ACT_REDECIDE_LIMIT) {
           return finish("no_progress", {
