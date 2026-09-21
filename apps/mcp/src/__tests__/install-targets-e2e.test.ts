@@ -629,7 +629,11 @@ describe("connect --target=<agent> writes a valid config", () => {
   // browser is up, so `onBrowserPlacement` never fires and the placement slot
   // has no pid. Reporting that lock as a holder tells a helper daemon another
   // session owns the browser at a pid that is about to be torn down.
-  it("does not name this run's own ceremony Chrome as a holder when the rig expires", async () => {
+  //
+  // Both directions are asserted against the same live lock: `none` alone is
+  // also what an unread profile answers, so without the foreign-pid control it
+  // could not tell suppression from a fixture that resolved nothing.
+  it("names the lock holder on expiry unless it is this run's own ceremony Chrome", async () => {
     const profileDir = path.join(tmpHome, "profiles", "expiry-holder");
     await fs.mkdir(profileDir, { recursive: true });
     const ceremonyChrome = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
@@ -637,37 +641,50 @@ describe("connect --target=<agent> writes a valid config", () => {
     });
     await new Promise<void>((resolve) => ceremonyChrome.once("spawn", () => resolve()));
     symlinkSync(`${os.hostname()}-${ceremonyChrome.pid}`, path.join(profileDir, "SingletonLock"));
-    vi.mocked(openInstallConfirmInBotChrome).mockImplementationOnce(async (options) => {
-      options.onCeremonyExpired?.(ceremonyChrome.pid ?? null);
-      return process.exit(1);
-    });
     const previousProfile = process.env.TRUSTY_SQUIRE_PROFILE_DIR;
     process.env.TRUSTY_SQUIRE_PROFILE_DIR = profileDir;
-    const machine = captureMachineChannel();
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
     const exit = vi.spyOn(process, "exit").mockImplementation((code) => {
       throw new Error(`exit:${code}`);
     });
+
+    const holderOnExpiry = async (ownBrowserPid: number | null): Promise<unknown> => {
+      vi.mocked(openInstallConfirmInBotChrome).mockImplementationOnce(async (options) => {
+        options.onCeremonyExpired?.(ownBrowserPid);
+        return process.exit(1);
+      });
+      const machine = captureMachineChannel();
+      try {
+        await expect(
+          connect({
+            command: "connect",
+            target: "hermes",
+            apiBase: "https://test.invalid",
+            skipBrowser: false,
+            forceRelogin: false,
+            noRegistry: false,
+            noInteractive: true,
+            json: true,
+          }),
+        ).rejects.toThrow("exit:1");
+        const report = machine.terminal<{ reason: string | null; holder: unknown }>();
+        expect(report.reason).toBe("install_expired");
+        return report.holder;
+      } finally {
+        machine.restore();
+      }
+    };
+
     try {
-      await expect(
-        connect({
-          command: "connect",
-          target: "hermes",
-          apiBase: "https://test.invalid",
-          skipBrowser: false,
-          forceRelogin: false,
-          noRegistry: false,
-          noInteractive: true,
-          json: true,
-        }),
-      ).rejects.toThrow("exit:1");
-      const report = machine.terminal<{ reason: string | null; holder: { kind: string } }>();
-      expect(report.reason).toBe("install_expired");
-      expect(report.holder).toEqual({ kind: "none" });
+      expect(await holderOnExpiry(null)).toEqual({
+        kind: "other",
+        code: "singleton_lock",
+        pid: ceremonyChrome.pid,
+      });
+      expect(await holderOnExpiry(ceremonyChrome.pid ?? null)).toEqual({ kind: "none" });
     } finally {
       exit.mockRestore();
       error.mockRestore();
-      machine.restore();
       if (previousProfile === undefined) delete process.env.TRUSTY_SQUIRE_PROFILE_DIR;
       else process.env.TRUSTY_SQUIRE_PROFILE_DIR = previousProfile;
       ceremonyChrome.kill("SIGKILL");
