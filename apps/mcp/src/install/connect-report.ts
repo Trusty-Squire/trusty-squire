@@ -7,6 +7,7 @@
 // contract. A later MCP reader must call the same function, not restated
 // prose.
 
+import { writeSync } from "node:fs";
 import { hostname } from "node:os";
 import type { CeremonyBrowserPlacement } from "../bot/google-login.js";
 import type { OAuthProviderId } from "../bot/oauth-providers.js";
@@ -24,6 +25,7 @@ export type ConnectReasonCode =
   | "requested_provider_missing"
   | "account_mismatch"
   | "profile_unverifiable"
+  | "install_expired"
   | "run_failed";
 
 export type ConnectHolder =
@@ -77,10 +79,10 @@ export type ConnectOutcome =
       account_id: string;
       providers: OAuthProviderId[] | null;
       requested_provider?: OAuthProviderId;
-      skip_browser: boolean;
     }
   | { kind: "profile_busy" }
   | { kind: "install_unclaimed"; confirm_url: string }
+  | { kind: "install_expired" }
   | { kind: "account_switch_refused" }
   | { kind: "cookie_clear_failed" }
   | { kind: "run_failed" };
@@ -102,12 +104,7 @@ function settled(
     reason,
     sign_in_url: extras.sign_in_url ?? null,
     account: extras.account ?? null,
-    // "Busy" and "nobody holds it" are a contradiction to read: a profile we
-    // could not answer for is an unknown holder, not an absent one.
-    holder:
-      state === "busy" && input.holder.kind === "none"
-        ? { kind: "unknown", reason: "identity_unknown" }
-        : input.holder,
+    holder: input.holder,
     browser_location: input.browser_location,
   };
 }
@@ -161,11 +158,14 @@ export function buildConnectReport(input: ConnectReportInput): ConnectReport {
     case "profile_busy":
       return settled("busy", null, input);
     case "install_unclaimed":
-      // The pairing token is still pending, so the URL is live. It is a
+      // The run waits no longer than the pairing token lives and reports a
+      // lapsed one as `install_expired`, so this URL is still open. It is a
       // needs-sign-in unless nothing here could be shown the page at all.
       return input.browser_location.kind === "unreachable"
         ? settled("no-browser", null, input, { sign_in_url: outcome.confirm_url })
         : signInOutstanding(input, outcome.confirm_url);
+    case "install_expired":
+      return settled("no-browser", "install_expired", input);
     case "account_switch_refused":
       return settled("no-browser", "account_mismatch", input);
     case "cookie_clear_failed":
@@ -335,9 +335,13 @@ export function beginConnectRun(): void {
   reported = false;
 }
 
+// Written straight to the descriptor: every reporting path exits immediately
+// afterwards, and `process.exit` does not drain a buffered stdout write —
+// which on a macOS pipe is asynchronous, so the report would be lost exactly
+// where a caller is reading it.
 export function emitConnectReport(report: ConnectReport, json: boolean | undefined): void {
   if (reported) return;
   reported = true;
   if (json !== true) return;
-  process.stdout.write(`${JSON.stringify(report)}\n`);
+  writeSync(process.stdout.fd, `${JSON.stringify(report)}\n`);
 }

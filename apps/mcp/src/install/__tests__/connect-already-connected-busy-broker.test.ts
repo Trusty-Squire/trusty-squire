@@ -23,7 +23,7 @@
 // Chrome-shaped cookie store. Only the network API is faked — a genuine process
 // boundary.
 
-import { promises as fs } from "node:fs";
+import nodeFs, { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
@@ -94,6 +94,32 @@ async function writeProfileCookies(
     profileDir,
     cookies.map((cookie) => ({ ...cookie, expires })),
   );
+}
+
+/**
+ * The machine channel is stdout's DESCRIPTOR, written synchronously so an
+ * immediate `process.exit` cannot drop it. Point that descriptor at a file
+ * for the duration and read back exactly the bytes a caller would pipe.
+ */
+function captureMachineChannel(): {
+  read: () => string;
+  restore: () => void;
+} {
+  const file = path.join(socketRoot, `machine-${Math.random().toString(36).slice(2)}.json`);
+  const fd = nodeFs.openSync(file, "w+");
+  const original = process.stdout.fd;
+  Object.defineProperty(process.stdout, "fd", { value: fd, configurable: true, writable: true });
+  return {
+    read: () => nodeFs.readFileSync(file, "utf8"),
+    restore: () => {
+      Object.defineProperty(process.stdout, "fd", {
+        value: original,
+        configurable: true,
+        writable: true,
+      });
+      nodeFs.closeSync(fd);
+    },
+  };
 }
 
 let tmpHome: string;
@@ -232,14 +258,10 @@ it("prints the same already-connected facts as JSON without changing the human l
   vi.stubEnv("TRUSTY_SQUIRE_PROFILE_DIR", profileDir);
 
   const human: string[] = [];
-  const machine: string[] = [];
   const warn = vi.spyOn(console, "warn").mockImplementation((message?: unknown) => {
     human.push(String(message));
   });
-  const write = vi.spyOn(process.stdout, "write").mockImplementation((chunk) => {
-    machine.push(String(chunk));
-    return true;
-  });
+  const machine = captureMachineChannel();
   try {
     await connect({
       command: "connect",
@@ -253,13 +275,13 @@ it("prints the same already-connected facts as JSON without changing the human l
     });
   } finally {
     warn.mockRestore();
-    write.mockRestore();
+    machine.restore();
   }
 
   expect(human.join("\n")).toContain("Already connected");
   // One self-sufficient object on the machine channel: JSON.parse of the whole
   // stream, not a last-line convention a caller has to know about.
-  const report = JSON.parse(machine.join("")) as {
+  const report = JSON.parse(machine.read()) as {
     state: string;
     sign_in_url: string | null;
     account: { id: string; providers: string[] } | null;
@@ -277,13 +299,9 @@ it("prints the same already-connected facts as JSON without changing the human l
 it("still reports on stdout when the run fails before a target is resolved", async () => {
   vi.stubEnv("TRUSTY_SQUIRE_PROFILE_DIR", profileDir);
 
-  const machine: string[] = [];
   const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
   const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-  const write = vi.spyOn(process.stdout, "write").mockImplementation((chunk) => {
-    machine.push(String(chunk));
-    return true;
-  });
+  const machine = captureMachineChannel();
   let threw = false;
   try {
     await connect({
@@ -298,13 +316,13 @@ it("still reports on stdout when the run fails before a target is resolved", asy
   } catch {
     threw = true;
   } finally {
-    write.mockRestore();
+    machine.restore();
     warn.mockRestore();
     error.mockRestore();
   }
 
   expect(threw).toBe(true);
-  const report = JSON.parse(machine.join("")) as { state: string; reason: string | null };
+  const report = JSON.parse(machine.read()) as { state: string; reason: string | null };
   expect(report.state).toBe("no-browser");
   expect(report.reason).toBe("run_failed");
 });

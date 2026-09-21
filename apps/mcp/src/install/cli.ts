@@ -65,7 +65,7 @@ import {
   withProfileOperationGuard,
 } from "../bot/profile.js";
 import { VERSION } from "../version.js";
-import { ensureLatestVersion } from "./version-check.js";
+import { ensureLatestVersion, VersionUpdateRequiredError } from "./version-check.js";
 import * as ui from "./ui.js";
 import {
   runInteractiveSetup,
@@ -178,8 +178,7 @@ function parseArgs(argv: string[]): Argv {
         // Silent-drop is the footgun behind the pre-0.4.2 Goose mishap
         // (--target=goose-typo → auto-detect → wrong agent configured).
         // Fail loud with the valid list so the user sees the mismatch.
-        console.error(`unknown --target '${t}'. Valid targets: ${Object.keys(AGENTS).join(", ")}`);
-        process.exit(64);
+        rejectUsage(`unknown --target '${t}'. Valid targets: ${Object.keys(AGENTS).join(", ")}`);
       }
       target = t;
     } else if (arg.startsWith("--api-base=")) {
@@ -205,8 +204,7 @@ function parseArgs(argv: string[]): Argv {
       // silent-destruction class this whole change removes.
       const value = arg.slice("--account=".length).trim();
       if (value.length === 0) {
-        console.error("--account requires an account id (e.g. --account=01ABC...)");
-        process.exit(64);
+        rejectUsage("--account requires an account id (e.g. --account=01ABC...)");
       }
       account = value;
     } else if (arg.startsWith("--profile-dir=")) {
@@ -253,9 +251,17 @@ function parseArgs(argv: string[]): Argv {
   return args;
 }
 
+// Usage failures throw so the caller can still report on the machine channel
+// before the process ends; `runCli` keeps the exit code they have always used.
+export class CliUsageError extends Error {}
+
+function rejectUsage(message: string): never {
+  console.error(message);
+  throw new CliUsageError(message);
+}
+
 function rejectDeprecatedCli(message: string): never {
-  console.error(`[trusty-squire] ${message}`);
-  process.exit(64);
+  rejectUsage(`[trusty-squire] ${message}`);
 }
 
 function isAgentTarget(s: string): s is AgentTarget {
@@ -367,16 +373,21 @@ function resolveCopiedNpxServerLaunch(binPath: string): { command: string; args:
 }
 
 export async function runCli(argv: string[]): Promise<void> {
-  const args = parseArgs(argv);
+  let args: Argv;
+  try {
+    args = parseArgs(argv);
+  } catch (err) {
+    if (err instanceof CliUsageError) {
+      reportUnparsedConnect(argv);
+      process.exit(64);
+    }
+    throw err;
+  }
   loadHarvesterEnvFile();
   try {
     switch (args.command) {
       case "connect":
-        // `npx …/mcp connect` reuses a stale local copy instead of fetching the
-        // latest, and connect then pins the host config to that stale version.
-        // Re-exec on the current release first so the one-liner alone lands it.
-        await ensureLatestVersion(argv);
-        await connect(args);
+        await connect(args, argv);
         return;
       case "logout":
         await logout(args);
@@ -394,8 +405,24 @@ export async function runCli(argv: string[]): Promise<void> {
     }
   } catch (err) {
     if (err instanceof TargetUnresolvedError) process.exit(2);
+    if (err instanceof VersionUpdateRequiredError) process.exit(70);
     throw err;
   }
+}
+
+// A connect that dies inside argv validation never built an `Argv`, so the
+// flag is read off the raw argv — the machine channel still owes one report.
+function reportUnparsedConnect(argv: readonly string[]): void {
+  if (argv[0] !== "connect" || !argv.includes("--json")) return;
+  beginConnectRun();
+  emitConnectReport(
+    buildConnectReport({
+      outcome: { kind: "run_failed" },
+      holder: snapshotConnectHolder(CHROME_PROFILE_DIR),
+      browser_location: { kind: "none" },
+    }),
+    true,
+  );
 }
 
 // Store the user-supplied 2Captcha key in the vault (encrypted, never written
@@ -491,13 +518,17 @@ async function settings(args: Argv): Promise<void> {
   ui.success(`${agent.display_name} settings saved.`);
 }
 
-async function connect(args: Argv): Promise<void> {
+async function connect(args: Argv, argv: readonly string[] = []): Promise<void> {
   beginConnectRun();
   // Every exit path reports, including one that fails before a target or a
   // profile is resolved. `emitConnectReport` drops the second object, so this
   // is a floor under the stream rather than an extra report.
   let reportProfileDir = CHROME_PROFILE_DIR;
   try {
+    // `npx …/mcp connect` reuses a stale local copy instead of fetching the
+    // latest, and connect then pins the host config to that stale version.
+    // Re-exec on the current release first so the one-liner alone lands it.
+    await ensureLatestVersion(argv);
     const { target, agent, wantInteractive } = await prepareConnect(args);
     const context = await resolveConnectTargetContext(target, agent);
     const canonicalProfileDir = profilePathIdentity(context.profileDir);
@@ -891,6 +922,18 @@ async function runConnectInstall(
     ui.fail(`Couldn't open the confirm page: ${claim.detail}`);
     process.exit(1);
   }
+  if (claim.kind === "expired") {
+    emitConnectStatus(args, {
+      outcome: { kind: "install_expired" },
+      profileDir,
+      browser_location: claim.browser_location,
+    });
+    ui.fail(
+      `The sign-in window expired before the browser confirm finished. ` +
+        `Start again: ${ui.code("npx @trusty-squire/mcp connect")}`,
+    );
+    process.exit(1);
+  }
   if (claim.kind === "unclaimed") {
     emitConnectStatus(args, {
       outcome: { kind: "install_unclaimed", confirm_url: claim.confirm_url },
@@ -970,7 +1013,6 @@ async function runConnectInstall(
       ...(args.forceReloginProvider !== undefined
         ? { requested_provider: args.forceReloginProvider }
         : {}),
-      skip_browser: args.skipBrowser,
     },
     profileDir,
     browser_location: claim.browser_location,
@@ -1260,6 +1302,7 @@ export function claimHeartbeatMessage(claimed: boolean): string {
 type InstallClaimResult =
   | { kind: "claimed"; session: SessionData; browser_location: ConnectBrowserLocation }
   | { kind: "unclaimed"; confirm_url: string; browser_location: ConnectBrowserLocation }
+  | { kind: "expired"; browser_location: ConnectBrowserLocation }
   | {
       kind: "confirm_failed";
       detail: string;
@@ -1287,6 +1330,13 @@ async function runInstallClaim(
 ): Promise<InstallClaimResult> {
   console.warn(`Connecting this machine to your account…`);
   const initiate = await installInitiate(apiBase, target, baseSession.machine_token ?? null);
+  // Waiting past the pairing token's life would hand back a URL that is
+  // already dead. The server's own expiry is the bound.
+  const tokenExpiresAt = Date.parse(initiate.expires_at);
+  const ceremonyMinutes = Number.isFinite(tokenExpiresAt)
+    ? Math.max(1, Math.floor((tokenExpiresAt - Date.now()) / 60_000))
+    : undefined;
+  const expired = { value: false };
 
   // Track the claimed token outside the poll closure so the in-Chrome
   // flow's pollUntilClaimed can read it once the API reports claimed.
@@ -1312,6 +1362,7 @@ async function runInstallClaim(
         };
         claimedThisPoll = true;
       } else if (status.status === "expired") {
+        expired.value = true;
         return "expired";
       }
     }
@@ -1346,6 +1397,7 @@ async function runInstallClaim(
       // ignore — user copies the URL
     }
     const ok = await pollForClaim(apiBase, initiate.setup_code);
+    if (ok === "expired") return { kind: "expired", browser_location: { kind: "none" } };
     if (ok === null) {
       return {
         kind: "unclaimed",
@@ -1382,6 +1434,7 @@ async function runInstallClaim(
     onBrowserPlacement: (placement) => {
       placed.value = placement;
     },
+    ...(ceremonyMinutes !== undefined ? { timeoutMinutes: ceremonyMinutes } : {}),
     ...(options.forceReloginProviders?.length
       ? { forceReloginProviders: options.forceReloginProviders }
       : {}),
@@ -1396,6 +1449,7 @@ async function runInstallClaim(
   // Surface the underlying browser-launch error rather than replacing it
   // with a generic confirmation timeout.
   if (result.status === "error") {
+    if (expired.value) return { kind: "expired", browser_location };
     return {
       kind: "confirm_failed",
       detail: result.detail ?? "unknown error",
@@ -1405,7 +1459,9 @@ async function runInstallClaim(
   }
 
   if (result.status !== "claimed" || state.value === null) {
-    return { kind: "unclaimed", confirm_url: initiate.confirm_url, browser_location };
+    return expired.value
+      ? { kind: "expired", browser_location }
+      : { kind: "unclaimed", confirm_url: initiate.confirm_url, browser_location };
   }
 
   return {
@@ -1521,7 +1577,7 @@ async function pollForClaim(
   setupCode: string,
   intervalMsOrOpts: number | { intervalMs?: number; timeoutMs?: number } = {},
   timeoutMsArg?: number,
-): Promise<ClaimResult | null> {
+): Promise<ClaimResult | "expired" | null> {
   const opts =
     typeof intervalMsOrOpts === "number"
       ? { intervalMs: intervalMsOrOpts, timeoutMs: timeoutMsArg }
@@ -1540,7 +1596,7 @@ async function pollForClaim(
           : {}),
       };
     }
-    if (status.status === "expired") return null;
+    if (status.status === "expired") return "expired";
     await new Promise((r) => setTimeout(r, intervalMs));
   }
   return null;

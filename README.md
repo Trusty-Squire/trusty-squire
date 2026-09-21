@@ -121,9 +121,11 @@ The report carries six fields:
   - `no-browser` — no browser here is signed in the way this install needs: nothing could be shown the page, the sign-in happened outside Squire's browser, or the ceremony finished without the session the operator needs. `reason` says which.
 - `sign_in_url` — the one sign-in URL, or `null`. Always a string when `state` is `needs-sign-in`; a `no-browser` run may also carry one when the install is still open but nothing here could show it.
 - `account` — `{ id, providers }` when `state` is `connected`, otherwise `null`.
-- `holder` — who holds the bot profile: `{kind:"none"}`, `{kind:"other",code:"singleton_lock",pid}`, or `{kind:"unknown",reason:"cross_host"|"identity_unknown"}`. A lock left behind by a dead process is `none`, not a holder.
+- `holder` — who holds the bot profile, as read: `{kind:"none"}`, `{kind:"other",code:"singleton_lock",pid}`, or `{kind:"unknown",reason:"cross_host"|"identity_unknown"}`. A lock left behind by a dead process is `none`, not a holder, and `busy` with `holder:{kind:"none"}` is an honest answer — nothing holds the profile, Squire just could not verify it (see `reason`).
 - `browser_location` — where the ceremony browser actually opened, reported by the code that placed it: `{kind:"host_screen",display?}` (the screen you are at), `{kind:"virtual",display?}` (reachable only through the noVNC URL), `{kind:"unreachable",reason}`, `{kind:"none"}` (no browser was opened), or `{kind:"unknown",reason}`. Squire decides this; callers do not detect screens.
-- `reason` — only what the five fields above cannot say: `provider_session_missing`, `requested_provider_missing`, `account_mismatch`, `profile_unverifiable`, `run_failed`. `null` otherwise.
+- `reason` — only what the five fields above cannot say: `provider_session_missing`, `requested_provider_missing`, `account_mismatch`, `profile_unverifiable`, `install_expired`, `run_failed`. `null` otherwise.
+
+Connect never waits longer than the sign-in link lives, so a `sign_in_url` it hands back is still open; a link that lapsed first is reported as `no-browser` with `reason: "install_expired"` and no URL at all.
 
 Supported targets: `claude-code`, `cursor`, `codex`, `opencode`, `goose`, `cline`, `continue`, and `hermes`.
 

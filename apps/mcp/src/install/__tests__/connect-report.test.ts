@@ -52,7 +52,6 @@ describe("buildConnectReport", () => {
         kind: "ceremony_complete",
         account_id: "acc_1",
         providers: ["google"],
-        skip_browser: false,
       },
     });
     expect(afterCeremony.state).toBe("connected");
@@ -76,7 +75,6 @@ describe("buildConnectReport", () => {
         kind: "ceremony_complete",
         account_id: "acc_1",
         providers: null,
-        skip_browser: false,
       },
       holder: otherHolder,
     });
@@ -134,18 +132,17 @@ describe("buildConnectReport", () => {
     const outcomes: ConnectReportInput["outcome"][] = [
       { kind: "provisioned", account_id: "a", providers: ["google"] },
       { kind: "unverified" },
-      { kind: "ceremony_complete", account_id: "a", providers: null, skip_browser: false },
-      { kind: "ceremony_complete", account_id: "a", providers: [], skip_browser: false },
-      { kind: "ceremony_complete", account_id: "a", providers: [], skip_browser: true },
+      { kind: "ceremony_complete", account_id: "a", providers: null },
+      { kind: "ceremony_complete", account_id: "a", providers: [] },
       {
         kind: "ceremony_complete",
         account_id: "a",
         providers: ["google"],
         requested_provider: "github",
-        skip_browser: false,
       },
       { kind: "profile_busy" },
       { kind: "install_unclaimed", confirm_url: "https://example.test/in" },
+      { kind: "install_expired" },
       { kind: "account_switch_refused" },
       { kind: "cookie_clear_failed" },
       { kind: "run_failed" },
@@ -174,17 +171,30 @@ describe("buildConnectReport", () => {
     expect(JSON.stringify(report.holder)).not.toMatch(/already using the browser/i);
   });
 
-  it("never says busy and nobody-holds-it in the same object", () => {
+  // The holder is reported as READ. A profile Squire could not verify is not
+  // evidence that something holds it, and telling a caller to wait for a
+  // profile nothing holds is the wait that never ends.
+  it("reports the holder it observed, never a guess, on every busy outcome", () => {
     for (const outcome of [
       { kind: "profile_busy" },
       { kind: "unverified" },
       { kind: "cookie_clear_failed" },
     ] as const) {
-      expect(classify({ outcome }).holder, outcome.kind).toEqual({
-        kind: "unknown",
-        reason: "identity_unknown",
-      });
+      expect(classify({ outcome }).holder, outcome.kind).toEqual({ kind: "none" });
+      expect(classify({ outcome, holder: otherHolder }).holder, outcome.kind).toEqual(otherHolder);
     }
+  });
+
+  // A lapsed pairing token has no live URL, so it is never a needs-sign-in
+  // and never puts a dead URL in sign_in_url.
+  it("reports an expired install as its own reason, with no URL", () => {
+    const report = classify({
+      outcome: { kind: "install_expired" },
+      browser_location: { kind: "host_screen", display: ":0" },
+    });
+    expect(report.state).toBe("no-browser");
+    expect(report.reason).toBe("install_expired");
+    expect(report.sign_in_url).toBeNull();
   });
 
   it("reports a run that failed before it could settle as no-browser", () => {
@@ -201,7 +211,6 @@ describe("buildConnectReport", () => {
         kind: "ceremony_complete",
         account_id: "acc_1",
         providers: [],
-        skip_browser: true,
       },
     });
     expect(report.state).toBe("no-browser");
@@ -218,7 +227,6 @@ describe("buildConnectReport", () => {
         account_id: "acc_1",
         providers: ["google"],
         requested_provider: "github",
-        skip_browser: false,
       },
     });
     expect(report.state).toBe("connected");

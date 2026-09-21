@@ -783,7 +783,8 @@ Read this file. Follow the rules. Run the verify script. Paste the output. Then 
   and the human copy renders from the same value. Do not parse connect's English.
   One report per run, on EVERY exit path — a `--json` caller must never meet
   an empty stdout. `needs-sign-in` carries its `sign_in_url` by construction
-  (the type says so); an outcome with no live URL gets a different state.
+  (the type says so); an outcome with no live URL gets a different state, and
+  the ceremony never outlives the pairing token that URL belongs to.
   `browser_location` is
   OBSERVED and handed back by whichever path placed the ceremony browser
   (`onBrowserPlacement` in `bot/google-login.ts`) — never predicted from the

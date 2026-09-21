@@ -11,6 +11,7 @@ import {
   parseArgs,
   applyInstallPreferences,
   resolveConnectTargetContext,
+  runCli,
 } from "../install/cli.js";
 import type { SessionData } from "../session.js";
 import type { AgentDefinition } from "../install/agents.js";
@@ -85,38 +86,36 @@ describe("parseArgs registry", () => {
     expect(args.registryConfigured).toBe(true);
   });
 
-  it("rejects deprecated registry flags", () => {
-    expectDeprecatedExit(() => parseArgs(["connect", "--registry"]));
-    expectDeprecatedExit(() =>
-      parseArgs(["connect", "--registry-url=https://staging.registry.test"]),
-    );
+  it("rejects deprecated registry flags", async () => {
+    await expectDeprecatedExit(["connect", "--registry"]);
+    await expectDeprecatedExit(["connect", "--registry-url=https://staging.registry.test"]);
   });
 });
 
 describe("parseArgs deprecated flags", () => {
-  it("rejects the removed install alias", () => {
-    expectDeprecatedExit(() => parseArgs(["install"]));
+  it("rejects the removed install alias", async () => {
+    await expectDeprecatedExit(["install"]);
   });
 
-  it("rejects removed compatibility flags", () => {
-    expectDeprecatedExit(() => parseArgs(["connect", "--skip-login"]));
-    expectDeprecatedExit(() => parseArgs(["connect", "--skip-secondary"]));
+  it("rejects removed compatibility flags", async () => {
+    await expectDeprecatedExit(["connect", "--skip-login"]);
+    await expectDeprecatedExit(["connect", "--skip-secondary"]);
   });
 
   // ONE pathway: `login` and the two flags that existed only to serve it are
   // gone, and a user (or an agent reading a stale doc) that reaches for them
   // must be told to use connect instead of silently getting a working command.
-  it("rejects the removed login subcommand and points at connect", () => {
-    const message = expectDeprecatedExit(() => parseArgs(["login"]));
+  it("rejects the removed login subcommand and points at connect", async () => {
+    const message = await expectDeprecatedExit(["login"]);
     expect(message).toContain("`login` has been removed");
     expect(message).toContain("connect");
   });
 
-  it("rejects the login-only provider and profile-dir flags", () => {
-    expect(expectDeprecatedExit(() => parseArgs(["connect", "--provider=google"]))).toContain(
+  it("rejects the login-only provider and profile-dir flags", async () => {
+    expect(await expectDeprecatedExit(["connect", "--provider=google"])).toContain(
       "--force-relogin",
     );
-    expectDeprecatedExit(() => parseArgs(["connect", "--profile-dir=/tmp/profile"]));
+    await expectDeprecatedExit(["connect", "--profile-dir=/tmp/profile"]);
   });
 });
 
@@ -176,10 +175,12 @@ describe("resolveConnectTargetContext", () => {
   });
 
   it("preserves legacy first-connect defaults when the target has no config", async () => {
-    await expect(resolveConnectTargetContext("hermes", configuredAgent(null), {})).resolves.toEqual({
-      profileDir: CHROME_PROFILE_DIR,
-      agentIdentity: "hermes",
-    });
+    await expect(resolveConnectTargetContext("hermes", configuredAgent(null), {})).resolves.toEqual(
+      {
+        profileDir: CHROME_PROFILE_DIR,
+        agentIdentity: "hermes",
+      },
+    );
   });
 
   it("fails closed on an invalid configured context without logging its value", async () => {
@@ -195,15 +196,16 @@ describe("resolveConnectTargetContext", () => {
   });
 });
 
-// Returns the message printed to the user, so a caller can assert WHICH
-// replacement the removal points at.
-function expectDeprecatedExit(fn: () => unknown): string {
+// Drives the real CLI boundary, because that is where the removal's exit code
+// is observable. Returns the message printed to the user, so a caller can
+// assert WHICH replacement the removal points at.
+async function expectDeprecatedExit(argv: string[]): Promise<string> {
   const error = vi.spyOn(console, "error").mockImplementation(() => {});
   const exit = vi.spyOn(process, "exit").mockImplementation((code?: string | number | null) => {
     throw new Error(`exit:${code}`);
   });
   try {
-    expect(fn).toThrow("exit:64");
+    await expect(runCli(argv)).rejects.toThrow("exit:64");
     expect(error).toHaveBeenCalledWith(expect.stringContaining("[trusty-squire]"));
     return String(error.mock.calls.at(-1)?.[0] ?? "");
   } finally {
