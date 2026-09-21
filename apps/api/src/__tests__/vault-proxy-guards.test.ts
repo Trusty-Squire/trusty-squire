@@ -12,6 +12,7 @@ import {
   type DispatchInput,
   type DispatchResult,
 } from "../services/http-proxy.js";
+import { streamOf } from "./dispatch-fixture.js";
 
 function syncCode(fn: () => unknown): string {
   try {
@@ -155,7 +156,7 @@ describe("HttpProxyExecutor.execute guards", () => {
       lookup: async () => ({ address: "203.0.113.5", family: 4 }),
       dispatch: async (input): Promise<DispatchResult> => {
         dispatched.push(input);
-        return { status: 200, headers: { "content-type": "application/json", "set-cookie": "a=b" }, body: '{"ok":true}', truncated: false };
+        return { status: 200, headers: { "content-type": "application/json", "set-cookie": "a=b" }, bodyStream: streamOf('{"ok":true}'), truncated: false };
       },
       ...opts,
     });
@@ -223,7 +224,7 @@ describe("HttpProxyExecutor.execute guards", () => {
   it("rejects a non-JSON/text response MIME", async () => {
     const executor = new HttpProxyExecutor({
       lookup: async () => ({ address: "203.0.113.5", family: 4 }),
-      dispatch: async () => ({ status: 200, headers: { "content-type": "application/octet-stream" }, body: "bin", truncated: false }),
+      dispatch: async () => ({ status: 200, headers: { "content-type": "application/octet-stream" }, bodyStream: streamOf("bin"), truncated: false }),
     });
     expect(await asyncCode(executor.execute({ accountId: "a", http: { method: "GET", url: "https://x.com/" }, fields: ONE }))).toBe("unsupported_response_type");
   });

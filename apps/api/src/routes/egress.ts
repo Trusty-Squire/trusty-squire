@@ -1,6 +1,9 @@
-// egress.ts — Egress Grants v1a (buffered). A deployed machine holds a revocable
+// egress.ts — Egress Grants v1a. A deployed machine holds a revocable
 // grant token and calls a provider through Squire's injecting proxy; the raw
-// vault credential never leaves the server.
+// vault credential never leaves the server. The grant proxy streams the
+// upstream body through and forwards sanitised upstream headers so an SSE
+// client sees the first event byte when upstream emits it, not after
+// generation finishes.
 //
 //   POST   /v1/egress/grants        (agent)  mint a grant for a credential
 //   GET    /v1/egress/grants        (agent)  list this account's grants
@@ -22,7 +25,7 @@ import {
   unattributedVaultAuditAttribution,
 } from "@trusty-squire/vault";
 import type { ApiDeps } from "../services/deps.js";
-import { HttpProxyExecutor, ProxyError } from "../services/http-proxy.js";
+import { HttpProxyExecutor, ProxyError, type StreamedProxyResult } from "../services/http-proxy.js";
 import {
   applyAuthShape,
   EgressGrantStoreUnavailableError,
@@ -142,13 +145,13 @@ export const registerEgressRoutes: FastifyPluginAsync<{
   now?: () => Date;
 }> = async (fastify, opts) => {
   // Egress is a WORKLOAD proxy (LLM SDKs, deployed apps), not the agent's
-  // snappy one-shot use_credential call — so it needs a much larger body cap
-  // (LLM JSON responses dwarf the 10KB default) and patient timeouts (a non-
-  // streaming completion's time-to-first-byte is tens of seconds, not 5s).
+  // snappy one-shot use_credential call — so it needs patient timeouts (a non-
+  // streaming completion's time-to-first-byte is tens of seconds, not 5s). The
+  // body is passed through rather than buffered, so it carries no size cap:
+  // truncating a long generation mid-body is worse than forwarding it.
   const executor =
     opts.proxyExecutor ??
     new HttpProxyExecutor({
-      maxResponseBytes: 16 * 1024 * 1024, // 16MB — full LLM JSON responses
       headersTimeoutMs: 120_000, // time-to-first-byte for slow completions
       bodyTimeoutMs: 120_000,
     });
@@ -469,6 +472,10 @@ export const registerEgressRoutes: FastifyPluginAsync<{
         Object.values(inboundHeaders).some((v) => v.includes("${SECRET}")) ||
         Object.values(inboundQuery).some((v) => v.includes("${SECRET}"));
       try {
+        // Stream is captured outside the vault response so the vault type
+        // (string body) stays unchanged; executeStream returns as soon as
+        // upstream headers arrive.
+        let bodyStream: StreamedProxyResult["body"] | undefined;
         const response = await opts.deps.vault.proxyResolvedCredential(
           cred,
           grant.account_id,
@@ -494,14 +501,29 @@ export const registerEgressRoutes: FastifyPluginAsync<{
           // bodyVerbatim: the body above is the client workload's opaque
           // payload, never a Squire-authored ${SECRET} template — forward it
           // byte-for-byte, never scanned or substituted.
-          (input) => executor.execute({ ...input, bodyVerbatim: true }),
+          async (input) => {
+            const streamed = await executor.executeStream({ ...input, bodyVerbatim: true });
+            bodyStream = streamed.body;
+            return {
+              status: streamed.status,
+              headers: streamed.headers,
+              body: "",
+              truncated: streamed.truncated,
+              // The audit row lands now with an empty body; this settles when
+              // the last byte leaves, and the vault amends the row.
+              bodyComplete: streamed.bodyComplete,
+            };
+          },
           {
             purpose: "egress_proxy",
             grant_id: grant.id,
             attribution: unattributedVaultAuditAttribution("egress_proxy"),
           },
         );
-        reply.code(response.status).send(response.body);
+        for (const [key, value] of Object.entries(response.headers)) {
+          reply.header(key, value);
+        }
+        return reply.code(response.status).send(bodyStream);
       } catch (err) {
         if (isRetryablePrismaConnectionError(err)) {
           sendEgressStoreUnavailable(reply);

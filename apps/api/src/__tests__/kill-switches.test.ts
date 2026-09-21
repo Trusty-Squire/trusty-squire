@@ -11,6 +11,7 @@ import { issueSession, signSessionJwt, SESSION_COOKIE_NAME } from "../auth/sessi
 import { buildInMemoryDeps, type ApiDeps } from "../services/deps.js";
 import { buildServer } from "../server.js";
 import { HttpProxyExecutor } from "../services/http-proxy.js";
+import { streamOf } from "./dispatch-fixture.js";
 
 const SESSION_SECRET = "dev-test-secret-do-not-use-anywhere-else";
 
@@ -37,7 +38,7 @@ function fakeExecutor(): HttpProxyExecutor {
     dispatch: async () => ({
       status: 200,
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ ok: true }),
+      bodyStream: streamOf(JSON.stringify({ ok: true })),
       truncated: false,
     }),
   });

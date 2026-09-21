@@ -4,18 +4,22 @@
 // EGRESS token; the server swaps it for the real vault secret and forwards
 // upstream. The agent/app never holds the provider key.
 
+import { request as httpRequest } from "node:http";
+import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { issueAgentSession } from "../auth/agent.js";
 import { issueSession, signSessionJwt, SESSION_COOKIE_NAME } from "../auth/session.js";
 import { buildInMemoryDeps, type ApiDeps } from "../services/deps.js";
 import { buildServer } from "../server.js";
+import { VAULT_AUDIT_TYPES, type VaultAuditPayload } from "@trusty-squire/vault";
 import { HttpProxyExecutor } from "../services/http-proxy.js";
 import {
   EgressGrantStoreUnavailableError,
   type EgressGrant,
   type EgressGrantStore,
 } from "../services/egress-grant.js";
+import { streamOf } from "./dispatch-fixture.js";
 
 const SESSION_SECRET = "dev-test-secret-do-not-use-anywhere-else";
 
@@ -40,7 +44,7 @@ function fakeExecutor(): HttpProxyExecutor {
       return {
         status: 200,
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ ok: true }),
+        bodyStream: streamOf(JSON.stringify({ ok: true })),
         truncated: false,
       };
     },
@@ -50,6 +54,24 @@ function fakeExecutor(): HttpProxyExecutor {
 interface Harness {
   server: FastifyInstance;
   deps: ApiDeps;
+}
+// The streamed row's amendment is fire-and-forget by design (the route must not
+// wait on it), so read it back with a bounded poll rather than a fixed sleep.
+async function pollAudit(
+  deps: ApiDeps,
+  accountId: string,
+  match: (payload: VaultAuditPayload) => boolean,
+): Promise<VaultAuditPayload> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const rows = await deps.vaultAuditStore.list(accountId, {
+      type: VAULT_AUDIT_TYPES.proxyExecuted,
+      limit: 50,
+    });
+    const hit = rows.map((r) => r.payload).find(match);
+    if (hit !== undefined) return hit;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error("no matching vault.proxy_executed audit row");
 }
 async function setup(opts: { egressGrantStore?: EgressGrantStore } = {}): Promise<Harness> {
   const deps = buildInMemoryDeps({ sessionSecret: SESSION_SECRET });
@@ -794,5 +816,291 @@ describe("Egress Grants — /v1/egress", () => {
     const body = res.json() as { grants: Array<Record<string, unknown>> };
     expect(body.grants).toHaveLength(1);
     expect(JSON.stringify(body)).not.toContain("token_hash");
+  });
+
+  it("forwards the upstream content-type to the caller", async () => {
+    await h.server.close();
+    const executor = new HttpProxyExecutor({
+      lookup: async () => ({ address: "203.0.113.9", family: 4 }),
+      dispatch: async (input) => {
+        seen.push({
+          url: input.url.toString(),
+          auth: input.headers.authorization,
+          method: input.method,
+          headers: { ...input.headers },
+          body: input.body,
+        });
+        return {
+          status: 200,
+          headers: { "content-type": "text/event-stream", "x-request-id": "up-1" },
+          bodyStream: streamOf("data: hello\n\n"),
+          truncated: false,
+        };
+      },
+    });
+    h.server = await buildServer({ deps: h.deps, proxyExecutor: executor });
+    const account = await h.deps.accountStore.createAccount("sse-ct@example.test", "S");
+    const cookie = await webCookie(h.deps, account.id);
+    const token = await agentToken(h.deps, account.id);
+    await storeCred(h, cookie, "OpenAI");
+    const { grant_id, egressToken } = await mintGrantHttp(h, token, { service: "OpenAI" });
+
+    const res = await h.server.inject({
+      method: "POST",
+      url: `/v1/egress/${grant_id}/v1/chat/completions`,
+      headers: { authorization: `Bearer ${egressToken}`, "content-type": "application/json" },
+      payload: { stream: true },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.headers["content-type"]).toMatch(/text\/event-stream/);
+    expect(res.headers["x-request-id"]).toBe("up-1");
+    expect(res.body).toBe("data: hello\n\n");
+  });
+
+  it("does not forward upstream set-cookie", async () => {
+    await h.server.close();
+    const executor = new HttpProxyExecutor({
+      lookup: async () => ({ address: "203.0.113.9", family: 4 }),
+      dispatch: async () => ({
+        status: 200,
+        headers: { "content-type": "application/json", "set-cookie": "session=secret" },
+        bodyStream: streamOf('{"ok":true}'),
+        truncated: false,
+      }),
+    });
+    h.server = await buildServer({ deps: h.deps, proxyExecutor: executor });
+    const account = await h.deps.accountStore.createAccount("cookie@example.test", "C");
+    const cookie = await webCookie(h.deps, account.id);
+    const token = await agentToken(h.deps, account.id);
+    await storeCred(h, cookie, "OpenAI");
+    const { grant_id, egressToken } = await mintGrantHttp(h, token, { service: "OpenAI" });
+
+    const res = await h.server.inject({
+      method: "POST",
+      url: `/v1/egress/${grant_id}/v1/chat/completions`,
+      headers: { authorization: `Bearer ${egressToken}`, "content-type": "application/json" },
+      payload: {},
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.headers["set-cookie"]).toBeUndefined();
+    expect(res.body).toBe('{"ok":true}');
+  });
+
+  it("streams an upstream body to the caller incrementally", async () => {
+    await h.server.close();
+    const upstream = new PassThrough();
+    const executor = new HttpProxyExecutor({
+      lookup: async () => ({ address: "203.0.113.9", family: 4 }),
+      dispatch: async () => ({
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+        truncated: false,
+        bodyStream: upstream,
+      }),
+    });
+    h.server = await buildServer({ deps: h.deps, proxyExecutor: executor });
+    const account = await h.deps.accountStore.createAccount("sse-live@example.test", "S");
+    const cookie = await webCookie(h.deps, account.id);
+    const token = await agentToken(h.deps, account.id);
+    await storeCred(h, cookie, "OpenAI");
+    const { grant_id, egressToken } = await mintGrantHttp(h, token, { service: "OpenAI" });
+
+    await h.server.listen({ host: "127.0.0.1", port: 0 });
+    const addr = h.server.server.address();
+    const port = typeof addr === "object" && addr !== null ? addr.port : 0;
+
+    const arrivals: Array<{ at: number; text: string }> = [];
+    const started = Date.now();
+    let sawHeaders: () => void = () => undefined;
+    const headersReady = new Promise<void>((resolve) => {
+      sawHeaders = resolve;
+    });
+    const finished = new Promise<void>((resolve, reject) => {
+      const req = httpRequest(
+        {
+          host: "127.0.0.1",
+          port,
+          method: "POST",
+          path: `/v1/egress/${grant_id}/v1/chat/completions`,
+          headers: {
+            authorization: `Bearer ${egressToken}`,
+            "content-type": "application/json",
+          },
+        },
+        (res) => {
+          expect(String(res.headers["content-type"])).toMatch(/text\/event-stream/);
+          sawHeaders();
+          res.on("data", (chunk: Buffer) => {
+            arrivals.push({ at: Date.now() - started, text: chunk.toString("utf8") });
+          });
+          res.on("end", () => resolve());
+          res.on("error", reject);
+        },
+      );
+      req.on("error", reject);
+      req.write(JSON.stringify({ stream: true }));
+      req.end();
+    });
+
+    upstream.write("data: first\n\n");
+    await headersReady;
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    upstream.write("data: second\n\n");
+    upstream.end();
+    await finished;
+
+    expect(arrivals.length).toBeGreaterThanOrEqual(1);
+    expect(arrivals[0]!.text).toContain("data: first");
+    expect(arrivals.at(-1)!.text).toContain("data: second");
+    // Ordering is the property under test — the first event reached the client
+    // on its own, before the second was written. An absolute latency bound on
+    // arrival[0] would flake on a loaded runner; the GAP between them cannot.
+    expect(arrivals.at(-1)!.at - arrivals[0]!.at).toBeGreaterThanOrEqual(150);
+
+    // The audit row is written at dispatch (a crash mid-stream still leaves
+    // one) and amended with the true byte count once the body ends.
+    const expectedBytes = Buffer.byteLength("data: first\n\ndata: second\n\n", "utf8");
+    const executed = await pollAudit(
+      h.deps,
+      account.id,
+      (p) => p.grant_id === grant_id && p.response_size === expectedBytes,
+    );
+    expect(executed.response_size).toBe(expectedBytes);
+    expect(executed.response_status).toBe(200);
+    expect(executed.upstream_duration_ms).toBeGreaterThanOrEqual(150);
+    expect(executed.proxy_error).toBeUndefined();
+  });
+
+  it("marks the audit row when the upstream body is cut short mid-stream", async () => {
+    await h.server.close();
+    const upstream = new PassThrough();
+    const executor = new HttpProxyExecutor({
+      lookup: async () => ({ address: "203.0.113.9", family: 4 }),
+      dispatch: async () => ({
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+        truncated: false,
+        bodyStream: upstream,
+      }),
+    });
+    h.server = await buildServer({ deps: h.deps, proxyExecutor: executor });
+    const account = await h.deps.accountStore.createAccount("sse-torn@example.test", "S");
+    const cookie = await webCookie(h.deps, account.id);
+    const token = await agentToken(h.deps, account.id);
+    await storeCred(h, cookie, "OpenAI");
+    const { grant_id, egressToken } = await mintGrantHttp(h, token, { service: "OpenAI" });
+
+    await h.server.listen({ host: "127.0.0.1", port: 0 });
+    const addr = h.server.server.address();
+    const port = typeof addr === "object" && addr !== null ? addr.port : 0;
+
+    let sawHeaders: () => void = () => undefined;
+    const headersReady = new Promise<void>((resolve) => {
+      sawHeaders = resolve;
+    });
+    const settled = new Promise<void>((resolve) => {
+      const req = httpRequest(
+        {
+          host: "127.0.0.1",
+          port,
+          method: "POST",
+          path: `/v1/egress/${grant_id}/v1/chat/completions`,
+          headers: {
+            authorization: `Bearer ${egressToken}`,
+            "content-type": "application/json",
+          },
+        },
+        (res) => {
+          expect(res.statusCode).toBe(200);
+          sawHeaders();
+          res.on("data", () => undefined);
+          res.on("end", () => resolve());
+          res.on("error", () => resolve());
+        },
+      );
+      req.on("error", () => resolve());
+      req.write(JSON.stringify({ stream: true }));
+      req.end();
+    });
+
+    upstream.write("data: first\n\n");
+    await headersReady;
+    // The generation dies half-way: the caller already holds a 200, so only the
+    // ledger can say the transfer never finished.
+    upstream.destroy(new Error("upstream connection reset"));
+    await settled;
+
+    const executed = await pollAudit(
+      h.deps,
+      account.id,
+      (p) => p.grant_id === grant_id && p.proxy_error !== undefined,
+    );
+    expect(executed.response_status).toBe(200);
+    expect(executed.proxy_error).toContain("upstream connection reset");
+    expect(executed.client_closed).toBeUndefined();
+    expect(executed.response_size).toBe(Buffer.byteLength("data: first\n\n", "utf8"));
+  });
+
+  it("records a caller's own cancel as a client close, not a proxy failure", async () => {
+    await h.server.close();
+    const upstream = new PassThrough();
+    const executor = new HttpProxyExecutor({
+      lookup: async () => ({ address: "203.0.113.9", family: 4 }),
+      dispatch: async () => ({
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+        truncated: false,
+        bodyStream: upstream,
+      }),
+    });
+    h.server = await buildServer({ deps: h.deps, proxyExecutor: executor });
+    const account = await h.deps.accountStore.createAccount("sse-cancel@example.test", "S");
+    const cookie = await webCookie(h.deps, account.id);
+    const token = await agentToken(h.deps, account.id);
+    await storeCred(h, cookie, "OpenAI");
+    const { grant_id, egressToken } = await mintGrantHttp(h, token, { service: "OpenAI" });
+
+    await h.server.listen({ host: "127.0.0.1", port: 0 });
+    const addr = h.server.server.address();
+    const port = typeof addr === "object" && addr !== null ? addr.port : 0;
+
+    // An SDK aborting a generation part-way: the caller hangs up while the
+    // upstream is still perfectly healthy.
+    const aborted = new Promise<void>((resolve) => {
+      const req = httpRequest(
+        {
+          host: "127.0.0.1",
+          port,
+          method: "POST",
+          path: `/v1/egress/${grant_id}/v1/chat/completions`,
+          headers: {
+            authorization: `Bearer ${egressToken}`,
+            "content-type": "application/json",
+          },
+        },
+        (res) => {
+          expect(res.statusCode).toBe(200);
+          res.once("data", () => {
+            req.destroy();
+            resolve();
+          });
+        },
+      );
+      req.on("error", () => resolve());
+      req.write(JSON.stringify({ stream: true }));
+      req.end();
+    });
+
+    upstream.write("data: first\n\n");
+    await aborted;
+
+    const executed = await pollAudit(
+      h.deps,
+      account.id,
+      (p) => p.grant_id === grant_id && p.client_closed === true,
+    );
+    expect(executed.response_status).toBe(200);
+    expect(executed.proxy_error).toBeUndefined();
+    expect(upstream.destroyed).toBe(true);
   });
 });

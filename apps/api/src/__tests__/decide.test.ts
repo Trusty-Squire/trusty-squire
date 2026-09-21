@@ -15,6 +15,7 @@ import {
   QUESTION_LIMIT,
   STATE_LIMIT_BYTES,
 } from "../routes/decide.js";
+import { streamOf } from "./dispatch-fixture.js";
 
 const SESSION_SECRET = "dev-test-secret-do-not-use-anywhere-else";
 
@@ -52,7 +53,7 @@ function fakeExecutor(
       return {
         status: response.status,
         headers: response.headers ?? { "content-type": "application/json" },
-        body: response.body,
+        bodyStream: streamOf(response.body),
         truncated: false,
       };
     },

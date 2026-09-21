@@ -40,6 +40,22 @@ export class PrismaVaultAuditStore implements VaultAuditStore {
     else await this.prisma.vaultAuditEvent.create({ data });
   }
 
+  // Read-modify-write on one row the streaming proxy alone owns. updateMany
+  // (not update) so a row the retention cron already swept is a silent no-op
+  // rather than a throw on a best-effort audit path.
+  async amend(id: string, patch: Partial<VaultAuditPayload>): Promise<void> {
+    const [row] = await this.prisma.vaultAuditEvent.findMany({ where: { id }, take: 1 });
+    if (row === undefined) return;
+    const merged = {
+      ...((row.payload ?? {}) as unknown as VaultAuditPayload),
+      ...patch,
+    };
+    await this.prisma.vaultAuditEvent.updateMany({
+      where: { id },
+      data: { payload: merged as unknown as Record<string, unknown> },
+    });
+  }
+
   async countRecentRetrievals(accountId: string, since: Date): Promise<number> {
     return this.prisma.vaultAuditEvent.count({
       where: {
