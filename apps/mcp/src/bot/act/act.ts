@@ -92,6 +92,7 @@ import type { Observation, ProvisionAction } from "../provision-session.js";
 import type { Session } from "../session/model.js";
 import { resolveLiveControlIdentity, type ActControlIdentity } from "./identity.js";
 import {
+  clickCrossOriginFrameTarget,
   commitDriveListOption,
   overlayOptionLabels,
   waitForOpenedOverlay,
@@ -108,6 +109,7 @@ export type ActExecutorOptions = {
   typeThroughOverlay?: boolean;
   guardOcclusion?: boolean;
   commitListOptions?: boolean;
+  coordinateFallbackForCrossOriginFrame?: boolean;
 };
 
 const DRIVE_DISPATCH: ActExecutorOptions = {
@@ -116,6 +118,7 @@ const DRIVE_DISPATCH: ActExecutorOptions = {
   typeThroughOverlay: true,
   guardOcclusion: true,
   commitListOptions: true,
+  coordinateFallbackForCrossOriginFrame: true,
 };
 
 export type DriveActResult =
@@ -751,6 +754,7 @@ async function executeAct(
   };
   const actStarted = Date.now();
   let actedCombobox = false;
+  let crossOriginClicked = false;
   let actionPageAfter = compactV2ActionPage;
   let completedAction: ProvisionAction = action;
   let resolutionTarget: string | undefined;
@@ -1080,7 +1084,25 @@ async function executeAct(
             clickScope !== undefined
               ? await commitDriveListOption(clickPage, clickScope, el.selector)
               : false;
-          if (!committedOption) {
+          const coordinateClicked =
+            !committedOption &&
+            action.kind === "click" &&
+            options?.coordinateFallbackForCrossOriginFrame === true &&
+            clickPage !== null &&
+            clickPage !== undefined &&
+            clickScope !== undefined
+              ? await adoptTabOpenedByClick(session, browser, async () => {
+                  crossOriginClicked = await clickCrossOriginFrameTarget(
+                    clickPage,
+                    clickScope,
+                    el.selector,
+                  );
+                }).then((adopted) => {
+                  if (crossOriginClicked && adopted !== null) actionPageAfter = adopted;
+                  return crossOriginClicked;
+                })
+              : false;
+          if (!committedOption && !coordinateClicked) {
             actionPageAfter =
               (await adoptTabOpenedByClick(session, browser, async () => {
                 await actClick({ ...actDriverTarget(el), method: action.kind });

@@ -991,7 +991,8 @@ export class BrowserController implements BrowserDriver {
           input.stepPx === null
             ? Math.round(window.innerHeight * 0.8)
             : Math.min(input.stepPx, window.innerHeight);
-        if (input.dir === "bottom") window.scrollTo(0, document.body.scrollHeight);
+        if (input.dir === "bottom")
+          window.scrollTo(0, document.documentElement.scrollHeight);
         else if (input.dir === "top") window.scrollTo(0, 0);
         else if (input.dir === "up") window.scrollBy(0, -step);
         else window.scrollBy(0, step);

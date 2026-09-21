@@ -205,6 +205,102 @@ export async function commitDriveListOption(
   }
 }
 
+/** CDP coordinates are only for a cross-origin child frame a locator cannot reach. */
+export function drivePointerUsesCdp(reachedTop: boolean, frameIsMain: boolean): boolean {
+  return !reachedTop && !frameIsMain;
+}
+
+// Viewport point for the target, plus whether the frameElement walk reached
+// window.top. A cross-origin boundary stops the walk — the child window reports
+// no frameElement across it — so the host adds the frame's own offset.
+function inPagePointerTarget(
+  selector: string,
+): { x: number; y: number; reachedTop: boolean } | null {
+  const element = document.querySelector(selector);
+  if (element === null) return null;
+  const before = element.getBoundingClientRect();
+  const inView =
+    before.width > 0 &&
+    before.height > 0 &&
+    before.bottom > 0 &&
+    before.top < innerHeight &&
+    before.right > 0 &&
+    before.left < innerWidth;
+  if (!inView) {
+    element.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
+  }
+  const rect = element.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0) return null;
+  let x = rect.x + rect.width / 2;
+  let y = rect.y + rect.height / 2;
+  let reachedTop = false;
+  try {
+    let view: Window | null = element.ownerDocument.defaultView;
+    let frameEl = view?.frameElement ?? null;
+    while (frameEl instanceof Element) {
+      const frameRect = frameEl.getBoundingClientRect();
+      x += frameRect.x;
+      y += frameRect.y;
+      view = frameEl.ownerDocument.defaultView;
+      frameEl = view?.frameElement ?? null;
+    }
+    reachedTop = view === window.top;
+  } catch {
+    reachedTop = false;
+  }
+  return { x, y, reachedTop };
+}
+
+/** Click a target in a cross-origin child frame by viewport coordinates.
+ *
+ * Returns false when the locator CAN reach the target (main frame, or the
+ * frameElement walk reached top), leaving the ordinary dispatch to run. CDP
+ * mouse coordinates are main-viewport CSS px and the compositor routes hits
+ * into OOPIFs; Playwright's boundingBox already accumulates every ancestor
+ * frame offset, so one hop is the complete correction.
+ */
+export async function clickCrossOriginFrameTarget(
+  page: Page,
+  scope: Page | Frame,
+  selector: string,
+): Promise<boolean> {
+  if (!("parentFrame" in scope) || scope === page.mainFrame()) return false;
+  const point = await evaluateBound(scope, inPagePointerTarget, selector).catch(() => null);
+  if (point === null || !drivePointerUsesCdp(point.reachedTop, false)) return false;
+  let offsetX = 0;
+  let offsetY = 0;
+  const frameElement = await scope.frameElement().catch(() => null);
+  if (frameElement !== null) {
+    const box = await frameElement.boundingBox().catch(() => null);
+    if (box !== null) {
+      offsetX = box.x;
+      offsetY = box.y;
+    }
+  }
+  const x = point.x + offsetX;
+  const y = point.y + offsetY;
+  const cdp = await page.context().newCDPSession(page);
+  try {
+    await cdp.send("Input.dispatchMouseEvent", {
+      type: "mousePressed",
+      x,
+      y,
+      button: "left",
+      clickCount: 1,
+    });
+    await cdp.send("Input.dispatchMouseEvent", {
+      type: "mouseReleased",
+      x,
+      y,
+      button: "left",
+      clickCount: 1,
+    });
+    return true;
+  } finally {
+    await cdp.detach().catch(() => undefined);
+  }
+}
+
 export async function reenterDriveField(
   scope: Page | Frame,
   selector: string,

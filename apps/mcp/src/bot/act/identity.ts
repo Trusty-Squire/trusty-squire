@@ -19,6 +19,7 @@ export type ActControlIdentity = {
   placeholder?: string;
   inputType?: string;
   ariaLabel?: string;
+  labelComparable?: boolean;
 };
 
 function originOf(url: string): string {
@@ -53,6 +54,7 @@ export function identityFromDriveElement(
     placeholder?: string;
     inputType?: string;
     ariaLabel?: string;
+    labelComparable?: boolean;
   },
   pageUrl: string,
 ): ActControlIdentity {
@@ -68,6 +70,7 @@ export function identityFromDriveElement(
     ...(el.placeholder ? { placeholder: el.placeholder } : {}),
     ...(el.inputType ? { inputType: el.inputType } : {}),
     ...(el.ariaLabel ? { ariaLabel: el.ariaLabel } : {}),
+    ...(el.labelComparable === true ? { labelComparable: true } : {}),
   };
 }
 
@@ -86,6 +89,7 @@ export function rememberDriveIdentities(
     placeholder?: string;
     inputType?: string;
     ariaLabel?: string;
+    labelComparable?: boolean;
   }>,
   pageUrl: string,
 ): Map<string, ActControlIdentity> {
@@ -162,6 +166,7 @@ function inPageSameControl(arg: {
   role: string;
   label: string;
   href: string;
+  compareLabel: boolean;
 }): boolean {
   type ControlDescription = { role: string; label: string; href: string };
   type DriveCache = {
@@ -183,10 +188,9 @@ function inPageSameControl(arg: {
   if (live === null) return false;
   if (live.role.toLowerCase() !== arg.role) return false;
   if (live.href !== arg.href) return false;
-  // The snapshot emits the role as the label when it derived no accessible name
-  // (nameless control, or its name-walk budget ran out). There is no recorded
-  // name to compare then; role and destination still have to match.
-  if (arg.label.toLowerCase() === arg.role) return true;
+  // Only a label the snapshot derived the same way can be matched; role and
+  // destination carry the check for the rest.
+  if (!arg.compareLabel) return true;
   const normalize = (text: string): string => text.replace(/\s+/g, " ").trim().toLowerCase();
   return normalize(live.label) === normalize(arg.label);
 }
@@ -218,6 +222,7 @@ export async function resolveIdentityScope(
       role: identity.role,
       label: identity.label,
       href: identity.href ?? "",
+      compareLabel: identity.labelComparable === true,
     }).catch(() => false);
     if (same) return scope;
   }

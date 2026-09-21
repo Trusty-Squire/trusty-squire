@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Page } from "playwright";
 import {
+  drivePointerUsesCdp,
   pageFingerprintOf,
   settleDriveStep,
   waitForNavigationIdle,
@@ -113,5 +114,14 @@ describe("action settle", () => {
     await vi.advanceTimersByTimeAsync(1);
     await waiting;
     expect(settled).toBe(true);
+  });
+});
+
+describe("drive pointer path", () => {
+  it("keeps CDP coordinates only for a cross-origin child frame", () => {
+    expect(drivePointerUsesCdp(true, true)).toBe(false);
+    expect(drivePointerUsesCdp(true, false)).toBe(false);
+    expect(drivePointerUsesCdp(false, true)).toBe(false);
+    expect(drivePointerUsesCdp(false, false)).toBe(true);
   });
 });

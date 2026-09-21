@@ -38,6 +38,8 @@ export interface DriveSnapshotElement {
   name?: string;
   /** The `aria-label` ATTRIBUTE, not the resolved accessible name. */
   ariaLabel?: string;
+  /** The label is the full accessible name, so an act-time read can match it. */
+  labelComparable?: boolean;
   /** The input `type` (`email`, `text`, …), when the node is an input. */
   inputType?: string;
   /** Live CSS/Playwright selector for the node, used to re-resolve identity. */
@@ -461,30 +463,19 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
     }
     return null;
   };
-  // Dispatch resolves this selector strictly and act-time identity requires it
-  // to name exactly one node, so a shorthand is only taken when it is already
-  // unique; otherwise the path is walked to the document root, which is.
-  const labelOf = (element: Element, role: string): string => {
-    const rect = element.getBoundingClientRect();
-    const inViewport =
-      rect.bottom > 0 && rect.top < innerHeight && rect.right > 0 && rect.left < innerWidth;
-    const buttonLike = role === "button" || element.tagName === "BUTTON";
-    const keepOffscreen =
-      role === "textbox" ||
-      role === "searchbox" ||
-      role === "spinbutton" ||
-      role === "checkbox" ||
-      role === "radio" ||
-      role === "combobox" ||
-      element.tagName === "SELECT" ||
-      (buttonLike && arg.keepOffscreenButtons);
-    return !inViewport && !keepOffscreen
-      ? element.getAttribute("aria-label")?.trim() || role
-      : name(element) || role;
+  // The label an act-time check can reproduce: the accessible name under a
+  // budget it can re-arm. `truncated` says the walk ran out mid-element, so the
+  // recorded spelling is a prefix nothing can derive again.
+  const accessibleName = (element: Element, role: string): { label: string; truncated: boolean } => {
+    const derived = name(element);
+    return {
+      label: derived || role,
+      truncated: nameVisits >= arg.maxNameVisits || performance.now() >= nameDeadline,
+    };
   };
-  // Act-time identity reads the control back through the SAME derivation the
-  // snapshot emitted, so a node React mutated in place cannot pass as the
-  // control the decision named.
+  // Act-time identity reads the control back through the SAME derivation, with
+  // the name budget re-armed, so a node React mutated in place cannot pass as
+  // the control the decision named.
   cache.describe = (element: Element): { role: string; label: string; href: string } | null => {
     const role = roleOf(element);
     if (role === null) return null;
@@ -492,7 +483,7 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
     nameDeadline = performance.now() + 250;
     return {
       role,
-      label: labelOf(element, role),
+      label: name(element) || role,
       href: element instanceof HTMLAnchorElement && element.href.length > 0 ? element.href : "",
     };
   };
@@ -586,7 +577,12 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
       ) !== null;
     if (!inViewport && !keepOffscreen && !pinned) continue;
     const ref = identity(element);
-    const label = labelOf(element, role);
+    // Offscreen and unkept: the cheap aria-label spelling, which depends on the
+    // viewport at this instant and so is not comparable later.
+    const offscreenLabel = !inViewport && !keepOffscreen;
+    const named = offscreenLabel ? null : accessibleName(element, role);
+    const label = named === null ? element.getAttribute("aria-label")?.trim() || role : named.label;
+    const labelComparable = named !== null && !named.truncated;
     const disabled =
       element.matches(":disabled") ||
       element.closest('[aria-disabled="true"]') !== null ||
@@ -706,6 +702,7 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
       ...(width === undefined ? {} : { width }),
       ...(placeholder.length > 0 ? { placeholder } : {}),
       ...(ariaLabel.length > 0 ? { ariaLabel } : {}),
+      ...(labelComparable ? { labelComparable: true } : {}),
       ...(href.length > 0 ? { href } : {}),
       ...(inputName.length > 0 ? { name: inputName } : {}),
       ...(inputType.length > 0 ? { inputType } : {}),
