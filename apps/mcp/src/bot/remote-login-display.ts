@@ -36,6 +36,7 @@ import {
   spawnOwnerTrackedHelper,
   waitForOwnerTrackedHelperExit,
 } from "./owner-process-reaper.js";
+import { LOGIN_RIG_OWNED_LIFETIME_MS } from "../pairing-ttl.js";
 
 const LOGIN_WIDTH = Number(process.env.BOT_NOVNC_W) || 720;
 const LOGIN_HEIGHT = Number(process.env.BOT_NOVNC_H) || 1280;
@@ -794,6 +795,7 @@ function releaseChildHandles(child: ChildProcess): void {
 }
 
 function forceTeardownRemoteLoginRig(rig: RemoteLoginRig): void {
+  cancelRigOwnedLifetime(rig);
   for (const child of rig.procs) {
     try {
       signalOwnerTrackedHelper(child, "SIGKILL");
@@ -847,7 +849,17 @@ async function teardownExposedLoginHelpers(
   }
 }
 
+const rigLifetimeCancels = new WeakMap<RemoteLoginRig, () => void>();
+
+function cancelRigOwnedLifetime(rig: RemoteLoginRig): void {
+  const cancel = rigLifetimeCancels.get(rig);
+  if (cancel === undefined) return;
+  rigLifetimeCancels.delete(rig);
+  cancel();
+}
+
 export function teardownRemoteLoginRig(rig: RemoteLoginRig, graceMs = 1_000): Promise<void> {
+  cancelRigOwnedLifetime(rig);
   const existing = rigTeardowns.get(rig);
   if (existing !== undefined) return existing;
   const teardown = (async (): Promise<void> => {
@@ -865,6 +877,15 @@ export interface LoginSignalExitCoordination {
   set(enabled: boolean): void;
 }
 
+export interface LoginRigCleanupOptions {
+  lifetimeMs?: number;
+  // Called once, synchronously, when the owned lifetime expires — before the
+  // teardown-and-exit it triggers. `connect` reports its machine-readable
+  // terminal line here, because this exit never returns through the run's own
+  // reporting frame.
+  onExpired?: () => void;
+}
+
 const signalExitCoordination: LoginSignalExitCoordination = {
   enabled: isSelfManagedChromeTerminationSignalExitEnabled,
   set: setSelfManagedChromeTerminationSignalExitEnabled,
@@ -873,6 +894,7 @@ const signalExitCoordination: LoginSignalExitCoordination = {
 export function registerRemoteLoginRigCleanup(
   rig: RemoteLoginRig,
   activeBrowserTeardown: () => (() => Promise<void>) | undefined,
+  options: LoginRigCleanupOptions = {},
   runtime: LoginProcessRuntime = process,
   signalExit: LoginSignalExitCoordination = signalExitCoordination,
 ): () => void {
@@ -884,6 +906,7 @@ export function registerRemoteLoginRigCleanup(
     signalExit.set(true);
   };
   const exitAfterCleanup = (code: number): void => {
+    cancelRigOwnedLifetime(rig);
     if (finishing) {
       forceTeardownRemoteLoginRig(rig);
       restoreSignalExit();
@@ -923,6 +946,13 @@ export function registerRemoteLoginRigCleanup(
     console.error("[login] unhandled rejection; tearing down the login browser", reason);
     exitAfterCleanup(1);
   };
+  const onOwnedLifetime = (): void => {
+    console.error(
+      "[login] ceremony display exceeded its owned lifetime; tearing down the login rig",
+    );
+    options.onExpired?.();
+    exitAfterCleanup(1);
+  };
 
   runtime.once("exit", onExit);
   const ownsTerminationExit = signalExit.enabled();
@@ -936,7 +966,19 @@ export function registerRemoteLoginRigCleanup(
     runtime.once("unhandledRejection", onUnhandledRejection);
   }
 
+  // The rig owns this deadline from the moment cleanup is registered — that
+  // is when the ceremony claims the display, before pollUntil starts and
+  // even if pollUntil never starts. Pairing-token wait plus grace; override
+  // only for tests.
+  const lifetimeMs = options.lifetimeMs ?? LOGIN_RIG_OWNED_LIFETIME_MS;
+  const lifetimeTimer = setTimeout(onOwnedLifetime, lifetimeMs);
+  const cancelLifetime = (): void => {
+    clearTimeout(lifetimeTimer);
+  };
+  rigLifetimeCancels.set(rig, cancelLifetime);
+
   return (): void => {
+    cancelRigOwnedLifetime(rig);
     if (finishing) return;
     runtime.removeListener("exit", onExit);
     if (!ownsTerminationExit) return;

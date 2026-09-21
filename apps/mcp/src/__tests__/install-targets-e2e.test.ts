@@ -14,7 +14,8 @@
 // This file proves the install pipeline drives the right writer for
 // each --target value.
 
-import { promises as fs } from "node:fs";
+import { promises as fs, symlinkSync } from "node:fs";
+import { spawn } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -567,6 +568,126 @@ describe("connect --target=<agent> writes a valid config", () => {
         agent_session_token: "ts_agent_test_token",
         account_id: "acct_test",
       });
+    }
+  });
+
+  // The noVNC rig's owned lifetime tears the ceremony down and exits the
+  // process from inside the rig's own cleanup — no frame below connect()
+  // returns, so nothing there can report the run. Leaving the stream on the
+  // non-terminal `needs-sign-in` line makes a caller infer the outcome from
+  // an exit code, which is the thing the machine channel exists to delete.
+  it("ends the machine channel when the ceremony rig outlives its own bound", async () => {
+    vi.mocked(openInstallConfirmInBotChrome).mockImplementationOnce(async (options) => {
+      options.onCeremonyExpired?.(null);
+      return process.exit(1);
+    });
+    const machine = captureMachineChannel();
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const exit = vi.spyOn(process, "exit").mockImplementation((code) => {
+      throw new Error(`exit:${code}`);
+    });
+    try {
+      await expect(
+        connect({
+          command: "connect",
+          target: "hermes",
+          apiBase: "https://test.invalid",
+          skipBrowser: false,
+          forceRelogin: false,
+          noRegistry: false,
+          noInteractive: true,
+          json: true,
+        }),
+      ).rejects.toThrow("exit:1");
+      const lines = machine.reports<{
+        state: string;
+        reason: string | null;
+        terminal: boolean;
+      }>();
+      expect(lines[0]).toMatchObject({ state: "needs-sign-in", terminal: false });
+      expect(lines.filter((line) => line.terminal)).toHaveLength(1);
+      const report = machine.terminal<{
+        state: string;
+        reason: string | null;
+        browser_location: { kind: string };
+      }>();
+      expect(report.state).toBe("no-browser");
+      expect(report.reason).toBe("install_expired");
+      // The rig was stood up and had to be force-reaped, so this run is not
+      // one that "opened no browser at all" — reporting `none` would tell a
+      // caller nothing was left behind.
+      expect(report.browser_location.kind).toBe("unreachable");
+    } finally {
+      exit.mockRestore();
+      error.mockRestore();
+      machine.restore();
+    }
+  });
+
+  // The rig can outlive its bound while the ceremony Chrome this run launched
+  // is still holding the profile's SingletonLock — the tunnel wedges after the
+  // browser is up, so `onBrowserPlacement` never fires and the placement slot
+  // has no pid. Reporting that lock as a holder tells a helper daemon another
+  // session owns the browser at a pid that is about to be torn down.
+  //
+  // Both directions are asserted against the same live lock: `none` alone is
+  // also what an unread profile answers, so without the foreign-pid control it
+  // could not tell suppression from a fixture that resolved nothing.
+  it("names the lock holder on expiry unless it is this run's own ceremony Chrome", async () => {
+    const profileDir = path.join(tmpHome, "profiles", "expiry-holder");
+    await fs.mkdir(profileDir, { recursive: true });
+    const ceremonyChrome = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+      stdio: "ignore",
+    });
+    await new Promise<void>((resolve) => ceremonyChrome.once("spawn", () => resolve()));
+    symlinkSync(`${os.hostname()}-${ceremonyChrome.pid}`, path.join(profileDir, "SingletonLock"));
+    const previousProfile = process.env.TRUSTY_SQUIRE_PROFILE_DIR;
+    process.env.TRUSTY_SQUIRE_PROFILE_DIR = profileDir;
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const exit = vi.spyOn(process, "exit").mockImplementation((code) => {
+      throw new Error(`exit:${code}`);
+    });
+
+    const holderOnExpiry = async (ownBrowserPid: number | null): Promise<unknown> => {
+      vi.mocked(openInstallConfirmInBotChrome).mockImplementationOnce(async (options) => {
+        options.onCeremonyExpired?.(ownBrowserPid);
+        return process.exit(1);
+      });
+      const machine = captureMachineChannel();
+      try {
+        await expect(
+          connect({
+            command: "connect",
+            target: "hermes",
+            apiBase: "https://test.invalid",
+            skipBrowser: false,
+            forceRelogin: false,
+            noRegistry: false,
+            noInteractive: true,
+            json: true,
+          }),
+        ).rejects.toThrow("exit:1");
+        const report = machine.terminal<{ reason: string | null; holder: unknown }>();
+        expect(report.reason).toBe("install_expired");
+        return report.holder;
+      } finally {
+        machine.restore();
+      }
+    };
+
+    try {
+      expect(await holderOnExpiry(null)).toEqual({
+        kind: "other",
+        code: "singleton_lock",
+        pid: ceremonyChrome.pid,
+      });
+      expect(await holderOnExpiry(ceremonyChrome.pid ?? null)).toEqual({ kind: "none" });
+    } finally {
+      exit.mockRestore();
+      error.mockRestore();
+      if (previousProfile === undefined) delete process.env.TRUSTY_SQUIRE_PROFILE_DIR;
+      else process.env.TRUSTY_SQUIRE_PROFILE_DIR = previousProfile;
+      ceremonyChrome.kill("SIGKILL");
     }
   });
 

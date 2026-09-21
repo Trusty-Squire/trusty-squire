@@ -1,6 +1,6 @@
 // The pairing token's lifetime is a CONTRACT with the MCP CLI, not a private
 // tuning knob. `connect` counts the ceremony wait as a local duration —
-// `PAIRING_TOKEN_TTL_MS` in apps/mcp/src/install/cli.ts — because differencing
+// `PAIRING_TOKEN_TTL_MS` in apps/mcp/src/pairing-ttl.ts — because differencing
 // this server's `expires_at` against the caller's clock made the window a
 // function of clock skew.
 //

@@ -1,6 +1,7 @@
 import { EventEmitter } from "node:events";
 import { createServer } from "node:net";
-import type { ChildProcess } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
+import { createRequire } from "node:module";
 import {
   chmodSync,
   existsSync,
@@ -13,6 +14,7 @@ import {
 import type * as RealFs from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 
 // CI does not install noVNC. Supply only the two core assets the login bridge
@@ -52,6 +54,7 @@ import {
   teardownRemoteLoginRig,
   type RemoteLoginRig,
 } from "../remote-login-display.js";
+import { LOGIN_RIG_OWNED_LIFETIME_MS } from "../../pairing-ttl.js";
 import { synchronizeSelfManagedChromeTerminationSignalHandlers } from "../browser.js";
 import { spawnOwnerTrackedHelper } from "../owner-process-reaper.js";
 
@@ -77,6 +80,26 @@ async function waitUntil(predicate: () => boolean, timeoutMs = 5_000): Promise<v
     await new Promise<void>((resolve) => setTimeout(resolve, 10));
   }
   if (!predicate()) throw new Error("condition did not become true");
+}
+
+function fakeCleanupRuntime(): NonNullable<Parameters<typeof registerRemoteLoginRigCleanup>[3]> {
+  const handlers = new Map<string, (...args: never[]) => void>();
+  const runtime = {
+    on: vi.fn((event: string, listener: (...args: never[]) => void) => {
+      handlers.set(event, listener);
+      return runtime;
+    }),
+    once: vi.fn((event: string, listener: (...args: never[]) => void) => {
+      handlers.set(event, listener);
+      return runtime;
+    }),
+    removeListener: vi.fn((event: string) => {
+      handlers.delete(event);
+      return runtime;
+    }),
+    exit: vi.fn(),
+  };
+  return runtime as unknown as NonNullable<Parameters<typeof registerRemoteLoginRigCleanup>[3]>;
 }
 
 function fakeProcess(name: string, ignoreSigterm = false): ChildProcess {
@@ -606,10 +629,10 @@ process.exit(1);
         return runtime;
       }),
       exit: vi.fn(),
-    } as unknown as NonNullable<Parameters<typeof registerRemoteLoginRigCleanup>[2]>;
+    } as unknown as NonNullable<Parameters<typeof registerRemoteLoginRigCleanup>[3]>;
     const set = vi.fn();
 
-    const remove = registerRemoteLoginRigCleanup(rig, () => undefined, runtime, {
+    const remove = registerRemoteLoginRigCleanup(rig, () => undefined, {}, runtime, {
       enabled: () => false,
       set,
     });
@@ -666,10 +689,10 @@ process.exit(1);
         return runtime;
       }),
       exit: vi.fn(),
-    } as unknown as NonNullable<Parameters<typeof registerRemoteLoginRigCleanup>[2]>;
+    } as unknown as NonNullable<Parameters<typeof registerRemoteLoginRigCleanup>[3]>;
     const set = vi.fn();
 
-    registerRemoteLoginRigCleanup(rig, () => undefined, runtime, {
+    registerRemoteLoginRigCleanup(rig, () => undefined, {}, runtime, {
       enabled: () => true,
       set,
     });
@@ -681,6 +704,164 @@ process.exit(1);
     }
     expect(set).toHaveBeenNthCalledWith(1, false);
     expect(set).toHaveBeenLastCalledWith(true);
+  });
+
+  // Every other lifetime test hands in a short `lifetimeMs`, so the value a
+  // real `connect` actually arms — the only one that ships — is exercised
+  // nowhere else. A rig that fires early tears the display down mid-ceremony;
+  // one that fires late is not a bound at all.
+  it("arms the pairing-token window plus grace when the caller names no lifetime", async () => {
+    vi.useFakeTimers();
+    try {
+      const { rig, processes } = rigWithProcesses();
+      const runtime = fakeCleanupRuntime();
+      registerRemoteLoginRigCleanup(rig, () => undefined, {}, runtime, {
+        enabled: () => true,
+        set: vi.fn(),
+      });
+
+      await vi.advanceTimersByTimeAsync(LOGIN_RIG_OWNED_LIFETIME_MS - 1);
+      expect(runtime.exit).not.toHaveBeenCalled();
+      for (const child of processes) {
+        expect(child.kill).not.toHaveBeenCalled();
+      }
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(runtime.exit).toHaveBeenCalledWith(1);
+      for (const child of processes) {
+        expect(child.kill).toHaveBeenCalledWith("SIGTERM");
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reports the expiry and tears the ceremony helpers down when the lifetime elapses", async () => {
+    const { rig, processes } = rigWithProcesses();
+    const runtime = fakeCleanupRuntime();
+    const onExpired = vi.fn();
+    registerRemoteLoginRigCleanup(rig, () => undefined, { lifetimeMs: 80, onExpired }, runtime, {
+      enabled: () => true,
+      set: vi.fn(),
+    });
+    expect(processes[0]?.kill).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(runtime.exit).toHaveBeenCalledWith(1));
+    // Reported BEFORE the exit: a caller reading the machine channel must not
+    // have to infer this run's outcome from the exit code alone.
+    expect(onExpired).toHaveBeenCalledTimes(1);
+    expect(onExpired.mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(runtime.exit).mock.invocationCallOrder[0] ?? 0,
+    );
+    for (const child of processes) {
+      expect(child.kill).toHaveBeenCalledWith("SIGTERM");
+    }
+  });
+
+  it("does not fire the owned lifetime after cleanup is removed", async () => {
+    const { rig, processes } = rigWithProcesses();
+    const runtime = fakeCleanupRuntime();
+    const remove = registerRemoteLoginRigCleanup(
+      rig,
+      () => undefined,
+      { lifetimeMs: 80 },
+      runtime,
+      { enabled: () => true, set: vi.fn() },
+    );
+    remove();
+    await new Promise<void>((resolve) => setTimeout(resolve, 150));
+    expect(runtime.exit).not.toHaveBeenCalled();
+    for (const child of processes) {
+      expect(child.kill).not.toHaveBeenCalled();
+    }
+  });
+
+  it("keeps ceremony helpers after the detached spawner dies, then the rig-owned lifetime reaps them", async () => {
+    if (process.platform !== "linux") return;
+    const recorded = new Set<number>();
+    const scratch = mkdtempSync(join(tmpdir(), "ts-login-rig-lifetime-repro-"));
+    const statusPath = join(scratch, "status.json");
+    const reaperDir = join(scratch, "owner-reapers");
+    const home = join(scratch, "home");
+    const fixture = fileURLToPath(
+      new URL("./fixtures/login-rig-lifetime-connect.ts", import.meta.url),
+    );
+    const tsx = createRequire(import.meta.url).resolve("tsx");
+    const lifetimeMs = 2_000;
+    const daemon = spawn(
+      process.execPath,
+      [
+        "-e",
+        `
+const { spawn } = require("node:child_process");
+const child = spawn(process.execPath, ${JSON.stringify(["--import", tsx, fixture, statusPath])}, {
+  detached: true,
+  stdio: "ignore",
+  env: {
+    ...process.env,
+    HOME: ${JSON.stringify(home)},
+    TRUSTY_SQUIRE_REAPER_DIR: ${JSON.stringify(reaperDir)},
+    LOGIN_RIG_FIXTURE_LIFETIME_MS: ${JSON.stringify(String(lifetimeMs))},
+  },
+});
+if (child.pid === undefined) process.exit(2);
+child.unref();
+setInterval(() => undefined, 60_000);
+`,
+      ],
+      { stdio: "ignore" },
+    );
+    const daemonPid = daemon.pid;
+    if (daemonPid === undefined) throw new Error("spawner did not expose a pid");
+    recorded.add(daemonPid);
+    let connectPid = 0;
+    let helperPids: number[] = [];
+    try {
+      await waitUntil(() => existsSync(statusPath), 8_000);
+      const status = JSON.parse(readFileSync(statusPath, "utf8")) as {
+        connect: number;
+        helpers: { role: string; pid: number }[];
+      };
+      connectPid = status.connect;
+      helperPids = status.helpers.map((helper) => helper.pid);
+      recorded.add(connectPid);
+      for (const pid of helperPids) recorded.add(pid);
+      try {
+        const children = readFileSync(`/proc/${connectPid}/task/${connectPid}/children`, "utf8")
+          .trim()
+          .split(/\s+/)
+          .map(Number)
+          .filter((pid) => Number.isSafeInteger(pid) && pid > 0);
+        for (const pid of children) recorded.add(pid);
+      } catch {}
+      expect(helperPids).toHaveLength(4);
+      expect(processIsLive(connectPid)).toBe(true);
+      for (const pid of helperPids) expect(processIsLive(pid)).toBe(true);
+
+      // Kill only the recorded spawner. The helpers must survive this — we
+      // rejected parent-death as the bound.
+      process.kill(daemonPid, "SIGKILL");
+      await waitUntil(() => !processIsLive(daemonPid));
+      expect(processIsLive(connectPid)).toBe(true);
+      for (const pid of helperPids) expect(processIsLive(pid)).toBe(true);
+
+      await waitUntil(() => helperPids.every((pid) => !processIsLive(pid)), lifetimeMs + 3_000);
+      for (const pid of helperPids) expect(processIsLive(pid)).toBe(false);
+    } finally {
+      for (const pid of recorded) {
+        if (!processIsLive(pid)) continue;
+        try {
+          process.kill(pid, "SIGTERM");
+        } catch {}
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, 200));
+      for (const pid of recorded) {
+        if (!processIsLive(pid)) continue;
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch {}
+      }
+      rmSync(scratch, { recursive: true, force: true });
+    }
   });
 });
 

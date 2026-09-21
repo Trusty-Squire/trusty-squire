@@ -92,13 +92,9 @@ import {
   type ConnectBrowserLocation,
   type ConnectOutcome,
 } from "./connect-report.js";
+import { PAIRING_TOKEN_TTL_MS } from "../pairing-ttl.js";
 
 const DEFAULT_API_BASE = process.env.TRUSTY_SQUIRE_API_BASE ?? "https://trusty-squire-api.fly.dev";
-// Mirrors PAIR_TTL_MS in apps/api/src/auth/pairing-token.ts. Held as a
-// duration, never as a comparison against the server's clock. Drift is caught
-// from the server side by apps/api/src/__tests__/pairing-token-ttl.test.ts and
-// from this side by the ceremony-deadline test in install-targets-e2e.
-const PAIRING_TOKEN_TTL_MS = 10 * 60 * 1000;
 // Managed skill-registry URL. Advanced setup decides whether this is written
 // into the MCP config; the URL itself is product-owned and not user-editable.
 const DEFAULT_REGISTRY_URL = "https://registry.trustysquire.ai";
@@ -945,6 +941,16 @@ async function runConnectInstall(
         browser_location,
         ownBrowserPid: placed.ownBrowserPid,
       }),
+    reportCeremonyExpired: (ownBrowserPid) =>
+      emitConnectStatus(args, {
+        outcome: { kind: "install_expired" },
+        profileDir,
+        browser_location: placed.value ?? {
+          kind: "unreachable",
+          reason: "the ceremony display outlived its own bound without showing the page anywhere",
+        },
+        ownBrowserPid,
+      }),
     ...(deferredReloginProviders.length ? { forceReloginProviders: deferredReloginProviders } : {}),
   });
   if (claim.kind === "confirm_failed") {
@@ -1378,6 +1384,12 @@ async function runInstallClaim(
     // Writes a non-terminal line naming the live pairing link and where the
     // browser is, before this run blocks on a human.
     reportSignInOpen: (confirm_url: string, browser_location: ConnectBrowserLocation) => void;
+    // Writes the run's terminal line when the ceremony rig outlives its own
+    // bound. That path exits the process from inside the rig's cleanup, so
+    // nothing below returns here to report it. The ceremony browser is still
+    // alive when it fires, and `placed` has not recorded it yet, so the pid
+    // arrives with the call rather than off the placement slot.
+    reportCeremonyExpired: (ownBrowserPid: number | null) => void;
     // Providers whose cookie clear busy-failed and now rides the ceremony
     // (see the --force-relogin block in the caller).
     forceReloginProviders?: readonly OAuthProviderId[];
@@ -1500,6 +1512,7 @@ async function runInstallClaim(
       options.placed.ownBrowserPid = ownBrowserPid;
       options.reportSignInOpen(initiate.confirm_url, placement);
     },
+    onCeremonyExpired: options.reportCeremonyExpired,
     deadline: ceremonyDeadline,
     ...(options.forceReloginProviders?.length
       ? { forceReloginProviders: options.forceReloginProviders }
