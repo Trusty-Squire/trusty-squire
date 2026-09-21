@@ -731,13 +731,67 @@ describe("connect --target=<agent> writes a valid config", () => {
     }
   });
 
+  // Item 5 names three answers: a real display, a virtual one, or nowhere
+  // reachable. A ceremony whose rig never came up showed the page nowhere —
+  // handing back a live URL plus an English sentence to interpret is the
+  // parsing this surface exists to delete.
+  it("reports a ceremony that showed the page nowhere as unreachable", async () => {
+    vi.mocked(installPoll).mockResolvedValue({ status: "pending" });
+    vi.mocked(openInstallConfirmInBotChrome).mockResolvedValueOnce({
+      status: "error",
+      detail: "x11vnc is not installed",
+    });
+    const machine = captureMachineChannel();
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const exit = vi.spyOn(process, "exit").mockImplementation((code) => {
+      throw new Error(`exit:${code}`);
+    });
+    try {
+      await expect(
+        connect({
+          command: "connect",
+          target: "hermes",
+          apiBase: "https://test.invalid",
+          skipBrowser: false,
+          forceRelogin: false,
+          noRegistry: false,
+          noInteractive: true,
+          json: true,
+        }),
+      ).rejects.toThrow("exit:1");
+      const report = machine.terminal<{
+        state: string;
+        sign_in_url: string | null;
+        browser_location: { kind: string; reason?: string };
+      }>();
+      expect(report.browser_location.kind).toBe("unreachable");
+      expect(report.browser_location.reason).toBe("x11vnc is not installed");
+      expect(report.state).toBe("no-browser");
+    } finally {
+      exit.mockRestore();
+      warn.mockRestore();
+      error.mockRestore();
+      machine.restore();
+      vi.mocked(installPoll).mockReset();
+      vi.mocked(installPoll).mockResolvedValue({
+        status: "claimed",
+        agent_session_token: "ts_agent_test_token",
+        account_id: "acct_test",
+      });
+    }
+  });
+
   // Item 5 is answered where the browser was placed, and the answer is not
   // rewritten later. A virtual display carries the address that reaches it, and
   // that line goes out while the tunnel is up — not at settle, when it is gone.
   it("reports the virtual display and its live address before the wait", async () => {
     vi.mocked(installPoll).mockResolvedValue({ status: "pending" });
     vi.mocked(openInstallConfirmInBotChrome).mockImplementationOnce(async (options) => {
-      options.onBrowserPlacement?.({ kind: "virtual", url: "https://tunnel.invalid/#p=secret" });
+      options.onBrowserPlacement?.(
+        { kind: "virtual", url: "https://tunnel.invalid/#p=secret" },
+        null,
+      );
       return { status: "timeout" as const };
     });
     const machine = captureMachineChannel();

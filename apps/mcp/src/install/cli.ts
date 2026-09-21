@@ -534,7 +534,7 @@ async function connect(args: Argv, argv: readonly string[] = []): Promise<void> 
   let reportProfileDir = CHROME_PROFILE_DIR;
   // Null until the ceremony is attempted: only then is "no browser opened"
   // something this handler could stop asserting for free.
-  const placed: BrowserPlacementSlot = { value: null };
+  const placed: BrowserPlacementSlot = { value: null, ownBrowserPid: null };
   try {
     // `npx …/mcp connect` reuses a stale local copy instead of fetching the
     // latest, and connect then pins the host config to that stale version.
@@ -595,6 +595,7 @@ async function connect(args: Argv, argv: readonly string[] = []): Promise<void> 
         outcome: contended ? { kind: "profile_busy" } : { kind: "run_failed" },
         profileDir: reportProfileDir,
         browser_location: placed.value ?? { kind: "none" },
+        ownBrowserPid: placed.ownBrowserPid,
       });
       ui.fail(
         err instanceof ProfileBusyError
@@ -607,6 +608,7 @@ async function connect(args: Argv, argv: readonly string[] = []): Promise<void> 
       outcome: { kind: "run_failed" },
       profileDir: reportProfileDir,
       browser_location: placed.value ?? { kind: "none" },
+      ownBrowserPid: placed.ownBrowserPid,
     });
     throw err;
   }
@@ -695,12 +697,13 @@ function emitConnectStatus(
     outcome: ConnectOutcome;
     profileDir: string;
     browser_location: ConnectBrowserLocation;
+    ownBrowserPid?: number | null;
   },
 ): void {
   emitConnectReport(
     buildConnectReport({
       outcome: input.outcome,
-      holder: snapshotConnectHolder(input.profileDir),
+      holder: snapshotConnectHolder(input.profileDir, input.ownBrowserPid ?? null),
       browser_location: input.browser_location,
     }),
     args.json,
@@ -940,6 +943,7 @@ async function runConnectInstall(
         outcome: { kind: "sign_in_open", confirm_url },
         profileDir,
         browser_location,
+        ownBrowserPid: placed.ownBrowserPid,
       }),
     ...(deferredReloginProviders.length ? { forceReloginProviders: deferredReloginProviders } : {}),
   });
@@ -948,6 +952,7 @@ async function runConnectInstall(
       outcome: { kind: "install_unclaimed", confirm_url: claim.confirm_url },
       profileDir,
       browser_location: claim.browser_location,
+      ownBrowserPid: placed.ownBrowserPid,
     });
     ui.fail(`Couldn't open the confirm page: ${claim.detail}`);
     process.exit(1);
@@ -957,6 +962,7 @@ async function runConnectInstall(
       outcome: { kind: "install_expired" },
       profileDir,
       browser_location: claim.browser_location,
+      ownBrowserPid: placed.ownBrowserPid,
     });
     ui.fail(
       `The sign-in window expired before the browser confirm finished. ` +
@@ -969,6 +975,7 @@ async function runConnectInstall(
       outcome: { kind: "install_unclaimed", confirm_url: claim.confirm_url },
       profileDir,
       browser_location: claim.browser_location,
+      ownBrowserPid: placed.ownBrowserPid,
     });
     ui.fail(
       `Install didn't complete — browser confirm never finished. ` +
@@ -986,6 +993,7 @@ async function runConnectInstall(
       outcome: { kind: "account_switch_refused" },
       profileDir,
       browser_location: claim.browser_location,
+      ownBrowserPid: placed.ownBrowserPid,
     });
     ui.fail(
       `The scoped ${args.forceReloginProvider} refresh returned a different Trusty Squire account. ` +
@@ -1046,6 +1054,7 @@ async function runConnectInstall(
     },
     profileDir,
     browser_location: claim.browser_location,
+    ownBrowserPid: placed.ownBrowserPid,
   });
   if (!complete.ok) {
     ui.fail(connectIncompleteMessage(complete.reason, args.skipBrowser));
@@ -1330,10 +1339,13 @@ export function claimHeartbeatMessage(claimed: boolean): string {
 // when it did not claim: the sign-in URL that is still live, and where the
 // browser actually went.
 // One run's observed ceremony placement, shared with the handlers that report
-// it. `null` means no ceremony was attempted, which is the only state in which
-// "no browser was opened" is a fact rather than an assumption.
+// it. `value === null` means no ceremony was attempted, which is the only
+// state in which "no browser was opened" is a fact rather than an assumption.
+// `ownBrowserPid` is the Chrome this run launched, so the holder snapshot can
+// tell its own ceremony window apart from another session's.
 interface BrowserPlacementSlot {
   value: ConnectBrowserLocation | null;
+  ownBrowserPid: number | null;
 }
 
 type InstallClaimResult =
@@ -1475,13 +1487,6 @@ async function runInstallClaim(
     };
   }
 
-  // The ceremony is about to run, so "no browser opened" stops being true.
-  // The callback below replaces this the moment a path reports a placement.
-  options.placed.value = {
-    kind: "unknown",
-    reason: "the ceremony ended before any path reported where the browser opened",
-  };
-
   // Default: run the confirm INSIDE the bot's Chrome. The user signs
   // The wizard page reads provider state from /v1/auth/whoami so no
   // CLI-side hint is needed.
@@ -1490,8 +1495,9 @@ async function runInstallClaim(
     pollUntilClaimed: pollOnce,
     heartbeatMessage: () => claimHeartbeatMessage(state.value !== null),
     profileDir: options.profileDir,
-    onBrowserPlacement: (placement) => {
+    onBrowserPlacement: (placement, ownBrowserPid) => {
       options.placed.value = placement;
+      options.placed.ownBrowserPid = ownBrowserPid;
       options.reportSignInOpen(initiate.confirm_url, placement);
     },
     deadline: ceremonyDeadline,
@@ -1499,7 +1505,14 @@ async function runInstallClaim(
       ? { forceReloginProviders: options.forceReloginProviders }
       : {}),
   });
-  const browser_location: ConnectBrowserLocation = options.placed.value;
+  // No path reported a placement, so nothing was shown anywhere — which is
+  // `unreachable`, named with the failure that caused it, not a fourth
+  // spelling a caller has to read English to interpret.
+  const browser_location: ConnectBrowserLocation = options.placed.value ?? {
+    kind: "unreachable",
+    reason: result.detail ?? "the ceremony ended without showing the page anywhere",
+  };
+  options.placed.value = browser_location;
 
   // rc.33 — surface the underlying error instead of letting the outer
   // wrapper print a generic "browser confirm step never finished."

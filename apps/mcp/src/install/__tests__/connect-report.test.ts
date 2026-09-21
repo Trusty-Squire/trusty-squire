@@ -330,6 +330,19 @@ describe("human copy renders from the same facts", () => {
 // Chrome's SingletonLock is a symlink named `<host>-<pid>`; a crashed or
 // killed browser leaves one behind pointing at a pid that is gone. That is
 // what `reapLeakedProfileHolder` clears — so it is not a holder.
+// The lease records the acquiring process. Taking it while `process.pid`
+// reads as a live foreign process is how a test gets a lease owned by
+// someone else without a second TypeScript runtime.
+function leaseHeldBy(profileDir: string, pid: number): ProfileOperationLease {
+  const own = Object.getOwnPropertyDescriptor(process, "pid");
+  Object.defineProperty(process, "pid", { value: pid, configurable: true });
+  try {
+    return acquireProfileOperationGuard(profileDir);
+  } finally {
+    if (own !== undefined) Object.defineProperty(process, "pid", own);
+  }
+}
+
 describe("snapshotConnectHolder", () => {
   function lockedProfile(pid: number): string {
     const dir = mkdtempSync(join(tmpdir(), "ts-connect-holder-"));
@@ -347,6 +360,56 @@ describe("snapshotConnectHolder", () => {
     expect(snapshotConnectHolder(mkdtempSync(join(tmpdir(), "ts-connect-holder-")))).toEqual({
       kind: "none",
     });
+  });
+
+  // The ceremony Chrome this run launched writes the same SingletonLock a
+  // foreign browser would, and it is a CHILD process, so comparing against
+  // `process.pid` never caught it. Naming it `other` told a caller the profile
+  // was held by another session while this very run was showing it a sign-in.
+  it("does not name the browser this run launched as another session", async () => {
+    const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+      stdio: "ignore",
+    });
+    await new Promise<void>((resolve) => child.once("spawn", () => resolve()));
+    try {
+      const profileDir = lockedProfile(child.pid!);
+      expect(snapshotConnectHolder(profileDir)).toEqual({
+        kind: "other",
+        code: "singleton_lock",
+        pid: child.pid,
+      });
+      expect(snapshotConnectHolder(profileDir, child.pid!)).toEqual({ kind: "none" });
+    } finally {
+      child.kill("SIGKILL");
+    }
+  });
+
+  // Our own window must not mask a lease another session holds: the branch
+  // falls through the way the stale and absent-lock branches already do.
+  it("still names a foreign lease behind this run's own ceremony window", async () => {
+    const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+      stdio: "ignore",
+    });
+    const childUp = new Promise<void>((resolve) => child.once("spawn", () => resolve()));
+    const leaseOwner = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+      stdio: "ignore",
+    });
+    const leaseOwnerUp = new Promise<void>((resolve) => leaseOwner.once("spawn", () => resolve()));
+    await Promise.all([childUp, leaseOwnerUp]);
+    let lease: ProfileOperationLease | undefined;
+    try {
+      const profileDir = lockedProfile(child.pid!);
+      lease = leaseHeldBy(profileDir, leaseOwner.pid!);
+      expect(snapshotConnectHolder(profileDir, child.pid!)).toEqual({
+        kind: "other",
+        code: "operation_lease",
+        pid: leaseOwner.pid,
+      });
+    } finally {
+      lease?.release();
+      leaseOwner.kill("SIGKILL");
+      child.kill("SIGKILL");
+    }
   });
 });
 
@@ -416,19 +479,6 @@ describe("snapshotConnectHolder reads the operation lease too", () => {
     child?.kill("SIGKILL");
     child = undefined;
   });
-
-  // The lease records the acquiring process. Taking it while `process.pid`
-  // reads as a live foreign process is how a test gets a lease owned by
-  // someone else without a second TypeScript runtime.
-  function leaseHeldBy(profileDir: string, pid: number): ProfileOperationLease {
-    const own = Object.getOwnPropertyDescriptor(process, "pid");
-    Object.defineProperty(process, "pid", { value: pid, configurable: true });
-    try {
-      return acquireProfileOperationGuard(profileDir);
-    } finally {
-      if (own !== undefined) Object.defineProperty(process, "pid", own);
-    }
-  }
 
   it("names the session that holds the lease when no browser lock exists", async () => {
     const profileDir = mkdtempSync(join(tmpdir(), "ts-connect-lease-"));

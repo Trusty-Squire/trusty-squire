@@ -374,13 +374,24 @@ export function decideConnectComplete(
   return { ok: true };
 }
 
-export function snapshotConnectHolder(profileDir: string): ConnectHolder {
+/**
+ * Who holds the bot profile, as read. `ownBrowserPid` is the ceremony Chrome
+ * THIS run launched, when it launched one: that window is not "another
+ * session", and answering `other` for it told a caller to wait for itself.
+ */
+export function snapshotConnectHolder(
+  profileDir: string,
+  ownBrowserPid: number | null = null,
+): ConnectHolder {
   const lock = readLockHolder(profileDir);
   if (lock === null) return leaseHolder(profileDir);
   if (lock.host !== hostname()) return { kind: "unknown", reason: "cross_host" };
   // A lock whose pid is gone is what `reapLeakedProfileHolder` exists to
   // clear; reporting it as a live holder is the opposite answer.
   if (lock.stale) return leaseHolder(profileDir);
+  // Our own ceremony window masks nothing: a lease another session holds is
+  // still worth naming, so fall through the way the other branches do.
+  if (ownBrowserPid !== null && lock.pid === ownBrowserPid) return leaseHolder(profileDir);
   return { kind: "other", code: "singleton_lock", pid: lock.pid };
 }
 
