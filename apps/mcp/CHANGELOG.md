@@ -1,5 +1,9 @@
 # Changelog — @trusty-squire/mcp
 
+## Unreleased
+
+- `connect --json` prints a typed report on stdout (`state`, `sign_in_url`, `account`, `holder`, `browser_location`) from the same value the human copy renders. Human output is unchanged.
+
 ## 1.1.14-rc.15 (2026-09-12)
 
 - Detect SBPS card-payment CVV fields and, during the captain-approved time-boxed payment window, allow 3DS requests within the relaxed payment-window host scope (#738).

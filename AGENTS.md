@@ -777,7 +777,10 @@ Read this file. Follow the rules. Run the verify script. Paste the output. Then 
 - **`connect` is the only sign-in command.** Never reintroduce `login`.
   The shared-browser ceremony and fallback contracts are owned by
   [`docs/browser-broker.md`](docs/browser-broker.md); user-facing setup is in
-  [README.md](README.md).
+  [README.md](README.md). Machine callers use `connect --json` — the typed
+  report (`state`, `sign_in_url`, `account`, `holder`, `browser_location`) is
+  built by [`apps/mcp/src/install/connect-report.ts`](apps/mcp/src/install/connect-report.ts)
+  and the human copy renders from the same value. Do not parse connect's English.
 - **Never quit a Chrome whose profile state you still need with SIGTERM.** Chrome
   routes SIGTERM to its abrupt "session ending" exit and does NOT flush the
   SQLite cookie store (its own commit timer is ~30s out), so a SIGTERM teardown

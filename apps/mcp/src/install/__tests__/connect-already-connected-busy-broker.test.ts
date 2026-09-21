@@ -223,6 +223,52 @@ it("reports already connected while the broker owns the profile and its browser"
   expect(elapsed).toBeLessThan(5_000);
 });
 
+it("prints the same already-connected facts as JSON without changing the human line", async () => {
+  await writeProfileCookies(
+    profileDir,
+    GOOGLE_SESSION_COOKIES.map((name) => ({ host: ".google.com", name })),
+  );
+  profileLease = acquireProfileOperationGuard(profileDir);
+  vi.stubEnv("TRUSTY_SQUIRE_PROFILE_DIR", profileDir);
+
+  const human: string[] = [];
+  const machine: string[] = [];
+  const warn = vi.spyOn(console, "warn").mockImplementation((message?: unknown) => {
+    human.push(String(message));
+  });
+  const write = vi.spyOn(process.stdout, "write").mockImplementation((chunk) => {
+    machine.push(String(chunk));
+    return true;
+  });
+  try {
+    await connect({
+      command: "connect",
+      target: "cursor",
+      apiBase: "https://api.example.test",
+      skipBrowser: false,
+      forceRelogin: false,
+      noRegistry: false,
+      noInteractive: true,
+      json: true,
+    });
+  } finally {
+    warn.mockRestore();
+    write.mockRestore();
+  }
+
+  expect(human.join("\n")).toContain("Already connected");
+  const report = JSON.parse(machine.join("").trim().split("\n").at(-1) ?? "{}") as {
+    state: string;
+    sign_in_url: string | null;
+    account: { id: string; providers: string[] } | null;
+    browser_location: { kind: string };
+  };
+  expect(report.state).toBe("connected");
+  expect(report.sign_in_url).toBeNull();
+  expect(report.account).toEqual({ id: "account-id", providers: ["google"] });
+  expect(report.browser_location).toEqual({ kind: "none" });
+});
+
 // An ABSENT cookie store and an UNREADABLE one are different answers, and
 // collapsing them is what stranded a bound machine with no profile: it can
 // never be "already connected", and it must never be told to close a browser

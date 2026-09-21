@@ -61,6 +61,11 @@ describe("parseArgs --skip-browser", () => {
     expect(parseArgs(["connect"]).forceRelogin).toBe(false);
     expect(parseArgs(["connect", "--force-relogin"]).forceRelogin).toBe(true);
   });
+
+  it("parses --json without changing the default human path", () => {
+    expect(parseArgs(["connect"]).json).toBeUndefined();
+    expect(parseArgs(["connect", "--json"]).json).toBe(true);
+  });
 });
 
 describe("parseArgs registry", () => {

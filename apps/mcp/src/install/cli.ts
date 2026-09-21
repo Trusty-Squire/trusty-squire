@@ -75,6 +75,22 @@ import {
 } from "./interactive.js";
 import chalk from "chalk";
 import { confirm, isCancel } from "@clack/prompts";
+import { hostDisplayAcceptsConnections } from "../bot/display-env.js";
+import {
+  alreadyConnectedMessage,
+  buildConnectReport,
+  connectIncompleteMessage,
+  decideConnectComplete,
+  decideConnectPreflight,
+  emitConnectReport,
+  isUnshowableConfirmDetail,
+  observeConnectBrowserLocation,
+  preflightUnverifiedMessage,
+  providersConnectMustAwait,
+  snapshotConnectHolder,
+  type ConnectBrowserLocation,
+  type ConnectOutcome,
+} from "./connect-report.js";
 
 const DEFAULT_API_BASE = process.env.TRUSTY_SQUIRE_API_BASE ?? "https://trusty-squire-api.fly.dev";
 // Managed skill-registry URL. Advanced setup decides whether this is written
@@ -118,6 +134,9 @@ type Argv = {
   // scripted runs that still want a normal Chrome confirm (i.e. don't
   // imply --skip-browser).
   noInteractive: boolean;
+  // --json: print the typed connect report on stdout. Human copy stays
+  // on stderr. Additive — an interactive run without this flag is unchanged.
+  json?: boolean;
   advancedConfigured?: boolean;
   consentOperatorInboxOtp?: boolean;
 };
@@ -152,6 +171,7 @@ function parseArgs(argv: string[]): Argv {
   let forceRelogin = false;
   let forceReloginProvider: ProviderArg | undefined;
   let noInteractive = false;
+  let json = false;
   let account: string | undefined;
   for (const arg of argv) {
     if (arg.startsWith("--target=")) {
@@ -209,6 +229,8 @@ function parseArgs(argv: string[]): Argv {
       rejectDeprecatedCli("`--skip-secondary` has been removed; connect is single-stage.");
     } else if (arg === "--no-interactive") {
       noInteractive = true;
+    } else if (arg === "--json") {
+      json = true;
     }
   }
   const args: Argv = {
@@ -220,6 +242,7 @@ function parseArgs(argv: string[]): Argv {
     noRegistry,
     ...(registryConfigured ? { registryConfigured } : {}),
     noInteractive,
+    ...(json ? { json } : {}),
   };
   if (target !== undefined) args.target = target;
   if (account !== undefined) {
@@ -509,6 +532,14 @@ async function connect(args: Argv): Promise<void> {
     );
   } catch (err) {
     if (err instanceof ProfileBusyError) {
+      emitConnectReport(
+        buildConnectReport({
+          outcome: { kind: "profile_busy" },
+          holder: snapshotConnectHolder(canonicalProfileDir),
+          browser_location: { kind: "none" },
+        }),
+        args.json,
+      );
       ui.fail(PROFILE_BUSY_MESSAGE);
       process.exit(1);
     }
@@ -593,6 +624,24 @@ export async function resolveConnectTargetContext(
   };
 }
 
+function emitConnectStatus(
+  args: Argv,
+  input: {
+    outcome: ConnectOutcome;
+    profileDir: string;
+    browser_location: ConnectBrowserLocation;
+  },
+): void {
+  emitConnectReport(
+    buildConnectReport({
+      outcome: input.outcome,
+      holder: snapshotConnectHolder(input.profileDir),
+      browser_location: input.browser_location,
+    }),
+    args.json,
+  );
+}
+
 async function withConnectTargetEnvironment<T>(
   context: ConnectTargetContext,
   operation: () => Promise<T>,
@@ -653,6 +702,11 @@ async function settleAlreadyConnected(
       agentIdentity,
     });
     await maybeStoreTwoCaptchaKey(args, preflight.session);
+    emitConnectStatus(args, {
+      outcome: { kind: "unverified", account_id: preflight.session.account_id ?? "" },
+      profileDir,
+      browser_location: { kind: "none" },
+    });
     ui.warn(preflightUnverifiedMessage(preflight.detail));
     ui.hint(
       `Close any other Trusty Squire session and re-run ` +
@@ -674,10 +728,16 @@ async function settleAlreadyConnected(
       agentIdentity,
     });
     await maybeStoreTwoCaptchaKey(args, preflight.session);
-    ui.success(
-      `Already connected (${preflight.providers.join(" + ")}). ` +
-        `${agent.display_name} config refreshed.`,
-    );
+    emitConnectStatus(args, {
+      outcome: {
+        kind: "provisioned",
+        account_id: preflight.session.account_id ?? "",
+        providers: preflight.providers,
+      },
+      profileDir,
+      browser_location: { kind: "none" },
+    });
+    ui.success(alreadyConnectedMessage(preflight.providers, agent.display_name));
     printProviderState(preflight.providers);
     ui.hint(
       `Pass ${ui.code("--force-relogin")} to switch accounts or to refresh a ` +
@@ -748,6 +808,11 @@ async function runConnectInstall(
           "signed out through the sign-in browser instead.",
       );
     } else if (!cleared) {
+      emitConnectStatus(args, {
+        outcome: { kind: "cookie_clear_failed" },
+        profileDir,
+        browser_location: { kind: "none" },
+      });
       ui.fail(
         "I couldn't verify that the previous provider cookies were cleared. " +
           "Close every Chrome process using the bot profile and retry with --force-relogin.",
@@ -803,9 +868,15 @@ async function runConnectInstall(
   const session = await runInstallClaim(args.apiBase, target, baseSession, args.skipBrowser, {
     applyServerPrefs: !wantInteractive,
     profileDir,
+    json: args.json === true,
     ...(deferredReloginProviders.length ? { forceReloginProviders: deferredReloginProviders } : {}),
   });
   if (session === null) {
+    emitConnectStatus(args, {
+      outcome: { kind: "install_unclaimed" },
+      profileDir,
+      browser_location: { kind: "none" },
+    });
     ui.fail(
       `Install didn't complete — browser confirm never finished. ` +
         `Try again: ${ui.code("npx @trusty-squire/mcp connect")}`,
@@ -817,6 +888,11 @@ async function runConnectInstall(
     accountId !== undefined &&
     session.account_id !== accountId
   ) {
+    emitConnectStatus(args, {
+      outcome: { kind: "account_switch_refused" },
+      profileDir,
+      browser_location: { kind: "none" },
+    });
     ui.fail(
       `The scoped ${args.forceReloginProvider} refresh returned a different Trusty Squire account. ` +
         `Refusing to replace ${agent.display_name}'s account binding; use bare --force-relogin ` +
@@ -865,6 +941,19 @@ async function runConnectInstall(
   await maybeStoreTwoCaptchaKey(args, session);
 
   const complete = decideConnectComplete(providers, args.forceReloginProvider);
+  emitConnectStatus(args, {
+    outcome: {
+      kind: "ceremony_complete",
+      account_id: session.account_id ?? "",
+      providers,
+      ...(args.forceReloginProvider !== undefined
+        ? { requested_provider: args.forceReloginProvider }
+        : {}),
+      skip_browser: args.skipBrowser,
+    },
+    profileDir,
+    browser_location: { kind: "none" },
+  });
   if (!complete.ok) {
     ui.fail(connectIncompleteMessage(complete.reason, args.skipBrowser));
     process.exit(1);
@@ -949,155 +1038,16 @@ export async function agentTokenStillValid(
   }
 }
 
-// Pure gate for the `connect` fast path: given the read session, whether its
-// agent token still validated, and the bot's confirmed provider sessions,
-// decide whether connect can (re)write the MCP config WITHOUT a browser
-// re-claim.
-//
-// Account-bound plumbing is not enough. The product-level connection is the
-// bot-profile Google session: without it the host agent may be able to call the
-// Trusty Squire API, but cannot act as the user at third-party services.
-// GitHub is optional headroom; Google is the required primary identity.
-export function decideProvisioned(
-  session: SessionData | null,
-  tokenValid: boolean,
-  providers: OAuthProviderId[],
-): { providers: OAuthProviderId[] } | null {
-  if (
-    session === null ||
-    session.machine_token === undefined ||
-    session.agent_session_token === undefined ||
-    session.account_id === undefined
-  ) {
-    return null;
-  }
-  if (!tokenValid) return null;
-  if (!providers.includes("google")) return null;
-  return { providers };
-}
-
-export type ConnectPreflight =
-  | { kind: "ceremony" }
-  | { kind: "provisioned"; providers: OAuthProviderId[] }
-  | { kind: "unverified" };
-
-type VerifiedConnectPreflight = Exclude<ConnectPreflight, { kind: "unverified" }>;
-
-export function decideConnectPreflight(
-  session: SessionData | null,
-  tokenValid: boolean,
-  providers: null,
-): Extract<ConnectPreflight, { kind: "ceremony" } | { kind: "unverified" }>;
-export function decideConnectPreflight(
-  session: SessionData | null,
-  tokenValid: boolean,
-  providers: OAuthProviderId[],
-): VerifiedConnectPreflight;
-export function decideConnectPreflight(
-  session: SessionData | null,
-  tokenValid: boolean,
-  providers: OAuthProviderId[] | null,
-): ConnectPreflight {
-  if (
-    session === null ||
-    session.machine_token === undefined ||
-    session.agent_session_token === undefined ||
-    session.account_id === undefined
-  ) {
-    return { kind: "ceremony" };
-  }
-  // Deliberately precede probe-null: an expired agent token must re-pair, not
-  // silently refresh config into an install that 401s on every MCP call.
-  // Do not flip this ordering.
-  if (!tokenValid) return { kind: "ceremony" };
-  if (providers === null) return { kind: "unverified" };
-  const provisioned = decideProvisioned(session, tokenValid, providers);
-  return provisioned === null
-    ? { kind: "ceremony" }
-    : { kind: "provisioned", providers: provisioned.providers };
-}
-
-export type ConnectIncompleteReason =
-  | "probe_failed"
-  | "no_google_session"
-  | "requested_provider_missing";
-
-// Pure SUCCESS GATE for a connect run that went through the ceremony. The
-// machine claim is not the product: an install is only connected when the
-// bot's Chrome profile holds a session it can wear at third-party sites, and
-// the only thing that proves it is the post-ceremony LIVE probe. `providers`
-// is null when that probe failed, which fails closed — an unverifiable session
-// must never be reported as connected (that is how connect used to print
-// "Squire on duty" over an install with no Google session at all).
-/**
- * The providers the post-ceremony probe must wait for before it may answer.
- *
- * This is exactly what `decideConnectComplete` goes on to DEMAND, and the two
- * must not drift: Google is required on every run, plus an explicitly
- * requested `--force-relogin=<provider>`. Awaiting only the requested one let
- * the snapshot answer on cookies that were already on disk — a profile with
- * GitHub committed from an earlier run returns `["github"]` on the first read
- * while the Google session the user just created is still inside Chrome's
- * ~30s commit window, and the gate rejects a sign-in that succeeded.
- */
-export function providersConnectMustAwait(requestedProvider?: OAuthProviderId): OAuthProviderId[] {
-  return requestedProvider === undefined || requestedProvider === "google"
-    ? ["google"]
-    : ["google", requestedProvider];
-}
-
-export function decideConnectComplete(
-  providers: OAuthProviderId[] | null,
-  requestedProvider?: OAuthProviderId,
-): { ok: true } | { ok: false; reason: ConnectIncompleteReason } {
-  if (providers === null) return { ok: false, reason: "probe_failed" };
-  if (!providers.includes("google")) return { ok: false, reason: "no_google_session" };
-  // A scoped --force-relogin=<provider> is an explicit ask; silently landing
-  // only Google would report success for work the user didn't get.
-  if (requestedProvider !== undefined && !providers.includes(requestedProvider)) {
-    return { ok: false, reason: "requested_provider_missing" };
-  }
-  return { ok: true };
-}
-
-export function connectIncompleteMessage(
-  reason: ConnectIncompleteReason,
-  skipBrowser: boolean,
-): string {
-  const retry = "npx @trusty-squire/mcp connect --force-relogin";
-  const skipBrowserNote = skipBrowser
-    ? " --skip-browser signs you in outside the bot's Chrome, so its profile never " +
-      "gains the session; re-run connect without it on a machine with a display " +
-      "(headless hosts get a noVNC URL)."
-    : "";
-  switch (reason) {
-    case "probe_failed":
-      return (
-        `This machine is bound to your account, but I couldn't verify a live Google session ` +
-        `in the bot's Chrome profile, so I won't call this connected. ` +
-        `Close any other Trusty Squire session and re-run ${retry}.`
-      );
-    case "no_google_session":
-      return (
-        `This machine is bound to your account, but the bot's Chrome profile has no live ` +
-        `Google session, so the operator cannot act as you.${skipBrowserNote} ` +
-        `Re-run ${retry}.`
-      );
-    case "requested_provider_missing":
-      return (
-        `This machine is connected, but the provider sign-in you asked to refresh didn't ` +
-        `complete. Re-run ${retry}=github and finish the GitHub step in the browser.`
-      );
-  }
-}
-
-export function preflightUnverifiedMessage(detail: string): string {
-  return (
-    `This machine is bound to your account, but I couldn't verify a live provider session ` +
-    `in the bot's Chrome profile (${detail}), so I won't call this connected. ` +
-    `Your agent config was refreshed.`
-  );
-}
+export {
+  connectIncompleteMessage,
+  decideConnectComplete,
+  decideConnectPreflight,
+  decideProvisioned,
+  preflightUnverifiedMessage,
+  providersConnectMustAwait,
+  type ConnectIncompleteReason,
+  type ConnectPreflight,
+} from "./connect-report.js";
 
 type CheckedConnectPreflight =
   | { kind: "ceremony" }
@@ -1307,6 +1257,7 @@ async function runInstallClaim(
     // discarded a fresh inbox-read preference.
     applyServerPrefs: boolean;
     profileDir: string;
+    json?: boolean;
     // Providers whose cookie clear busy-failed and now rides the ceremony
     // (see the --force-relogin block in the caller).
     forceReloginProviders?: readonly OAuthProviderId[];
@@ -1314,6 +1265,23 @@ async function runInstallClaim(
 ): Promise<SessionData | null> {
   console.warn(`Connecting this machine to your account…`);
   const initiate = await installInitiate(apiBase, target, baseSession.machine_token ?? null);
+  const hostScreenLive = skipBrowser ? false : await hostDisplayAcceptsConnections();
+  emitConnectReport(
+    buildConnectReport({
+      outcome: {
+        kind: "ceremony_waiting",
+        confirm_url: initiate.confirm_url,
+        skip_browser: skipBrowser,
+      },
+      holder: snapshotConnectHolder(options.profileDir),
+      browser_location: observeConnectBrowserLocation({
+        phase: skipBrowser ? "skip_browser" : "decided",
+        host_screen_live: hostScreenLive,
+        ...(process.env.DISPLAY !== undefined ? { display: process.env.DISPLAY } : {}),
+      }),
+    }),
+    options.json,
+  );
 
   // Track the claimed token outside the poll closure so the in-Chrome
   // flow's pollUntilClaimed can read it once the API reports claimed.
@@ -1401,7 +1369,20 @@ async function runInstallClaim(
   // Surface the underlying browser-launch error rather than replacing it
   // with a generic confirmation timeout.
   if (result.status === "error") {
-    ui.fail(`Couldn't open the confirm page: ${result.detail ?? "unknown error"}`);
+    const detail = result.detail ?? "unknown error";
+    emitConnectReport(
+      buildConnectReport({
+        outcome: isUnshowableConfirmDetail(detail)
+          ? { kind: "display_unshowable", detail }
+          : { kind: "browser_confirm_failed", detail },
+        holder: snapshotConnectHolder(options.profileDir),
+        browser_location: isUnshowableConfirmDetail(detail)
+          ? { kind: "unreachable", reason: detail }
+          : { kind: "unknown", reason: detail },
+      }),
+      options.json,
+    );
+    ui.fail(`Couldn't open the confirm page: ${detail}`);
     process.exit(1);
   }
 
@@ -1490,6 +1471,7 @@ function printHelp(): void {
   );
   console.warn(`  --no-registry                disable managed registry participation`);
   console.warn(`  --no-interactive             skip the TUI picker (use flag defaults only)`);
+  console.warn(`  --json                       print a machine-readable connect report on stdout`);
   console.warn("");
   console.warn(`${chalk.bold("Example")}`);
   console.warn(`  ${ui.code("npx @trusty-squire/mcp connect")}`);

@@ -104,6 +104,12 @@ To choose a target explicitly:
 npx @trusty-squire/mcp connect --target=codex
 ```
 
+Callers that must not parse English can pass `--json`. Connect then prints a typed report on stdout (`state`, `sign_in_url`, `account`, `holder`, `browser_location`) from the same value the human copy uses. Human output stays on stderr. A first-time install has no MCP session yet, so this flag is the machine contract — not a server tool.
+
+```bash
+npx @trusty-squire/mcp connect --json --no-interactive --target=codex
+```
+
 Supported targets: `claude-code`, `cursor`, `codex`, `opencode`, `goose`, `cline`, `continue`, and `hermes`.
 
 The isolated `operate_*` browser runtime currently requires Linux and a local Chrome connection;
