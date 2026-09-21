@@ -64,6 +64,7 @@ import {
 } from "./browser-process-runtime.js";
 import type { RemoteLoginRig } from "./remote-login-display.js";
 import type { PageDriver } from "./page-driver.js";
+import { hostDisplayAcceptsConnections } from "./display-env.js";
 
 const OPERATOR_BROWSER_WINDOW_SIZE = { width: 1280, height: 1024 };
 
@@ -162,11 +163,19 @@ export class BrowserProcessOwner {
   }
 
   private async ownedHeadedBrowserEnvironment(): Promise<NodeJS.ProcessEnv> {
+    // Real screen wins: Xvfb exists for headless hosts only. The display is
+    // verified live — this daemon outlives the X session that handed it a
+    // DISPLAY, and a dead one must fall back to a rig, not fail every launch.
+    if (await hostDisplayAcceptsConnections()) return { ...process.env };
     if (this.ownedDisplayRig === null) {
       const { createXvfbDisplayRig, startRemoteLoginDisplay } =
         await import("./remote-login-display.js");
       const rig = createXvfbDisplayRig(OPERATOR_BROWSER_WINDOW_SIZE);
       this.ownedDisplayRig = rig;
+      // Reaped through ownership, not process hooks: the Xvfb is an
+      // owner-tracked helper in its own process group, recorded in the reaper
+      // manifest, so the reaper worker reaps it when this owner dies — SIGKILL
+      // included — and the next start sweeps whatever that missed.
       await startRemoteLoginDisplay(rig);
     }
     const { remoteLoginEnvironment } = await import("./remote-login-display.js");
@@ -525,8 +534,9 @@ export class BrowserProcessOwner {
             : ""),
       );
     }
-    // Keep the operator browser headed: the browser runs on the operator's
-    // Xvfb display, preserving the normal Chrome surface OAuth providers see.
+    // Keep the operator browser headed: the machine screen when one exists,
+    // otherwise the operator's Xvfb, preserving the normal Chrome surface
+    // OAuth providers see.
     this.launchedMode = "headed";
 
     // T3: a PERSISTENT context backed by this operator session's unique
@@ -773,7 +783,9 @@ export class BrowserProcessOwner {
     let probe: Browser | undefined;
     try {
       probe = await getChromium().launch({
-        headless: OPERATOR_BROWSER_HEADLESS,
+        // Throwaway: it reads one JSON body and never needs a screen, so it
+        // stays headless rather than flashing a window on the user's desktop.
+        headless: true,
         env: browserEnv,
         ...(channel !== null ? { channel } : {}),
         ...(proxy !== null ? { proxy } : {}),

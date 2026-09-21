@@ -1,18 +1,20 @@
-// The shared-broker ceremony exposure must never start a noVNC rig it cannot
-// PROVE is ours: the holder's XAUTHORITY has to be a `tsq-login-` private
-// rig the broker minted. The result names WHY there is no exposure, because
-// the states are not equivalent (round-12 review-3): "unshowable" means the
-// ceremony tab provably cannot be shown to anyone and the connect fails
-// immediately with the cause and the recovery; "already_visible" means the
-// tab sits on a display this repository did not create (the machine's own
-// screen), which the user may be looking at right now.
+// The ceremony tab has to land where the person running connect can see it,
+// and the broker's own environment never decides that: its Chrome may sit on
+// the machine's screen while connect runs over SSH, or on a private Xvfb
+// while connect runs at the desk. So the tab counts as visible only when the
+// holder is on the machine's own screen AND this connect is at that machine;
+// every other named display is exposed over noVNC. The result names WHY there
+// is no exposure, because the states are not equivalent (round-12 review-3):
+// "unshowable" means the tab provably cannot be shown to anyone and the
+// connect fails immediately with the cause and the recovery, rather than
+// polling out its deadline against a screen nobody is watching.
 
 import { existsSync, symlinkSync } from "node:fs";
 import { mkdtemp, mkdir, rm } from "node:fs/promises";
 import { spawn, type ChildProcess } from "node:child_process";
 import { hostname, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { exposeSharedBrokerCeremonyDisplay } from "../google-login.js";
 import { registerLocalBrowserLaunch } from "../browser-process-runtime.js";
 import {
@@ -138,6 +140,23 @@ async function holderOwnsProfile(profile: string, child: ChildProcess): Promise<
   symlinkSync(`${hostname()}-${child.pid}`, join(profile, "SingletonLock"));
 }
 
+// These cases turn on whether THIS process has a screen (`hasDisplay()`), so
+// the suite pins the host shape instead of inheriting the runner's.
+function headlessHost(): void {
+  vi.stubEnv("DISPLAY", "");
+}
+
+function screenedHost(): void {
+  vi.stubEnv("DISPLAY", ":0");
+  vi.stubEnv("SSH_CONNECTION", "");
+  vi.stubEnv("SSH_TTY", "");
+  vi.stubEnv("XDG_SESSION_TYPE", "x11");
+}
+
+beforeEach(() => {
+  headlessHost();
+});
+
 describe("exposeSharedBrokerCeremonyDisplay", () => {
   it("prefers the tracked rig for the holder profile over the process environment", async () => {
     const profile = await tempProfile();
@@ -157,9 +176,13 @@ describe("exposeSharedBrokerCeremonyDisplay", () => {
       if (exposure.kind === "exposed") await exposure.stop();
       expect(mockState.privateDirs.every((path) => !existsSync(path))).toBe(true);
       untrackOwnerBrowserLaunch(launch.marker);
-      await expect(exposeSharedBrokerCeremonyDisplay(profile, "test")).resolves.toMatchObject({
-        kind: "already_visible",
+      const fallback = await exposeSharedBrokerCeremonyDisplay(profile, "test");
+      expect(fallback.kind).toBe("exposed");
+      expect(mockState.rigs[1]).toMatchObject({
+        display: ":0",
+        authFile: "/foreign/xauthority",
       });
+      if (fallback.kind === "exposed") await fallback.stop();
     } finally {
       untrackOwnerBrowserLaunch(launch.marker);
     }
@@ -263,15 +286,15 @@ describe("exposeSharedBrokerCeremonyDisplay", () => {
 
   it("reports unshowable when the holder's environment has no display at all", async () => {
     const profile = await tempProfile();
-    // A live holder whose environment carries no DISPLAY/XAUTHORITY at all:
-    // the tab provably cannot be shown to anyone — and certainly no rig the
-    // helper should adopt — so it must return before touching the mocked rig
+    // A live holder whose environment carries no DISPLAY at all: the tab
+    // provably cannot be shown to anyone — and certainly no rig the helper
+    // should adopt — so it must return before touching the mocked rig
     // helpers.
     const child = await spawnHolder({ PATH: process.env.PATH ?? "" });
     await holderOwnsProfile(profile, child);
     await expect(exposeSharedBrokerCeremonyDisplay(profile, "test")).resolves.toEqual({
       kind: "unshowable",
-      reason: expect.stringMatching(/without a DISPLAY\/XAUTHORITY/),
+      reason: expect.stringMatching(/without a DISPLAY in its launch record/),
     });
     // Prove the skip happened BEFORE the mocked rig helpers: no rig was
     // created and no attach was attempted for a non-owned environment.
@@ -279,11 +302,12 @@ describe("exposeSharedBrokerCeremonyDisplay", () => {
     expect(mockState.attachAttempts).toBe(0);
   });
 
-  it("reports already_visible when the holder runs on a display this repository did not create", async () => {
+  it("reports already_visible when a connect at the screen finds the holder on it", async () => {
     const profile = await tempProfile();
-    // A foreign XAUTHORITY belongs to the machine's own screen, which the
-    // user may already be looking at — that is NOT an unshowable tab, and no
-    // noVNC rig may be started for a display we do not own.
+    // A foreign XAUTHORITY belongs to the machine's own screen, and this
+    // connect is signed in at that screen — the user is looking at the tab
+    // right now, so it is neither unshowable nor worth a noVNC rig.
+    screenedHost();
     const child = await spawnHolder({
       PATH: process.env.PATH ?? "",
       DISPLAY: ":0",
@@ -292,7 +316,7 @@ describe("exposeSharedBrokerCeremonyDisplay", () => {
     await holderOwnsProfile(profile, child);
     await expect(exposeSharedBrokerCeremonyDisplay(profile, "test")).resolves.toEqual({
       kind: "already_visible",
-      reason: expect.stringMatching(/display this repository did not create/),
+      reason: expect.stringMatching(/this machine's own screen/),
     });
     expect(mockState.rigCreated).toBe(0);
     expect(mockState.attachAttempts).toBe(0);
@@ -333,5 +357,85 @@ describe("exposeSharedBrokerCeremonyDisplay", () => {
     // was attempted (and threw).
     expect(mockState.rigCreated).toBe(1);
     expect(mockState.attachAttempts).toBe(1);
+  });
+
+  it("treats a tracked host display as already visible when connect is at that screen", async () => {
+    const profile = await tempProfile();
+    screenedHost();
+    vi.stubEnv("TRUSTY_SQUIRE_REAPER_DIR", join(profile, "reaper"));
+    const authFile = "/home/someone/.Xauthority";
+    const launch = registerLocalBrowserLaunch(profile, { DISPLAY: ":0", XAUTHORITY: authFile });
+    const child = await spawnHolder(
+      { DISPLAY: ":99", XAUTHORITY: join(tmpdir(), "tsq-login-x", "x") },
+      profile,
+    );
+    await holderOwnsProfile(profile, child);
+    expect(
+      bindOwnerBrowserLaunch(launch.marker, profileProcessIdentity(child.pid!, profile)!),
+    ).toBe(true);
+    try {
+      await expect(exposeSharedBrokerCeremonyDisplay(profile, "test")).resolves.toMatchObject({
+        kind: "already_visible",
+        reason: expect.stringMatching(/this machine's own screen/),
+      });
+      expect(mockState.rigCreated).toBe(0);
+      expect(mockState.attachAttempts).toBe(0);
+    } finally {
+      untrackOwnerBrowserLaunch(launch.marker);
+    }
+  });
+
+  // The ceremony goes where the PERSON RUNNING CONNECT can see it. A broker
+  // whose Chrome sits on the machine's own screen is no help to someone
+  // signing in over SSH, so that display is exposed to them rather than
+  // described to them.
+  it("exposes a host display over noVNC when connect has no screen of its own", async () => {
+    const profile = await tempProfile();
+    const child = await spawnHolder({
+      PATH: process.env.PATH ?? "",
+      DISPLAY: ":0",
+      XAUTHORITY: "/home/someone/.Xauthority",
+    });
+    await holderOwnsProfile(profile, child);
+    mockState.attachSucceeds = true;
+    const exposure = await exposeSharedBrokerCeremonyDisplay(profile, "test");
+    expect(exposure.kind).toBe("exposed");
+    expect(mockState.rigs[0]).toMatchObject({
+      display: ":0",
+      authFile: "/home/someone/.Xauthority",
+    });
+    if (exposure.kind === "exposed") await exposure.stop();
+  });
+
+  // Every rig this repo starts sets DISPLAY and XAUTHORITY together, so a
+  // holder carrying only DISPLAY is provably on the machine's own screen —
+  // the holder's own evidence decides, not this process's environment.
+  it("reads a holder with DISPLAY and no XAUTHORITY as the machine's screen", async () => {
+    const profile = await tempProfile();
+    screenedHost();
+    const child = await spawnHolder({ PATH: process.env.PATH ?? "", DISPLAY: ":0" });
+    await holderOwnsProfile(profile, child);
+    await expect(exposeSharedBrokerCeremonyDisplay(profile, "test")).resolves.toMatchObject({
+      kind: "already_visible",
+      reason: expect.stringMatching(/this machine's own screen/),
+    });
+    expect(mockState.rigCreated).toBe(0);
+    expect(mockState.attachAttempts).toBe(0);
+  });
+
+  it("refuses to call an unnamed display visible just because this host has a screen", async () => {
+    const profile = await tempProfile();
+    // A broker parked on an Xvfb whose evidence is unreadable is NOT on the
+    // screen in front of this connect; saying it is would poll to the
+    // deadline against a tab nobody can see.
+    screenedHost();
+    const child = await spawnHolder({ PATH: process.env.PATH ?? "" });
+    await holderOwnsProfile(profile, child);
+    await expect(exposeSharedBrokerCeremonyDisplay(profile, "test")).resolves.toEqual({
+      kind: "unshowable",
+      reason: expect.stringMatching(/without a DISPLAY in its launch record/),
+    });
+    expect(mockState.rigCreated).toBe(0);
+    expect(mockState.attachAttempts).toBe(0);
   });
 });

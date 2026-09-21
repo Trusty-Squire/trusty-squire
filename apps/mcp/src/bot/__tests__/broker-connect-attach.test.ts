@@ -268,6 +268,15 @@ async function connectFixture(
   // The profile lock machinery and the broker fixture both keep their lock
   // files under the temp root, so this test never touches the real /tmp.
   vi.stubEnv("TMPDIR", lockRoot);
+  // This test describes connect run AT the machine, which is half of the
+  // ceremony's visibility answer — the other half is the holder's display,
+  // spawned below. Pin it instead of inheriting the host's: a headless runner
+  // would otherwise send the ceremony down the noVNC path and assert nothing
+  // this test is about.
+  vi.stubEnv("DISPLAY", ":0");
+  vi.stubEnv("XDG_SESSION_TYPE", "x11");
+  vi.stubEnv("SSH_CONNECTION", "");
+  vi.stubEnv("SSH_TTY", "");
 
   // Imported here so `CHROME_PROFILE_DIR` freezes on the process default
   // (the isolated sandbox profile) BEFORE the connect shape re-points the

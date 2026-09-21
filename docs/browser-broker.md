@@ -85,15 +85,38 @@ custody (`launchCeremonyBrowserContext`) — runs only where no broker can serve
 yet (for example, a first connect on an unenrolled machine, or an unreachable
 broker socket); its profile gate fail-fasts
 with the busy-profile message rather than racing a browser that holds the
-profile. Because the broker's Chrome runs on its own private Xvfb, connect
-exposes that display over noVNC for the ceremony (same x11vnc + websockify +
+profile. The shared-broker path stays first because that Chrome already
+holds the profile. A host with a screen (`hasDisplay()` in
+`apps/mcp/src/bot/display-env.ts`) launches that Chrome on the machine
+display — no Xvfb, no noVNC. That decision is the daemon's, taken when it
+launches its Chrome: a broker spawned without DISPLAY (over SSH, or from a
+user service) cannot see the GUI session's display and parks its Chrome on a
+private Xvfb. A later connect from a screened terminal keeps the noVNC
+exposure for that Chrome rather than refusing — nothing here can move a live
+Chrome between X displays, and the profile that Chrome holds is the one the
+ceremony needs. Headless hosts likewise use the broker's private Xvfb and
+connect exposes it over noVNC for the ceremony (same x11vnc + websockify +
 tunnel stack as the standalone remote login, reaped at the ceremony's lease
 boundary) — a tab no human can see is a tab no human can complete.
+The ceremony lands where the PERSON RUNNING CONNECT can see it, and the
+broker's own environment never decides that: its Chrome may sit on the
+machine's screen while connect runs over SSH, or on a private Xvfb while
+connect runs at the desk. The tab counts as already visible only when the
+holder is on the machine's own screen AND this connect has one (`hasDisplay()`
+in `apps/mcp/src/bot/display-env.ts`); every other named display — the
+broker's Xvfb, or the host's screen seen from a screenless connect — is
+exposed over noVNC. The noVNC URL therefore shows whatever that display is
+carrying, the machine's own desktop included; the disclosure label says so.
 Display discovery first reads the holder profile's tracked launch display from
 the owner-reaper manifest, then falls back to the holder's process tree: Chrome
 can erase its main process environment while children retain DISPLAY/XAUTHORITY.
-A display outside the repo-owned rig is treated as already visible. Missing
-usable display evidence or failed noVNC exposure stops the ceremony immediately.
+The holder's own evidence classifies its display: every rig this repo starts
+sets DISPLAY and XAUTHORITY together, so a holder carrying DISPLAY without
+XAUTHORITY is provably on the machine's screen (startx/xinit, WSLg and several
+display managers do not export it). A display no evidence can name is
+unshowable and stops the ceremony immediately — except where windows are drawn
+natively (macOS, Windows), which has no X display to discover and no rig it
+could be hiding on. A failed noVNC exposure stops it immediately too.
 Cleanup removes the ceremony's helpers and tab, preserving the broker's browser
 and display even on setup failure. The self-launch path closes its own browser
 and rig, including when initial page setup fails.
