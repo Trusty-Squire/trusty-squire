@@ -28,11 +28,7 @@ import { isIP } from "node:net";
 import { PassThrough, Transform, pipeline } from "node:stream";
 import type { Readable } from "node:stream";
 import type { ProxyBodyOutcome } from "@trusty-squire/vault";
-import {
-  createBrotliDecompress,
-  createGunzip,
-  createInflate,
-} from "node:zlib";
+import { createBrotliDecompress, createGunzip, createInflate } from "node:zlib";
 
 // node:https/node:http send no User-Agent by default, and some providers
 // (e.g. Zenodo) reject a header-less request with 403 as suspected scraping.
@@ -478,8 +474,7 @@ export class HttpProxyExecutor {
     // carries no content — there is nothing to type-check, and refusing it
     // would turn an ordinary DELETE through a grant into a 502.
     if (!opts.canHaveBody) return headers;
-    const ok =
-      contentType.startsWith("application/json") || contentType.startsWith("text/");
+    const ok = contentType.startsWith("application/json") || contentType.startsWith("text/");
     if (!ok) {
       throw new ProxyError(
         "unsupported_response_type",
@@ -575,10 +570,7 @@ function decoderForEncoding(enc: string): Transform | undefined {
   return undefined;
 }
 
-function headerValue(
-  raw: Record<string, string | string[]>,
-  name: string,
-): string | undefined {
+function headerValue(raw: Record<string, string | string[]>, name: string): string | undefined {
   const value = raw[name];
   return Array.isArray(value) ? value[0] : value;
 }
@@ -602,11 +594,7 @@ interface PipedResponseBody {
 
 // Counts what passes and aborts past `maxBytes`, tearing the source down with
 // it. `onTotal` reports the running count for the caller to read once settled.
-function meter(
-  source: Readable,
-  maxBytes: number,
-  onTotal?: (bytes: number) => void,
-): Transform {
+function meter(source: Readable, maxBytes: number, onTotal?: (bytes: number) => void): Transform {
   let seen = 0;
   return new Transform({
     transform(chunk: Buffer, _encoding, cb) {

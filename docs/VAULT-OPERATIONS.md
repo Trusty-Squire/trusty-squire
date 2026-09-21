@@ -134,6 +134,15 @@ status, a 429, a proxy error, a missing status, a `proxy_rejected`, or any
 non-`success` outcome is surfaced as its own marked ledger row *and* still
 counted in its rollup's totals.
 
+The egress grant proxy streams its response, so its `vault.proxy_executed` row
+lands as soon as the upstream headers arrive — a transfer that dies mid-body
+still leaves a row — and is amended with the real byte count and the true
+duration once the last body byte leaves. A row read while a long response is
+still streaming has not settled its size yet. A caller that hangs up mid-stream
+is recorded as `client_closed`: aborting a generation is how an SDK cancels, so
+it is routine and not an anomaly. An upstream break mid-body lands as
+`proxy_error`, which is.
+
 ## Notifications
 
 A **new** credential stored via the agent path (bot signup) fires a
