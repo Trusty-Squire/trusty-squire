@@ -4909,3 +4909,85 @@ describe("operate_drive feedback loop", () => {
     }
   }, 30_000);
 });
+
+describe("capture flow key evidence", () => {
+  const READ_KEY = "vsk_sandbox_read_Abc123def456Ghi789";
+  const WRITE_KEY = "vsk_sandbox_write_Zyx987wvu654Tsr321";
+
+  it("stores both sibling keys, never a checkbox identifier, and reports no masked remainder", async () => {
+    const html = `<!doctype html><meta charset="utf-8"><title>API keys</title>
+<main>
+  <h1>API keys</h1>
+  <label>Secret <input type="checkbox" id="secret" value="fallback123456789"></label>
+  <label>Read key <input id="read" readonly value="${READ_KEY}"></label>
+  <label>Write key</label>
+  <p id="write">vsk_sandbox_write_20af…</p>
+  <button id="reveal" type="button">Reveal</button>
+</main>
+<script>
+  document.getElementById("reveal").addEventListener("click", () => {
+    document.getElementById("write").textContent = "${WRITE_KEY}";
+  });
+</script>`;
+    const { context, started } = await openFixture(html, "sibling-keys-checkbox.test");
+    try {
+      const dependencies = deps(async (_api, _state, questions) =>
+        jevFromQuestions(questions, true),
+      );
+      const handoff = await runOperateDrive(
+        { session_id: started.session_id, goal: "extract an API key", max_steps: 8 },
+        api(),
+        undefined,
+        dependencies,
+      );
+      expect(handoff.status).toBe("complete");
+      const extracted = await extractCredentials(started.session_id);
+      expect(extracted.credentials.sandbox_read_key).toBe(READ_KEY);
+      expect(extracted.credentials.sandbox_write_key).toBe(WRITE_KEY);
+      expect(extracted.credentials.secret).toBeUndefined();
+      expect(Object.values(extracted.credentials)).not.toContain("fallback123456789");
+      expect(extracted.masked_remaining ?? []).toEqual([]);
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
+  it("does not report success while a masked sibling key stays masked", async () => {
+    const html = `<!doctype html><meta charset="utf-8"><title>API keys</title>
+<main>
+  <h1>API keys</h1>
+  <label>Read key <input id="read" readonly value="${READ_KEY}"></label>
+  <label>Write key</label>
+  <p id="write">vsk_sandbox_write_20af…</p>
+  <button id="reveal" type="button">Reveal</button>
+</main>
+<script>
+  // The reveal does nothing: the write key stays masked.
+  document.getElementById("reveal").addEventListener("click", () => {});
+</script>`;
+    const { context, started } = await openFixture(html, "sibling-key-stays-masked.test");
+    try {
+      const dependencies = deps(async (_api, _state, questions) =>
+        jevFromQuestions(questions, true),
+      );
+      const handoff = await runOperateDrive(
+        { session_id: started.session_id, goal: "extract an API key", max_steps: 8 },
+        api(),
+        undefined,
+        dependencies,
+      );
+      // The drive must not report complete: a credential-shaped value is still
+      // masked, so the capture is incomplete.
+      expect(handoff.status).not.toBe("complete");
+      expect(handoff.status).toBe("stuck");
+      expect(handoff.reason ?? "").toMatch(/still masked/i);
+      const extracted = await extractCredentials(started.session_id);
+      expect(extracted.credentials.sandbox_read_key).toBe(READ_KEY);
+      expect((extracted.masked_remaining ?? []).length).toBeGreaterThan(0);
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+});

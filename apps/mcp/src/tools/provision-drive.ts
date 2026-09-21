@@ -748,6 +748,9 @@ export function storedExtractResult(
     url: extracted.url,
     candidate_count: extracted.candidate_count,
     stored_credential: stored,
+    ...(extracted.masked_remaining !== undefined
+      ? { masked_remaining: extracted.masked_remaining }
+      : {}),
   };
 }
 
