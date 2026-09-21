@@ -4,6 +4,8 @@
 // EGRESS token; the server swaps it for the real vault secret and forwards
 // upstream. The agent/app never holds the provider key.
 
+import { request as httpRequest } from "node:http";
+import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { issueAgentSession } from "../auth/agent.js";
@@ -794,5 +796,145 @@ describe("Egress Grants — /v1/egress", () => {
     const body = res.json() as { grants: Array<Record<string, unknown>> };
     expect(body.grants).toHaveLength(1);
     expect(JSON.stringify(body)).not.toContain("token_hash");
+  });
+
+  it("forwards the upstream content-type to the caller", async () => {
+    await h.server.close();
+    const executor = new HttpProxyExecutor({
+      lookup: async () => ({ address: "203.0.113.9", family: 4 }),
+      dispatch: async (input) => {
+        seen.push({
+          url: input.url.toString(),
+          auth: input.headers.authorization,
+          method: input.method,
+          headers: { ...input.headers },
+          body: input.body,
+        });
+        return {
+          status: 200,
+          headers: { "content-type": "text/event-stream", "x-request-id": "up-1" },
+          body: "data: hello\n\n",
+          truncated: false,
+        };
+      },
+    });
+    h.server = await buildServer({ deps: h.deps, proxyExecutor: executor });
+    const account = await h.deps.accountStore.createAccount("sse-ct@example.test", "S");
+    const cookie = await webCookie(h.deps, account.id);
+    const token = await agentToken(h.deps, account.id);
+    await storeCred(h, cookie, "OpenAI");
+    const { grant_id, egressToken } = await mintGrantHttp(h, token, { service: "OpenAI" });
+
+    const res = await h.server.inject({
+      method: "POST",
+      url: `/v1/egress/${grant_id}/v1/chat/completions`,
+      headers: { authorization: `Bearer ${egressToken}`, "content-type": "application/json" },
+      payload: { stream: true },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.headers["content-type"]).toMatch(/text\/event-stream/);
+    expect(res.headers["x-request-id"]).toBe("up-1");
+    expect(res.body).toBe("data: hello\n\n");
+  });
+
+  it("does not forward upstream set-cookie", async () => {
+    await h.server.close();
+    const executor = new HttpProxyExecutor({
+      lookup: async () => ({ address: "203.0.113.9", family: 4 }),
+      dispatch: async () => ({
+        status: 200,
+        headers: { "content-type": "application/json", "set-cookie": "session=secret" },
+        body: '{"ok":true}',
+        truncated: false,
+      }),
+    });
+    h.server = await buildServer({ deps: h.deps, proxyExecutor: executor });
+    const account = await h.deps.accountStore.createAccount("cookie@example.test", "C");
+    const cookie = await webCookie(h.deps, account.id);
+    const token = await agentToken(h.deps, account.id);
+    await storeCred(h, cookie, "OpenAI");
+    const { grant_id, egressToken } = await mintGrantHttp(h, token, { service: "OpenAI" });
+
+    const res = await h.server.inject({
+      method: "POST",
+      url: `/v1/egress/${grant_id}/v1/chat/completions`,
+      headers: { authorization: `Bearer ${egressToken}`, "content-type": "application/json" },
+      payload: {},
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.headers["set-cookie"]).toBeUndefined();
+    expect(res.body).toBe('{"ok":true}');
+  });
+
+  it("streams an upstream body to the caller incrementally", async () => {
+    await h.server.close();
+    const upstream = new PassThrough();
+    const executor = new HttpProxyExecutor({
+      lookup: async () => ({ address: "203.0.113.9", family: 4 }),
+      dispatch: async () => ({
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+        body: "",
+        truncated: false,
+        bodyStream: upstream,
+      }),
+    });
+    h.server = await buildServer({ deps: h.deps, proxyExecutor: executor });
+    const account = await h.deps.accountStore.createAccount("sse-live@example.test", "S");
+    const cookie = await webCookie(h.deps, account.id);
+    const token = await agentToken(h.deps, account.id);
+    await storeCred(h, cookie, "OpenAI");
+    const { grant_id, egressToken } = await mintGrantHttp(h, token, { service: "OpenAI" });
+
+    await h.server.listen({ host: "127.0.0.1", port: 0 });
+    const addr = h.server.server.address();
+    const port = typeof addr === "object" && addr !== null ? addr.port : 0;
+
+    const arrivals: Array<{ at: number; text: string }> = [];
+    const started = Date.now();
+    let sawHeaders: () => void = () => undefined;
+    const headersReady = new Promise<void>((resolve) => {
+      sawHeaders = resolve;
+    });
+    const finished = new Promise<void>((resolve, reject) => {
+      const req = httpRequest(
+        {
+          host: "127.0.0.1",
+          port,
+          method: "POST",
+          path: `/v1/egress/${grant_id}/v1/chat/completions`,
+          headers: {
+            authorization: `Bearer ${egressToken}`,
+            "content-type": "application/json",
+          },
+        },
+        (res) => {
+          expect(String(res.headers["content-type"])).toMatch(/text\/event-stream/);
+          sawHeaders();
+          res.on("data", (chunk: Buffer) => {
+            arrivals.push({ at: Date.now() - started, text: chunk.toString("utf8") });
+          });
+          res.on("end", () => resolve());
+          res.on("error", reject);
+        },
+      );
+      req.on("error", reject);
+      req.write(JSON.stringify({ stream: true }));
+      req.end();
+    });
+
+    const firstWriteAt = Date.now() - started;
+    upstream.write("data: first\n\n");
+    await headersReady;
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    upstream.write("data: second\n\n");
+    upstream.end();
+    await finished;
+
+    expect(arrivals.length).toBeGreaterThanOrEqual(1);
+    expect(arrivals[0]!.text).toContain("data: first");
+    expect(arrivals[0]!.at).toBeLessThan(firstWriteAt + 80);
+    expect(arrivals.at(-1)!.text).toContain("data: second");
+    expect(arrivals.at(-1)!.at).toBeGreaterThanOrEqual(firstWriteAt + 180);
   });
 });

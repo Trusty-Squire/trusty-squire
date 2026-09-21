@@ -12,7 +12,7 @@
 import { describe, it, expect } from "vitest";
 import { createServer, type IncomingMessage } from "node:http";
 import { gzipSync, brotliCompressSync } from "node:zlib";
-import { HttpProxyExecutor, substituteSecret } from "../services/http-proxy.js";
+import { HttpProxyExecutor, ProxyError, substituteSecret } from "../services/http-proxy.js";
 
 interface Captured {
   authorization: string;
@@ -155,6 +155,119 @@ describe("HttpProxyExecutor — real defaultDispatch", () => {
       // Exactly the caller's UA — a comma-joined value would mean two were sent.
       expect(captured.userAgent).toBe("caller/9.9");
     });
+  });
+});
+
+describe("HttpProxyExecutor.executeStream", () => {
+  it("emits the first upstream chunk before later chunks arrive", async () => {
+    const server = createServer((_req, res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write("data: first\n\n");
+      setTimeout(() => {
+        res.write("data: second\n\n");
+        res.end();
+      }, 200);
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const addr = server.address();
+    const port = typeof addr === "object" && addr !== null ? addr.port : 0;
+    try {
+      const started = Date.now();
+      const streamed = await realProxy().executeStream({
+        accountId: "acct-test",
+        http: { method: "GET", url: `http://127.0.0.1:${port}/v1/stream`, headers: {} },
+        fields: {},
+      });
+      expect(streamed.headers["content-type"]).toBe("text/event-stream");
+      expect(streamed.headers["content-length"]).toBeUndefined();
+
+      const arrivals: Array<{ at: number; text: string }> = [];
+      for await (const chunk of streamed.body) {
+        arrivals.push({
+          at: Date.now() - started,
+          text: Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk),
+        });
+      }
+      expect(arrivals.length).toBeGreaterThanOrEqual(1);
+      expect(arrivals[0]!.text).toContain("data: first");
+      expect(arrivals[0]!.at).toBeLessThan(120);
+      expect(arrivals.at(-1)!.text).toContain("data: second");
+      expect(arrivals.at(-1)!.at).toBeGreaterThanOrEqual(180);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("aborts mid-stream when the size cap is exceeded rather than after buffering", async () => {
+    let writes = 0;
+    const server = createServer((_req, res) => {
+      res.writeHead(200, { "content-type": "text/plain" });
+      const tick = (): void => {
+        if (res.destroyed || writes >= 8) {
+          if (!res.writableEnded) res.end();
+          return;
+        }
+        writes += 1;
+        res.write("x".repeat(40));
+        setTimeout(tick, 20);
+      };
+      tick();
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const addr = server.address();
+    const port = typeof addr === "object" && addr !== null ? addr.port : 0;
+    const proxy = new HttpProxyExecutor({
+      blockPrivate: false,
+      allowInsecureHttp: true,
+      maxResponseBytes: 64,
+    });
+    try {
+      const streamed = await proxy.executeStream({
+        accountId: "acct-test",
+        http: { method: "GET", url: `http://127.0.0.1:${port}/big`, headers: {} },
+        fields: {},
+      });
+      let sawTooLarge = false;
+      try {
+        for await (const _chunk of streamed.body) {
+          // drain until the cap destroys the stream
+        }
+      } catch (err) {
+        sawTooLarge = err instanceof ProxyError && err.code === "response_too_large";
+      }
+      expect(sawTooLarge).toBe(true);
+      expect(writes).toBeLessThan(8);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("execute() still rejects response_too_large when the cap trips mid-stream", async () => {
+    const server = createServer((_req, res) => {
+      res.writeHead(200, { "content-type": "text/plain" });
+      res.write("a".repeat(40));
+      res.write("b".repeat(40));
+      res.end();
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const addr = server.address();
+    const port = typeof addr === "object" && addr !== null ? addr.port : 0;
+    const proxy = new HttpProxyExecutor({
+      blockPrivate: false,
+      allowInsecureHttp: true,
+      maxResponseBytes: 50,
+    });
+    try {
+      await expect(
+        proxy.execute({
+          accountId: "acct-test",
+          http: { method: "GET", url: `http://127.0.0.1:${port}/big`, headers: {} },
+          fields: {},
+        }),
+      ).rejects.toMatchObject({ code: "response_too_large" });
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 });
 

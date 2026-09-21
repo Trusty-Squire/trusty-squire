@@ -15,14 +15,20 @@
 //   - resulting header value capped at 8KB
 //   - https-only, hostname resolved once + IP pinned (no rebinding),
 //     post-resolution IP checked against private/link-local/CGNAT/NAT64
-//   - response Content-Length cap (pre-read + mid-stream), MIME allowlist,
-//     Set-Cookie stripped
+//   - response Content-Length cap (pre-read + mid-stream abort), MIME allowlist,
+//     Set-Cookie stripped. execute() still buffers for use_credential;
+//     executeStream() forwards headers + body bytes as they arrive.
 
 import { lookup as dnsLookup } from "node:dns";
 import { request as httpsRequest } from "node:https";
 import { request as httpRequest } from "node:http";
 import { isIP } from "node:net";
-import { gunzipSync, inflateSync, brotliDecompressSync } from "node:zlib";
+import { PassThrough, Readable, Transform, pipeline } from "node:stream";
+import {
+  createBrotliDecompress,
+  createGunzip,
+  createInflate,
+} from "node:zlib";
 
 // node:https/node:http send no User-Agent by default, and some providers
 // (e.g. Zenodo) reject a header-less request with 403 as suspected scraping.
@@ -47,6 +53,15 @@ export interface ProxyResult {
   status: number;
   headers: Record<string, string>;
   body: string;
+  truncated: boolean;
+}
+
+// Headers are sanitised and ready to forward; `body` is the live upstream
+// byte stream (already decompressed when we decoded, already size-capped).
+export interface StreamedProxyResult {
+  status: number;
+  headers: Record<string, string>;
+  body: Readable;
   truncated: boolean;
 }
 
@@ -87,6 +102,19 @@ export class ProxyError extends Error {
 const TOKEN_SRC = "\\$\\{SECRET(_JSON|_BASIC)?(?:\\.([^}]+))?\\}";
 const MAX_HEADER_VALUE_BYTES = 8 * 1024;
 const DEFAULT_MAX_RESPONSE_BYTES = 10 * 1024;
+// Hop-by-hop headers plus content-length: a streamed reply is chunked, so a
+// forwarded Content-Length would lie about (or race) the bytes we actually send.
+const STREAM_RESPONSE_DROP_HEADERS = new Set([
+  "connection",
+  "keep-alive",
+  "proxy-authenticate",
+  "proxy-authorization",
+  "te",
+  "trailer",
+  "transfer-encoding",
+  "upgrade",
+  "content-length",
+]);
 
 // ── Pure: secret substitution ──────────────────────────────────
 
@@ -258,6 +286,9 @@ export interface DispatchResult {
   headers: Record<string, string | string[]>;
   body: string;
   truncated: boolean;
+  // Present when the real dispatcher (or a streaming test fake) is handing
+  // the upstream body through instead of buffering it. `body` is then "".
+  bodyStream?: Readable;
 }
 
 export interface HttpProxyExecutorOptions {
@@ -299,6 +330,57 @@ export class HttpProxyExecutor {
     // scanned or substituted. use_credential leaves this unset.
     bodyVerbatim?: boolean;
   }): Promise<ProxyResult> {
+    const dispatched = await this.dispatch(await this.buildDispatchInput(input));
+    if (dispatched.bodyStream !== undefined) {
+      try {
+        const headers = this.sanitiseHeaders(dispatched.headers);
+        const stream = pipeThroughCapAndDecode(
+          dispatched.bodyStream,
+          headers,
+          this.maxResponseBytes,
+        );
+        const body = await readBodyStream(stream);
+        return { status: dispatched.status, headers, body, truncated: dispatched.truncated };
+      } catch (err) {
+        dispatched.bodyStream.destroy();
+        throw err;
+      }
+    }
+    return this.sanitiseResponse(dispatched);
+  }
+
+  // Resolves as soon as upstream headers arrive so a caller can start
+  // forwarding bytes. use_credential keeps `execute` (buffered); egress
+  // uses this so SSE / chat streams are not held until generation ends.
+  async executeStream(input: {
+    accountId: string;
+    http: ProxyHttpRequest;
+    fields: Record<string, string>;
+    bodyVerbatim?: boolean;
+  }): Promise<StreamedProxyResult> {
+    const dispatched = await this.dispatch(await this.buildDispatchInput(input));
+    const source = dispatched.bodyStream ?? Readable.from([dispatched.body]);
+    try {
+      const headers = this.headersForStream(dispatched.headers);
+      const body = pipeThroughCapAndDecode(source, headers, this.maxResponseBytes);
+      return {
+        status: dispatched.status,
+        headers,
+        body,
+        truncated: dispatched.truncated,
+      };
+    } catch (err) {
+      source.destroy();
+      throw err;
+    }
+  }
+
+  private async buildDispatchInput(input: {
+    accountId: string;
+    http: ProxyHttpRequest;
+    fields: Record<string, string>;
+    bodyVerbatim?: boolean;
+  }): Promise<DispatchInput> {
     const resolved = substituteSecret(input.http, input.fields, {
       ...(input.bodyVerbatim !== undefined ? { bodyVerbatim: input.bodyVerbatim } : {}),
     });
@@ -328,7 +410,7 @@ export class HttpProxyExecutor {
     const hasUserAgent = Object.keys(resolved.headers ?? {}).some(
       (k) => k.toLowerCase() === "user-agent",
     );
-    const dispatched = await this.dispatch({
+    return {
       method: resolved.method,
       url,
       headers: {
@@ -342,8 +424,7 @@ export class HttpProxyExecutor {
       maxResponseBytes: this.maxResponseBytes,
       headersTimeoutMs: this.headersTimeoutMs,
       bodyTimeoutMs: this.bodyTimeoutMs,
-    });
-    return this.sanitiseResponse(dispatched);
+    };
   }
 
   private async resolveAndPin(
@@ -368,9 +449,18 @@ export class HttpProxyExecutor {
   }
 
   private sanitiseResponse(d: DispatchResult): ProxyResult {
+    return {
+      status: d.status,
+      headers: this.sanitiseHeaders(d.headers),
+      body: d.body,
+      truncated: d.truncated,
+    };
+  }
+
+  private sanitiseHeaders(raw: Record<string, string | string[]>): Record<string, string> {
     const headers: Record<string, string> = {};
     let contentType = "";
-    for (const [k, v] of Object.entries(d.headers)) {
+    for (const [k, v] of Object.entries(raw)) {
       const key = k.toLowerCase();
       if (key === "set-cookie") continue;
       const value = Array.isArray(v) ? v.join(", ") : v;
@@ -385,7 +475,15 @@ export class HttpProxyExecutor {
         `response content-type '${contentType}' not permitted`,
       );
     }
-    return { status: d.status, headers, body: d.body, truncated: d.truncated };
+    return headers;
+  }
+
+  private headersForStream(raw: Record<string, string | string[]>): Record<string, string> {
+    const headers = this.sanitiseHeaders(raw);
+    for (const key of STREAM_RESPONSE_DROP_HEADERS) {
+      delete headers[key];
+    }
+    return headers;
   }
 }
 
@@ -434,56 +532,14 @@ function defaultDispatch(input: DispatchInput): Promise<DispatchResult> {
           reject(new ProxyError("response_too_large", "upstream Content-Length exceeds cap"));
           return;
         }
-        const chunks: Buffer[] = [];
-        let total = 0;
-        res.on("data", (chunk: Buffer) => {
-          total += chunk.length;
-          if (total > input.maxResponseBytes) {
-            res.destroy();
-            reject(new ProxyError("response_too_large", "upstream body exceeded cap mid-stream"));
-            return;
-          }
-          chunks.push(chunk);
-        });
-        res.on("end", () => {
-          const headers = { ...res.headers } as Record<string, string | string[]>;
-          let raw = Buffer.concat(chunks);
-          // Decompress per Content-Encoding BEFORE decoding to text. The old
-          // code did Buffer.toString("utf8") on the raw bytes — for a gzipped
-          // response that mangles every non-ASCII byte (0x8b → U+FFFD), and the
-          // stale `content-encoding: gzip` header then told the client to
-          // re-inflate the garbage (JSON.parse died on the leading 0x1f).
-          // sanitiseResponse already restricts bodies to JSON/text, so the
-          // decompressed payload is always text — no binary passthrough needed.
-          const enc = String(headers["content-encoding"] ?? "").trim().toLowerCase();
-          if (enc !== "" && enc !== "identity" && raw.length > 0) {
-            // Bound the decompressed size too — a small compressed body can
-            // inflate to a memory bomb. maxOutputLength makes zlib throw past
-            // the same cap we apply to the wire, which we map to too_large.
-            const zopts = { maxOutputLength: input.maxResponseBytes };
-            try {
-              if (enc.includes("br")) raw = brotliDecompressSync(raw, zopts);
-              else if (enc.includes("gzip") || enc.includes("x-gzip")) raw = gunzipSync(raw, zopts);
-              else if (enc.includes("deflate")) raw = inflateSync(raw, zopts);
-            } catch (e) {
-              const msg = e instanceof Error ? e.message : String(e);
-              if (/maxOutputLength|too large|ERR_BUFFER/i.test(msg)) {
-                reject(new ProxyError("response_too_large", "decompressed body exceeded cap"));
-              } else {
-                reject(new ProxyError("upstream_error", `could not decompress '${enc}' response`));
-              }
-              return;
-            }
-            // Body is now plaintext; these headers no longer describe it.
-            delete headers["content-encoding"];
-            delete headers["content-length"];
-          }
-          resolve({
-            status: res.statusCode ?? 0,
-            headers,
-            body: raw.toString("utf8"),
-            truncated: false,
-          });
+        // Resolve on headers so executeStream can start forwarding. IncomingMessage
+        // stays paused until the consumer attaches; decode + size-cap happen there.
+        resolve({
+          status: res.statusCode ?? 0,
+          headers: { ...res.headers } as Record<string, string | string[]>,
+          body: "",
+          truncated: false,
+          bodyStream: res,
         });
       },
     );
@@ -496,4 +552,85 @@ function defaultDispatch(input: DispatchInput): Promise<DispatchResult> {
     if (input.body !== undefined) req.write(input.body);
     req.end();
   });
+}
+
+function decoderForEncoding(enc: string, maxResponseBytes: number): Transform | undefined {
+  const zopts = { maxOutputLength: maxResponseBytes };
+  if (enc.includes("br")) return createBrotliDecompress(zopts);
+  if (enc.includes("gzip") || enc.includes("x-gzip")) return createGunzip(zopts);
+  if (enc.includes("deflate")) return createInflate(zopts);
+  return undefined;
+}
+
+function mapStreamError(err: unknown, enc: string, decoded: boolean): ProxyError {
+  if (err instanceof ProxyError) return err;
+  const msg = err instanceof Error ? err.message : String(err);
+  if (decoded && /maxOutputLength|too large|ERR_BUFFER/i.test(msg)) {
+    return new ProxyError("response_too_large", "decompressed body exceeded cap");
+  }
+  if (decoded) {
+    return new ProxyError("upstream_error", `could not decompress '${enc}' response`);
+  }
+  return new ProxyError("upstream_error", msg);
+}
+
+// Decode (when we know the encoding) and enforce the byte cap as bytes arrive
+// so a mid-stream overflow aborts instead of buffering first. Mutates `headers`
+// so they describe the bytes that leave this pipe.
+function pipeThroughCapAndDecode(
+  source: Readable,
+  headers: Record<string, string>,
+  maxResponseBytes: number,
+): Readable {
+  const enc = (headers["content-encoding"] ?? "").trim().toLowerCase();
+  const decoder =
+    enc !== "" && enc !== "identity" ? decoderForEncoding(enc, maxResponseBytes) : undefined;
+  if (decoder !== undefined) {
+    // Body will be plaintext; these headers no longer describe it.
+    delete headers["content-encoding"];
+    delete headers["content-length"];
+  }
+
+  let total = 0;
+  const cap = new Transform({
+    transform(chunk: Buffer, _encoding, cb) {
+      total += chunk.length;
+      if (total > maxResponseBytes) {
+        source.destroy();
+        cb(new ProxyError("response_too_large", "upstream body exceeded cap mid-stream"));
+        return;
+      }
+      cb(null, chunk);
+    },
+  });
+
+  const dest = new PassThrough();
+  // A consumer (execute / Fastify) attaches its own error handler; this one
+  // only prevents a late socket teardown after the body already ended from
+  // becoming an unhandled exception.
+  dest.on("error", () => undefined);
+  const onDone = (err: Error | null | undefined): void => {
+    if (err == null || dest.destroyed || dest.readableEnded) return;
+    dest.destroy(mapStreamError(err, enc, decoder !== undefined));
+  };
+  if (decoder !== undefined) {
+    pipeline(source, decoder, cap, dest, onDone);
+  } else {
+    pipeline(source, cap, dest, onDone);
+  }
+  return dest;
+}
+
+async function readBodyStream(stream: Readable): Promise<string> {
+  const chunks: Buffer[] = [];
+  try {
+    for await (const chunk of stream) {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string));
+    }
+  } catch (err) {
+    throw err instanceof ProxyError
+      ? err
+      : new ProxyError("upstream_error", err instanceof Error ? err.message : String(err));
+  }
+  return Buffer.concat(chunks).toString("utf8");
 }
