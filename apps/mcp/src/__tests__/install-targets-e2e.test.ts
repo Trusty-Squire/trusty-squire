@@ -48,6 +48,10 @@ vi.mock("../api-client.js", () => ({
   })),
 }));
 
+// `--skip-browser` hands the URL to the machine's default browser. Stubbed so
+// the suite neither spawns one nor depends on whether this host can.
+vi.mock("open", () => ({ default: vi.fn(async () => undefined) }));
+
 vi.mock("../bot/index.js", async () => {
   // Preserve the real exports the install CLI uses for typing while
   // stubbing the network-hitting detectAsn.
@@ -113,7 +117,10 @@ import {
   probeProviderSessionsAfterCeremony,
 } from "../bot/google-login.js";
 import { clearBrowserProfile, clearProviderCookies } from "../bot/login-state.js";
-import { installPoll } from "../api-client.js";
+import { ProfileBusyError } from "../bot/profile.js";
+import { BrokerRefusal } from "../bot/broker/refusal.js";
+import { installInitiate, installPoll } from "../api-client.js";
+import { captureMachineChannel } from "./machine-channel.js";
 import { connect, resolveServerLaunch } from "../install/cli.js";
 import { AGENTS } from "../install/agents.js";
 import { openSessionStorage } from "../session.js";
@@ -486,6 +493,376 @@ describe("connect --target=<agent> writes a valid config", () => {
       else process.env.TRUSTY_SQUIRE_PROFILE_DIR = previousProfile;
       if (previousAccount === undefined) delete process.env.TRUSTY_SQUIRE_ACCOUNT_ID;
       else process.env.TRUSTY_SQUIRE_ACCOUNT_ID = previousAccount;
+    }
+  });
+
+  // The ceremony waits the pairing token's LIFETIME, counted from when the
+  // initiate response arrived. Differencing the server's `expires_at` against
+  // this machine's clock made the window a function of clock skew: a host
+  // running ten minutes fast collapsed a 2FA sign-in to sixty seconds.
+  it("waits the token's lifetime even when this machine's clock is skewed", async () => {
+    vi.mocked(installInitiate).mockResolvedValueOnce({
+      setup_code: "test_setup_code",
+      confirm_url: "https://test.invalid/install?token=test_setup_code",
+      // As a host running ten minutes ahead of the server sees it.
+      expires_at: new Date(Date.now() - 600_000).toISOString(),
+    });
+    const before = Date.now();
+
+    await connect({
+      command: "connect",
+      target: "hermes",
+      apiBase: "https://test.invalid",
+      skipBrowser: false,
+      forceRelogin: false,
+      noRegistry: false,
+      noInteractive: true,
+    });
+
+    const call = vi.mocked(openInstallConfirmInBotChrome).mock.calls.at(-1);
+    const deadline = call?.[0].deadline ?? 0;
+    expect(deadline - before).toBeGreaterThan(9 * 60_000);
+    expect(deadline - Date.now()).toBeLessThanOrEqual(10 * 60_000);
+  });
+
+  // The ceremony waits exactly as long as the pairing token lives, so reaching
+  // that deadline means the link is dead. Handing it back as `needs-sign-in`
+  // gave Beeline a URL that 410s on the first click.
+  it("reports an expired install, not a sign-in URL, when the ceremony runs out", async () => {
+    vi.mocked(installPoll).mockResolvedValue({ status: "pending" });
+    vi.mocked(openInstallConfirmInBotChrome).mockResolvedValueOnce({ status: "timeout" });
+    const machine = captureMachineChannel();
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const exit = vi.spyOn(process, "exit").mockImplementation((code) => {
+      throw new Error(`exit:${code}`);
+    });
+    try {
+      await expect(
+        connect({
+          command: "connect",
+          target: "hermes",
+          apiBase: "https://test.invalid",
+          skipBrowser: false,
+          forceRelogin: false,
+          noRegistry: false,
+          noInteractive: true,
+          json: true,
+        }),
+      ).rejects.toThrow("exit:1");
+      const report = machine.terminal<{
+        state: string;
+        reason: string | null;
+        sign_in_url: string | null;
+      }>();
+      expect(report.state).toBe("no-browser");
+      expect(report.reason).toBe("install_expired");
+      expect(report.sign_in_url).toBeNull();
+    } finally {
+      exit.mockRestore();
+      error.mockRestore();
+      machine.restore();
+      vi.mocked(installPoll).mockReset();
+      vi.mocked(installPoll).mockResolvedValue({
+        status: "claimed",
+        agent_session_token: "ts_agent_test_token",
+        account_id: "acct_test",
+      });
+    }
+  });
+
+  // Intent item 4: "whether the profile/browser is currently held by another
+  // session ... as a code". A ceremony the profile gate refuses is exactly
+  // that. Flattening the refusal to a string made it `needs-sign-in` with a
+  // live URL, and a caller that opened it elsewhere claimed the install with
+  // no provider session in the bot's Chrome — which the run's own gate rejects.
+  it("reports a ceremony the profile gate refused as busy, not as a sign-in", async () => {
+    vi.mocked(openInstallConfirmInBotChrome).mockRejectedValueOnce(
+      new ProfileBusyError("another Trusty Squire session is already using the browser"),
+    );
+    const machine = captureMachineChannel();
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const exit = vi.spyOn(process, "exit").mockImplementation((code) => {
+      throw new Error(`exit:${code}`);
+    });
+    try {
+      await expect(
+        connect({
+          command: "connect",
+          target: "hermes",
+          apiBase: "https://test.invalid",
+          skipBrowser: false,
+          forceRelogin: false,
+          noRegistry: false,
+          noInteractive: true,
+          json: true,
+        }),
+      ).rejects.toThrow("exit:1");
+      const report = machine.terminal<{
+        state: string;
+        sign_in_url: string | null;
+        holder: { kind: string };
+      }>();
+      expect(report.state).toBe("busy");
+      expect(report.sign_in_url).toBeNull();
+      expect(report.holder).toBeDefined();
+    } finally {
+      exit.mockRestore();
+      error.mockRestore();
+      machine.restore();
+    }
+  });
+
+  // A resident broker that refuses the ceremony holds the browser just as
+  // surely as the profile gate does. Flattening its refusal to a string put
+  // `needs-sign-in` and a live URL on the machine channel, and a caller that
+  // opened that URL elsewhere claimed the install with no provider session in
+  // the bot's Chrome — which this run's own gate then rejects.
+  it("reports a resident broker's refusal as busy, not as a sign-in", async () => {
+    vi.mocked(openInstallConfirmInBotChrome).mockRejectedValueOnce(
+      new BrokerRefusal("broker_unavailable", "a stale-credential broker is still serving clients"),
+    );
+    const machine = captureMachineChannel();
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const exit = vi.spyOn(process, "exit").mockImplementation((code) => {
+      throw new Error(`exit:${code}`);
+    });
+    try {
+      await expect(
+        connect({
+          command: "connect",
+          target: "hermes",
+          apiBase: "https://test.invalid",
+          skipBrowser: false,
+          forceRelogin: false,
+          noRegistry: false,
+          noInteractive: true,
+          json: true,
+        }),
+      ).rejects.toThrow("exit:1");
+      const report = machine.terminal<{
+        state: string;
+        reason: string | null;
+        sign_in_url: string | null;
+      }>();
+      expect(report.state).toBe("busy");
+      expect(report.reason).toBeNull();
+      expect(report.sign_in_url).toBeNull();
+    } finally {
+      exit.mockRestore();
+      error.mockRestore();
+      machine.restore();
+    }
+  });
+
+  // Not every BrokerRefusal is contention: the wire mints `broker_lost` when
+  // the daemon dies mid-ceremony and `launch_timeout` when its Chrome never
+  // came up. Reporting those as `busy` told a caller to wait for a holder that
+  // does not exist, on a run that actually broke.
+  it("reports a broker that died mid-ceremony as a failed run, not as busy", async () => {
+    vi.mocked(openInstallConfirmInBotChrome).mockRejectedValueOnce(
+      new BrokerRefusal("broker_lost", "Broker connection is closed"),
+    );
+    const machine = captureMachineChannel();
+    const human: string[] = [];
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const warn = vi.spyOn(console, "warn").mockImplementation((message?: unknown) => {
+      human.push(String(message));
+    });
+    const exit = vi.spyOn(process, "exit").mockImplementation((code) => {
+      throw new Error(`exit:${code}`);
+    });
+    try {
+      await expect(
+        connect({
+          command: "connect",
+          target: "hermes",
+          apiBase: "https://test.invalid",
+          skipBrowser: false,
+          forceRelogin: false,
+          noRegistry: false,
+          noInteractive: true,
+          json: true,
+        }),
+      ).rejects.toThrow("exit:1");
+      const report = machine.terminal<{ state: string; reason: string | null }>();
+      expect(report.state).toBe("no-browser");
+      expect(report.reason).toBe("run_failed");
+      // The human copy is unchanged: the refusal's own message names the
+      // recovery, and it has always been printed this way.
+      expect(human.join("\n")).toContain("Broker connection is closed");
+    } finally {
+      exit.mockRestore();
+      warn.mockRestore();
+      error.mockRestore();
+      machine.restore();
+    }
+  });
+
+  // Connect blocks for minutes waiting on a human. A channel that only speaks
+  // at settle is silent for exactly the window in which the link is live, which
+  // left a caller scraping the boxen frame on stderr for it.
+  it("puts the sign-in URL on the machine channel before it starts waiting", async () => {
+    const machine = captureMachineChannel();
+    try {
+      await connect({
+        command: "connect",
+        target: "hermes",
+        apiBase: "https://test.invalid",
+        skipBrowser: true,
+        forceRelogin: false,
+        noRegistry: false,
+        noInteractive: true,
+        json: true,
+      });
+      const lines = machine.reports<{
+        terminal: boolean;
+        state: string;
+        sign_in_url: string | null;
+      }>();
+      const first = lines[0];
+      expect(first?.terminal).toBe(false);
+      expect(first?.state).toBe("needs-sign-in");
+      expect(first?.sign_in_url).toBe("https://test.invalid/install?token=test_setup_code");
+      // Exactly one line ends the run, and it is the last one.
+      expect(lines.filter((line) => line.terminal)).toHaveLength(1);
+      expect(lines.at(-1)?.terminal).toBe(true);
+    } finally {
+      machine.restore();
+    }
+  });
+
+  // Item 5 names three answers: a real display, a virtual one, or nowhere
+  // reachable. A ceremony whose rig never came up showed the page nowhere —
+  // handing back a live URL plus an English sentence to interpret is the
+  // parsing this surface exists to delete.
+  it("reports a ceremony that showed the page nowhere as unreachable", async () => {
+    vi.mocked(installPoll).mockResolvedValue({ status: "pending" });
+    vi.mocked(openInstallConfirmInBotChrome).mockResolvedValueOnce({
+      status: "error",
+      detail: "x11vnc is not installed",
+    });
+    const machine = captureMachineChannel();
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const exit = vi.spyOn(process, "exit").mockImplementation((code) => {
+      throw new Error(`exit:${code}`);
+    });
+    try {
+      await expect(
+        connect({
+          command: "connect",
+          target: "hermes",
+          apiBase: "https://test.invalid",
+          skipBrowser: false,
+          forceRelogin: false,
+          noRegistry: false,
+          noInteractive: true,
+          json: true,
+        }),
+      ).rejects.toThrow("exit:1");
+      const report = machine.terminal<{
+        state: string;
+        sign_in_url: string | null;
+        browser_location: { kind: string; reason?: string };
+      }>();
+      expect(report.browser_location.kind).toBe("unreachable");
+      expect(report.browser_location.reason).toBe("x11vnc is not installed");
+      expect(report.state).toBe("no-browser");
+    } finally {
+      exit.mockRestore();
+      warn.mockRestore();
+      error.mockRestore();
+      machine.restore();
+      vi.mocked(installPoll).mockReset();
+      vi.mocked(installPoll).mockResolvedValue({
+        status: "claimed",
+        agent_session_token: "ts_agent_test_token",
+        account_id: "acct_test",
+      });
+    }
+  });
+
+  // Item 5 is answered where the browser was placed, and the answer is not
+  // rewritten later. A virtual display carries the address that reaches it, and
+  // that line goes out while the tunnel is up — not at settle, when it is gone.
+  it("reports the virtual display and its live address before the wait", async () => {
+    vi.mocked(installPoll).mockResolvedValue({ status: "pending" });
+    vi.mocked(openInstallConfirmInBotChrome).mockImplementationOnce(async (options) => {
+      options.onBrowserPlacement?.(
+        { kind: "virtual", url: "https://tunnel.invalid/#p=secret" },
+        null,
+      );
+      return { status: "timeout" as const };
+    });
+    const machine = captureMachineChannel();
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const exit = vi.spyOn(process, "exit").mockImplementation((code) => {
+      throw new Error(`exit:${code}`);
+    });
+    try {
+      await expect(
+        connect({
+          command: "connect",
+          target: "hermes",
+          apiBase: "https://test.invalid",
+          skipBrowser: false,
+          forceRelogin: false,
+          noRegistry: false,
+          noInteractive: true,
+          json: true,
+        }),
+      ).rejects.toThrow("exit:1");
+      const lines = machine.reports<{
+        terminal: boolean;
+        state: string;
+        sign_in_url: string | null;
+        browser_location: { kind: string; url?: string };
+      }>();
+      const live = lines.find((line) => line.browser_location.kind === "virtual");
+      expect(live, "a virtual placement is reported while the tunnel is up").toBeDefined();
+      expect(live?.terminal).toBe(false);
+      expect(live?.state).toBe("needs-sign-in");
+      expect(live?.sign_in_url).toBe("https://test.invalid/install?token=test_setup_code");
+      expect(live?.browser_location.url).toBe("https://tunnel.invalid/#p=secret");
+      // The placement is reported as observed on the settled line too, never
+      // relabelled into something it was not.
+      expect(lines.at(-1)?.browser_location.kind).toBe("virtual");
+    } finally {
+      exit.mockRestore();
+      error.mockRestore();
+      machine.restore();
+      vi.mocked(installPoll).mockReset();
+      vi.mocked(installPoll).mockResolvedValue({
+        status: "claimed",
+        agent_session_token: "ts_agent_test_token",
+        account_id: "acct_test",
+      });
+    }
+  });
+
+  // `open()` puts a real browser on the user's screen. Reporting "no browser
+  // was opened" there is an assumption standing in for an observation; Squire
+  // did not place that window and cannot say where it went.
+  it("does not claim no browser opened when --skip-browser handed off the link", async () => {
+    const machine = captureMachineChannel();
+    try {
+      await connect({
+        command: "connect",
+        target: "hermes",
+        apiBase: "https://test.invalid",
+        skipBrowser: true,
+        forceRelogin: false,
+        noRegistry: false,
+        noInteractive: true,
+        json: true,
+      });
+      const report = machine.terminal<{
+        browser_location: { kind: string; reason?: string };
+      }>();
+      expect(report.browser_location.kind).toBe("unknown");
+      expect(report.browser_location.reason).toContain("default browser");
+    } finally {
+      machine.restore();
     }
   });
 

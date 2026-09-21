@@ -112,6 +112,19 @@ export function isUnavailable(error: unknown): boolean {
   return code === "ENOENT" || code === "ECONNREFUSED" || code === "broker_lost";
 }
 
+/** The refusals that mean another session HAS the browser, as opposed to the
+ * broker failing at something. `broker_unavailable` is an identified resident
+ * declining to yield; `profile_busy` is the profile layer itself saying "not
+ * now". Every other code (a lost connection, a launch timeout, a server-side
+ * execution failure) is this run breaking, not contention, and a caller told
+ * to wait for a holder would wait on nothing. */
+export function isBrowserContentionRefusal(error: unknown): boolean {
+  return (
+    error instanceof BrokerRefusal &&
+    (error.code === "broker_unavailable" || error.code === "profile_busy")
+  );
+}
+
 function isUnauthorizedRefusal(error: unknown): boolean {
   return error instanceof BrokerRefusal && error.code === "unauthorized";
 }

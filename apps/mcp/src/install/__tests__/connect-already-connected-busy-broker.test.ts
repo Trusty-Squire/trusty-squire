@@ -28,6 +28,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 
+import { captureMachineChannel } from "../../__tests__/machine-channel.js";
 import { connect } from "../cli.js";
 import { listenBroker } from "../../bot/broker/transport.js";
 import {
@@ -221,6 +222,85 @@ it("reports already connected while the broker owns the profile and its browser"
   expect(output.join("\n")).not.toContain("couldn't verify");
   // Nothing waited on the profile: the old probe's pre-wait alone is 15s.
   expect(elapsed).toBeLessThan(5_000);
+});
+
+it("prints the same already-connected facts as JSON without changing the human line", async () => {
+  await writeProfileCookies(
+    profileDir,
+    GOOGLE_SESSION_COOKIES.map((name) => ({ host: ".google.com", name })),
+  );
+  profileLease = acquireProfileOperationGuard(profileDir);
+  vi.stubEnv("TRUSTY_SQUIRE_PROFILE_DIR", profileDir);
+
+  const human: string[] = [];
+  const warn = vi.spyOn(console, "warn").mockImplementation((message?: unknown) => {
+    human.push(String(message));
+  });
+  const machine = captureMachineChannel();
+  try {
+    await connect({
+      command: "connect",
+      target: "cursor",
+      apiBase: "https://api.example.test",
+      skipBrowser: false,
+      forceRelogin: false,
+      noRegistry: false,
+      noInteractive: true,
+      json: true,
+    });
+  } finally {
+    warn.mockRestore();
+    machine.restore();
+  }
+
+  expect(human.join("\n")).toContain("Already connected");
+  // Newline-delimited JSON: each line is a complete report, and the run's last
+  // word is the one marked terminal. This run answers in a single line.
+  expect(machine.reports()).toHaveLength(1);
+  const report = machine.terminal<{
+    state: string;
+    sign_in_url: string | null;
+    account: { id: string; providers: string[] } | null;
+    browser_location: { kind: string };
+  }>();
+  expect(report.state).toBe("connected");
+  expect(report.sign_in_url).toBeNull();
+  expect(report.account).toEqual({ id: "account-id", providers: ["google"] });
+  expect(report.browser_location).toEqual({ kind: "none" });
+});
+
+// `JSON.parse(stdout)` is the whole machine contract, so a run that dies
+// before it can settle still owes one object — the ambiguous/zero target
+// resolution a dev box hits the moment --target is omitted.
+it("still reports on stdout when the run fails before a target is resolved", async () => {
+  vi.stubEnv("TRUSTY_SQUIRE_PROFILE_DIR", profileDir);
+
+  const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+  const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+  const machine = captureMachineChannel();
+  let threw = false;
+  try {
+    await connect({
+      command: "connect",
+      apiBase: "https://api.example.test",
+      skipBrowser: false,
+      forceRelogin: false,
+      noRegistry: false,
+      noInteractive: true,
+      json: true,
+    });
+  } catch {
+    threw = true;
+  } finally {
+    machine.restore();
+    warn.mockRestore();
+    error.mockRestore();
+  }
+
+  expect(threw).toBe(true);
+  const report = machine.terminal<{ state: string; reason: string | null }>();
+  expect(report.state).toBe("no-browser");
+  expect(report.reason).toBe("run_failed");
 });
 
 // An ABSENT cookie store and an UNREADABLE one are different answers, and

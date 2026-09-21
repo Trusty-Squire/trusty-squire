@@ -138,10 +138,13 @@ export async function ensureLatestVersion(argv: readonly string[]): Promise<void
   }
   // Couldn't self-heal (npx missing / spawn failed). Fail CLOSED — refuse to pin
   // a stale version silently, which is the whole bug. Tell the user exactly what
-  // to run.
+  // to run. Thrown rather than exited so the caller still reports before the
+  // process ends; `runCli` keeps the exit code.
   console.error(
     `[trusty-squire] Couldn't auto-update via npx. Update, then re-run connect:\n` +
       `    npm install -g ${PKG}@latest`,
   );
-  process.exit(70);
+  throw new VersionUpdateRequiredError(`${PKG} is behind ${latest} and could not self-update`);
 }
+
+export class VersionUpdateRequiredError extends Error {}

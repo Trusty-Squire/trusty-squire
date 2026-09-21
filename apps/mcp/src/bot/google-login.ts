@@ -36,6 +36,7 @@ import {
   reclaimStaleCredentialBrokerIfPresent,
   resolveBrokerSocket,
 } from "./broker/discovery.js";
+import { BrokerRefusal } from "./broker/refusal.js";
 import type { BrokerClient } from "./broker/transport.js";
 import { controlLabelV2, wireRoleToSafeRoleV2 } from "./compact-observation-v2.js";
 import { extractGoogleAccountEmail } from "./oauth-login.js";
@@ -642,6 +643,19 @@ function createTrackedLoginBrowserLifecycle(
   return lifecycle;
 }
 
+// Where the ceremony browser ACTUALLY went, named by the path that placed it
+// — the screen the person running connect is at, a display only the noVNC URL
+// reaches, or nowhere showable at all. Nobody predicts this from their own
+// environment before a browser exists.
+export type CeremonyBrowserPlacement =
+  | { kind: "host_screen"; display?: string }
+  // A display nobody is sitting at, so it carries the address that reaches it.
+  // The placement is reported the moment the browser lands, while the tunnel is
+  // up and the run is still waiting — which is exactly when a caller needs to
+  // hand that address to a person.
+  | { kind: "virtual"; url: string }
+  | { kind: "unreachable"; reason: string };
+
 // Open the bot's visible Chrome at `url` and run `pollUntilDone` until it
 // resolves true, the deadline passes, or the browser/status check fails.
 //
@@ -668,6 +682,12 @@ export interface RunInBotChromeOpts {
   // step. Resolve this lazily so its heartbeat describes the current phase.
   heartbeatMessage?: string | (() => string);
   onProxyDisposition?: (proxy: LoginProxyDisposition) => void;
+  // Called once by whichever path placed the browser, with where it landed.
+  // `ownBrowserPid` is the Chrome THIS run launched, when it launched one —
+  // the broker's browser belongs to another session and reports null. The
+  // reporter needs it to tell its own ceremony window apart from a foreign
+  // holder of the same profile lock.
+  onBrowserPlacement?: (placement: CeremonyBrowserPlacement, ownBrowserPid: number | null) => void;
   // Deferred --force-relogin clears: `clearProviderCookies` busy-failed
   // because the broker's browser holds the profile, so the old provider
   // sessions are signed out through the ceremony's own tab instead (the
@@ -726,7 +746,7 @@ export interface LoginRunResult {
 // person running connect is already looking at the screen the tab is on.
 // Neither failure path ever touches the display or the browser.
 export type SharedCeremonyExposure =
-  | { kind: "exposed"; stop: () => Promise<void> }
+  | { kind: "exposed"; url: string; stop: () => Promise<void> }
   | { kind: "already_visible"; reason: string }
   | { kind: "unshowable"; reason: string };
 
@@ -774,8 +794,9 @@ export async function exposeSharedBrokerCeremonyDisplay(
   }
   const exposureRig = rig;
   const removeCleanup = registerRemoteLoginRigCleanup(exposureRig, () => undefined);
+  let url: string;
   try {
-    await exposeRemoteLoginDisplay(rig, label);
+    url = await exposeRemoteLoginDisplay(rig, label);
   } catch (err) {
     removeCleanup();
     await teardownRemoteLoginRig(rig).catch(() => undefined);
@@ -786,6 +807,7 @@ export async function exposeSharedBrokerCeremonyDisplay(
   }
   return {
     kind: "exposed",
+    url,
     stop: async () => {
       // Helpers only: the display and the browser belong to the broker daemon.
       removeCleanup();
@@ -1103,6 +1125,7 @@ export async function tryRunCeremonyInSharedBroker(
     // deadline would only burn it (round-12 review-3): fail now.
     const exposure = await exposeSharedBrokerCeremonyDisplay(opts.profileDir, SHARED_DISPLAY_LABEL);
     if (exposure.kind === "unshowable") {
+      opts.onBrowserPlacement?.({ kind: "unreachable", reason: exposure.reason }, null);
       throw new Error(
         `\n[login] The install page opened as a tab in the shared browser's private ` +
           `display, which nothing here can show: ${exposure.reason}. Without a display ` +
@@ -1112,6 +1135,12 @@ export async function tryRunCeremonyInSharedBroker(
           `your own tunnel) and run connect again.\n`,
       );
     }
+    opts.onBrowserPlacement?.(
+      exposure.kind === "already_visible"
+        ? { kind: "host_screen" }
+        : { kind: "virtual", url: exposure.url },
+      null,
+    );
     console.error(
       exposure.kind === "already_visible"
         ? `\n[login] The install page opened as a tab in the shared browser's display ` +
@@ -1315,6 +1344,13 @@ export async function runDisplayedChrome(
           isRunning: browser.isRunning,
         }),
     );
+    opts.onBrowserPlacement?.(
+      {
+        kind: "host_screen",
+        ...(process.env.DISPLAY !== undefined ? { display: process.env.DISPLAY } : {}),
+      },
+      browser.identity?.pid ?? null,
+    );
     console.error(`\n[login] A Chrome window has opened. ${opts.bannerLabel}\n`);
     const ok = await pollUntil(
       opts.deadline,
@@ -1365,8 +1401,9 @@ export async function runRemoteLoginChrome(opts: RunInBotChromeOpts): Promise<Lo
         }),
     );
     try {
-      await exposeRemoteLoginDisplay(rig, opts.bannerLabel);
+      const url = await exposeRemoteLoginDisplay(rig, opts.bannerLabel);
       lifecycle.throwIfCancelled();
+      opts.onBrowserPlacement?.({ kind: "virtual", url }, browser.identity?.pid ?? null);
 
       const completed = await pollUntil(
         opts.deadline,
@@ -1485,9 +1522,16 @@ export async function openInstallConfirmInBotChrome(
     // completion signal for every install path.
     pollUntilClaimed: (wizardCompleted: boolean) => Promise<InstallClaimPollResult>;
     profileDir?: string;
-    timeoutMinutes?: number;
+    // Absolute local deadline (ms). The caller owns it because only the
+    // caller knows what the ceremony is waiting on.
+    deadline: number;
     // Phase-aware terminal copy supplied by connect.
     heartbeatMessage?: string | (() => string);
+    // Where the ceremony browser landed, from the path that placed it.
+    onBrowserPlacement?: (
+      placement: CeremonyBrowserPlacement,
+      ownBrowserPid: number | null,
+    ) => void;
     // Deferred --force-relogin providers (cleared through the ceremony
     // itself when the standalone cookie-clear busy-failed).
     forceReloginProviders?: readonly OAuthProviderId[];
@@ -1498,8 +1542,7 @@ export async function openInstallConfirmInBotChrome(
   detail?: string;
 }> {
   const profileDir = opts.profileDir ?? CHROME_PROFILE_DIR;
-  const timeoutMinutes = Math.max(1, opts.timeoutMinutes ?? 15);
-  const deadline = Date.now() + timeoutMinutes * 60 * 1000;
+  const deadline = opts.deadline;
   let completion: Awaited<ReturnType<typeof startInstallCompletionListener>> | undefined;
 
   try {
@@ -1516,6 +1559,9 @@ export async function openInstallConfirmInBotChrome(
       pollUntilDone: async () =>
         installClaimPollCompleted(await opts.pollUntilClaimed(completion?.isCompleted() === true)),
       ...(opts.heartbeatMessage !== undefined ? { heartbeatMessage: opts.heartbeatMessage } : {}),
+      ...(opts.onBrowserPlacement !== undefined
+        ? { onBrowserPlacement: opts.onBrowserPlacement }
+        : {}),
       ...(opts.forceReloginProviders?.length
         ? { forceReloginProviders: opts.forceReloginProviders }
         : {}),
@@ -1525,6 +1571,12 @@ export async function openInstallConfirmInBotChrome(
     }
     return { status: "timeout", detail: "no install completed before the deadline" };
   } catch (err) {
+    // A refusal that names another session holding the browser — the profile
+    // gate's, or an identified resident broker's — is the caller's own typed
+    // condition, and connect reports it as a holder. Flattening either to a
+    // string turned "another browser has the profile" into "a sign-in is
+    // outstanding", and sent the caller to claim the install elsewhere.
+    if (err instanceof ProfileBusyError || err instanceof BrokerRefusal) throw err;
     return { status: "error", detail: err instanceof Error ? err.message : String(err) };
   } finally {
     await completion?.close().catch(() => undefined);

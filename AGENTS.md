@@ -777,7 +777,38 @@ Read this file. Follow the rules. Run the verify script. Paste the output. Then 
 - **`connect` is the only sign-in command.** Never reintroduce `login`.
   The shared-browser ceremony and fallback contracts are owned by
   [`docs/browser-broker.md`](docs/browser-broker.md); user-facing setup is in
-  [README.md](README.md).
+  [README.md](README.md). Machine callers use `connect --json` — the typed
+  report (`state`, `sign_in_url`, `account`, `holder`, `browser_location`) is
+  built by [`apps/mcp/src/install/connect-report.ts`](apps/mcp/src/install/connect-report.ts)
+  and the human copy renders from the same value. Do not parse connect's English.
+  The machine channel is NEWLINE-DELIMITED JSON: one complete, self-sufficient
+  report per line, written whenever the run's answer changes, with exactly one
+  `terminal: true` line and it last. A `--json` caller must never meet an empty
+  stdout, and the line naming a live sign-in URL or noVNC address goes out
+  BEFORE the run blocks on a human — a surface that only speaks at settle is
+  silent for the whole window in which those addresses are worth having. `needs-sign-in` carries its `sign_in_url` by construction
+  (the type says so); an outcome with no live URL gets a different state, and
+  the ceremony never outlives the pairing token that URL belongs to — as a
+  duration counted locally, never by differencing the server's timestamp
+  against this machine's clock. A field that names what was OBSERVED (`holder`,
+  `browser_location`) carries the observation or an explicit unknown; never an
+  assumption made by an error handler. `state` agrees with the exit code: a run
+  that fails never reports `connected`, and a `connected` that was read off the
+  cookie store rather than probed says so in `reason`. `browser_location` is
+  OBSERVED and handed back by whichever path placed the ceremony browser
+  (`onBrowserPlacement` in `bot/google-login.ts`) — never predicted from the
+  CLI process's own environment — and it never carries an address that will be
+  dead when the report is read: a virtual display's noVNC address ships on the
+  non-terminal line written while that tunnel is up, and the placement is never
+  relabelled afterwards — one value, decided where the browser was placed. A refusal that means another session holds the browser —
+  `ProfileBusyError` or a contention `BrokerRefusal` (`broker_unavailable`,
+  `profile_busy`) — reaches connect typed and reports `busy` with the holder,
+  read from Chrome's lock OR the operation lease. Every other refusal code is
+  the run breaking, not contention, and reports `run_failed`. `account` carries
+  the binding whenever the run proved one, `connected` or not, and its
+  `providers` is `null` — not `[]` — when the probe could not read the profile. A rejected flag is answered as a
+  usage error, never as a connection state. Do not add a report variant no path
+  emits.
 - **Never quit a Chrome whose profile state you still need with SIGTERM.** Chrome
   routes SIGTERM to its abrupt "session ending" exit and does NOT flush the
   SQLite cookie store (its own commit timer is ~30s out), so a SIGTERM teardown

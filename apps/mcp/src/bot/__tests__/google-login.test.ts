@@ -166,6 +166,7 @@ describe("install completion callback", () => {
           confirmUrl: "https://example.test/install",
           pollUntilClaimed,
           profileDir: "/unused/profile",
+          deadline: Date.now() + 60_000,
         },
         runChrome,
       ),
@@ -497,7 +498,11 @@ describe("login browser lifecycle guards", () => {
 });
 
 describe("self-launched login profile contention", () => {
-  it("returns the clear already-in-use error immediately instead of waiting", async () => {
+  // The gate's refusal stays a ProfileBusyError all the way out. Flattening it
+  // into the generic `{status:"error", detail}` left connect unable to tell
+  // "another browser has the profile" from "the confirm page failed to open",
+  // and it reported the contended run as an outstanding sign-in.
+  it("raises the typed already-in-use refusal immediately instead of waiting", async () => {
     const profileDir = mkdtempSync(join(tmpdir(), "ts-login-profile-"));
     symlinkSync(`${hostname()}-${process.pid}`, join(profileDir, "SingletonLock"));
 
@@ -505,18 +510,17 @@ describe("self-launched login profile contention", () => {
       // Exercise the real self-launch profile gate without broker discovery or
       // host-dependent noVNC setup. Broker reuse has its own attach regressions.
       const pollUntilClaimed = vi.fn(async () => "pending" as const);
-      const result = await openInstallConfirmInBotChrome(
-        {
-          confirmUrl: "https://example.test/install",
-          pollUntilClaimed,
-          profileDir,
-        },
-        runDisplayedChrome,
-      );
-      expect(result).toEqual({
-        status: "error",
-        detail: "another Trusty Squire session is already using the browser — close it first",
-      });
+      await expect(
+        openInstallConfirmInBotChrome(
+          {
+            confirmUrl: "https://example.test/install",
+            pollUntilClaimed,
+            profileDir,
+            deadline: Date.now() + 60_000,
+          },
+          runDisplayedChrome,
+        ),
+      ).rejects.toThrow(ProfileBusyError);
       expect(pollUntilClaimed).not.toHaveBeenCalled();
     } finally {
       rmSync(profileDir, { recursive: true, force: true });
