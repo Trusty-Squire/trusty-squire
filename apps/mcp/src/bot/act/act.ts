@@ -90,7 +90,7 @@ import {
 // Type-only cycle back to the facade is fine; no runtime import.
 import type { Observation, ProvisionAction } from "../provision-session.js";
 import type { Session } from "../session/model.js";
-import { resolveLiveControlIdentity } from "./identity.js";
+import { resolveLiveControlIdentity, type ActControlIdentity } from "./identity.js";
 import {
   commitDriveListOption,
   overlayOptionLabels,
@@ -602,11 +602,15 @@ function actsThroughOverlay(el: InteractiveElement, picker: boolean): boolean {
   );
 }
 
-function submitsOnEnter(el: InteractiveElement): boolean {
+function submitsOnEnter(el: InteractiveElement, ariaLabel: string): boolean {
   const role = (el.role ?? "").toLowerCase();
   const type = (el.type ?? "").toLowerCase();
-  const hay = `${el.ariaLabel ?? ""} ${el.placeholder ?? ""} ${el.name ?? ""}`;
-  return role === "searchbox" || type === "search" || el.name === "q" || /search/i.test(hay);
+  return (
+    role === "searchbox" ||
+    type === "search" ||
+    el.name === "q" ||
+    /search/i.test(`${ariaLabel} ${el.placeholder ?? ""}`)
+  );
 }
 
 function scopeForElement(page: Page, el: InteractiveElement): Page | Frame {
@@ -667,17 +671,17 @@ async function resolveFreshActTarget(
   noMatchPrefix: string,
   actionTarget: string,
   withVisibleCandidates: boolean,
-): Promise<{ el: InteractiveElement; fresh: InteractiveElement[]; picker: boolean }> {
+): Promise<{
+  el: InteractiveElement;
+  fresh: InteractiveElement[];
+  driveIdentity: ActControlIdentity | undefined;
+}> {
   const driveIdentity = session.drive?.identities?.get(resolutionTarget);
   const livePage = compactV2ActionPage ?? browser.page;
   if (driveIdentity !== undefined && livePage !== null) {
     const live = await resolveLiveControlIdentity(livePage, resolutionTarget, driveIdentity);
     if (live !== null) {
-      return {
-        el: live,
-        fresh: session.lastElements,
-        picker: driveIdentity.picker === true,
-      };
+      return { el: live, fresh: session.lastElements, driveIdentity };
     }
     if (session.compactV2Active) {
       if (!internalAccess) throwCompactV2StaleRef();
@@ -696,7 +700,7 @@ async function resolveFreshActTarget(
     compactV2Authorization === undefined
       ? resolveTarget(fresh, resolutionTarget)
       : resolveAuthorizedCompactV2Target(session, fresh, compactV2Authorization);
-  if (el !== null) return { el, fresh, picker: false };
+  if (el !== null) return { el, fresh, driveIdentity: undefined };
   if (session.compactV2Active) {
     if (!internalAccess) throwCompactV2StaleRef();
     throw new Error(`${internalLabel}: internal live target changed`);
@@ -1035,7 +1039,7 @@ async function executeAct(
           break;
         }
         // Re-resolve against FRESH elements every act — never trust a stale index.
-        const { el, fresh, picker } = await resolveFreshActTarget(
+        const { el, fresh, driveIdentity } = await resolveFreshActTarget(
           session,
           browser,
           compactV2ActionPage,
@@ -1047,7 +1051,9 @@ async function executeAct(
           action.target,
           true,
         );
-        actedCombobox = actsThroughOverlay(el, picker);
+        actedCombobox = actsThroughOverlay(el, driveIdentity?.picker === true);
+        const ariaLabelAttribute =
+          driveIdentity === undefined ? (el.ariaLabel ?? "") : (driveIdentity.ariaLabel ?? "");
         // Preserve frame identity (origin + path) for the frame-scoped fill.
         if (action.kind === "click" || action.kind === "js_click") {
           const clickPage = compactV2ActionPage ?? browser.page;
@@ -1098,13 +1104,13 @@ async function executeAct(
             const overlayBefore = await overlayOptionLabels(compactV2ActionPage);
             await compactV2ActionPage.keyboard.press("ControlOrMeta+a");
             await compactV2ActionPage.keyboard.insertText(typedText ?? "");
-            if (submitsOnEnter(el)) {
+            await waitForOverlayOptionsToChange(compactV2ActionPage, overlayBefore);
+            if (submitsOnEnter(el, ariaLabelAttribute)) {
               await compactV2ActionPage.keyboard.press("Enter").catch(() => undefined);
             }
-            await waitForOverlayOptionsToChange(compactV2ActionPage, overlayBefore);
           } else {
             await actType(actTarget, typedText!, false);
-            if (options?.typeThroughOverlay === true && submitsOnEnter(el)) {
+            if (options?.typeThroughOverlay === true && submitsOnEnter(el, ariaLabelAttribute)) {
               await (compactV2ActionPage ?? browser.page)?.keyboard
                 .press("Enter")
                 .catch(() => undefined);
@@ -1251,6 +1257,7 @@ async function executeAct(
   if (session.drive !== null) {
     const observeMs = Date.now() - observeStarted;
     session.drive.lastActProfile = {
+      ...session.drive.lastActProfile,
       act_ms: Math.max(0, Date.now() - actStarted - settleMs - observeMs),
       settle_ms: settleMs,
       observe_ms: observeMs,

@@ -18,6 +18,7 @@ export type ActControlIdentity = {
   name?: string;
   placeholder?: string;
   inputType?: string;
+  ariaLabel?: string;
 };
 
 function originOf(url: string): string {
@@ -51,6 +52,7 @@ export function identityFromDriveElement(
     name?: string;
     placeholder?: string;
     inputType?: string;
+    ariaLabel?: string;
   },
   pageUrl: string,
 ): ActControlIdentity {
@@ -65,6 +67,7 @@ export function identityFromDriveElement(
     ...(el.name ? { name: el.name } : {}),
     ...(el.placeholder ? { placeholder: el.placeholder } : {}),
     ...(el.inputType ? { inputType: el.inputType } : {}),
+    ...(el.ariaLabel ? { ariaLabel: el.ariaLabel } : {}),
   };
 }
 
@@ -82,6 +85,7 @@ export function rememberDriveIdentities(
     name?: string;
     placeholder?: string;
     inputType?: string;
+    ariaLabel?: string;
   }>,
   pageUrl: string,
 ): Map<string, ActControlIdentity> {
@@ -147,20 +151,44 @@ function framePathOf(frame: Page | Frame): string | undefined {
   return indexes.length === 0 ? undefined : indexes.join("/");
 }
 
-// One rule: the ref's registered node is still connected AND the identity's
-// selector resolves to exactly that node. A second spelling of "close enough"
-// is how an act lands on the neighbor this record exists to refuse.
-function inPageSameControl(arg: { ref: string; selector: string }): boolean {
-  type DriveCache = { nodes: Map<string, Element> };
+// One rule: the ref's registered node is still connected, the identity's
+// selector resolves to exactly that node, and the node still reads back as the
+// role, label and destination the decision named. Node identity alone misses an
+// in-place re-render, where the same node keeps its selector and becomes a
+// different control.
+function inPageSameControl(arg: {
+  ref: string;
+  selector: string;
+  role: string;
+  label: string;
+  href: string;
+}): boolean {
+  type ControlDescription = { role: string; label: string; href: string };
+  type DriveCache = {
+    nodes: Map<string, Element>;
+    describe?: (element: Element) => ControlDescription | null;
+  };
   const registry = (window as Window & { __tsDriveRegistry?: DriveCache }).__tsDriveRegistry;
   const node = registry?.nodes.get(arg.ref);
   if (node === undefined || !node.isConnected) return false;
   try {
     const found = document.querySelectorAll(arg.selector);
-    return found.length === 1 && found[0] === node;
+    if (found.length !== 1 || found[0] !== node) return false;
   } catch {
     return false;
   }
+  const describe = registry?.describe;
+  if (typeof describe !== "function") return false;
+  const live = describe(node);
+  if (live === null) return false;
+  if (live.role.toLowerCase() !== arg.role) return false;
+  if (live.href !== arg.href) return false;
+  // The snapshot emits the role as the label when it derived no accessible name
+  // (nameless control, or its name-walk budget ran out). There is no recorded
+  // name to compare then; role and destination still have to match.
+  if (arg.label.toLowerCase() === arg.role) return true;
+  const normalize = (text: string): string => text.replace(/\s+/g, " ").trim().toLowerCase();
+  return normalize(live.label) === normalize(arg.label);
 }
 
 /** Frames the identity names. Origin is the part that survives a pushState;
@@ -187,6 +215,9 @@ export async function resolveIdentityScope(
     const same = await evaluateBound(scope, inPageSameControl, {
       ref,
       selector: identity.selector,
+      role: identity.role,
+      label: identity.label,
+      href: identity.href ?? "",
     }).catch(() => false);
     if (same) return scope;
   }

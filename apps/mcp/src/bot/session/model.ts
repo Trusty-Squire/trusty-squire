@@ -201,8 +201,9 @@ export interface SessionDriveState {
   lastActProfile: DriveActProfile | null;
   /** Identity stored behind each drive `@e:` token for this snapshot. */
   identities?: Map<string, ActControlIdentity>;
-  /** Control state at the snapshot the current decision was made from. */
-  snapshotControlDigest?: string;
+  /** Control state at the snapshot the current decision was made from.
+   *  `null` means the snapshot fell back and never read it. */
+  snapshotControlDigest?: string | null;
   maskedValueRefs?: string[];
   lastDocumentEpoch?: string | null;
   resumeCompactRows?: Array<[string, string, string?]>;

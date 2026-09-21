@@ -36,6 +36,8 @@ export interface DriveSnapshotElement {
   placeholder?: string;
   /** The control's HTML `name`, when it has one. */
   name?: string;
+  /** The `aria-label` ATTRIBUTE, not the resolved accessible name. */
+  ariaLabel?: string;
   /** The input `type` (`email`, `text`, …), when the node is an input. */
   inputType?: string;
   /** Live CSS/Playwright selector for the node, used to re-resolve identity. */
@@ -306,10 +308,12 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
   const deadline = scriptStarted + arg.budgetMs;
   const expired = (): boolean => performance.now() >= deadline;
   if (document.body === null) return null;
+  type ControlDescription = { role: string; label: string; href: string };
   type DriveCache = {
     ids: WeakMap<Element, number>;
     nodes: Map<string, Element>;
     next: number;
+    describe?: (element: Element) => ControlDescription | null;
   };
   const root = window as Window & { __tsDriveRegistry?: DriveCache };
   const cache: DriveCache = root.__tsDriveRegistry ?? {
@@ -350,9 +354,16 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
     return style.display !== "none" && style.visibility !== "hidden" && style.opacity !== "0";
   };
   let nameVisits = 0;
+  let nameDeadline = deadline;
   const name = (element: Element | null, seen = new Set<Element>()): string => {
-    if (element === null || seen.has(element) || nameVisits >= arg.maxNameVisits || expired())
+    if (
+      element === null ||
+      seen.has(element) ||
+      nameVisits >= arg.maxNameVisits ||
+      performance.now() >= nameDeadline
+    ) {
       return "";
+    }
     nameVisits += 1;
     seen.add(element);
     const labelledBy = (element.getAttribute("aria-labelledby") ?? "")
@@ -453,6 +464,38 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
   // Dispatch resolves this selector strictly and act-time identity requires it
   // to name exactly one node, so a shorthand is only taken when it is already
   // unique; otherwise the path is walked to the document root, which is.
+  const labelOf = (element: Element, role: string): string => {
+    const rect = element.getBoundingClientRect();
+    const inViewport =
+      rect.bottom > 0 && rect.top < innerHeight && rect.right > 0 && rect.left < innerWidth;
+    const buttonLike = role === "button" || element.tagName === "BUTTON";
+    const keepOffscreen =
+      role === "textbox" ||
+      role === "searchbox" ||
+      role === "spinbutton" ||
+      role === "checkbox" ||
+      role === "radio" ||
+      role === "combobox" ||
+      element.tagName === "SELECT" ||
+      (buttonLike && arg.keepOffscreenButtons);
+    return !inViewport && !keepOffscreen
+      ? element.getAttribute("aria-label")?.trim() || role
+      : name(element) || role;
+  };
+  // Act-time identity reads the control back through the SAME derivation the
+  // snapshot emitted, so a node React mutated in place cannot pass as the
+  // control the decision named.
+  cache.describe = (element: Element): { role: string; label: string; href: string } | null => {
+    const role = roleOf(element);
+    if (role === null) return null;
+    nameVisits = 0;
+    nameDeadline = performance.now() + 250;
+    return {
+      role,
+      label: labelOf(element, role),
+      href: element instanceof HTMLAnchorElement && element.href.length > 0 ? element.href : "",
+    };
+  };
   const selectorFor = (node: Element): string => {
     const namesOnlyThisNode = (candidate: string): boolean => {
       try {
@@ -543,10 +586,7 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
       ) !== null;
     if (!inViewport && !keepOffscreen && !pinned) continue;
     const ref = identity(element);
-    const label =
-      !inViewport && !keepOffscreen
-        ? element.getAttribute("aria-label")?.trim() || role
-        : name(element) || role;
+    const label = labelOf(element, role);
     const disabled =
       element.matches(":disabled") ||
       element.closest('[aria-disabled="true"]') !== null ||
@@ -623,6 +663,7 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
     const href =
       element instanceof HTMLAnchorElement && element.href.length > 0 ? element.href : "";
     const placeholder = element.getAttribute("placeholder")?.trim() ?? "";
+    const ariaLabel = element.getAttribute("aria-label")?.trim() ?? "";
     const inputName =
       element instanceof HTMLInputElement ||
       element instanceof HTMLTextAreaElement ||
@@ -664,6 +705,7 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
       ...(picker ? { picker: true } : {}),
       ...(width === undefined ? {} : { width }),
       ...(placeholder.length > 0 ? { placeholder } : {}),
+      ...(ariaLabel.length > 0 ? { ariaLabel } : {}),
       ...(href.length > 0 ? { href } : {}),
       ...(inputName.length > 0 ? { name: inputName } : {}),
       ...(inputType.length > 0 ? { inputType } : {}),

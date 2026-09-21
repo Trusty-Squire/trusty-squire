@@ -4896,6 +4896,12 @@ async function snapshotDriveSession(
   timedOut: boolean;
 }> {
   const started = Date.now();
+  // The pre-act guard compares against these, and only the full path below can
+  // refresh them. Clearing first makes "unknown" distinguishable from "differs"
+  // on every fallback return, so a fallback cannot abandon the next decision.
+  const previousEpoch = drive.lastDocumentEpoch;
+  drive.snapshotControlDigest = null;
+  drive.lastDocumentEpoch = null;
   const timed = (
     observation: Observation,
     rows: WireRow[],
@@ -4967,7 +4973,6 @@ async function snapshotDriveSession(
   drive.snapshotControlDigest = await driveControlDigest(page);
   const rawRows = driveRowsFromSnapshot(snapshot);
   lastSelectOptions.set(session, snapshotSelectOptions(snapshot));
-  const previousEpoch = drive.lastDocumentEpoch;
   if (
     typeof previousEpoch === "string" &&
     previousEpoch.length > 0 &&
