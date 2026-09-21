@@ -21,9 +21,9 @@ import { describe, expect, it } from "vitest";
 import {
   agentTokenStillValid,
   claimHeartbeatMessage,
-  decideProvisioned,
   shouldCompleteInstallClaim,
 } from "../install/cli.js";
+import { decideProvisioned } from "../install/connect-report.js";
 import { clearBrowserProfile } from "../bot/login-state.js";
 import { profilePathIdentity, withProfileOperationGuard } from "../bot/profile.js";
 import type { SessionData } from "../session.js";

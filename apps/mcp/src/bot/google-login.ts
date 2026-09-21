@@ -642,6 +642,15 @@ function createTrackedLoginBrowserLifecycle(
   return lifecycle;
 }
 
+// Where the ceremony browser ACTUALLY went, named by the path that placed it
+// — the screen the person running connect is at, a display only the noVNC URL
+// reaches, or nowhere showable at all. Nobody predicts this from their own
+// environment before a browser exists.
+export type CeremonyBrowserPlacement =
+  | { kind: "host_screen"; display?: string }
+  | { kind: "virtual"; display?: string }
+  | { kind: "unreachable"; reason: string };
+
 // Open the bot's visible Chrome at `url` and run `pollUntilDone` until it
 // resolves true, the deadline passes, or the browser/status check fails.
 //
@@ -668,6 +677,8 @@ export interface RunInBotChromeOpts {
   // step. Resolve this lazily so its heartbeat describes the current phase.
   heartbeatMessage?: string | (() => string);
   onProxyDisposition?: (proxy: LoginProxyDisposition) => void;
+  // Called once by whichever path placed the browser, with where it landed.
+  onBrowserPlacement?: (placement: CeremonyBrowserPlacement) => void;
   // Deferred --force-relogin clears: `clearProviderCookies` busy-failed
   // because the broker's browser holds the profile, so the old provider
   // sessions are signed out through the ceremony's own tab instead (the
@@ -1103,6 +1114,7 @@ export async function tryRunCeremonyInSharedBroker(
     // deadline would only burn it (round-12 review-3): fail now.
     const exposure = await exposeSharedBrokerCeremonyDisplay(opts.profileDir, SHARED_DISPLAY_LABEL);
     if (exposure.kind === "unshowable") {
+      opts.onBrowserPlacement?.({ kind: "unreachable", reason: exposure.reason });
       throw new Error(
         `\n[login] The install page opened as a tab in the shared browser's private ` +
           `display, which nothing here can show: ${exposure.reason}. Without a display ` +
@@ -1112,6 +1124,9 @@ export async function tryRunCeremonyInSharedBroker(
           `your own tunnel) and run connect again.\n`,
       );
     }
+    opts.onBrowserPlacement?.(
+      exposure.kind === "already_visible" ? { kind: "host_screen" } : { kind: "virtual" },
+    );
     console.error(
       exposure.kind === "already_visible"
         ? `\n[login] The install page opened as a tab in the shared browser's display ` +
@@ -1315,6 +1330,10 @@ export async function runDisplayedChrome(
           isRunning: browser.isRunning,
         }),
     );
+    opts.onBrowserPlacement?.({
+      kind: "host_screen",
+      ...(process.env.DISPLAY !== undefined ? { display: process.env.DISPLAY } : {}),
+    });
     console.error(`\n[login] A Chrome window has opened. ${opts.bannerLabel}\n`);
     const ok = await pollUntil(
       opts.deadline,
@@ -1367,6 +1386,10 @@ export async function runRemoteLoginChrome(opts: RunInBotChromeOpts): Promise<Lo
     try {
       await exposeRemoteLoginDisplay(rig, opts.bannerLabel);
       lifecycle.throwIfCancelled();
+      opts.onBrowserPlacement?.({
+        kind: "virtual",
+        ...(rig.display !== undefined ? { display: rig.display } : {}),
+      });
 
       const completed = await pollUntil(
         opts.deadline,
@@ -1488,6 +1511,8 @@ export async function openInstallConfirmInBotChrome(
     timeoutMinutes?: number;
     // Phase-aware terminal copy supplied by connect.
     heartbeatMessage?: string | (() => string);
+    // Where the ceremony browser landed, from the path that placed it.
+    onBrowserPlacement?: (placement: CeremonyBrowserPlacement) => void;
     // Deferred --force-relogin providers (cleared through the ceremony
     // itself when the standalone cookie-clear busy-failed).
     forceReloginProviders?: readonly OAuthProviderId[];
@@ -1516,6 +1541,9 @@ export async function openInstallConfirmInBotChrome(
       pollUntilDone: async () =>
         installClaimPollCompleted(await opts.pollUntilClaimed(completion?.isCompleted() === true)),
       ...(opts.heartbeatMessage !== undefined ? { heartbeatMessage: opts.heartbeatMessage } : {}),
+      ...(opts.onBrowserPlacement !== undefined
+        ? { onBrowserPlacement: opts.onBrowserPlacement }
+        : {}),
       ...(opts.forceReloginProviders?.length
         ? { forceReloginProviders: opts.forceReloginProviders }
         : {}),

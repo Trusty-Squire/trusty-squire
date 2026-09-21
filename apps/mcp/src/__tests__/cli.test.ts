@@ -66,6 +66,12 @@ describe("parseArgs --skip-browser", () => {
     expect(parseArgs(["connect"]).json).toBeUndefined();
     expect(parseArgs(["connect", "--json"]).json).toBe(true);
   });
+
+  // The clack picker draws on stdout, which --json owns.
+  it("makes --json non-interactive so nothing else writes to the machine channel", () => {
+    expect(parseArgs(["connect"]).noInteractive).toBe(false);
+    expect(parseArgs(["connect", "--json"]).noInteractive).toBe(true);
+  });
 });
 
 describe("parseArgs registry", () => {

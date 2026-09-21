@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- `connect --json` prints a typed report on stdout (`state`, `sign_in_url`, `account`, `holder`, `browser_location`) from the same value the human copy renders. Human output is unchanged.
+- `connect --json` prints exactly one typed report on stdout when the run settles (`state`, `sign_in_url`, `account`, `holder`, `browser_location`, plus a narrow `reason`) from the same value the human copy renders. `browser_location` is reported by the path that placed the ceremony browser, `--json` implies `--no-interactive`, and human output is unchanged.
 
 ## 1.1.14-rc.15 (2026-09-12)
 

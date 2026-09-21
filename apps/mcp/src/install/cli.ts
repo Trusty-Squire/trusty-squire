@@ -75,7 +75,6 @@ import {
 } from "./interactive.js";
 import chalk from "chalk";
 import { confirm, isCancel } from "@clack/prompts";
-import { hostDisplayAcceptsConnections } from "../bot/display-env.js";
 import {
   alreadyConnectedMessage,
   buildConnectReport,
@@ -83,8 +82,6 @@ import {
   decideConnectComplete,
   decideConnectPreflight,
   emitConnectReport,
-  isUnshowableConfirmDetail,
-  observeConnectBrowserLocation,
   preflightUnverifiedMessage,
   providersConnectMustAwait,
   snapshotConnectHolder,
@@ -241,7 +238,8 @@ function parseArgs(argv: string[]): Argv {
     ...(forceReloginProvider !== undefined ? { forceReloginProvider } : {}),
     noRegistry,
     ...(registryConfigured ? { registryConfigured } : {}),
-    noInteractive,
+    // The picker draws on stdout, which is the machine channel under --json.
+    noInteractive: noInteractive || json,
     ...(json ? { json } : {}),
   };
   if (target !== undefined) args.target = target;
@@ -532,14 +530,11 @@ async function connect(args: Argv): Promise<void> {
     );
   } catch (err) {
     if (err instanceof ProfileBusyError) {
-      emitConnectReport(
-        buildConnectReport({
-          outcome: { kind: "profile_busy" },
-          holder: snapshotConnectHolder(canonicalProfileDir),
-          browser_location: { kind: "none" },
-        }),
-        args.json,
-      );
+      emitConnectStatus(args, {
+        outcome: { kind: "profile_busy" },
+        profileDir: canonicalProfileDir,
+        browser_location: { kind: "none" },
+      });
       ui.fail(PROFILE_BUSY_MESSAGE);
       process.exit(1);
     }
@@ -703,7 +698,7 @@ async function settleAlreadyConnected(
     });
     await maybeStoreTwoCaptchaKey(args, preflight.session);
     emitConnectStatus(args, {
-      outcome: { kind: "unverified", account_id: preflight.session.account_id ?? "" },
+      outcome: { kind: "unverified" },
       profileDir,
       browser_location: { kind: "none" },
     });
@@ -865,17 +860,25 @@ async function runConnectInstall(
     consent_skillify_telemetry: consent.skillifyTelemetry,
     consent_operator_inbox_otp: consent.operatorInboxOtp,
   };
-  const session = await runInstallClaim(args.apiBase, target, baseSession, args.skipBrowser, {
+  const claim = await runInstallClaim(args.apiBase, target, baseSession, args.skipBrowser, {
     applyServerPrefs: !wantInteractive,
     profileDir,
-    json: args.json === true,
     ...(deferredReloginProviders.length ? { forceReloginProviders: deferredReloginProviders } : {}),
   });
-  if (session === null) {
+  if (claim.kind === "confirm_failed") {
     emitConnectStatus(args, {
-      outcome: { kind: "install_unclaimed" },
+      outcome: { kind: "browser_confirm_failed" },
       profileDir,
-      browser_location: { kind: "none" },
+      browser_location: claim.browser_location,
+    });
+    ui.fail(`Couldn't open the confirm page: ${claim.detail}`);
+    process.exit(1);
+  }
+  if (claim.kind === "unclaimed") {
+    emitConnectStatus(args, {
+      outcome: { kind: "install_unclaimed", confirm_url: claim.confirm_url },
+      profileDir,
+      browser_location: claim.browser_location,
     });
     ui.fail(
       `Install didn't complete — browser confirm never finished. ` +
@@ -883,6 +886,7 @@ async function runConnectInstall(
     );
     process.exit(1);
   }
+  const session = claim.session;
   if (
     args.forceReloginProvider !== undefined &&
     accountId !== undefined &&
@@ -952,7 +956,7 @@ async function runConnectInstall(
       skip_browser: args.skipBrowser,
     },
     profileDir,
-    browser_location: { kind: "none" },
+    browser_location: claim.browser_location,
   });
   if (!complete.ok) {
     ui.fail(connectIncompleteMessage(complete.reason, args.skipBrowser));
@@ -1037,17 +1041,6 @@ export async function agentTokenStillValid(
     return true;
   }
 }
-
-export {
-  connectIncompleteMessage,
-  decideConnectComplete,
-  decideConnectPreflight,
-  decideProvisioned,
-  preflightUnverifiedMessage,
-  providersConnectMustAwait,
-  type ConnectIncompleteReason,
-  type ConnectPreflight,
-} from "./connect-report.js";
 
 type CheckedConnectPreflight =
   | { kind: "ceremony" }
@@ -1244,6 +1237,14 @@ export function claimHeartbeatMessage(claimed: boolean): string {
     : "Still waiting for you to finish signing in — the URL/window above stays live until you do.";
 }
 
+// What the ceremony settled on, with the two facts a machine caller needs
+// when it did not claim: the sign-in URL that is still live, and where the
+// browser actually went.
+type InstallClaimResult =
+  | { kind: "claimed"; session: SessionData; browser_location: ConnectBrowserLocation }
+  | { kind: "unclaimed"; confirm_url: string; browser_location: ConnectBrowserLocation }
+  | { kind: "confirm_failed"; detail: string; browser_location: ConnectBrowserLocation };
+
 async function runInstallClaim(
   apiBase: string,
   target: AgentTarget,
@@ -1257,31 +1258,13 @@ async function runInstallClaim(
     // discarded a fresh inbox-read preference.
     applyServerPrefs: boolean;
     profileDir: string;
-    json?: boolean;
     // Providers whose cookie clear busy-failed and now rides the ceremony
     // (see the --force-relogin block in the caller).
     forceReloginProviders?: readonly OAuthProviderId[];
   },
-): Promise<SessionData | null> {
+): Promise<InstallClaimResult> {
   console.warn(`Connecting this machine to your account…`);
   const initiate = await installInitiate(apiBase, target, baseSession.machine_token ?? null);
-  const hostScreenLive = skipBrowser ? false : await hostDisplayAcceptsConnections();
-  emitConnectReport(
-    buildConnectReport({
-      outcome: {
-        kind: "ceremony_waiting",
-        confirm_url: initiate.confirm_url,
-        skip_browser: skipBrowser,
-      },
-      holder: snapshotConnectHolder(options.profileDir),
-      browser_location: observeConnectBrowserLocation({
-        phase: skipBrowser ? "skip_browser" : "decided",
-        host_screen_live: hostScreenLive,
-        ...(process.env.DISPLAY !== undefined ? { display: process.env.DISPLAY } : {}),
-      }),
-    }),
-    options.json,
-  );
 
   // Track the claimed token outside the poll closure so the in-Chrome
   // flow's pollUntilClaimed can read it once the API reports claimed.
@@ -1341,15 +1324,30 @@ async function runInstallClaim(
       // ignore — user copies the URL
     }
     const ok = await pollForClaim(apiBase, initiate.setup_code);
-    if (ok === null) return null;
+    if (ok === null) {
+      return {
+        kind: "unclaimed",
+        confirm_url: initiate.confirm_url,
+        browser_location: { kind: "none" },
+      };
+    }
     return {
-      ...applyInstallPreferences(baseSession, ok.preferences, options.applyServerPrefs),
-      api_base_url: apiBase,
-      saved_at: new Date().toISOString(),
-      agent_session_token: ok.token,
-      account_id: ok.account_id,
+      kind: "claimed",
+      browser_location: { kind: "none" },
+      session: {
+        ...applyInstallPreferences(baseSession, ok.preferences, options.applyServerPrefs),
+        api_base_url: apiBase,
+        saved_at: new Date().toISOString(),
+        agent_session_token: ok.token,
+        account_id: ok.account_id,
+      },
     };
   }
+
+  // Wrapper object for the same reason as `state` above: the ceremony reports
+  // its placement through a callback, and only the path that placed the
+  // browser knows where it went.
+  const placed: { value: ConnectBrowserLocation | null } = { value: null };
 
   // Default: run the confirm INSIDE the bot's Chrome. The user signs
   // The wizard page reads provider state from /v1/auth/whoami so no
@@ -1359,43 +1357,44 @@ async function runInstallClaim(
     pollUntilClaimed: pollOnce,
     heartbeatMessage: () => claimHeartbeatMessage(state.value !== null),
     profileDir: options.profileDir,
+    onBrowserPlacement: (placement) => {
+      placed.value = placement;
+    },
     ...(options.forceReloginProviders?.length
       ? { forceReloginProviders: options.forceReloginProviders }
       : {}),
   });
+  const browser_location: ConnectBrowserLocation = placed.value ?? {
+    kind: "unknown",
+    reason: "the ceremony ended before any path reported where the browser opened",
+  };
 
   // rc.33 — surface the underlying error instead of letting the outer
   // wrapper print a generic "browser confirm step never finished."
   // Surface the underlying browser-launch error rather than replacing it
   // with a generic confirmation timeout.
   if (result.status === "error") {
-    const detail = result.detail ?? "unknown error";
-    emitConnectReport(
-      buildConnectReport({
-        outcome: isUnshowableConfirmDetail(detail)
-          ? { kind: "display_unshowable", detail }
-          : { kind: "browser_confirm_failed", detail },
-        holder: snapshotConnectHolder(options.profileDir),
-        browser_location: isUnshowableConfirmDetail(detail)
-          ? { kind: "unreachable", reason: detail }
-          : { kind: "unknown", reason: detail },
-      }),
-      options.json,
-    );
-    ui.fail(`Couldn't open the confirm page: ${detail}`);
-    process.exit(1);
+    return {
+      kind: "confirm_failed",
+      detail: result.detail ?? "unknown error",
+      browser_location,
+    };
   }
 
   if (result.status !== "claimed" || state.value === null) {
-    return null;
+    return { kind: "unclaimed", confirm_url: initiate.confirm_url, browser_location };
   }
 
   return {
-    ...applyInstallPreferences(baseSession, state.value.preferences, options.applyServerPrefs),
-    api_base_url: apiBase,
-    saved_at: new Date().toISOString(),
-    agent_session_token: state.value.token,
-    account_id: state.value.account_id,
+    kind: "claimed",
+    browser_location,
+    session: {
+      ...applyInstallPreferences(baseSession, state.value.preferences, options.applyServerPrefs),
+      api_base_url: apiBase,
+      saved_at: new Date().toISOString(),
+      agent_session_token: state.value.token,
+      account_id: state.value.account_id,
+    },
   };
 }
 
@@ -1471,7 +1470,10 @@ function printHelp(): void {
   );
   console.warn(`  --no-registry                disable managed registry participation`);
   console.warn(`  --no-interactive             skip the TUI picker (use flag defaults only)`);
-  console.warn(`  --json                       print a machine-readable connect report on stdout`);
+  console.warn(
+    `  --json                       print one machine-readable connect report on stdout ` +
+      `(implies --no-interactive)`,
+  );
   console.warn("");
   console.warn(`${chalk.bold("Example")}`);
   console.warn(`  ${ui.code("npx @trusty-squire/mcp connect")}`);

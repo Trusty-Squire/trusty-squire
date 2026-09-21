@@ -781,6 +781,10 @@ Read this file. Follow the rules. Run the verify script. Paste the output. Then 
   report (`state`, `sign_in_url`, `account`, `holder`, `browser_location`) is
   built by [`apps/mcp/src/install/connect-report.ts`](apps/mcp/src/install/connect-report.ts)
   and the human copy renders from the same value. Do not parse connect's English.
+  One report per run, emitted where the run settles; `browser_location` is
+  OBSERVED and handed back by whichever path placed the ceremony browser
+  (`onBrowserPlacement` in `bot/google-login.ts`) — never predicted from the
+  CLI process's own environment. Do not add a report variant no path emits.
 - **Never quit a Chrome whose profile state you still need with SIGTERM.** Chrome
   routes SIGTERM to its abrupt "session ending" exit and does NOT flush the
   SQLite cookie store (its own commit timer is ~30s out), so a SIGTERM teardown

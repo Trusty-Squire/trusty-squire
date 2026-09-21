@@ -1,51 +1,42 @@
 // Machine-readable connect report. One typed value answers the whole
 // question (state, sign-in URL, account, holder, browser location); the
-// human sentences render from it. `connect --json` prints this object.
+// human sentences render from it. `connect --json` prints this object once,
+// when the run has settled — interim progress never lands on that stream.
 //
 // Connect runs before any MCP server exists, so the CLI carries the
 // contract. A later MCP reader must call the same function, not restated
 // prose.
 
 import { hostname } from "node:os";
+import type { CeremonyBrowserPlacement } from "../bot/google-login.js";
 import type { OAuthProviderId } from "../bot/oauth-providers.js";
-import { currentProfileHolderPid, readLockHolder } from "../bot/profile.js";
+import { readLockHolder } from "../bot/profile.js";
 import type { SessionData } from "../session.js";
 
 export const CONNECT_STATES = ["connected", "needs-sign-in", "busy", "no-browser"] as const;
 export type ConnectState = (typeof CONNECT_STATES)[number];
 
+// What blocks this connect, and ONLY where the other fields cannot say it:
+// a holder, a browser location and a sign-in URL already name their own
+// cases, so those carry no reason at all.
 export type ConnectReasonCode =
-  | "already_provisioned"
-  | "ceremony_complete"
-  | "ceremony_required"
-  | "skip_browser"
-  | "unverified_probe"
-  | "probe_failed"
-  | "no_google_session"
+  | "provider_session_missing"
   | "requested_provider_missing"
-  | "profile_busy"
-  | "display_unshowable"
-  | "install_unclaimed"
-  | "browser_confirm_failed"
-  | "account_switch_refused"
-  | "cookie_clear_failed";
+  | "account_mismatch"
+  | "profile_unverifiable";
 
 export type ConnectHolder =
   | { kind: "none" }
   | { kind: "self"; code: "this_process"; pid: number }
-  | {
-      kind: "other";
-      code: "singleton_lock" | "profile_lock" | "broker_lease";
-      pid?: number;
-      host?: string;
-    }
-  | { kind: "unknown"; reason: "holder_unreadable" | "cross_host" | "identity_unknown" };
+  | { kind: "other"; code: "singleton_lock"; pid: number }
+  | { kind: "unknown"; reason: "cross_host" | "identity_unknown" };
 
+// The placement half is whatever the code that PLACED the ceremony browser
+// reported; the other two members are the runs that placed no browser and
+// the runs whose placement never came back.
 export type ConnectBrowserLocation =
-  | { kind: "host_screen"; display?: string }
-  | { kind: "virtual"; display?: string }
+  | CeremonyBrowserPlacement
   | { kind: "none" }
-  | { kind: "unreachable"; reason: string }
   | { kind: "unknown"; reason: string };
 
 export interface ConnectAccount {
@@ -54,16 +45,17 @@ export interface ConnectAccount {
 }
 
 /**
- * The five fields Beeline drives from, plus the reason code that
- * distinguishes not-connected cases without matching English.
+ * The five fields Beeline drives from, plus the reason code for the cases
+ * those five cannot tell apart between them.
  *
- * Every field is always present. `sign_in_url` is a URL only in
- * `needs-sign-in` when we have exactly one; otherwise null. `account`
- * is set only when `state` is `connected`.
+ * Every field is always present. `sign_in_url` is a URL exactly when the run
+ * settled still holding a live sign-in URL; `account` is set only when
+ * `state` is `connected`; `reason` is null when the other fields already say
+ * everything there is to say.
  */
 export interface ConnectReport {
   state: ConnectState;
-  reason: ConnectReasonCode;
+  reason: ConnectReasonCode | null;
   sign_in_url: string | null;
   account: ConnectAccount | null;
   holder: ConnectHolder;
@@ -72,8 +64,7 @@ export interface ConnectReport {
 
 export type ConnectOutcome =
   | { kind: "provisioned"; account_id: string; providers: OAuthProviderId[] }
-  | { kind: "unverified"; account_id: string }
-  | { kind: "ceremony_waiting"; confirm_url: string; skip_browser: boolean }
+  | { kind: "unverified" }
   | {
       kind: "ceremony_complete";
       account_id: string;
@@ -82,9 +73,8 @@ export type ConnectOutcome =
       skip_browser: boolean;
     }
   | { kind: "profile_busy" }
-  | { kind: "display_unshowable"; detail: string }
-  | { kind: "install_unclaimed" }
-  | { kind: "browser_confirm_failed"; detail: string }
+  | { kind: "install_unclaimed"; confirm_url: string }
+  | { kind: "browser_confirm_failed" }
   | { kind: "account_switch_refused" }
   | { kind: "cookie_clear_failed" };
 
@@ -94,9 +84,9 @@ export interface ConnectReportInput {
   browser_location: ConnectBrowserLocation;
 }
 
-function emptyReport(
+function settled(
   state: ConnectState,
-  reason: ConnectReasonCode,
+  reason: ConnectReasonCode | null,
   input: ConnectReportInput,
   extras: Pick<ConnectReport, "sign_in_url" | "account"> = {
     sign_in_url: null,
@@ -108,7 +98,12 @@ function emptyReport(
     reason,
     sign_in_url: extras.sign_in_url,
     account: extras.account,
-    holder: input.holder,
+    // "Busy" and "nobody holds it" are a contradiction to read: a profile we
+    // could not answer for is an unknown holder, not an absent one.
+    holder:
+      state === "busy" && input.holder.kind === "none"
+        ? { kind: "unknown", reason: "identity_unknown" }
+        : input.holder,
     browser_location: input.browser_location,
   };
 }
@@ -120,65 +115,49 @@ function connectedAccount(account_id: string, providers: OAuthProviderId[]): Con
 /**
  * Classify connect from already-known facts. Does not launch a browser,
  * probe a profile, or invent a gate — it only names the state the
- * existing success / preflight / busy / display answers already decided.
+ * existing success / preflight / busy / placement answers already decided.
  */
 export function buildConnectReport(input: ConnectReportInput): ConnectReport {
   const { outcome } = input;
   switch (outcome.kind) {
     case "provisioned":
-      return emptyReport("connected", "already_provisioned", input, {
+      return settled("connected", null, input, {
         sign_in_url: null,
         account: connectedAccount(outcome.account_id, outcome.providers),
       });
     case "ceremony_complete": {
       const gate = decideConnectComplete(outcome.providers, outcome.requested_provider);
       if (gate.ok) {
-        return emptyReport("connected", "ceremony_complete", input, {
+        return settled("connected", null, input, {
           sign_in_url: null,
           account: connectedAccount(outcome.account_id, outcome.providers ?? []),
         });
       }
-      if (gate.reason === "probe_failed") {
-        return emptyReport("busy", "probe_failed", input);
+      if (gate.reason === "probe_failed") return settled("busy", "profile_unverifiable", input);
+      if (gate.reason === "requested_provider_missing") {
+        return settled("needs-sign-in", "requested_provider_missing", input);
       }
-      if (gate.reason === "no_google_session" && outcome.skip_browser) {
-        return emptyReport("no-browser", "no_google_session", input);
-      }
-      return emptyReport("needs-sign-in", gate.reason, input);
+      return settled(
+        outcome.skip_browser ? "no-browser" : "needs-sign-in",
+        "provider_session_missing",
+        input,
+      );
     }
     case "unverified":
-      return emptyReport("busy", "unverified_probe", input);
-    case "ceremony_waiting":
-      return emptyReport(
-        "needs-sign-in",
-        outcome.skip_browser ? "skip_browser" : "ceremony_required",
-        input,
-        { sign_in_url: outcome.confirm_url, account: null },
-      );
+      return settled("busy", "profile_unverifiable", input);
     case "profile_busy":
-      return emptyReport("busy", "profile_busy", {
-        ...input,
-        holder:
-          input.holder.kind === "none"
-            ? { kind: "unknown", reason: "identity_unknown" }
-            : input.holder,
-      });
-    case "display_unshowable":
-      return emptyReport("no-browser", "display_unshowable", {
-        ...input,
-        browser_location:
-          input.browser_location.kind === "unreachable"
-            ? input.browser_location
-            : { kind: "unreachable", reason: outcome.detail },
-      });
+      return settled("busy", null, input);
     case "install_unclaimed":
-      return emptyReport("needs-sign-in", "install_unclaimed", input);
+      return settled("needs-sign-in", null, input, {
+        sign_in_url: outcome.confirm_url,
+        account: null,
+      });
     case "browser_confirm_failed":
-      return emptyReport("no-browser", "browser_confirm_failed", input);
+      return settled("no-browser", null, input);
     case "account_switch_refused":
-      return emptyReport("needs-sign-in", "account_switch_refused", input);
+      return settled("needs-sign-in", "account_mismatch", input);
     case "cookie_clear_failed":
-      return emptyReport("busy", "cookie_clear_failed", input);
+      return settled("busy", "profile_unverifiable", input);
   }
 }
 
@@ -323,64 +302,18 @@ export function decideConnectComplete(
   return { ok: true };
 }
 
-export interface BrowserLocationFacts {
-  phase: "none" | "skip_browser" | "decided";
-  host_screen_live?: boolean;
-  placement?: "host_screen" | "virtual" | "unreachable";
-  display?: string;
-  reason?: string;
-}
-
-function optionalDisplay(display: string | undefined): string | undefined {
-  const trimmed = display?.trim();
-  return trimmed !== undefined && trimmed.length > 0 ? trimmed : undefined;
-}
-
-/**
- * Where Squire decided the ceremony browser is showing. A real screen
- * wins; the virtual display is for hosts with no live screen. Callers
- * do not detect screens themselves.
- */
-export function observeConnectBrowserLocation(facts: BrowserLocationFacts): ConnectBrowserLocation {
-  if (facts.phase === "none" || facts.phase === "skip_browser") return { kind: "none" };
-  if (facts.placement === "unreachable") {
-    return { kind: "unreachable", reason: facts.reason ?? "display_unshowable" };
-  }
-  if (facts.placement === "virtual") {
-    const display = optionalDisplay(facts.display);
-    return display === undefined ? { kind: "virtual" } : { kind: "virtual", display };
-  }
-  if (facts.placement === "host_screen" || facts.host_screen_live === true) {
-    const display = optionalDisplay(facts.display);
-    return display === undefined ? { kind: "host_screen" } : { kind: "host_screen", display };
-  }
-  if (facts.host_screen_live === false) return { kind: "virtual" };
-  return { kind: "unknown", reason: facts.reason ?? "display_probe_unavailable" };
-}
-
 export function snapshotConnectHolder(profileDir: string): ConnectHolder {
   const lock = readLockHolder(profileDir);
-  if (lock !== null && !lock.stale) {
-    if (lock.host !== hostname()) return { kind: "unknown", reason: "cross_host" };
-    if (lock.pid === process.pid) return { kind: "self", code: "this_process", pid: lock.pid };
-    return { kind: "other", code: "singleton_lock", pid: lock.pid, host: lock.host };
-  }
-  const pid = currentProfileHolderPid(profileDir);
-  if (pid === null) return { kind: "none" };
-  if (pid === process.pid) return { kind: "self", code: "this_process", pid };
-  return { kind: "other", code: "singleton_lock", pid };
+  if (lock === null) return { kind: "none" };
+  if (lock.host !== hostname()) return { kind: "unknown", reason: "cross_host" };
+  // A lock whose pid is gone is what `reapLeakedProfileHolder` exists to
+  // clear; reporting it as a live holder is the opposite answer.
+  if (lock.stale) return { kind: "none" };
+  if (lock.pid === process.pid) return { kind: "self", code: "this_process", pid: lock.pid };
+  return { kind: "other", code: "singleton_lock", pid: lock.pid };
 }
 
 export function emitConnectReport(report: ConnectReport, json: boolean | undefined): void {
   if (json !== true) return;
   process.stdout.write(`${JSON.stringify(report)}\n`);
-}
-
-export function isUnshowableConfirmDetail(detail: string | undefined): boolean {
-  if (detail === undefined) return false;
-  return (
-    detail.includes("nothing here can show") ||
-    detail.includes("private display") ||
-    detail.includes("nobody can see or complete the sign-in")
-  );
 }

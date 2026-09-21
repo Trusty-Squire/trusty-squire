@@ -104,11 +104,20 @@ To choose a target explicitly:
 npx @trusty-squire/mcp connect --target=codex
 ```
 
-Callers that must not parse English can pass `--json`. Connect then prints a typed report on stdout (`state`, `sign_in_url`, `account`, `holder`, `browser_location`) from the same value the human copy uses. Human output stays on stderr. A first-time install has no MCP session yet, so this flag is the machine contract — not a server tool.
+Callers that must not parse English can pass `--json`. Connect then writes **exactly one** JSON object to stdout when the run settles — `JSON.parse(stdout)` is the whole contract, and no progress line ever lands there. Human output stays on stderr, and `--json` implies `--no-interactive` so the picker never draws on the machine channel. A first-time install has no MCP session yet, so this flag is the machine contract — not a server tool.
 
 ```bash
-npx @trusty-squire/mcp connect --json --no-interactive --target=codex
+npx @trusty-squire/mcp connect --json --target=codex
 ```
+
+The report carries six fields:
+
+- `state` — `connected` | `needs-sign-in` | `busy` | `no-browser`.
+- `sign_in_url` — the sign-in URL, set exactly when the run ended still holding a live one (a ceremony that timed out), otherwise `null`.
+- `account` — `{ id, providers }` when `state` is `connected`, otherwise `null`.
+- `holder` — who holds the bot profile: `{kind:"none"}`, `{kind:"self",code:"this_process",pid}`, `{kind:"other",code:"singleton_lock",pid}`, or `{kind:"unknown",reason:"cross_host"|"identity_unknown"}`. A lock left behind by a dead process is `none`, not a holder.
+- `browser_location` — where the ceremony browser actually opened, reported by the code that placed it: `{kind:"host_screen",display?}` (the screen you are at), `{kind:"virtual",display?}` (reachable only through the noVNC URL), `{kind:"unreachable",reason}`, `{kind:"none"}` (no browser was opened), or `{kind:"unknown",reason}`. Squire decides this; callers do not detect screens.
+- `reason` — only what the five fields above cannot say: `provider_session_missing`, `requested_provider_missing`, `account_mismatch`, `profile_unverifiable`. `null` otherwise.
 
 Supported targets: `claude-code`, `cursor`, `codex`, `opencode`, `goose`, `cline`, `continue`, and `hermes`.
 

@@ -257,7 +257,9 @@ it("prints the same already-connected facts as JSON without changing the human l
   }
 
   expect(human.join("\n")).toContain("Already connected");
-  const report = JSON.parse(machine.join("").trim().split("\n").at(-1) ?? "{}") as {
+  // One self-sufficient object on the machine channel: JSON.parse of the whole
+  // stream, not a last-line convention a caller has to know about.
+  const report = JSON.parse(machine.join("")) as {
     state: string;
     sign_in_url: string | null;
     account: { id: string; providers: string[] } | null;

@@ -8,15 +8,15 @@
 //     proves the bot can wear the user's identity at a third-party site.
 
 import { describe, expect, it, vi } from "vitest";
+import { runCli } from "../cli.js";
 import {
   connectIncompleteMessage,
   decideConnectPreflight,
   decideConnectComplete,
   preflightUnverifiedMessage,
   providersConnectMustAwait,
-  runCli,
   type ConnectIncompleteReason,
-} from "../cli.js";
+} from "../connect-report.js";
 import type { SessionData } from "../../session.js";
 import { openSessionStorage } from "../../session.js";
 
