@@ -14,7 +14,7 @@
 // This file proves the install pipeline drives the right writer for
 // each --target value.
 
-import { promises as fs } from "node:fs";
+import nodeFs, { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -47,6 +47,10 @@ vi.mock("../api-client.js", () => ({
     account_id: "acct_test",
   })),
 }));
+
+// `--skip-browser` hands the URL to the machine's default browser. Stubbed so
+// the suite neither spawns one nor depends on whether this host can.
+vi.mock("open", () => ({ default: vi.fn(async () => undefined) }));
 
 vi.mock("../bot/index.js", async () => {
   // Preserve the real exports the install CLI uses for typing while
@@ -516,6 +520,100 @@ describe("connect --target=<agent> writes a valid config", () => {
     const deadline = call?.[0].deadline ?? 0;
     expect(deadline - before).toBeGreaterThan(9 * 60_000);
     expect(deadline - Date.now()).toBeLessThanOrEqual(10 * 60_000);
+  });
+
+  /**
+   * The machine channel is stdout's DESCRIPTOR — `emitConnectReport` writes it
+   * synchronously so an immediate `process.exit` cannot drop it. Point that
+   * descriptor at a file and read back exactly what a caller would pipe.
+   */
+  function captureMachineChannel(): { read: () => string; restore: () => void } {
+    const file = path.join(tmpHome, `machine-${Math.random().toString(36).slice(2)}.json`);
+    const fd = nodeFs.openSync(file, "w+");
+    const original = process.stdout.fd;
+    Object.defineProperty(process.stdout, "fd", { value: fd, configurable: true, writable: true });
+    return {
+      read: () => nodeFs.readFileSync(file, "utf8"),
+      restore: () => {
+        Object.defineProperty(process.stdout, "fd", {
+          value: original,
+          configurable: true,
+          writable: true,
+        });
+        nodeFs.closeSync(fd);
+      },
+    };
+  }
+
+  // The ceremony waits exactly as long as the pairing token lives, so reaching
+  // that deadline means the link is dead. Handing it back as `needs-sign-in`
+  // gave Beeline a URL that 410s on the first click.
+  it("reports an expired install, not a sign-in URL, when the ceremony runs out", async () => {
+    vi.mocked(installPoll).mockResolvedValue({ status: "pending" });
+    vi.mocked(openInstallConfirmInBotChrome).mockResolvedValueOnce({ status: "timeout" });
+    const machine = captureMachineChannel();
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const exit = vi.spyOn(process, "exit").mockImplementation((code) => {
+      throw new Error(`exit:${code}`);
+    });
+    try {
+      await expect(
+        connect({
+          command: "connect",
+          target: "hermes",
+          apiBase: "https://test.invalid",
+          skipBrowser: false,
+          forceRelogin: false,
+          noRegistry: false,
+          noInteractive: true,
+          json: true,
+        }),
+      ).rejects.toThrow("exit:1");
+      const report = JSON.parse(machine.read()) as {
+        state: string;
+        reason: string | null;
+        sign_in_url: string | null;
+      };
+      expect(report.state).toBe("no-browser");
+      expect(report.reason).toBe("install_expired");
+      expect(report.sign_in_url).toBeNull();
+    } finally {
+      exit.mockRestore();
+      error.mockRestore();
+      machine.restore();
+      vi.mocked(installPoll).mockReset();
+      vi.mocked(installPoll).mockResolvedValue({
+        status: "claimed",
+        agent_session_token: "ts_agent_test_token",
+        account_id: "acct_test",
+      });
+    }
+  });
+
+  // `open()` puts a real browser on the user's screen. Reporting "no browser
+  // was opened" there is an assumption standing in for an observation; Squire
+  // did not place that window and cannot say where it went.
+  it("does not claim no browser opened when --skip-browser handed off the link", async () => {
+    const machine = captureMachineChannel();
+    try {
+      await connect({
+        command: "connect",
+        target: "hermes",
+        apiBase: "https://test.invalid",
+        skipBrowser: true,
+        forceRelogin: false,
+        noRegistry: false,
+        noInteractive: true,
+        json: true,
+      });
+      const report = JSON.parse(machine.read()) as {
+        browser_location: { kind: string; reason?: string };
+      };
+      expect(report.browser_location.kind).toBe("unknown");
+      expect(report.browser_location.reason).toContain("default browser");
+    } finally {
+      machine.restore();
+    }
   });
 
   it("refuses a scoped provider refresh that returns a different account", async () => {

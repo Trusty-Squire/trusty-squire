@@ -147,11 +147,16 @@ interface InstallConsent {
   operatorInboxOtp: boolean;
 }
 
+// The ONE rule for which subcommand an argv runs. The machine-channel report
+// gate asks the same question the parser does, so it must not answer it twice.
+// Default (no positional) → `connect` because the most common invocation is
+// `npx @trusty-squire/mcp` with no args, and that should kick off setup.
+function commandFromArgv(argv: readonly string[]): string {
+  return argv.filter((a) => !a.startsWith("--"))[0] ?? "connect";
+}
+
 function parseArgs(argv: string[]): Argv {
-  const positional = argv.filter((a) => !a.startsWith("--"));
-  // Default (no positional) → `connect` because the most common invocation is
-  // `npx @trusty-squire/mcp` with no args, and that should kick off setup.
-  const command = positional[0] ?? "connect";
+  const command = commandFromArgv(argv);
   if (command === "install") {
     rejectDeprecatedCli("`install` has been removed. Use `npx @trusty-squire/mcp connect`.");
   }
@@ -415,11 +420,8 @@ export async function runCli(argv: string[]): Promise<void> {
 
 // A connect that dies inside argv validation never built an `Argv`, so the
 // flag is read off the raw argv — the machine channel still owes one report.
-// The command is derived exactly as `parseArgs` derives it, bare invocation
-// included; matching `argv[0]` literally missed the documented default form.
 function reportUnparsedConnect(argv: readonly string[]): void {
-  const command = argv.filter((a) => !a.startsWith("--"))[0] ?? "connect";
-  if (command !== "connect" || !argv.includes("--json")) return;
+  if (commandFromArgv(argv) !== "connect" || !argv.includes("--json")) return;
   beginConnectRun();
   emitConnectReport(
     buildConnectReport({
@@ -1411,24 +1413,35 @@ async function runInstallClaim(
       color: "wine",
       title: "sign in",
     });
+    let handedOff = false;
     try {
       const openMod = await import("open");
       await openMod.default(initiate.confirm_url);
+      handedOff = true;
     } catch {
       // ignore — user copies the URL
     }
+    // A spawned default browser is a browser that opened; Squire just did not
+    // place it and cannot say where it went.
+    options.placed.value = handedOff
+      ? {
+          kind: "unknown",
+          reason: "handed to this machine's default browser; Squire did not place it",
+        }
+      : { kind: "none" };
+    const handoff: ConnectBrowserLocation = options.placed.value;
     const ok = await pollForClaim(apiBase, initiate.setup_code);
-    if (ok === "expired") return { kind: "expired", browser_location: { kind: "none" } };
+    if (ok === "expired") return { kind: "expired", browser_location: handoff };
     if (ok === null) {
       return {
         kind: "unclaimed",
         confirm_url: initiate.confirm_url,
-        browser_location: { kind: "none" },
+        browser_location: handoff,
       };
     }
     return {
       kind: "claimed",
-      browser_location: { kind: "none" },
+      browser_location: handoff,
       session: {
         ...applyInstallPreferences(baseSession, ok.preferences, options.applyServerPrefs),
         api_base_url: apiBase,
@@ -1478,10 +1491,10 @@ async function runInstallClaim(
     };
   }
 
+  // Reachable only by the ceremony deadline elapsing, and that deadline IS the
+  // pairing token's life — so there is no live URL left to hand anyone.
   if (result.status !== "claimed" || state.value === null) {
-    return expired.value
-      ? { kind: "expired", browser_location }
-      : { kind: "unclaimed", confirm_url: initiate.confirm_url, browser_location };
+    return { kind: "expired", browser_location };
   }
 
   return {
