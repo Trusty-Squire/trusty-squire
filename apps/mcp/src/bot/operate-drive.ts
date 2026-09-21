@@ -1631,17 +1631,37 @@ export function pageShowsRevealedKey(rows: readonly WireRow[], _pageText: string
 /** The drive's key-goal evidence and DONE condition: the capture flow
  * `operate_extract` runs, called as-is. Reveal-masked-values, near-copy tokens,
  * named fields, same-family `api_key_2..n` extras and sanitize stay in
- * capture.ts; the drive only asks whether it returned at least one storable
- * credential, and never keeps a second policy. */
-export async function driveKeyCredentials(sessionId: string): Promise<Record<string, string>> {
+ * capture.ts; the drive only reads what that flow reports and never keeps a
+ * second policy. */
+export interface DriveKeyEvidence {
+  credentials: Record<string, string>;
+  /** Credential-shaped values that were still masked after the reveal pass. */
+  maskedRemaining: string[];
+}
+
+export function driveKeyGoalComplete(evidence: DriveKeyEvidence): boolean {
+  return Object.keys(evidence.credentials).length > 0 && evidence.maskedRemaining.length === 0;
+}
+
+export async function driveKeyEvidence(sessionId: string): Promise<DriveKeyEvidence> {
   try {
     const extracted = await extractCredentials(sessionId);
-    return extracted.credentials;
+    return {
+      credentials: extracted.credentials,
+      maskedRemaining: extracted.masked_remaining ?? [],
+    };
   } catch {
     // The completion check must never crash the loop; an unavailable page is
     // simply "no credential yet", and the loop carries on.
-    return {};
+    return { credentials: {}, maskedRemaining: [] };
   }
+}
+
+/** "still masked: a, b" for a stuck reason, or undefined when nothing was. */
+export function maskedRemainingReason(evidence: DriveKeyEvidence): string | undefined {
+  return evidence.maskedRemaining.length > 0
+    ? `still masked: ${evidence.maskedRemaining.join(", ")}`
+    : undefined;
 }
 
 /** The control that must come before a key goal can finish: a reveal/show
@@ -5653,10 +5673,12 @@ async function driveLoop(input: {
         return "continue";
       }
       // A key goal is only complete when the capture flow operate_extract runs
-      // returns at least one storable credential. A masked value means a key
-      // exists but the drive has not seen it; try the reveal control, then a
-      // create/generate control, then report honestly.
-      if (isKeyGoal(drive.goal) && Object.keys(await driveKeyCredentials(sessionId)).length === 0) {
+      // returns at least one storable credential and no credential-shaped
+      // value is left masked. A masked value means a key exists but the drive
+      // has not seen it; try the reveal control, then a create/generate
+      // control, then report honestly.
+      const keyEvidence = isKeyGoal(drive.goal) ? await driveKeyEvidence(sessionId) : undefined;
+      if (keyEvidence !== undefined && !driveKeyGoalComplete(keyEvidence)) {
         noteOutcome({
           beforeUrl: observation.url,
           afterUrl: observation.url,
@@ -5667,7 +5689,12 @@ async function driveLoop(input: {
           beforeFingerprint: drive.boundFingerprint ?? fresh,
           afterFingerprint: fresh,
         });
-        drive.history.push("DONE refused: extraction stored no credential");
+        const masked = maskedRemainingReason(keyEvidence);
+        drive.history.push(
+          masked === undefined
+            ? "DONE refused: extraction stored no credential"
+            : `DONE refused: ${masked}`,
+        );
         drive.consumedActionKey = null;
         const stallKey = pageProgressKey(
           observation.url,
@@ -5678,7 +5705,7 @@ async function driveLoop(input: {
         drive.stallKeys ??= [];
         if (drive.stallKeys.includes(stallKey)) {
           return finish("stuck", {
-            reason: "no stored credential is on the page",
+            reason: masked ?? "no stored credential is on the page",
           });
         }
         drive.stallKeys.push(stallKey);
@@ -6235,7 +6262,7 @@ async function driveLoop(input: {
       observation = attached.observation;
       rows = attached.rows;
       actMs = Date.now() - actStarted;
-      if (isKeyGoal(drive.goal) && Object.keys(await driveKeyCredentials(sessionId)).length > 0) {
+      if (isKeyGoal(drive.goal) && driveKeyGoalComplete(await driveKeyEvidence(sessionId))) {
         // The capture flow reveals masked values, so re-snapshot before the
         // handoff: the returned observation must show what extraction read.
         const finalSnap = await snapshotOrTimeout(framesIfNeeded());
@@ -6272,7 +6299,7 @@ async function driveLoop(input: {
       const snap = await refreshSnapshot(framesIfNeeded());
       if (snap.timedOut)
         return finish("evaluate_timeout", { reason: "in-page evaluate exceeded budget" });
-      if (isKeyGoal(drive.goal) && Object.keys(await driveKeyCredentials(sessionId)).length > 0) {
+      if (isKeyGoal(drive.goal) && driveKeyGoalComplete(await driveKeyEvidence(sessionId))) {
         // Same as the unsupported branch: extraction may have revealed a
         // masked value, so the handoff needs a snapshot of what it read.
         const finalSnap = await snapshotOrTimeout(framesIfNeeded());
@@ -6923,8 +6950,8 @@ async function driveLoop(input: {
       ...new Set([...(drive.exhaustedActionKeys ?? []), ...(drive.staleClickRefs ?? [])]),
     ];
     if (isKeyGoal(drive.goal)) {
-      const credentials = await driveKeyCredentials(sessionId);
-      if (Object.keys(credentials).length > 0) {
+      const keyEvidence = await driveKeyEvidence(sessionId);
+      if (driveKeyGoalComplete(keyEvidence)) {
         const applied = await applyDecision({ kind: "complete", confidence: 1 });
         if (applied !== "continue") return applied;
         steps += 1;
@@ -7073,7 +7100,7 @@ async function driveLoop(input: {
       decision.kind !== "complete" &&
       isKeyGoal(drive.goal) &&
       confidenceOf(answers.goal_complete) >= DRIVE_CONFIDENCE_THRESHOLD &&
-      Object.keys(await driveKeyCredentials(sessionId)).length > 0
+      driveKeyGoalComplete(await driveKeyEvidence(sessionId))
     ) {
       const applied = await applyDecision(
         { kind: "complete", confidence: confidenceOf(answers.goal_complete) },

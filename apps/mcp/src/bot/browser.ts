@@ -4517,6 +4517,14 @@ export class BrowserController implements BrowserDriver {
       const out: string[] = [];
       document.querySelectorAll("input, textarea").forEach((el) => {
         if (!(el instanceof HTMLInputElement) && !(el instanceof HTMLTextAreaElement)) return;
+        // Only text-shaped controls RENDER a value. A checkbox/radio/button's
+        // `value` is a markup constant (or the control's id) and must never be
+        // read as a credential candidate.
+        if (
+          el instanceof HTMLInputElement &&
+          !["text", "search", "url", "tel", "number", "email", ""].includes(el.type)
+        )
+          return;
         const value = el.value;
         if (value.trim().length > 0) out.push(value.trim());
       });
@@ -4864,9 +4872,16 @@ export class BrowserController implements BrowserDriver {
         out.push({ value, label, isMasked: false, hasRevealButton: false });
       }
 
-      // 1. <input> / <textarea> values (visible only).
+      // 1. <input> / <textarea> values (visible only). Only text-shaped
+      //    controls can RENDER a credential: a checkbox/radio/button's `value`
+      //    is a markup constant (or the control's id), not page content — an
+      //    offscreen `<input type="checkbox" id="secret" value="fallback">`
+      //    must never become a stored credential.
       document.querySelectorAll("input, textarea").forEach((el) => {
-        if (el instanceof HTMLInputElement && (el.type === "hidden" || el.type === "password"))
+        if (
+          el instanceof HTMLInputElement &&
+          !["text", "search", "url", "tel", "number", "email", ""].includes(el.type)
+        )
           return;
         if (!isVisible(el)) return;
         const value =
@@ -4943,7 +4958,11 @@ export class BrowserController implements BrowserDriver {
         });
         const t = direct.trim();
         if (t.length < 3 || t.length > 100) return;
-        if (!/[•●⬤*]{3,}/.test(t) && !/^[•*]+$/.test(t)) return;
+        // Canonical MASKED_DISPLAY_RE union (credential-shape.ts): bullet/
+        // circle, 3+ asterisks, ellipsis, or 3+ dots. The old
+        // `[•●⬤*]{3,}` missed the `…`/`...` masks a masked sibling key uses
+        // (`vsk_sandbox_write_20af…`), so its Reveal was never clicked.
+        if (!/[•●⬤]|\*{3,}|…|\.{3,}/.test(t)) return;
         masked.push({ el, row: rowAncestor(el) });
       });
       document.querySelectorAll<HTMLInputElement>('input[type="password"]').forEach((el) => {
