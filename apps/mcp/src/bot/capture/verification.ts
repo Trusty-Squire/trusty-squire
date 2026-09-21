@@ -834,10 +834,11 @@ export async function awaitVerification(
       let code: string | null = null;
       let link: string | null = null;
       let sourceFrom: string | null = null;
-      // A matching row whose own date predates the session start is a
-      // PREVIOUS task's mail (see mailRowPredatesSession): it never becomes
-      // the hit, but if that is all the read ever sees, the final result is
-      // the distinct stale-match not-found instead of the generic one.
+      // A row that matched THIS session (mailRowMatchedSession, not merely a
+      // candidate) whose own date predates the session start is a PREVIOUS
+      // task's mail (see mailRowPredatesSession): it never becomes the hit,
+      // but if that is all the read ever sees, the final result is the
+      // distinct stale-match not-found instead of the generic one.
       let staleMatchSeen = false;
       for (let attempt = 0; attempt < 3 && code === null && link === null; attempt++) {
         sourceFrom = null;
