@@ -91,6 +91,9 @@ import {
 } from "./connect-report.js";
 
 const DEFAULT_API_BASE = process.env.TRUSTY_SQUIRE_API_BASE ?? "https://trusty-squire-api.fly.dev";
+// Mirrors PAIR_TTL_MS in apps/api/src/auth/pairing-token.ts. Held as a
+// duration, never as a comparison against the server's clock.
+const PAIRING_TOKEN_TTL_MS = 10 * 60 * 1000;
 // Managed skill-registry URL. Advanced setup decides whether this is written
 // into the MCP config; the URL itself is product-owned and not user-editable.
 const DEFAULT_REGISTRY_URL = "https://registry.trustysquire.ai";
@@ -412,8 +415,11 @@ export async function runCli(argv: string[]): Promise<void> {
 
 // A connect that dies inside argv validation never built an `Argv`, so the
 // flag is read off the raw argv — the machine channel still owes one report.
+// The command is derived exactly as `parseArgs` derives it, bare invocation
+// included; matching `argv[0]` literally missed the documented default form.
 function reportUnparsedConnect(argv: readonly string[]): void {
-  if (argv[0] !== "connect" || !argv.includes("--json")) return;
+  const command = argv.filter((a) => !a.startsWith("--"))[0] ?? "connect";
+  if (command !== "connect" || !argv.includes("--json")) return;
   beginConnectRun();
   emitConnectReport(
     buildConnectReport({
@@ -524,6 +530,9 @@ async function connect(args: Argv, argv: readonly string[] = []): Promise<void> 
   // profile is resolved. `emitConnectReport` drops the second object, so this
   // is a floor under the stream rather than an extra report.
   let reportProfileDir = CHROME_PROFILE_DIR;
+  // Null until the ceremony is attempted: only then is "no browser opened"
+  // something this handler could stop asserting for free.
+  const placed: BrowserPlacementSlot = { value: null };
   try {
     // `npx …/mcp connect` reuses a stale local copy instead of fetching the
     // latest, and connect then pins the host config to that stale version.
@@ -568,6 +577,7 @@ async function connect(args: Argv, argv: readonly string[] = []): Promise<void> 
           context.accountId,
           context.agentIdentity,
           wantInteractive,
+          placed,
         );
       },
     );
@@ -576,7 +586,7 @@ async function connect(args: Argv, argv: readonly string[] = []): Promise<void> 
       emitConnectStatus(args, {
         outcome: { kind: "profile_busy" },
         profileDir: reportProfileDir,
-        browser_location: { kind: "none" },
+        browser_location: placed.value ?? { kind: "none" },
       });
       ui.fail(PROFILE_BUSY_MESSAGE);
       process.exit(1);
@@ -584,7 +594,7 @@ async function connect(args: Argv, argv: readonly string[] = []): Promise<void> 
     emitConnectStatus(args, {
       outcome: { kind: "run_failed" },
       profileDir: reportProfileDir,
-      browser_location: { kind: "none" },
+      browser_location: placed.value ?? { kind: "none" },
     });
     throw err;
   }
@@ -802,6 +812,7 @@ async function runConnectInstall(
   accountId: string | undefined,
   agentIdentity: string,
   wantInteractive: boolean,
+  placed: BrowserPlacementSlot,
 ): Promise<void> {
   console.warn("");
   console.warn(
@@ -911,6 +922,7 @@ async function runConnectInstall(
   const claim = await runInstallClaim(args.apiBase, target, baseSession, args.skipBrowser, {
     applyServerPrefs: !wantInteractive,
     profileDir,
+    placed,
     ...(deferredReloginProviders.length ? { forceReloginProviders: deferredReloginProviders } : {}),
   });
   if (claim.kind === "confirm_failed") {
@@ -1299,6 +1311,13 @@ export function claimHeartbeatMessage(claimed: boolean): string {
 // What the ceremony settled on, with the two facts a machine caller needs
 // when it did not claim: the sign-in URL that is still live, and where the
 // browser actually went.
+// One run's observed ceremony placement, shared with the handlers that report
+// it. `null` means no ceremony was attempted, which is the only state in which
+// "no browser was opened" is a fact rather than an assumption.
+interface BrowserPlacementSlot {
+  value: ConnectBrowserLocation | null;
+}
+
 type InstallClaimResult =
   | { kind: "claimed"; session: SessionData; browser_location: ConnectBrowserLocation }
   | { kind: "unclaimed"; confirm_url: string; browser_location: ConnectBrowserLocation }
@@ -1323,6 +1342,9 @@ async function runInstallClaim(
     // discarded a fresh inbox-read preference.
     applyServerPrefs: boolean;
     profileDir: string;
+    // Where the ceremony browser went, recorded for whoever reports the run —
+    // including a handler above this frame that never sees the claim.
+    placed: BrowserPlacementSlot;
     // Providers whose cookie clear busy-failed and now rides the ceremony
     // (see the --force-relogin block in the caller).
     forceReloginProviders?: readonly OAuthProviderId[];
@@ -1331,11 +1353,10 @@ async function runInstallClaim(
   console.warn(`Connecting this machine to your account…`);
   const initiate = await installInitiate(apiBase, target, baseSession.machine_token ?? null);
   // Waiting past the pairing token's life would hand back a URL that is
-  // already dead. The server's own expiry is the bound.
-  const tokenExpiresAt = Date.parse(initiate.expires_at);
-  const ceremonyMinutes = Number.isFinite(tokenExpiresAt)
-    ? Math.max(1, Math.floor((tokenExpiresAt - Date.now()) / 60_000))
-    : undefined;
+  // already dead. Counted as a DURATION from the moment the response arrived:
+  // subtracting a local clock reading from the server's `expires_at` makes the
+  // window depend on clock skew, which collapses or overshoots it silently.
+  const ceremonyDeadline = Date.now() + PAIRING_TOKEN_TTL_MS;
   const expired = { value: false };
 
   // Track the claimed token outside the poll closure so the in-Chrome
@@ -1418,10 +1439,12 @@ async function runInstallClaim(
     };
   }
 
-  // Wrapper object for the same reason as `state` above: the ceremony reports
-  // its placement through a callback, and only the path that placed the
-  // browser knows where it went.
-  const placed: { value: ConnectBrowserLocation | null } = { value: null };
+  // The ceremony is about to run, so "no browser opened" stops being true.
+  // The callback below replaces this the moment a path reports a placement.
+  options.placed.value = {
+    kind: "unknown",
+    reason: "the ceremony ended before any path reported where the browser opened",
+  };
 
   // Default: run the confirm INSIDE the bot's Chrome. The user signs
   // The wizard page reads provider state from /v1/auth/whoami so no
@@ -1432,17 +1455,14 @@ async function runInstallClaim(
     heartbeatMessage: () => claimHeartbeatMessage(state.value !== null),
     profileDir: options.profileDir,
     onBrowserPlacement: (placement) => {
-      placed.value = placement;
+      options.placed.value = placement;
     },
-    ...(ceremonyMinutes !== undefined ? { timeoutMinutes: ceremonyMinutes } : {}),
+    deadline: ceremonyDeadline,
     ...(options.forceReloginProviders?.length
       ? { forceReloginProviders: options.forceReloginProviders }
       : {}),
   });
-  const browser_location: ConnectBrowserLocation = placed.value ?? {
-    kind: "unknown",
-    reason: "the ceremony ended before any path reported where the browser opened",
-  };
+  const browser_location: ConnectBrowserLocation = options.placed.value;
 
   // rc.33 — surface the underlying error instead of letting the outer
   // wrapper print a generic "browser confirm step never finished."

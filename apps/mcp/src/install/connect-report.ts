@@ -31,7 +31,7 @@ export type ConnectReasonCode =
 export type ConnectHolder =
   | { kind: "none" }
   | { kind: "other"; code: "singleton_lock"; pid: number }
-  | { kind: "unknown"; reason: "cross_host" | "identity_unknown" };
+  | { kind: "unknown"; reason: "cross_host" };
 
 // The placement half is whatever the code that PLACED the ceremony browser
 // reported; the other two members are the runs that placed no browser and
@@ -343,5 +343,11 @@ export function emitConnectReport(report: ConnectReport, json: boolean | undefin
   if (reported) return;
   reported = true;
   if (json !== true) return;
-  writeSync(process.stdout.fd, `${JSON.stringify(report)}\n`);
+  try {
+    writeSync(process.stdout.fd, `${JSON.stringify(report)}\n`);
+  } catch {
+    // A caller that closed the pipe (EPIPE) or a full non-blocking one
+    // (EAGAIN) is not a reason to fail a run or to replace its real error
+    // with a write error the user cannot act on.
+  }
 }

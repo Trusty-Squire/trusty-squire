@@ -6,6 +6,9 @@
 // so the provider session lands in the profile as a side effect of
 // the install confirm itself.
 
+import { closeSync, mkdtempSync, openSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
   parseArgs,
@@ -116,6 +119,41 @@ describe("parseArgs deprecated flags", () => {
       "--force-relogin",
     );
     await expectDeprecatedExit(["connect", "--profile-dir=/tmp/profile"]);
+  });
+});
+
+// `npx @trusty-squire/mcp --json --skip-login` runs the connect command —
+// parseArgs defaults the command when no positional is given — so it owes a
+// report like every other connect exit. Matching argv[0] literally missed it.
+describe("the machine channel on a usage failure", () => {
+  it("reports for the bare invocation, not only the explicit `connect` word", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ts-cli-machine-"));
+    const file = join(dir, "machine.json");
+    const fd = openSync(file, "w+");
+    const original = process.stdout.fd;
+    Object.defineProperty(process.stdout, "fd", { value: fd, configurable: true, writable: true });
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const exit = vi.spyOn(process, "exit").mockImplementation((code?: string | number | null) => {
+      throw new Error(`exit:${code}`);
+    });
+    try {
+      await expect(runCli(["--json", "--skip-login"])).rejects.toThrow("exit:64");
+      const report = JSON.parse(readFileSync(file, "utf8")) as {
+        state: string;
+        reason: string | null;
+      };
+      expect(report.state).toBe("no-browser");
+      expect(report.reason).toBe("run_failed");
+    } finally {
+      exit.mockRestore();
+      error.mockRestore();
+      Object.defineProperty(process.stdout, "fd", {
+        value: original,
+        configurable: true,
+        writable: true,
+      });
+      closeSync(fd);
+    }
   });
 });
 

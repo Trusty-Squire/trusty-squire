@@ -784,7 +784,11 @@ Read this file. Follow the rules. Run the verify script. Paste the output. Then 
   One report per run, on EVERY exit path — a `--json` caller must never meet
   an empty stdout. `needs-sign-in` carries its `sign_in_url` by construction
   (the type says so); an outcome with no live URL gets a different state, and
-  the ceremony never outlives the pairing token that URL belongs to.
+  the ceremony never outlives the pairing token that URL belongs to — as a
+  duration counted locally, never by differencing the server's timestamp
+  against this machine's clock. A field that names what was OBSERVED (`holder`,
+  `browser_location`) carries the observation or an explicit unknown; never an
+  assumption made by an error handler.
   `browser_location` is
   OBSERVED and handed back by whichever path placed the ceremony browser
   (`onBrowserPlacement` in `bot/google-login.ts`) — never predicted from the

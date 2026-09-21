@@ -166,6 +166,7 @@ describe("install completion callback", () => {
           confirmUrl: "https://example.test/install",
           pollUntilClaimed,
           profileDir: "/unused/profile",
+          deadline: Date.now() + 60_000,
         },
         runChrome,
       ),
@@ -510,6 +511,7 @@ describe("self-launched login profile contention", () => {
           confirmUrl: "https://example.test/install",
           pollUntilClaimed,
           profileDir,
+          deadline: Date.now() + 60_000,
         },
         runDisplayedChrome,
       );

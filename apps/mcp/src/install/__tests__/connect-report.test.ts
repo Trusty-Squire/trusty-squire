@@ -2,15 +2,17 @@
 // state is a typed value; human sentences render from the same object.
 
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, symlinkSync } from "node:fs";
+import { closeSync, mkdtempSync, openSync, symlinkSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   alreadyConnectedMessage,
+  beginConnectRun,
   buildConnectReport,
   connectIncompleteMessage,
   decideConnectComplete,
+  emitConnectReport,
   snapshotConnectHolder,
   type ConnectHolder,
   type ConnectReportInput,
@@ -295,5 +297,42 @@ describe("snapshotConnectHolder", () => {
     expect(snapshotConnectHolder(mkdtempSync(join(tmpdir(), "ts-connect-holder-")))).toEqual({
       kind: "none",
     });
+  });
+});
+
+// The report is best-effort output. A caller that closed the pipe it was
+// reading (EPIPE), or a full non-blocking one (EAGAIN), must not turn a
+// finished run into a crash or replace the run's real error with a write
+// error — `writeSync` throws where the stream write it replaced did not.
+describe("emitConnectReport", () => {
+  it("does not throw when the machine channel is gone", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ts-connect-emit-"));
+    const closed = openSync(join(dir, "sink"), "w");
+    closeSync(closed);
+    const original = process.stdout.fd;
+    Object.defineProperty(process.stdout, "fd", {
+      value: closed,
+      configurable: true,
+      writable: true,
+    });
+    beginConnectRun();
+    try {
+      expect(() =>
+        emitConnectReport(
+          buildConnectReport({
+            outcome: { kind: "run_failed" },
+            holder: { kind: "none" },
+            browser_location: { kind: "none" },
+          }),
+          true,
+        ),
+      ).not.toThrow();
+    } finally {
+      Object.defineProperty(process.stdout, "fd", {
+        value: original,
+        configurable: true,
+        writable: true,
+      });
+    }
   });
 });

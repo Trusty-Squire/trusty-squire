@@ -1508,7 +1508,9 @@ export async function openInstallConfirmInBotChrome(
     // completion signal for every install path.
     pollUntilClaimed: (wizardCompleted: boolean) => Promise<InstallClaimPollResult>;
     profileDir?: string;
-    timeoutMinutes?: number;
+    // Absolute local deadline (ms). The caller owns it because only the
+    // caller knows what the ceremony is waiting on.
+    deadline: number;
     // Phase-aware terminal copy supplied by connect.
     heartbeatMessage?: string | (() => string);
     // Where the ceremony browser landed, from the path that placed it.
@@ -1523,8 +1525,7 @@ export async function openInstallConfirmInBotChrome(
   detail?: string;
 }> {
   const profileDir = opts.profileDir ?? CHROME_PROFILE_DIR;
-  const timeoutMinutes = Math.max(1, opts.timeoutMinutes ?? 15);
-  const deadline = Date.now() + timeoutMinutes * 60 * 1000;
+  const deadline = opts.deadline;
   let completion: Awaited<ReturnType<typeof startInstallCompletionListener>> | undefined;
 
   try {

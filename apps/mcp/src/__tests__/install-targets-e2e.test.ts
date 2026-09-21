@@ -113,7 +113,7 @@ import {
   probeProviderSessionsAfterCeremony,
 } from "../bot/google-login.js";
 import { clearBrowserProfile, clearProviderCookies } from "../bot/login-state.js";
-import { installPoll } from "../api-client.js";
+import { installInitiate, installPoll } from "../api-client.js";
 import { connect, resolveServerLaunch } from "../install/cli.js";
 import { AGENTS } from "../install/agents.js";
 import { openSessionStorage } from "../session.js";
@@ -487,6 +487,35 @@ describe("connect --target=<agent> writes a valid config", () => {
       if (previousAccount === undefined) delete process.env.TRUSTY_SQUIRE_ACCOUNT_ID;
       else process.env.TRUSTY_SQUIRE_ACCOUNT_ID = previousAccount;
     }
+  });
+
+  // The ceremony waits the pairing token's LIFETIME, counted from when the
+  // initiate response arrived. Differencing the server's `expires_at` against
+  // this machine's clock made the window a function of clock skew: a host
+  // running ten minutes fast collapsed a 2FA sign-in to sixty seconds.
+  it("waits the token's lifetime even when this machine's clock is skewed", async () => {
+    vi.mocked(installInitiate).mockResolvedValueOnce({
+      setup_code: "test_setup_code",
+      confirm_url: "https://test.invalid/install?token=test_setup_code",
+      // As a host running ten minutes ahead of the server sees it.
+      expires_at: new Date(Date.now() - 600_000).toISOString(),
+    });
+    const before = Date.now();
+
+    await connect({
+      command: "connect",
+      target: "hermes",
+      apiBase: "https://test.invalid",
+      skipBrowser: false,
+      forceRelogin: false,
+      noRegistry: false,
+      noInteractive: true,
+    });
+
+    const call = vi.mocked(openInstallConfirmInBotChrome).mock.calls.at(-1);
+    const deadline = call?.[0].deadline ?? 0;
+    expect(deadline - before).toBeGreaterThan(9 * 60_000);
+    expect(deadline - Date.now()).toBeLessThanOrEqual(10 * 60_000);
   });
 
   it("refuses a scoped provider refresh that returns a different account", async () => {
