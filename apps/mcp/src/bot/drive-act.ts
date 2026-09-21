@@ -13,7 +13,7 @@ export const DRIVE_IN_PAGE_SETTLE_MS = 800;
 const OVERLAY_OPTION_SELECTOR =
   '[role="option"],[role="listbox"] a,[role="listbox"] [role="option"],.suggestions a,.suggestion-link,.suggestions-dropdown a,[aria-selected],[role="grid"] button,[role="grid"] [role="gridcell"],[role="gridcell"],[role="dialog"] [role="gridcell"],[role="dialog"] [role="grid"] button';
 
-async function waitForOpenedOverlay(page: Page): Promise<void> {
+export async function waitForOpenedOverlay(page: Page): Promise<void> {
   await evaluateBound(
     page,
     async (input) => {
@@ -95,6 +95,116 @@ export async function waitForOverlayOptionsToChange(page: Page, before: readonly
   ).catch(() => undefined);
 }
 
+const LIST_FILTER_SELECTOR =
+  '[role="combobox"][aria-expanded="true"],[role="listbox"] input,input[aria-autocomplete="list"],input[aria-autocomplete="both"]';
+
+export function listOptionIdentity(
+  role: string | null,
+  inListbox: boolean,
+  inMenu: boolean,
+  text: string,
+): { text: string; role: "option" | "menuitem" } | null {
+  const trimmed = text.replace(/\s+/g, " ").trim();
+  if (trimmed.length === 0) return null;
+  if (role === "option" || (inListbox && role !== "combobox" && role !== "listbox")) {
+    return { text: trimmed.slice(0, 80), role: "option" };
+  }
+  if (role === "menuitem" || inMenu) return { text: trimmed.slice(0, 80), role: "menuitem" };
+  return null;
+}
+
+async function listOwnerSignature(scope: Page | Frame): Promise<string> {
+  return scope
+    .evaluate(() => {
+      const owners = Array.from(
+        document.querySelectorAll(
+          '[role="combobox"],[aria-haspopup="listbox"],[aria-expanded="true"]',
+        ),
+      );
+      return owners
+        .map((element) => {
+          const value =
+            element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement
+              ? element.value
+              : (element.textContent ?? "").replace(/\s+/g, " ").trim();
+          return `${value}\t${element.getAttribute("placeholder") ?? ""}`;
+        })
+        .join("\n");
+    })
+    .catch(() => "");
+}
+
+async function typeIntoOpenFilter(page: Page, text: string): Promise<boolean> {
+  const filter = page.locator(LIST_FILTER_SELECTOR).first();
+  if ((await filter.count().catch(() => 0)) === 0) return false;
+  try {
+    await filter.click({ timeout: 2000 });
+    await filter.fill("");
+    await filter.pressSequentially(text, { delay: 20 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Commit a listbox/combobox option via a fresh locator, not cached coordinates.
+ *
+ * Coordinate clicks miss widgets that re-render the list before the pointer
+ * lands. Some options are not real until the filter input receives an input
+ * event; some listen for Enter on the highlighted item instead of click.
+ * Returns false when the target is not an option row, leaving the ordinary
+ * click dispatch to run.
+ */
+export async function commitDriveListOption(
+  page: Page,
+  scope: Page | Frame,
+  selector: string,
+): Promise<boolean> {
+  if (selector.length === 0) return false;
+  const info = await scope
+    .evaluate((sel: string) => {
+      const element = document.querySelector(sel);
+      if (element === null || !element.isConnected) return null;
+      const option = element.closest('[role="option"],[role="menuitem"]');
+      const item = option ?? element;
+      return {
+        role: item.getAttribute("role"),
+        inListbox: item.closest('[role="listbox"]') !== null,
+        inMenu: item.closest('[role="menu"]') !== null,
+        text: (item.textContent ?? "").replace(/\s+/g, " ").trim(),
+      };
+    }, selector)
+    .catch(() => null);
+  if (info === null) return false;
+  const identity = listOptionIdentity(info.role, info.inListbox, info.inMenu, info.text);
+  if (identity === null) return false;
+  const before = await listOwnerSignature(scope);
+  if (
+    (await page
+      .getByRole(identity.role, { name: identity.text, exact: true })
+      .first()
+      .count()
+      .catch(() => 0)) === 0
+  ) {
+    await typeIntoOpenFilter(page, identity.text);
+  }
+  const target = page.getByRole(identity.role, { name: identity.text, exact: true }).first();
+  if ((await target.count().catch(() => 0)) === 0) return false;
+  try {
+    await target.scrollIntoViewIfNeeded().catch(() => undefined);
+    await target.click({ timeout: 5000 });
+    if ((await listOwnerSignature(scope)) !== before) return true;
+    await page.keyboard.press("Enter");
+    if ((await listOwnerSignature(scope)) !== before) return true;
+    if (await typeIntoOpenFilter(page, identity.text)) {
+      await page.keyboard.press("Enter");
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function reenterDriveField(
   scope: Page | Frame,
   selector: string,
@@ -149,25 +259,19 @@ export async function settleDriveStep(page: Page, combobox: boolean): Promise<nu
 export async function driveControlDigest(page: Page): Promise<string> {
   try {
     return await evaluateBound(page, () => {
-      const controls = Array.from(
+      return Array.from(
         document.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>(
           "input,select,textarea",
         ),
-      ).map(
-        (element) =>
-          `${element.tagName}:${element.type}:${element.value}:${
-            element instanceof HTMLInputElement ? element.checked : ""
-          }:${element.disabled}`,
-      );
-      const actionable = Array.from(
-        document.querySelectorAll("a[href],button,[role='button'],[role='link']"),
-      ).map(
-        (element) =>
-          `${element.tagName}:${(element.textContent ?? "").replace(/\s+/g, " ").trim().slice(0, 40)}:${
-            element.matches(":disabled") || element.getAttribute("aria-disabled") === "true"
-          }`,
-      );
-      return [...controls, ...actionable].join("\n");
+      )
+        .filter((element) => !(element instanceof HTMLInputElement && element.type === "hidden"))
+        .map(
+          (element) =>
+            `${element.tagName}:${element.type}:${element.value}:${
+              element instanceof HTMLInputElement ? element.checked : ""
+            }:${element.disabled}`,
+        )
+        .join("\n");
     });
   } catch {
     return "";

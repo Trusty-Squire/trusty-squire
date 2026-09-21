@@ -15,6 +15,9 @@ export type ActControlIdentity = {
   label: string;
   href?: string;
   picker?: boolean;
+  name?: string;
+  placeholder?: string;
+  inputType?: string;
 };
 
 function originOf(url: string): string {
@@ -45,6 +48,9 @@ export function identityFromDriveElement(
     frameUrl?: string;
     frameOrigin?: string;
     picker?: boolean;
+    name?: string;
+    placeholder?: string;
+    inputType?: string;
   },
   pageUrl: string,
 ): ActControlIdentity {
@@ -56,6 +62,9 @@ export function identityFromDriveElement(
     label: el.label,
     ...(el.href ? { href: el.href } : {}),
     ...(el.picker === true ? { picker: true } : {}),
+    ...(el.name ? { name: el.name } : {}),
+    ...(el.placeholder ? { placeholder: el.placeholder } : {}),
+    ...(el.inputType ? { inputType: el.inputType } : {}),
   };
 }
 
@@ -70,6 +79,9 @@ export function rememberDriveIdentities(
     frameUrl?: string;
     frameOrigin?: string;
     picker?: boolean;
+    name?: string;
+    placeholder?: string;
+    inputType?: string;
   }>,
   pageUrl: string,
 ): Map<string, ActControlIdentity> {
@@ -101,10 +113,10 @@ export function interactiveFromIdentity(
   return {
     index: 0,
     tag,
-    type: identity.picker === true ? "date" : null,
+    type: identity.picker === true ? "date" : (identity.inputType ?? null),
     id: identity.selector.startsWith("#") ? identity.selector.slice(1) : null,
-    name: null,
-    placeholder: null,
+    name: identity.name ?? null,
+    placeholder: identity.placeholder ?? null,
     ariaLabel: identity.label,
     role,
     labelText: identity.label,

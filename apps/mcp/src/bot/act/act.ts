@@ -91,7 +91,12 @@ import {
 import type { Observation, ProvisionAction } from "../provision-session.js";
 import type { Session } from "../session/model.js";
 import { resolveLiveControlIdentity } from "./identity.js";
-import { overlayOptionLabels, waitForOverlayOptionsToChange } from "../drive-act.js";
+import {
+  commitDriveListOption,
+  overlayOptionLabels,
+  waitForOpenedOverlay,
+  waitForOverlayOptionsToChange,
+} from "../drive-act.js";
 
 // `detail:"none"` already owns "return no observation". These name the two
 // things the drive loop does differently and asks for explicitly: it settles on
@@ -101,12 +106,16 @@ export type ActExecutorOptions = {
   skipSettle?: boolean;
   pacing?: DispatchPacing;
   typeThroughOverlay?: boolean;
+  guardOcclusion?: boolean;
+  commitListOptions?: boolean;
 };
 
 const DRIVE_DISPATCH: ActExecutorOptions = {
   skipSettle: true,
   pacing: DRIVE_DISPATCH_PACING,
   typeThroughOverlay: true,
+  guardOcclusion: true,
+  commitListOptions: true,
 };
 
 export type DriveActResult =
@@ -447,7 +456,10 @@ export async function actInternally(
       return { observation: oauthOnboardingRequiredObservation(session, error), outcome: {} };
     }
     if (session?.compactV2Active === true && !(error instanceof ProvisionTargetMissingError)) {
-      throw new CompactV2ActionFailureError(compactV2ActionFailureReason(error, action.kind));
+      throw new CompactV2ActionFailureError(
+        compactV2ActionFailureReason(error, action.kind),
+        clickDispatchStatusForError(error),
+      );
     }
     throw error;
   }
@@ -616,12 +628,25 @@ async function clickTargetOccluded(scope: Page | Frame, selector: string): Promi
     .evaluate((sel: string) => {
       const element = document.querySelector(sel);
       if (element === null) return false;
+      // The snapshot keeps offscreen fillables so the model can name them, and
+      // the dispatch scrolls before clicking — so measure where the click will
+      // actually land, not where the element sits right now. "instant" is
+      // load-bearing: a page with scroll-behavior:smooth would animate and the
+      // rect below would still be the pre-scroll one.
+      const before = element.getBoundingClientRect();
+      const inView =
+        before.width > 0 &&
+        before.height > 0 &&
+        before.bottom > 0 &&
+        before.top < innerHeight &&
+        before.right > 0 &&
+        before.left < innerWidth;
+      if (!inView) {
+        element.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
+      }
       const rect = element.getBoundingClientRect();
       if (rect.width <= 0 || rect.height <= 0) return false;
-      const x = rect.x + rect.width / 2;
-      const y = rect.y + rect.height / 2;
-      if (x < 0 || y < 0 || x > innerWidth || y > innerHeight) return false;
-      const hit = document.elementFromPoint(x, y);
+      const hit = document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2);
       return hit !== null && hit !== element && !element.contains(hit) && !hit.contains(element);
     }, selector)
     .catch(() => false);
@@ -1019,21 +1044,35 @@ async function executeAct(
         // Preserve frame identity (origin + path) for the frame-scoped fill.
         if (action.kind === "click" || action.kind === "js_click") {
           const clickPage = compactV2ActionPage ?? browser.page;
+          const clickScope =
+            clickPage === null || clickPage === undefined
+              ? undefined
+              : scopeForElement(clickPage, el);
           if (
             action.kind === "click" &&
-            clickPage !== null &&
-            clickPage !== undefined &&
-            (await clickTargetOccluded(scopeForElement(clickPage, el), el.selector))
+            options?.guardOcclusion === true &&
+            clickScope !== undefined &&
+            (await clickTargetOccluded(clickScope, el.selector))
           ) {
             throw new BrowserClickDispatchError(
               "not_dispatched",
               "click target is occluded by an overlay",
             );
           }
-          actionPageAfter =
-            (await adoptTabOpenedByClick(session, browser, async () => {
-              await actClick({ ...actDriverTarget(el), method: action.kind });
-            })) ?? actionPageAfter;
+          const committedOption =
+            action.kind === "click" &&
+            options?.commitListOptions === true &&
+            clickPage !== null &&
+            clickPage !== undefined &&
+            clickScope !== undefined
+              ? await commitDriveListOption(clickPage, clickScope, el.selector)
+              : false;
+          if (!committedOption) {
+            actionPageAfter =
+              (await adoptTabOpenedByClick(session, browser, async () => {
+                await actClick({ ...actDriverTarget(el), method: action.kind });
+              })) ?? actionPageAfter;
+          }
         } else if (action.kind === "type") {
           clearCommittedSelectValue(session, el.selector);
           const actTarget = actDriverTarget(el);
@@ -1048,7 +1087,7 @@ async function executeAct(
             // The suggestion baseline is read AFTER the overlay opens; reading
             // it before would make the refresh wait return on the stale rows.
             await actClick({ ...actTarget, method: "click" });
-            await settleAfterDriveAction(compactV2ActionPage, true);
+            await waitForOpenedOverlay(compactV2ActionPage).catch(() => undefined);
             const overlayBefore = await overlayOptionLabels(compactV2ActionPage);
             await compactV2ActionPage.keyboard.press("ControlOrMeta+a");
             await compactV2ActionPage.keyboard.insertText(typedText ?? "");
@@ -1265,6 +1304,16 @@ export async function dispatchDriveAct(
   } catch (error) {
     if (error instanceof CompactV2StaleRefError) return { kind: "stale", reason: "stale_ref" };
     if (error instanceof TargetStaleError) return { kind: "stale", reason: "stale" };
+    // The click reached the element and only the surrounding call failed —
+    // telling the drive it never executed invites a second submit.
+    const dispatchStatus =
+      error instanceof CompactV2ActionFailureError
+        ? error.dispatchStatus
+        : clickDispatchStatusForError(error);
+    if (dispatchStatus === "dispatched") return { kind: "ok", combobox: false };
+    // A select that could not take the value was refused by the CONTROL; the
+    // drive must not blame the ref and retire it.
+    if (action.kind === "select") return { kind: "stale", reason: "option_missing" };
     const message = error instanceof Error ? error.message : String(error);
     return {
       kind: "stale",

@@ -397,6 +397,8 @@ export type DispatchPacing = {
   hoverMs: readonly [number, number];
   bezier: boolean;
   keyDelayMs: readonly [number, number];
+  scrollStepPx: number | null;
+  scrollDwellMs: number;
 };
 
 export const TOOL_DISPATCH_PACING: DispatchPacing = {
@@ -405,6 +407,8 @@ export const TOOL_DISPATCH_PACING: DispatchPacing = {
   hoverMs: [80, 300],
   bezier: true,
   keyDelayMs: [40, 110],
+  scrollStepPx: null,
+  scrollDwellMs: 350,
 };
 
 // The drive settles and re-snapshots on its own schedule and retries a stale
@@ -416,6 +420,8 @@ export const DRIVE_DISPATCH_PACING: DispatchPacing = {
   hoverMs: [0, 0],
   bezier: false,
   keyDelayMs: [20, 20],
+  scrollStepPx: 560,
+  scrollDwellMs: 0,
 };
 
 export class BrowserController implements BrowserDriver {
@@ -979,14 +985,22 @@ export class BrowserController implements BrowserDriver {
   async scroll(direction: "up" | "down" | "top" | "bottom", page?: Page | null): Promise<void> {
     const target = page === undefined ? this.page : page;
     if (!target) throw new Error("Browser not started");
-    await target.evaluate((dir: string) => {
-      const step = Math.round(window.innerHeight * 0.8);
-      if (dir === "bottom") window.scrollTo(0, document.body.scrollHeight);
-      else if (dir === "top") window.scrollTo(0, 0);
-      else if (dir === "up") window.scrollBy(0, -step);
-      else window.scrollBy(0, step);
-    }, direction);
-    await target.waitForTimeout(350);
+    await target.evaluate(
+      (input: { dir: string; stepPx: number | null }) => {
+        const step =
+          input.stepPx === null
+            ? Math.round(window.innerHeight * 0.8)
+            : Math.min(input.stepPx, window.innerHeight);
+        if (input.dir === "bottom") window.scrollTo(0, document.body.scrollHeight);
+        else if (input.dir === "top") window.scrollTo(0, 0);
+        else if (input.dir === "up") window.scrollBy(0, -step);
+        else window.scrollBy(0, step);
+      },
+      { dir: direction, stepPx: this.dispatchPacing.scrollStepPx },
+    );
+    if (this.dispatchPacing.scrollDwellMs > 0) {
+      await target.waitForTimeout(this.dispatchPacing.scrollDwellMs);
+    }
   }
 
   async observe(page?: Page | null, settlePage?: boolean): Promise<BrowserUseCapture> {
