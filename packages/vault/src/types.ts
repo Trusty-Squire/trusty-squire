@@ -168,6 +168,10 @@ export interface VaultAuditPayload {
   response_size?: number;
   upstream_duration_ms?: number;
   proxy_error?: string;
+  // A streamed body the CALLER stopped before it finished. Distinct from
+  // proxy_error: nothing failed, so the ledger records it without treating it
+  // as actionable.
+  client_closed?: boolean;
   // Backlog-dedup forensics. `reference` is the row that was
   // soft-deleted; `collapsed_into` is the surviving (kept) reference
   // its duplicates were merged into. Set together by the one-time

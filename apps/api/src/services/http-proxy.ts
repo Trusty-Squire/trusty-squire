@@ -638,10 +638,21 @@ function pipeResponseBody(
   const bodyComplete = new Promise<ProxyBodyOutcome>((resolve) => {
     settle = resolve;
   });
-  // Settles on success AND on teardown, carrying the reason in the latter case:
-  // a torn transfer must not read back as a completed one.
+  // Settles on success AND on teardown, attributing the latter to the end that
+  // caused it: a torn transfer must not read back as a completed one, and a
+  // caller cancelling its own stream must not read back as a proxy failure.
+  // `pipeline` propagates the originating error to every OTHER stream, so the
+  // one left without it is where the teardown began.
   const onDone = (err: Error | null | undefined): void => {
-    settle({ bytes: total, ...(err != null ? { error: err.message } : {}) });
+    if (err == null) {
+      settle({ bytes: total });
+      return;
+    }
+    settle(
+      dest.errored == null
+        ? { bytes: total, clientClosed: true }
+        : { bytes: total, error: err.message },
+    );
   };
   if (decoder !== undefined) {
     pipeline(source, decoder, meter, dest, onDone);

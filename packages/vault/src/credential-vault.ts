@@ -237,12 +237,15 @@ export interface ProxyHttpTemplate {
   // not in `url`). Passed through to the executor; host check uses `url`.
   query?: Record<string, string>;
 }
-// What actually left a streaming proxy. `error` is set when the body did not
-// finish — an upstream reset, a size ceiling, or a client that hung up — so a
-// truncated transfer is not indistinguishable from a completed one.
+// What actually left a streaming proxy, so a truncated transfer is not
+// indistinguishable from a completed one. The two ways a body can stop short
+// are recorded apart because only one of them is a fault: `error` is the
+// upstream breaking or a ceiling tripping, `clientClosed` is the caller hanging
+// up — routine, since aborting a generation is how an SDK cancels.
 export interface ProxyBodyOutcome {
   bytes: number;
   error?: string;
+  clientClosed?: boolean;
 }
 export interface ProxyResponse {
   status: number;
@@ -1224,6 +1227,7 @@ export class CredentialVault implements VaultClient {
           response_size: outcome.bytes,
           upstream_duration_ms: this.now().getTime() - startedAt,
           ...(outcome.error !== undefined ? { proxy_error: outcome.error } : {}),
+          ...(outcome.clientClosed === true ? { client_closed: true } : {}),
         }),
       )
       .catch(() => undefined);

@@ -414,6 +414,8 @@ describe("audit_log classification helpers", () => {
       "unknown_status",
     );
     expect(anomalyReason({ ...egressBurst(1)[0]!, proxy_error: "ECONNRESET" })).toBe("proxy_error");
+    // A caller cancelling its own stream is ordinary, not a proxy failure.
+    expect(anomalyReason({ ...egressBurst(1)[0]!, client_closed: true })).toBeNull();
     expect(
       anomalyReason({
         id: "r1",

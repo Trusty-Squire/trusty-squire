@@ -265,6 +265,35 @@ describe("HttpProxyExecutor.executeStream", () => {
       expect(outcome.bytes).toBe(delivered);
       expect(outcome.error).toBeTypeOf("string");
       expect(outcome.error).not.toBe("");
+      expect(outcome.clientClosed).toBeUndefined();
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("attributes a consumer-side teardown to the caller, not to the upstream", async () => {
+    const server = createServer((_req, res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write("data: first\n\n");
+      const timer = setInterval(() => res.write("data: more\n\n"), 20);
+      res.on("close", () => clearInterval(timer));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const addr = server.address();
+    const port = typeof addr === "object" && addr !== null ? addr.port : 0;
+    const proxy = new HttpProxyExecutor({ blockPrivate: false, allowInsecureHttp: true });
+    try {
+      const streamed = await proxy.executeStream({
+        accountId: "acct-test",
+        http: { method: "GET", url: `http://127.0.0.1:${port}/stream`, headers: {} },
+        fields: {},
+      });
+      await new Promise<void>((resolve) => streamed.body.once("data", () => resolve()));
+      streamed.body.destroy();
+      const outcome = await streamed.bodyComplete;
+      expect(outcome.clientClosed).toBe(true);
+      expect(outcome.error).toBeUndefined();
+      expect(outcome.bytes).toBeGreaterThan(0);
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }

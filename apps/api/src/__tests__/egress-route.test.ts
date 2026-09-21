@@ -1037,6 +1037,70 @@ describe("Egress Grants — /v1/egress", () => {
     );
     expect(executed.response_status).toBe(200);
     expect(executed.proxy_error).toContain("upstream connection reset");
+    expect(executed.client_closed).toBeUndefined();
     expect(executed.response_size).toBe(Buffer.byteLength("data: first\n\n", "utf8"));
+  });
+
+  it("records a caller's own cancel as a client close, not a proxy failure", async () => {
+    await h.server.close();
+    const upstream = new PassThrough();
+    const executor = new HttpProxyExecutor({
+      lookup: async () => ({ address: "203.0.113.9", family: 4 }),
+      dispatch: async () => ({
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+        truncated: false,
+        bodyStream: upstream,
+      }),
+    });
+    h.server = await buildServer({ deps: h.deps, proxyExecutor: executor });
+    const account = await h.deps.accountStore.createAccount("sse-cancel@example.test", "S");
+    const cookie = await webCookie(h.deps, account.id);
+    const token = await agentToken(h.deps, account.id);
+    await storeCred(h, cookie, "OpenAI");
+    const { grant_id, egressToken } = await mintGrantHttp(h, token, { service: "OpenAI" });
+
+    await h.server.listen({ host: "127.0.0.1", port: 0 });
+    const addr = h.server.server.address();
+    const port = typeof addr === "object" && addr !== null ? addr.port : 0;
+
+    // An SDK aborting a generation part-way: the caller hangs up while the
+    // upstream is still perfectly healthy.
+    const aborted = new Promise<void>((resolve) => {
+      const req = httpRequest(
+        {
+          host: "127.0.0.1",
+          port,
+          method: "POST",
+          path: `/v1/egress/${grant_id}/v1/chat/completions`,
+          headers: {
+            authorization: `Bearer ${egressToken}`,
+            "content-type": "application/json",
+          },
+        },
+        (res) => {
+          expect(res.statusCode).toBe(200);
+          res.once("data", () => {
+            req.destroy();
+            resolve();
+          });
+        },
+      );
+      req.on("error", () => resolve());
+      req.write(JSON.stringify({ stream: true }));
+      req.end();
+    });
+
+    upstream.write("data: first\n\n");
+    await aborted;
+
+    const executed = await pollAudit(
+      h.deps,
+      account.id,
+      (p) => p.grant_id === grant_id && p.client_closed === true,
+    );
+    expect(executed.response_status).toBe(200);
+    expect(executed.proxy_error).toBeUndefined();
+    expect(upstream.destroyed).toBe(true);
   });
 });
