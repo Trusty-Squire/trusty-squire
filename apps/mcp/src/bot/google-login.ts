@@ -803,7 +803,7 @@ export async function exposeSharedBrokerCeremonyDisplay(
   }
   const exposureRig = rig;
   const removeCleanup = registerRemoteLoginRigCleanup(exposureRig, () => undefined, {
-    ...(onExpired !== undefined ? { onExpired: () => onExpired(null) } : {}),
+    onExpired: () => onExpired?.(null),
   });
   let url: string;
   try {
@@ -1382,13 +1382,17 @@ export async function runDisplayedChrome(
   return { status, closeState };
 }
 
-export async function runRemoteLoginChrome(opts: RunInBotChromeOpts): Promise<LoginRunResult> {
+export async function runRemoteLoginChrome(
+  opts: RunInBotChromeOpts,
+  runtime: {
+    launchCeremonyBrowserContext: typeof launchCeremonyBrowserContext;
+  } = { launchCeremonyBrowserContext },
+): Promise<LoginRunResult> {
   const rig = createRemoteLoginRig();
   let activeTeardown: (() => Promise<void>) | undefined;
   let ceremonyBrowserPid: number | null = null;
-  const reportExpired = opts.onCeremonyExpired;
   const removeRigCleanup = registerRemoteLoginRigCleanup(rig, () => activeTeardown, {
-    ...(reportExpired !== undefined ? { onExpired: () => reportExpired(ceremonyBrowserPid) } : {}),
+    onExpired: () => opts.onCeremonyExpired?.(ceremonyBrowserPid),
   });
   const lifecycle = createTrackedLoginBrowserLifecycle(
     async () => await teardownRemoteLoginRig(rig),
@@ -1401,7 +1405,7 @@ export async function runRemoteLoginChrome(opts: RunInBotChromeOpts): Promise<Lo
 
     opts.onProxyDisposition?.(null);
     const browserEnv = remoteLoginEnvironment(rig);
-    const browser = await launchCeremonyBrowserContext({
+    const browser = await runtime.launchCeremonyBrowserContext({
       profileDir: opts.profileDir,
       url: opts.url,
       window: { width: rig.width, height: rig.height },
