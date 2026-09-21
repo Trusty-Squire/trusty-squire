@@ -44,6 +44,10 @@ export interface ExtractResult {
   // How many labeled credential candidates the page presented — diagnostic so
   // the host can tell "found nothing" from "found masked values it couldn't read".
   candidate_count: number;
+  // Labels of credential-shaped values that are STILL masked after the reveal
+  // pass. Non-empty means the capture is incomplete: a sibling key was not
+  // read, so a caller must not treat this as a successful extraction.
+  masked_remaining?: string[];
 }
 
 const normLabelKey = (label: string): string =>
@@ -92,7 +96,7 @@ export function sanitizeExtractedCredentials(
     if (k === "refcode" || k === "referral_code") continue;
     if (isCredentialNoise(value)) continue;
     if (
-      (k === "key" || k === "api_key") &&
+      (k === "key" || k === "api_key" || k === "secret") &&
       value !== acceptedNearCopyCredential &&
       !looksLikeCredentialValue(value)
     )
@@ -755,12 +759,23 @@ export async function extractCredentials(sessionId: string): Promise<ExtractResu
     acceptedNearCopyCredential,
   );
   const found = Object.keys(sanitized).length > 0;
+  // A masked credential-shaped value that survived the reveal pass is an
+  // UNREAD key, not success. Name it so a caller never believes every key is
+  // vaulted when a sibling is still hidden.
+  const maskedRemaining = [
+    ...new Set(
+      labeled
+        .filter((candidate) => candidate.isMasked)
+        .map((candidate) => candidate.label ?? "masked credential"),
+    ),
+  ];
   audit(sessionId, "extract", { found, candidate_count: labeled.length });
   return {
     session_id: sessionId,
     url: page?.url() ?? browser.currentUrl(),
     credentials: sanitized,
     candidate_count: labeled.length,
+    ...(maskedRemaining.length > 0 ? { masked_remaining: maskedRemaining } : {}),
   };
 }
 
