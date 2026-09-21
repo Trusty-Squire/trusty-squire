@@ -399,6 +399,7 @@ export type DispatchPacing = {
   keyDelayMs: readonly [number, number];
   scrollStepPx: number | null;
   scrollDwellMs: number;
+  scrollBottomRoot: "body" | "documentElement";
 };
 
 export const TOOL_DISPATCH_PACING: DispatchPacing = {
@@ -409,6 +410,7 @@ export const TOOL_DISPATCH_PACING: DispatchPacing = {
   keyDelayMs: [40, 110],
   scrollStepPx: null,
   scrollDwellMs: 350,
+  scrollBottomRoot: "body",
 };
 
 // The drive settles and re-snapshots on its own schedule and retries a stale
@@ -422,6 +424,7 @@ export const DRIVE_DISPATCH_PACING: DispatchPacing = {
   keyDelayMs: [20, 20],
   scrollStepPx: 560,
   scrollDwellMs: 0,
+  scrollBottomRoot: "documentElement",
 };
 
 export class BrowserController implements BrowserDriver {
@@ -986,18 +989,25 @@ export class BrowserController implements BrowserDriver {
     const target = page === undefined ? this.page : page;
     if (!target) throw new Error("Browser not started");
     await target.evaluate(
-      (input: { dir: string; stepPx: number | null }) => {
+      (input: { dir: string; stepPx: number | null; bottomRoot: "body" | "documentElement" }) => {
         const step =
           input.stepPx === null
             ? Math.round(window.innerHeight * 0.8)
             : Math.min(input.stepPx, window.innerHeight);
-        if (input.dir === "bottom")
-          window.scrollTo(0, document.documentElement.scrollHeight);
+        const bottom =
+          input.bottomRoot === "body"
+            ? document.body.scrollHeight
+            : document.documentElement.scrollHeight;
+        if (input.dir === "bottom") window.scrollTo(0, bottom);
         else if (input.dir === "top") window.scrollTo(0, 0);
         else if (input.dir === "up") window.scrollBy(0, -step);
         else window.scrollBy(0, step);
       },
-      { dir: direction, stepPx: this.dispatchPacing.scrollStepPx },
+      {
+        dir: direction,
+        stepPx: this.dispatchPacing.scrollStepPx,
+        bottomRoot: this.dispatchPacing.scrollBottomRoot,
+      },
     );
     if (this.dispatchPacing.scrollDwellMs > 0) {
       await target.waitForTimeout(this.dispatchPacing.scrollDwellMs);

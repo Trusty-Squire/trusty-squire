@@ -90,7 +90,11 @@ import {
 // Type-only cycle back to the facade is fine; no runtime import.
 import type { Observation, ProvisionAction } from "../provision-session.js";
 import type { Session } from "../session/model.js";
-import { resolveLiveControlIdentity, type ActControlIdentity } from "./identity.js";
+import {
+  resolveIdentityScope,
+  resolveLiveControlIdentity,
+  type ActControlIdentity,
+} from "./identity.js";
 import { evaluateBound } from "../drive-evaluate.js";
 import {
   clickCrossOriginFrameTarget,
@@ -100,27 +104,18 @@ import {
   waitForOverlayOptionsToChange,
 } from "../drive-act.js";
 
-// `detail:"none"` already owns "return no observation". These name the two
-// things the drive loop does differently and asks for explicitly: it settles on
-// its own schedule, and it types an overlay-opening control by writing into
-// whatever the overlay focused. The tools' behaviour is the absent value.
+// `detail:"none"` already owns "return no observation". `drive` is the one
+// switch for everything the drive loop does differently: it settles on its own
+// schedule and pacing, guards for occlusion, commits an option row, falls back
+// to coordinates in a cross-origin frame, and types an overlay-opening control
+// by writing into whatever the overlay focused. The tools' behaviour is the
+// absent value. It is passed by the caller, never read off the session — a tool
+// act issued while a drive session is open keeps tool behaviour.
 export type ActExecutorOptions = {
-  skipSettle?: boolean;
-  pacing?: DispatchPacing;
-  typeThroughOverlay?: boolean;
-  guardOcclusion?: boolean;
-  commitListOptions?: boolean;
-  coordinateFallbackForCrossOriginFrame?: boolean;
+  drive?: boolean;
 };
 
-const DRIVE_DISPATCH: ActExecutorOptions = {
-  skipSettle: true,
-  pacing: DRIVE_DISPATCH_PACING,
-  typeThroughOverlay: true,
-  guardOcclusion: true,
-  commitListOptions: true,
-  coordinateFallbackForCrossOriginFrame: true,
-};
+const DRIVE_DISPATCH: ActExecutorOptions = { drive: true };
 
 export type DriveActResult =
   | { kind: "ok"; combobox: boolean }
@@ -430,10 +425,9 @@ export async function actInternally(
             true,
             options,
           );
-        const pacing = options?.pacing;
-        return session === undefined || pacing === undefined
+        return session === undefined || options?.drive !== true
           ? await act()
-          : await session.browser.withDispatchPacing(pacing, act);
+          : await session.browser.withDispatchPacing(DRIVE_DISPATCH_PACING, act);
       };
       return (action.kind === "click" ||
         action.kind === "js_click" ||
@@ -744,7 +738,7 @@ async function executeAct(
   const compactV2ActionPage = operationPage ?? operationPageForSession(session);
   const driveSettle =
     session.drive !== null && action.kind !== "oauth_login" && action.kind !== "oauth_click";
-  const skipToolSettle = options?.skipSettle === true;
+  const skipToolSettle = options?.drive === true;
   let settleMs = 0;
   const settle = async (combobox = false) => {
     if (skipToolSettle) return;
@@ -1069,7 +1063,7 @@ async function executeAct(
               : scopeForElement(clickPage, el);
           if (
             action.kind === "click" &&
-            options?.guardOcclusion === true &&
+            options?.drive === true &&
             clickScope !== undefined &&
             (await clickTargetOccluded(clickScope, el.selector))
           ) {
@@ -1084,13 +1078,13 @@ async function executeAct(
           // would charge every click for the branches that declined.
           const commitsListOption =
             action.kind === "click" &&
-            options?.commitListOptions === true &&
+            options?.drive === true &&
             clickPage !== null &&
             clickPage !== undefined &&
             clickScope !== undefined;
           const crossOriginScope =
             action.kind === "click" &&
-            options?.coordinateFallbackForCrossOriginFrame === true &&
+            options?.drive === true &&
             clickScope !== undefined &&
             "parentFrame" in clickScope
               ? clickScope
@@ -1120,7 +1114,7 @@ async function executeAct(
           clearCommittedSelectValue(session, el.selector);
           const actTarget = actDriverTarget(el);
           if (
-            options?.typeThroughOverlay === true &&
+            options?.drive === true &&
             actedCombobox &&
             compactV2ActionPage !== undefined
           ) {
@@ -1140,7 +1134,7 @@ async function executeAct(
             }
           } else {
             await actType(actTarget, typedText!, false);
-            if (options?.typeThroughOverlay === true && submitsOnEnter(el, ariaLabelAttribute)) {
+            if (options?.drive === true && submitsOnEnter(el, ariaLabelAttribute)) {
               await (compactV2ActionPage ?? browser.page)?.keyboard
                 .press("Enter")
                 .catch(() => undefined);
@@ -1320,6 +1314,24 @@ async function executeAct(
   };
 }
 
+async function guardDriveOauthTarget(
+  sessionId: string,
+  target: string,
+): Promise<DriveActResult> {
+  const session = sessionForCall(sessionId);
+  const identity = session?.drive?.identities?.get(target);
+  const page = session?.browser.page ?? null;
+  if (session === undefined || identity === undefined || page === null) {
+    return { kind: "unsupported" };
+  }
+  const scope = await resolveIdentityScope(page, target, identity);
+  if (scope === null) return { kind: "stale", reason: "stale_ref" };
+  if (await clickTargetOccluded(scope, identity.selector)) {
+    return { kind: "stale", reason: "occluded" };
+  }
+  return { kind: "unsupported" };
+}
+
 export async function dispatchDriveAct(
   sessionId: string,
   action: ProvisionAction,
@@ -1333,6 +1345,11 @@ export async function dispatchDriveAct(
     action.kind !== "select" &&
     action.kind !== "scroll"
   ) {
+    // The tools' oauth_login clicks by coordinate after a visibility wait only,
+    // so a banner over the provider button costs the whole OAuth deadline. Hand
+    // the drive the same refusal its own guard gave, and fall through to the
+    // tools path only when the target is clean.
+    if (action.kind === "oauth_login") return await guardDriveOauthTarget(sessionId, action.target);
     return { kind: "unsupported" };
   }
   try {
