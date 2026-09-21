@@ -229,12 +229,22 @@ describe("request building", () => {
     expect(operation.criteria).not.toHaveProperty("WAIT");
     expect(operation.criteria).not.toHaveProperty("BLOCKED");
     expect(operation.criteria).not.toHaveProperty("SELECT");
-    expect(questions.goal_complete).toBeUndefined();
+    expect(operation.criteria).toHaveProperty("NONE_OF_THESE");
+    expect(operation.criteria).toHaveProperty("GO_BACK");
+    // The four parallel Nouls ride along in the same request.
+    expect(questions.last_action_worked?.type).toBe("noul");
+    expect(questions.blocked_by_layer?.type).toBe("noul");
+    expect(questions.goal_complete?.type).toBe("noul");
+    expect(questions.dead_end?.type).toBe("noul");
     expect(questions.next_action).toBeUndefined();
     expect(questions.SCROLL_target).toBeUndefined();
     expect(Object.keys(questions).sort()).toEqual([
       "CLICK_target",
       "TYPE_TEXT_target",
+      "blocked_by_layer",
+      "dead_end",
+      "goal_complete",
+      "last_action_worked",
       "operation",
     ]);
     expect(questions.TYPE_TEXT_target?.type).toBe("choice");
@@ -543,7 +553,17 @@ describe("history threading", () => {
       url: "https://x.test/form",
       title: "Create account",
       text: "",
+      notices: [],
+      secrets_present: [],
     });
+    expect(state.goal).toEqual({
+      text: "sign up",
+      phase: "create_or_reveal",
+      done_when: "the page confirms the account or resource was created",
+    });
+    expect(state.trail).toEqual([]);
+    expect(state.tried_here).toEqual([]);
+    expect(state.visited).toEqual({});
     expect(state.instructions.goal).toBe("sign up");
     expect(state.instructions.rules).toEqual(DRIVE_RULES);
     expect(state.facts).toEqual(["email", "first_name"]);

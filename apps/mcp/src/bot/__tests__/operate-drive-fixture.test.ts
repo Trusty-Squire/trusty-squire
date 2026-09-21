@@ -7,7 +7,7 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { chromium, type Browser } from "playwright";
+import { chromium, type Browser, type Page } from "playwright";
 import type { ApiClient } from "../../api-client.js";
 import { BrowserController } from "../browser.js";
 import {
@@ -733,7 +733,12 @@ describe("operate_drive real-browser fixture", () => {
 <label>All API keys
   <select id="filter"><option>All API keys</option><option>Mine</option></select>
 </label>`;
-    const { context, page, started } = await openFixture(html, "keys-filter.test", "standard", "/dashboard");
+    const { context, page, started } = await openFixture(
+      html,
+      "keys-filter.test",
+      "standard",
+      "/dashboard",
+    );
     try {
       const dependencies = deps(async (_api, _state, questions) => jevFromQuestions(questions));
       const result = await runOperateDrive(
@@ -798,7 +803,9 @@ describe("operate_drive real-browser fixture", () => {
         dependencies,
       );
       expect(page.url()).toMatch(/\/keys/);
-      expect(result.trajectory.filter((step) => step.action === "click").length).toBeGreaterThanOrEqual(4);
+      expect(
+        result.trajectory.filter((step) => step.action === "click").length,
+      ).toBeGreaterThanOrEqual(4);
     } finally {
       await finishProvisionSession(started.session_id);
       await context.close();
@@ -850,9 +857,9 @@ describe("operate_drive real-browser fixture", () => {
       );
       expect(page.url()).toMatch(/\/keys/);
       expect(hits.filter((path) => path === "/").length).toBe(0);
-      expect(result.trajectory.filter((step) => step.action === "click").length).toBeLessThanOrEqual(
-        3,
-      );
+      expect(
+        result.trajectory.filter((step) => step.action === "click").length,
+      ).toBeLessThanOrEqual(3);
       expect(jevCalls).toBeGreaterThanOrEqual(1);
     } finally {
       await finishProvisionSession(started.session_id);
@@ -1311,7 +1318,12 @@ describe("operate_drive real-browser fixture", () => {
     document.body.appendChild(payload);
   };
 </script>`;
-    const { context, page, started } = await openFixture(html, "field-error.test", "standard", "/register");
+    const { context, page, started } = await openFixture(
+      html,
+      "field-error.test",
+      "standard",
+      "/register",
+    );
     try {
       const dependencies = deps(async (_api, _state, questions) => jevFromQuestions(questions));
       const result = await runOperateDrive(
@@ -1350,7 +1362,12 @@ describe("operate_drive real-browser fixture", () => {
     }, 120);
   };
 </script>`;
-    const { context, page, started } = await openFixture(html, "tab-swap.test", "standard", "/settings");
+    const { context, page, started } = await openFixture(
+      html,
+      "tab-swap.test",
+      "standard",
+      "/settings",
+    );
     try {
       const seen: string[] = [];
       const dependencies = deps(async (_api, state, questions) => {
@@ -1669,7 +1686,12 @@ describe("operate_drive real-browser fixture", () => {
   document.getElementById("account").onclick = () => show("account");
   document.getElementById("apps").onclick = () => show("apps");
 </script>`;
-    const { context, page, started } = await openFixture(html, "goal-reset.test", "standard", "/settings");
+    const { context, page, started } = await openFixture(
+      html,
+      "goal-reset.test",
+      "standard",
+      "/settings",
+    );
     try {
       const dependencies = deps(async (_api, _state, questions) => jevFromQuestions(questions));
       const first = await runOperateDrive(
@@ -1926,8 +1948,20 @@ describe("operate_drive real-browser fixture", () => {
         // Exactly one question, carrying no action operation and no target to
         // choose — there is nothing on the page to act on or name.
         expect(asked).toHaveLength(1);
-        expect(asked[0]!.names).toEqual(["operation"]);
-        expect([...asked[0]!.operationCriteria].sort()).toEqual(["BLOCKED", "DONE", "WAIT"]);
+        expect([...asked[0]!.names].sort()).toEqual([
+          "blocked_by_layer",
+          "dead_end",
+          "goal_complete",
+          "last_action_worked",
+          "operation",
+        ]);
+        expect([...asked[0]!.operationCriteria].sort()).toEqual([
+          "BLOCKED",
+          "DONE",
+          "GO_BACK",
+          "NONE_OF_THESE",
+          "WAIT",
+        ]);
         // The question says to judge from the page text, so the prose that
         // carries the only confirmation evidence has to be in it. The document
         // has no heading — title and headings alone would say nothing.
@@ -2047,20 +2081,20 @@ describe("operate_drive real-browser fixture", () => {
         { session_id: started.session_id, goal: "buy one item" },
         api(),
         undefined,
-        deps(async () => {
+        deps(async (_api, _state, questions) => {
           calls += 1;
+          const keys = Object.keys(choiceCriteria(questions.operation));
+          const rest = 0.3 / Math.max(1, keys.length - 1);
+          const probabilities: Record<string, number> = {};
+          for (const key of keys) probabilities[key] = key === "BLOCKED" ? 0.7 : rest;
+          // argmax is BLOCKED; validateChoiceReason rejects this as
+          // choice_not_argmax everywhere else in the drive.
           return {
             attempts: 1,
             elapsedMs: 5,
-            // argmax is BLOCKED; validateChoiceReason rejects this as
-            // choice_not_argmax everywhere else in the drive.
             result: {
               answers: {
-                operation: {
-                  choice: "DONE",
-                  confidence: 0.9,
-                  probabilities: { WAIT: 0.1, DONE: 0.2, BLOCKED: 0.7 },
-                },
+                operation: { choice: "DONE", confidence: 0.9, probabilities },
               },
             },
           };
@@ -3091,7 +3125,10 @@ describe("operate_drive real-browser fixture", () => {
   }, 60_000);
 
   it("retypes a field whose first entry dropped the last character", async () => {
-    const { context, page, started } = await openFixture(DROPPED_LAST_CHAR_HTML, "typed-retry.test");
+    const { context, page, started } = await openFixture(
+      DROPPED_LAST_CHAR_HTML,
+      "typed-retry.test",
+    );
     try {
       const dependencies = deps(async (_api, _state, questions) => {
         if ((await page.locator("#done").count()) > 0) return jevFromQuestions(questions, true);
@@ -3407,7 +3444,8 @@ describe("operate_drive real-browser fixture", () => {
       expect(waits.length).toBeLessThanOrEqual(DRIVE_EMPTY_SNAPSHOT_WAITS);
       expect(handoff.status).not.toBe("budget");
       expect(handoff.status).not.toBe("complete");
-      expect(offered).toEqual([["DONE", "BLOCKED"]]);
+      expect(offered).toHaveLength(1);
+      expect([...offered[0]!].sort()).toEqual(["BLOCKED", "DONE", "GO_BACK", "NONE_OF_THESE"]);
     } finally {
       await finishProvisionSession(started.session_id);
       await context.close();
@@ -3900,7 +3938,7 @@ describe("operate_drive real-browser fixture", () => {
     }
   }, 30_000);
 
-  it("finishes complete on a dialog that already shows a masked secret and never repeats Create API key", async () => {
+  it("does not finish on a dialog that shows only a masked secret and creates at most once", async () => {
     const html = `<!doctype html><meta charset="utf-8"><title>Keys</title>
 <main>
   <button type="button" id="create">Create API key</button>
@@ -3923,10 +3961,13 @@ describe("operate_drive real-browser fixture", () => {
         undefined,
         dependencies,
       );
-      expect(await page.evaluate(() => (window as unknown as { createClicks: number }).createClicks)).toBe(0);
-      expect(result.status).toBe("complete");
-      const creates = result.trajectory.filter((step) => step.target.includes("Create") || /create/i.test(step.reason ?? ""));
-      expect(creates.filter((step) => step.action === "click" && step.reason === undefined).length).toBe(0);
+      // A masked value is not an unmasked secret: the drive must not report
+      // complete, and must not loop creating keys.
+      const createClicks = await page.evaluate(
+        () => (window as unknown as { createClicks: number }).createClicks,
+      );
+      expect(createClicks).toBeLessThanOrEqual(1);
+      expect(result.status).not.toBe("complete");
     } finally {
       await finishProvisionSession(started.session_id);
       await context.close();
@@ -4067,7 +4108,12 @@ describe("operate_drive real-browser fixture", () => {
     history.replaceState({}, "", "/login?state=" + Math.random().toString(36).slice(2));
   };
 </script>`;
-    const { context, page, started } = await openFixture(html, "oauth-bounce.test", "drive", "/login");
+    const { context, page, started } = await openFixture(
+      html,
+      "oauth-bounce.test",
+      "drive",
+      "/login",
+    );
     try {
       const dependencies = deps(async (_api, _state, questions) => jevFromQuestions(questions));
       dependencies.act = async (sessionId, action) => {
@@ -4491,4 +4537,244 @@ describe("drive review regressions", () => {
     },
     30_000,
   );
+});
+
+describe("operate_drive feedback loop", () => {
+  function setChoice(
+    questions: Record<string, JevQuestion>,
+    name: string,
+    pick: string,
+    result: JevCallOutcome,
+  ): void {
+    const question = questions[name];
+    if (question?.type !== "choice") return;
+    if (!(pick in question.criteria)) return;
+    result.result.answers[name] = {
+      choice: pick,
+      confidence: 0.93,
+      probabilities: peaked(Object.keys(question.criteria), pick),
+    };
+  }
+
+  function pickByLabel(
+    questions: Record<string, JevQuestion>,
+    name: string,
+    label: string,
+    result: JevCallOutcome,
+  ): boolean {
+    const question = questions[name];
+    if (question?.type !== "choice") return false;
+    const pick = Object.keys(question.criteria).find((key) => question.criteria[key] === label);
+    if (pick === undefined) return false;
+    result.result.answers[name] = {
+      choice: pick,
+      confidence: 0.93,
+      probabilities: peaked(Object.keys(question.criteria), pick),
+    };
+    return true;
+  }
+
+  async function driveRef(page: Page, label: string): Promise<string> {
+    const snapshot = await captureFrameSnapshot(page, [], 0);
+    if (snapshot === null) throw new Error("no drive snapshot");
+    const rows = driveRowsFromSnapshot(snapshot);
+    const row = rows.find((entry) => {
+      const facts = String(entry[2] ?? "");
+      return facts.split("|")[0] === label || facts.includes(label);
+    });
+    if (row === undefined) throw new Error(`missing ${label}`);
+    return row[0];
+  }
+
+  it("records a never-executed click as not_executed, marks it tried, and never offers it again", async () => {
+    const html = `<!doctype html><meta charset="utf-8"><title>Workspace</title>
+<main>
+  <h1>Workspace</h1>
+  <button id="broken">Broken</button>
+  <button id="works" onclick="document.querySelector('main').innerHTML='<p id=done>Opened</p>'">Works</button>
+</main>`;
+    const { context, page, started } = await openFixture(html, "trail-not-executed.test");
+    const seen: Array<{ state: Record<string, unknown>; questions: Record<string, JevQuestion> }> =
+      [];
+    try {
+      const brokenRef = await driveRef(page, "Broken");
+      const dependencies = deps(async (_api, state, questions) => {
+        seen.push({
+          state: state as Record<string, unknown>,
+          questions: questions as Record<string, JevQuestion>,
+        });
+        const result = jevFromQuestions(questions, true);
+        const wanted = seen.length === 1 ? "Broken" : "Works";
+        if (pickByLabel(questions, "CLICK_target", wanted, result)) {
+          setChoice(questions, "operation", "CLICK", result);
+        }
+        return result;
+      });
+      dependencies.driveAct = async (_sessionId, action) => {
+        if (action.kind === "click" && action.target === brokenRef) {
+          return { kind: "stale", reason: "occluded", guardScriptMs: 0, guardWallMs: 0, cdpMs: 0 };
+        }
+        return await driveActOnPage(page, action);
+      };
+      const handoff = await runOperateDrive(
+        { session_id: started.session_id, goal: "open the workspace", max_steps: 8 },
+        api(),
+        undefined,
+        dependencies,
+      );
+      expect(seen.length).toBeGreaterThanOrEqual(2);
+      const trail = seen[1]!.state.trail as Array<{ outcome: string }>;
+      expect(trail.at(-1)?.outcome).toMatch(/^not_executed:/);
+      const elements = seen[1]!.state.elements as Array<{ description: string; tried?: boolean }>;
+      expect(
+        elements.some((element) => element.description === "Broken" && element.tried === true),
+      ).toBe(true);
+      // Withheld from the question criteria, so Jev cannot choose it again.
+      const click = seen[1]!.questions.CLICK_target;
+      const labels = click?.type === "choice" ? Object.values(click.criteria) : [];
+      expect(labels).not.toContain("Broken");
+      expect(handoff.status).toBe("complete");
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
+  it("records an OAuth hand-off that returns to the same path as bounced_back", async () => {
+    const html = `<!doctype html><meta charset="utf-8"><title>Sign in</title>
+<main><h1>Sign in</h1><a id="google" href="/oauth/google">Continue with Google</a></main>`;
+    const { context, page, started } = await openFixture(
+      html,
+      "oauth-bounce-trail.test",
+      "standard",
+      "/login",
+    );
+    const seen: Array<Record<string, unknown>> = [];
+    let bounce = 0;
+    try {
+      const dependencies = deps(async (_api, state, questions) => {
+        seen.push(state as Record<string, unknown>);
+        return jevFromQuestions(questions);
+      });
+      dependencies.act = async (sessionId) => {
+        bounce += 1;
+        await page.goto(`https://oauth-bounce-trail.test/login?state=s${bounce}`);
+        return await observe(sessionId, "compact");
+      };
+      const handoff = await runOperateDrive(
+        { session_id: started.session_id, goal: "sign in", max_steps: 8 },
+        api(),
+        undefined,
+        dependencies,
+      );
+      expect(handoff.status).toBe("stuck");
+      expect(handoff.reason).toMatch(/hand-off returned to the login page/i);
+      expect(bounce).toBe(2);
+      const outcomes = seen.flatMap((state) =>
+        (state.trail as Array<{ outcome: string; page: string }>).map((entry) => entry.outcome),
+      );
+      expect(outcomes).toContain("bounced_back");
+      const pages = seen.flatMap((state) =>
+        (state.trail as Array<{ page: string }>).map((entry) => entry.page),
+      );
+      expect(pages.every((page) => !page.includes("state="))).toBe(true);
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
+  it("finishes a masked key only after the dry extraction sees an unmasked value", async () => {
+    const html = `<!doctype html><meta charset="utf-8"><title>API keys</title>
+<main>
+  <h1>API keys</h1>
+  <label>API key <input id="key" readonly value="tvly-dev-****abcd"></label>
+  <button id="reveal">Reveal</button>
+</main>
+<script>
+  document.getElementById("reveal").addEventListener("click", () => {
+    document.getElementById("key").value = "tvly-dev-abc123def456ghi789jkl";
+  });
+</script>`;
+    const { context, page, started } = await openFixture(html, "reveal-masked-key.test");
+    const seen: Array<Record<string, unknown>> = [];
+    try {
+      const dependencies = deps(async (_api, state, questions) => {
+        seen.push(state as Record<string, unknown>);
+        return jevFromQuestions(questions, true);
+      });
+      const handoff = await runOperateDrive(
+        { session_id: started.session_id, goal: "extract an API key", max_steps: 8 },
+        api(),
+        undefined,
+        dependencies,
+      );
+      expect(handoff.status).toBe("complete");
+      // The masked value never satisfied the dry extraction, so the drive had
+      // to click Reveal before it could finish.
+      expect(await page.locator("#key").inputValue()).toBe("tvly-dev-abc123def456ghi789jkl");
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
+  it("clicks a create control on a permanently masked key list instead of finishing", async () => {
+    const html = `<!doctype html><meta charset="utf-8"><title>API keys</title>
+<main>
+  <h1>API keys</h1>
+  <table><tr><td>key one</td><td>tvly-dev-****abcd</td></tr>
+  <tr><td>key two</td><td>tvly-dev-****efgh</td></tr></table>
+  <button id="create" onclick="document.querySelector('table').outerHTML='<input id=key readonly value=tvly-dev-xyz123abc456def789ghi>'">Create key</button>
+</main>`;
+    const { context, page, started } = await openFixture(html, "create-key-masked-list.test");
+    try {
+      const dependencies = deps(async (_api, _state, questions) =>
+        jevFromQuestions(questions, true),
+      );
+      const handoff = await runOperateDrive(
+        { session_id: started.session_id, goal: "extract an API key", max_steps: 8 },
+        api(),
+        undefined,
+        dependencies,
+      );
+      expect(handoff.status).toBe("complete");
+      // The permanently masked rows never satisfied the dry extraction, so the
+      // drive had to create a new key before it could finish.
+      expect(await page.locator("#key").inputValue()).toBe("tvly-dev-xyz123abc456def789ghi");
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
+  it("answers NONE_OF_THESE instead of forcing a low-confidence click", async () => {
+    const html = `<!doctype html><meta charset="utf-8"><title>Welcome</title>
+<main><h1>Welcome</h1><a id="learn" href="/docs">Learn more</a></main>`;
+    const { context, started } = await openFixture(html, "none-of-these.test");
+    const clicks: ProvisionAction[] = [];
+    try {
+      const dependencies = deps(async (_api, _state, questions) => {
+        const result = jevFromQuestions(questions, true);
+        setChoice(questions, "operation", "NONE_OF_THESE", result);
+        return result;
+      });
+      dependencies.driveAct = async (_sessionId, action) => {
+        clicks.push(action);
+        return { kind: "stale", reason: "detached", guardScriptMs: 0, guardWallMs: 0, cdpMs: 0 };
+      };
+      const handoff = await runOperateDrive(
+        { session_id: started.session_id, goal: "extract an API key", max_steps: 8 },
+        api(),
+        undefined,
+        dependencies,
+      );
+      expect(handoff.status).toBe("stuck");
+      expect(handoff.reason).toMatch(/nothing on the page can advance the goal/i);
+      expect(clicks).toEqual([]);
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
 });
