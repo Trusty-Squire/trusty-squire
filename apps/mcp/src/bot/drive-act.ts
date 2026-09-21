@@ -10,8 +10,6 @@ const OVERLAY_REFRESH_WAIT_MS = 2000;
 export const DRIVE_NAVIGATION_WAIT_MS = 300;
 export const DRIVE_IN_PAGE_SETTLE_MS = 800;
 
-export type { DriveActResult } from "./act/act.js";
-
 const OVERLAY_OPTION_SELECTOR =
   '[role="option"],[role="listbox"] a,[role="listbox"] [role="option"],.suggestions a,.suggestion-link,.suggestions-dropdown a,[aria-selected],[role="grid"] button,[role="grid"] [role="gridcell"],[role="gridcell"],[role="dialog"] [role="gridcell"],[role="dialog"] [role="grid"] button';
 
@@ -64,7 +62,7 @@ export async function overlayOptionLabels(page: Page): Promise<string[]> {
 // Autocomplete keeps the pre-type rows until the network refresh (~110ms on
 // Flights). Returning at first option PRESENCE snapshots the stale set and the
 // model reads the previous city's suggestions.
-async function waitForOverlayOptionsToChange(page: Page, before: readonly string[]): Promise<void> {
+export async function waitForOverlayOptionsToChange(page: Page, before: readonly string[]): Promise<void> {
   await evaluateBound(
     page,
     async (input) => {
@@ -114,11 +112,7 @@ export async function reenterDriveField(
   }
 }
 
-export async function settleDriveStep(
-  page: Page,
-  combobox: boolean,
-  overlayBefore?: readonly string[],
-): Promise<number> {
+export async function settleDriveStep(page: Page, combobox: boolean): Promise<number> {
   const started = Date.now();
   try {
     const frames = page
@@ -143,14 +137,41 @@ export async function settleDriveStep(
       }),
     ]);
     if (timer !== undefined) clearTimeout(timer);
-    if (combobox) {
-      await waitForOpenedOverlay(page);
-      if (overlayBefore !== undefined) await waitForOverlayOptionsToChange(page, overlayBefore);
-    }
+    if (combobox) await waitForOpenedOverlay(page);
   } catch {
     return Date.now() - started;
   }
   return Date.now() - started;
+}
+
+/** The controls' own state — what a decision was made about, without the page
+ *  text that ticks on its own (countdown, relative timestamp, live price). */
+export async function driveControlDigest(page: Page): Promise<string> {
+  try {
+    return await evaluateBound(page, () => {
+      const controls = Array.from(
+        document.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>(
+          "input,select,textarea",
+        ),
+      ).map(
+        (element) =>
+          `${element.tagName}:${element.type}:${element.value}:${
+            element instanceof HTMLInputElement ? element.checked : ""
+          }:${element.disabled}`,
+      );
+      const actionable = Array.from(
+        document.querySelectorAll("a[href],button,[role='button'],[role='link']"),
+      ).map(
+        (element) =>
+          `${element.tagName}:${(element.textContent ?? "").replace(/\s+/g, " ").trim().slice(0, 40)}:${
+            element.matches(":disabled") || element.getAttribute("aria-disabled") === "true"
+          }`,
+      );
+      return [...controls, ...actionable].join("\n");
+    });
+  } catch {
+    return "";
+  }
 }
 
 export async function documentEpochOf(page: Page): Promise<string> {

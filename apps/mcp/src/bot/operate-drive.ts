@@ -59,13 +59,14 @@ import {
   type DriveSnapshot,
 } from "./drive-snapshot.js";
 import { DriveEvaluateTimeout, evaluateBound } from "./drive-evaluate.js";
+import type { Frame } from "playwright";
 import type { BrowserController } from "./browser.js";
 import { dispatchDriveAct, type DriveActResult } from "./act/act.js";
 import { frameOriginOf } from "./browser-use-capture.js";
 import {
   documentEpochOf,
   documentOriginOf,
-  overlayOptionLabels,
+  driveControlDigest,
   pageFingerprintOf,
   reenterDriveField,
   settleDriveStep,
@@ -4758,26 +4759,40 @@ async function canonicalDriveRefs(
   if (!Array.isArray(fresh) || fresh.length === 0) return translated;
   const canonical = provisionElementRefs(fresh);
   for (const ref of driveRefs) {
-    const scope = driveRefScope(page, ref);
-    const frameUrl = scope.url();
-    const frameOrigin = frameOriginOf(scope);
-    const isMain = scope === page.mainFrame();
-    const candidates = fresh.flatMap((element, index) =>
-      (
-        element.frameUrl == null
-          ? isMain
-          : element.frameUrl === frameUrl && element.frameOrigin === frameOrigin
-      )
-        ? [{ index, selector: element.selector }]
-        : [],
-    );
-    if (candidates.length === 0) continue;
-    const index = await evaluateBound(scope, canonicalIndexForDriveRef, { ref, candidates });
-    const match = index >= 0 ? fresh[index] : undefined;
-    const canonicalRef = match === undefined ? undefined : canonical.get(match);
-    if (canonicalRef !== undefined) {
-      if (session.compactV2Active) session.compactV2Refs.set(canonicalRef, canonicalRef);
-      translated.set(ref, canonicalRef);
+    try {
+      const scope = driveRefScope(page, ref);
+      const frameUrl = scope.url();
+      const frameOrigin = frameOriginOf(scope);
+      // Frame OBJECT identity, not just url+origin: two live instances of the
+      // same hosted-field iframe share both, and a candidate from the wrong one
+      // would mint a canonical ref that aims the PAN at the other frame.
+      const candidates = fresh.flatMap((element, index) => {
+        let candidateFrame: Frame = page.mainFrame();
+        if (element.framePath != null) {
+          for (const part of element.framePath.split("/")) {
+            if (!/^\d+$/.test(part)) return [];
+            const child = candidateFrame.childFrames()[Number(part)];
+            if (child === undefined) return [];
+            candidateFrame = child;
+          }
+        }
+        const sameFrame =
+          candidateFrame === scope &&
+          (element.frameUrl == null
+            ? scope === page.mainFrame()
+            : element.frameUrl === frameUrl && element.frameOrigin === frameOrigin);
+        return sameFrame ? [{ index, selector: element.selector }] : [];
+      });
+      if (candidates.length === 0) continue;
+      const index = await evaluateBound(scope, canonicalIndexForDriveRef, { ref, candidates });
+      const match = index >= 0 ? fresh[index] : undefined;
+      const canonicalRef = match === undefined ? undefined : canonical.get(match);
+      if (canonicalRef !== undefined) {
+        if (session.compactV2Active) session.compactV2Refs.set(canonicalRef, canonicalRef);
+        translated.set(ref, canonicalRef);
+      }
+    } catch (error) {
+      if (error instanceof DriveEvaluateTimeout) throw error;
     }
   }
   return translated;
@@ -4947,7 +4962,7 @@ async function snapshotDriveSession(
   }
   const snapshot = mergeSnapshots(parts);
   rememberDriveIdentities(drive, snapshot.elements, snapshot.url);
-  drive.snapshotPageFingerprint = await pageFingerprintOf(page);
+  drive.snapshotControlDigest = await driveControlDigest(page);
   const rawRows = driveRowsFromSnapshot(snapshot);
   lastSelectOptions.set(session, snapshotSelectOptions(snapshot));
   const previousEpoch = drive.lastDocumentEpoch;
@@ -5850,24 +5865,28 @@ async function driveLoop(input: {
     const targetBinding =
       decidedRow === undefined ? "" : decisionTargetBinding(decidedRow, observation.url);
     // Before acting, check the page against the snapshot the decision came
-    // from: unchanged, act; changed, re-snapshot so the binding check below
-    // rules on what is there now instead of acting into a re-render.
+    // from: unchanged, act; changed, re-snapshot and let the decider rule on
+    // the new page instead of executing a decision the model has outgrown.
+    // The signal is the document epoch plus the controls' own state — page text
+    // ticks on its own (countdown, live price) and would re-decide every step.
     if (session.browser.page !== null) {
       const liveEpoch = await documentEpochOf(session.browser.page);
-      const livePageFingerprint = await pageFingerprintOf(session.browser.page);
+      const liveControls = await driveControlDigest(session.browser.page);
       const documentChanged =
         typeof drive.lastDocumentEpoch === "string" &&
         drive.lastDocumentEpoch.length > 0 &&
         liveEpoch.length > 0 &&
         liveEpoch !== drive.lastDocumentEpoch;
-      const contentChanged =
-        typeof drive.snapshotPageFingerprint === "string" &&
-        drive.snapshotPageFingerprint.length > 0 &&
-        livePageFingerprint.length > 0 &&
-        livePageFingerprint !== drive.snapshotPageFingerprint;
-      if (documentChanged || contentChanged) {
+      const controlsChanged =
+        typeof drive.snapshotControlDigest === "string" &&
+        drive.snapshotControlDigest.length > 0 &&
+        liveControls.length > 0 &&
+        liveControls !== drive.snapshotControlDigest;
+      if (documentChanged || controlsChanged) {
         const snap = await snapshotOrTimeout(framesIfNeeded());
         if (snap !== "ok") return snap;
+        drive.consumedActionKey = null;
+        return "continue";
       }
     }
     const liveRow = findRow(rows, decision.actionKey, observation.url);
@@ -6109,13 +6128,6 @@ async function driveLoop(input: {
       (session.browser.page === null ? "" : await documentEpochOf(session.browser.page));
     const beforePageFingerprint =
       session.browser.page === null ? "" : await pageFingerprintOf(session.browser.page);
-    // Baseline for the post-type refresh wait: an autocomplete keeps the
-    // pre-type rows until its network round trip lands, so option PRESENCE
-    // alone would hand the model the previous query's suggestions.
-    const overlayBefore =
-      decision.action.kind === "type" && session.browser.page !== null
-        ? await overlayOptionLabels(session.browser.page)
-        : undefined;
     const actStarted = Date.now();
     const beforeKey = pageProgressKey(
       observation.url,
@@ -6226,7 +6238,7 @@ async function driveLoop(input: {
       if (bounced !== undefined) return bounced;
     } else {
       if (page !== null) {
-        settleMs = await settleDriveStep(page, acted.combobox, overlayBefore);
+        settleMs = await settleDriveStep(page, acted.combobox);
         const afterEpoch = await documentEpochOf(page);
         if (
           beforeEpoch.length > 0 &&

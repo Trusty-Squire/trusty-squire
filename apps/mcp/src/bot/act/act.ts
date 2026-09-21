@@ -9,11 +9,13 @@
 // runtime-import provision-session; `ProvisionAction`/`Observation` come back
 // as type-only imports (the tool layer keeps importing `act` from
 // provision-session, which re-exports it).
-import type { Page } from "playwright";
+import type { Frame, Page } from "playwright";
 import {
   BrowserClickDispatchError,
+  DRIVE_DISPATCH_PACING,
   clickDispatchStatusForError,
   type BrowserController,
+  type DispatchPacing,
   type InteractiveElement,
 } from "../browser.js";
 import {
@@ -89,11 +91,22 @@ import {
 import type { Observation, ProvisionAction } from "../provision-session.js";
 import type { Session } from "../session/model.js";
 import { resolveLiveControlIdentity } from "./identity.js";
+import { overlayOptionLabels, waitForOverlayOptionsToChange } from "../drive-act.js";
 
-export type ActObserveAfter = "full" | "none";
-
+// `detail:"none"` already owns "return no observation". These name the two
+// things the drive loop does differently and asks for explicitly: it settles on
+// its own schedule, and it types an overlay-opening control by writing into
+// whatever the overlay focused. The tools' behaviour is the absent value.
 export type ActExecutorOptions = {
-  observeAfter?: ActObserveAfter;
+  skipSettle?: boolean;
+  pacing?: DispatchPacing;
+  typeThroughOverlay?: boolean;
+};
+
+const DRIVE_DISPATCH: ActExecutorOptions = {
+  skipSettle: true,
+  pacing: DRIVE_DISPATCH_PACING,
+  typeThroughOverlay: true,
 };
 
 export type DriveActResult =
@@ -388,21 +401,27 @@ export async function actInternally(
     action.kind === "oauth_login" || action.kind === "oauth_click" ? action.provider : undefined;
   try {
     const execute = async (deadline?: OAuthActionDeadline): Promise<InternalActResult> => {
-      const run = async (): Promise<InternalActResult> =>
-        await executeAct(
-          sessionId,
-          action,
-          detail,
-          true,
-          compactV2Authorization,
-          deadline,
-          capturedOperationPage,
-          false,
-          undefined,
-          "full",
-          true,
-          options?.observeAfter ?? "full",
-        );
+      const run = async (): Promise<InternalActResult> => {
+        const act = async (): Promise<InternalActResult> =>
+          await executeAct(
+            sessionId,
+            action,
+            detail,
+            true,
+            compactV2Authorization,
+            deadline,
+            capturedOperationPage,
+            false,
+            undefined,
+            "full",
+            true,
+            options,
+          );
+        const pacing = options?.pacing;
+        return session === undefined || pacing === undefined
+          ? await act()
+          : await session.browser.withDispatchPacing(pacing, act);
+      };
       return (action.kind === "click" ||
         action.kind === "js_click" ||
         action.kind === "oauth_login" ||
@@ -557,8 +576,6 @@ function actDriverTarget(el: InteractiveElement): DriverTarget {
   return { kind: "selector", selector: el.selector };
 }
 
-// Typing into an overlay-opening control is decided by the CONTROL, never by
-// who called: the drive and the tools must not type the same page differently.
 function actsThroughOverlay(el: InteractiveElement): boolean {
   const role = (el.role ?? "").toLowerCase();
   const type = (el.type ?? "").toLowerCase();
@@ -570,6 +587,44 @@ function actsThroughOverlay(el: InteractiveElement): boolean {
     type === "datetime-local" ||
     type === "month"
   );
+}
+
+function submitsOnEnter(el: InteractiveElement): boolean {
+  const role = (el.role ?? "").toLowerCase();
+  const type = (el.type ?? "").toLowerCase();
+  const hay = `${el.ariaLabel ?? ""} ${el.placeholder ?? ""} ${el.name ?? ""}`;
+  return role === "searchbox" || type === "search" || el.name === "q" || /search/i.test(hay);
+}
+
+function scopeForElement(page: Page, el: InteractiveElement): Page | Frame {
+  if (el.framePath === undefined || el.framePath === null || el.framePath.length === 0) return page;
+  let frame: Frame = page.mainFrame();
+  for (const part of el.framePath.split("/")) {
+    const child = frame.childFrames()[Number(part)];
+    if (child === undefined) return page;
+    frame = child;
+  }
+  return frame;
+}
+
+// The occlusion guard the drive used to carry in its own dispatch: a cookie
+// banner or sticky footer over the target swallows the click while the page
+// still reports a dispatch, so the caller records a step that never landed.
+// Absent a box (still loading) it says nothing and the actionability waits rule.
+async function clickTargetOccluded(scope: Page | Frame, selector: string): Promise<boolean> {
+  return await scope
+    .evaluate((sel: string) => {
+      const element = document.querySelector(sel);
+      if (element === null) return false;
+      const rect = element.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return false;
+      const x = rect.x + rect.width / 2;
+      const y = rect.y + rect.height / 2;
+      if (x < 0 || y < 0 || x > innerWidth || y > innerHeight) return false;
+      const hit = document.elementFromPoint(x, y);
+      return hit !== null && hit !== element && !element.contains(hit) && !hit.contains(element);
+    }, selector)
+    .catch(() => false);
 }
 
 // Re-resolve against FRESH elements — never trust a stale index. Shared by the
@@ -639,7 +694,7 @@ async function executeAct(
   onScreenshotDispatched?: () => void,
   outputFormat: "compact" | "full" = "full",
   compactMapEmitted = true,
-  observeAfter: ActObserveAfter = "full",
+  options?: ActExecutorOptions,
 ): Promise<InternalActResult> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
@@ -647,7 +702,7 @@ async function executeAct(
   const compactV2ActionPage = operationPage ?? operationPageForSession(session);
   const driveSettle =
     session.drive !== null && action.kind !== "oauth_login" && action.kind !== "oauth_click";
-  const skipToolSettle = observeAfter === "none";
+  const skipToolSettle = options?.skipSettle === true;
   let settleMs = 0;
   const settle = async (combobox = false) => {
     if (skipToolSettle) return;
@@ -963,6 +1018,18 @@ async function executeAct(
         actedCombobox = actsThroughOverlay(el);
         // Preserve frame identity (origin + path) for the frame-scoped fill.
         if (action.kind === "click" || action.kind === "js_click") {
+          const clickPage = compactV2ActionPage ?? browser.page;
+          if (
+            action.kind === "click" &&
+            clickPage !== null &&
+            clickPage !== undefined &&
+            (await clickTargetOccluded(scopeForElement(clickPage, el), el.selector))
+          ) {
+            throw new BrowserClickDispatchError(
+              "not_dispatched",
+              "click target is occluded by an overlay",
+            );
+          }
           actionPageAfter =
             (await adoptTabOpenedByClick(session, browser, async () => {
               await actClick({ ...actDriverTarget(el), method: action.kind });
@@ -970,16 +1037,32 @@ async function executeAct(
         } else if (action.kind === "type") {
           clearCommittedSelectValue(session, el.selector);
           const actTarget = actDriverTarget(el);
-          if (actedCombobox && compactV2ActionPage !== undefined) {
+          if (
+            options?.typeThroughOverlay === true &&
+            actedCombobox &&
+            compactV2ActionPage !== undefined
+          ) {
             // The click may remount the field into an overlay that takes focus,
             // so the text goes to whatever is focused — after an explicit
             // select-all, because insertText alone APPENDS to a committed value.
+            // The suggestion baseline is read AFTER the overlay opens; reading
+            // it before would make the refresh wait return on the stale rows.
             await actClick({ ...actTarget, method: "click" });
             await settleAfterDriveAction(compactV2ActionPage, true);
+            const overlayBefore = await overlayOptionLabels(compactV2ActionPage);
             await compactV2ActionPage.keyboard.press("ControlOrMeta+a");
             await compactV2ActionPage.keyboard.insertText(typedText ?? "");
+            if (submitsOnEnter(el)) {
+              await compactV2ActionPage.keyboard.press("Enter").catch(() => undefined);
+            }
+            await waitForOverlayOptionsToChange(compactV2ActionPage, overlayBefore);
           } else {
             await actType(actTarget, typedText!, false);
+            if (options?.typeThroughOverlay === true && submitsOnEnter(el)) {
+              await (compactV2ActionPage ?? browser.page)?.keyboard
+                .press("Enter")
+                .catch(() => undefined);
+            }
           }
           // #635 fix (not a gate on typing): Shopify only enables delivery-rate
           // selection after the required address line is committed by
@@ -1096,7 +1179,7 @@ async function executeAct(
   const observation =
     terminalOAuthCompletionUrl !== null
       ? terminalOAuthCompletionObservation(session, terminalOAuthCompletionUrl)
-      : (observeAfter === "none" || detail === "none") && action.kind !== "oauth_login"
+      : detail === "none" && action.kind !== "oauth_login"
         ? compactV2PublicObservation(session, {
             stage: safeStageV2(
               actionObservationPage?.url() ?? browser.currentUrl(),
@@ -1170,15 +1253,23 @@ export async function dispatchDriveAct(
     return { kind: "unsupported" };
   }
   try {
-    const result = await actInternally(sessionId, action, "none", undefined, undefined, {
-      observeAfter: "none",
-    });
+    const result = await actInternally(
+      sessionId,
+      action,
+      "none",
+      undefined,
+      undefined,
+      DRIVE_DISPATCH,
+    );
     return { kind: "ok", combobox: result.combobox === true };
   } catch (error) {
     if (error instanceof CompactV2StaleRefError) return { kind: "stale", reason: "stale_ref" };
     if (error instanceof TargetStaleError) return { kind: "stale", reason: "stale" };
     const message = error instanceof Error ? error.message : String(error);
-    return { kind: "stale", reason: /intercepts pointer/i.test(message) ? "occluded" : "stale_ref" };
+    return {
+      kind: "stale",
+      reason: /occluded|intercepts pointer/i.test(message) ? "occluded" : "stale_ref",
+    };
   }
 }
 

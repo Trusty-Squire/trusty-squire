@@ -390,6 +390,34 @@ const INSTALL_WEBGL_SPOOF_SCRIPT = String.raw`(() => {
       }
     })();`;
 
+/** Actionability budgets and humanization the dispatch verbs spend per act. */
+export type DispatchPacing = {
+  visibleTimeoutMs: number;
+  disabledPollMs: number;
+  hoverMs: readonly [number, number];
+  bezier: boolean;
+  keyDelayMs: readonly [number, number];
+};
+
+export const TOOL_DISPATCH_PACING: DispatchPacing = {
+  visibleTimeoutMs: 20_000,
+  disabledPollMs: 15_000,
+  hoverMs: [80, 300],
+  bezier: true,
+  keyDelayMs: [40, 110],
+};
+
+// The drive settles and re-snapshots on its own schedule and retries a stale
+// target, so it trades the tools' patience for a step that stays near its
+// measured ~27ms act budget.
+export const DRIVE_DISPATCH_PACING: DispatchPacing = {
+  visibleTimeoutMs: 2_000,
+  disabledPollMs: 1_000,
+  hoverMs: [0, 0],
+  bezier: false,
+  keyDelayMs: [20, 20],
+};
+
 export class BrowserController implements BrowserDriver {
   get context(): BrowserContext | null {
     return this.processOwner.context;
@@ -464,10 +492,25 @@ export class BrowserController implements BrowserDriver {
   readonly oauthConsentAttemptedPhases = new Set<string>();
   activeOAuthAttempt: ActiveOAuthAttempt | null = null;
   readonly humanize: boolean;
+  // Dispatch pacing in force for the current act. The tools' humanized budgets
+  // are the default; the drive loop scopes its own so a step stays inside its
+  // wall-time bar (see withDispatchPacing).
+  private dispatchPacing: DispatchPacing = TOOL_DISPATCH_PACING;
   // Tracks the simulated mouse position so successive clicks can move
   // along a continuous path (humans don't teleport between clicks).
   mouseX = 100;
   mouseY = 100;
+
+  /** Run `fn` with `pacing` in force for every dispatch it issues. */
+  async withDispatchPacing<T>(pacing: DispatchPacing, fn: () => Promise<T>): Promise<T> {
+    const previous = this.dispatchPacing;
+    this.dispatchPacing = pacing;
+    try {
+      return await fn();
+    } finally {
+      this.dispatchPacing = previous;
+    }
+  }
 
   /** Install the session-lifetime output mask before the first secret write. */
   registerCardValueOutputMask(card: CardMaskRegistration): void {
@@ -1291,7 +1334,10 @@ export class BrowserController implements BrowserDriver {
     sealed = false,
   ): Promise<void> {
     // Wait for element to be visible and enabled before typing.
-    await page.waitForSelector(selector, { state: "visible", timeout: 10000 });
+    await page.waitForSelector(selector, {
+      state: "visible",
+      timeout: Math.min(10_000, this.dispatchPacing.visibleTimeoutMs),
+    });
     await markOperatorMutationDispatchAttempted();
     const locator = page.locator(selector);
     // Internal secret writers may retain this provenance marker. It is not a
@@ -1353,7 +1399,8 @@ export class BrowserController implements BrowserDriver {
   ): Promise<void> {
     const timeout = opts.timeoutMs === undefined ? undefined : { timeout: opts.timeoutMs };
     await locator.fill("", timeout).catch(() => undefined);
-    await locator.pressSequentially(text, { delay: rand(40, 110), ...timeout });
+    const [keyMin, keyMax] = this.dispatchPacing.keyDelayMs;
+    await locator.pressSequentially(text, { delay: rand(keyMin, keyMax), ...timeout });
   }
 
   // Best-effort scan for the SPECIFIC unfilled required field(s) blocking a
@@ -3619,7 +3666,7 @@ export class BrowserController implements BrowserDriver {
     // submit button DOES eventually mount. Bound stays low enough
     // that a genuinely-missing target still surfaces a clear error
     // within the bot's per-action budget.
-    await locator.waitFor({ state: "visible", timeout: 20000 });
+    await locator.waitFor({ state: "visible", timeout: this.dispatchPacing.visibleTimeoutMs });
     // rc.20 — wait for the target to be ENABLED before issuing the
     // click. humanClick uses page.mouse.click(x, y) which bypasses
     // Playwright's actionability check, so a disabled button receives
@@ -3650,7 +3697,7 @@ export class BrowserController implements BrowserDriver {
     // next round's reason includes "click failed: target is
     // aria-disabled" and the planner pivots to checking other fields.
     {
-      const deadline = Date.now() + 15_000;
+      const deadline = Date.now() + this.dispatchPacing.disabledPollMs;
       let isDisabled = false;
       while (Date.now() < deadline) {
         isDisabled = await locator
@@ -3704,11 +3751,13 @@ export class BrowserController implements BrowserDriver {
     const targetX = box.x + rand(box.width * 0.25, box.width * 0.75);
     const targetY = box.y + rand(box.height * 0.25, box.height * 0.75);
 
-    await this.bezierMouseTo(targetX, targetY);
+    if (this.dispatchPacing.bezier) await this.bezierMouseTo(targetX, targetY);
+    else await this.page.mouse.move(targetX, targetY);
     // Hover hesitation. Real users land on a button and pause briefly
     // before clicking. 80-300ms is short enough not to slow runs much
     // and long enough to register as "non-instant" in scoring JS.
-    await this.sleep(rand(80, 300));
+    const [hoverMin, hoverMax] = this.dispatchPacing.hoverMs;
+    if (hoverMax > 0) await this.sleep(rand(hoverMin, hoverMax));
     await this.page.mouse.click(targetX, targetY);
     this.mouseX = targetX;
     this.mouseY = targetY;

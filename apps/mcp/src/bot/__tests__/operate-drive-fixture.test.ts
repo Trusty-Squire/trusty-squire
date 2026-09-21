@@ -5019,10 +5019,10 @@ describe("capture flow key evidence", () => {
 </nav>
 <p id="hit">none</p>
 <script>
-  Array.from(document.querySelectorAll("a")).forEach((a) => {
-    a.addEventListener("click", (event: Event) => {
+  Array.from(document.querySelectorAll("a")).forEach(function (a) {
+    a.addEventListener("click", function (event) {
       event.preventDefault();
-      document.getElementById("hit")!.textContent = a.id;
+      document.getElementById("hit").textContent = a.id;
     });
   });
 </script>`;
