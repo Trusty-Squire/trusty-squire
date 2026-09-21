@@ -23,6 +23,7 @@ import {
   type SafeObservationIndexV2,
 } from "../compact-observation-v2.js";
 import type { ApiClient } from "../../api-client.js";
+import type { DriveTrailEntry } from "../drive-feedback.js";
 import type { OperatorBrowserWatchdog } from "../operator-browser-watchdog.js";
 
 // Credential-egress seed provenance: start is the service host, auto_widen
@@ -235,6 +236,19 @@ export interface SessionDriveState {
   pendingRevealScan?: boolean;
   /** OAuth hand-offs that returned to the same login page this drive. */
   oauthReturnAttempts?: number;
+  /** Structured trail of what each executed action actually did (capped). */
+  outcomeTrail?: DriveTrailEntry[];
+  /** Origin+path the last trail entry recorded, for arrival counting. */
+  lastTrailPage?: string | null;
+  /** Origin+path -> times this drive arrived there. */
+  visitedPages?: Record<string, number>;
+  /** Stable control keys already acted on for the current page+goal. */
+  triedHere?: string[];
+  triedHereLabels?: string[];
+  /** `page+goal` identity the tried list belongs to. */
+  triedHereKey?: string | null;
+  /** Progress keys where the decider already answered NONE_OF_THESE/re-plan. */
+  stallKeys?: string[];
 }
 
 // The last extracted elements are resealed on every retain so each retained
