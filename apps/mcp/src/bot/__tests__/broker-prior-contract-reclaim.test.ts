@@ -576,6 +576,14 @@ describe("same-contract stale-credential broker reclaim", () => {
   ])("old broker rejecting $field: $outcome", { timeout: 30_000 }, async ({ field, outcome }) => {
     const { discovery, profileModule, transport } = await modules();
     vi.stubEnv("TRUSTY_SQUIRE_BROKER_SOCKET", socket);
+    // Whether the ceremony tab is already visible takes BOTH halves: the
+    // holder's display (the stand-in below) and this connect having a screen
+    // of its own. Pin the second half rather than inheriting the host's — a
+    // headless runner would send it down the noVNC path this test is not about.
+    vi.stubEnv("DISPLAY", ":0");
+    vi.stubEnv("XDG_SESSION_TYPE", "x11");
+    vi.stubEnv("SSH_CONNECTION", "");
+    vi.stubEnv("SSH_TTY", "");
     lockPath = await electionLockPath(discovery, profileModule, profile);
     const journal = join(root, "ceremony-wire.txt");
     const fixture = spawnFixture(
