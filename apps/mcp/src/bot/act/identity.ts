@@ -95,7 +95,7 @@ export function rememberDriveIdentities(
 
 export function interactiveFromIdentity(
   identity: ActControlIdentity,
-  extras?: { framePath?: string; frameUrl?: string; frameOrigin?: string },
+  extras?: { framePath?: string },
 ): InteractiveElement {
   const role = canonicalActRole(identity.role);
   const tag =
@@ -108,12 +108,12 @@ export function interactiveFromIdentity(
           : role === "textbox"
             ? "input"
             : role || "div";
-  const frameUrl = extras?.frameUrl ?? identity.frameUrl;
-  const frameOrigin = extras?.frameOrigin ?? identity.frameOrigin;
+  const frameUrl = identity.frameUrl;
+  const frameOrigin = identity.frameOrigin;
   return {
     index: 0,
     tag,
-    type: identity.picker === true ? "date" : (identity.inputType ?? null),
+    type: identity.inputType ?? null,
     id: identity.selector.startsWith("#") ? identity.selector.slice(1) : null,
     name: identity.name ?? null,
     placeholder: identity.placeholder ?? null,
@@ -147,16 +147,6 @@ function framePathOf(frame: Page | Frame): string | undefined {
   return indexes.length === 0 ? undefined : indexes.join("/");
 }
 
-/** The frame ordinal the drive minted this ref in; snapshots number `page.frames()`. */
-export function driveRefFrameOrdinal(ref: string): number {
-  const match = /^@e:f(\d+)d\d+$/.exec(ref);
-  return match === null ? 0 : Number(match[1]);
-}
-
-export function driveRefScope(page: Page, ref: string): Frame {
-  return page.frames()[driveRefFrameOrdinal(ref)] ?? page.mainFrame();
-}
-
 // One rule: the ref's registered node is still connected AND the identity's
 // selector resolves to exactly that node. A second spelling of "close enough"
 // is how an act lands on the neighbor this record exists to refuse.
@@ -173,25 +163,46 @@ function inPageSameControl(arg: { ref: string; selector: string }): boolean {
   }
 }
 
+/** Frames the identity names. Origin is the part that survives a pushState;
+ *  a positional `page.frames()` ordinal is exactly what this record replaces. */
+function identityFrameCandidates(page: Page, identity: ActControlIdentity): Frame[] {
+  const sameOrigin = page
+    .frames()
+    .filter(
+      (frame) =>
+        identity.frameOrigin.length === 0 || frameOriginOf(frame) === identity.frameOrigin,
+    );
+  const exact = sameOrigin.filter((frame) => frame.url() === identity.frameUrl);
+  return exact.length > 0 ? exact : sameOrigin;
+}
+
+/** The frame the identity names that still holds the ref's registered node. */
+export async function resolveIdentityScope(
+  page: Page,
+  ref: string,
+  identity: ActControlIdentity,
+): Promise<Frame | null> {
+  if (identity.selector.length === 0) return null;
+  for (const scope of identityFrameCandidates(page, identity)) {
+    const same = await evaluateBound(scope, inPageSameControl, {
+      ref,
+      selector: identity.selector,
+    }).catch(() => false);
+    if (same) return scope;
+  }
+  return null;
+}
+
 /** Live element for a drive ref, or null when it is no longer the same control. */
 export async function resolveLiveControlIdentity(
   page: Page,
   ref: string,
   identity: ActControlIdentity,
 ): Promise<InteractiveElement | null> {
-  if (identity.selector.length === 0) return null;
-  const scope = driveRefScope(page, ref);
-  const same = await evaluateBound(scope, inPageSameControl, {
-    ref,
-    selector: identity.selector,
-  }).catch(() => false);
-  if (!same) return null;
+  const scope = await resolveIdentityScope(page, ref, identity);
+  if (scope === null) return null;
   const framePath = framePathOf(scope);
-  return interactiveFromIdentity(identity, {
-    ...(framePath === undefined ? {} : { framePath }),
-    frameUrl: scope.url(),
-    frameOrigin: frameOriginOf(scope),
-  });
+  return interactiveFromIdentity(identity, framePath === undefined ? undefined : { framePath });
 }
 
 /** Index of the canonical element that IS the node the drive ref registered. */

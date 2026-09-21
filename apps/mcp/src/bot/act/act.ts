@@ -588,7 +588,8 @@ function actDriverTarget(el: InteractiveElement): DriverTarget {
   return { kind: "selector", selector: el.selector };
 }
 
-function actsThroughOverlay(el: InteractiveElement): boolean {
+function actsThroughOverlay(el: InteractiveElement, picker: boolean): boolean {
+  if (picker) return true;
   const role = (el.role ?? "").toLowerCase();
   const type = (el.type ?? "").toLowerCase();
   return (
@@ -666,12 +667,18 @@ async function resolveFreshActTarget(
   noMatchPrefix: string,
   actionTarget: string,
   withVisibleCandidates: boolean,
-): Promise<{ el: InteractiveElement; fresh: InteractiveElement[] }> {
+): Promise<{ el: InteractiveElement; fresh: InteractiveElement[]; picker: boolean }> {
   const driveIdentity = session.drive?.identities?.get(resolutionTarget);
   const livePage = compactV2ActionPage ?? browser.page;
   if (driveIdentity !== undefined && livePage !== null) {
     const live = await resolveLiveControlIdentity(livePage, resolutionTarget, driveIdentity);
-    if (live !== null) return { el: live, fresh: session.lastElements };
+    if (live !== null) {
+      return {
+        el: live,
+        fresh: session.lastElements,
+        picker: driveIdentity.picker === true,
+      };
+    }
     if (session.compactV2Active) {
       if (!internalAccess) throwCompactV2StaleRef();
       throw new CompactV2StaleRefError("stale_ref");
@@ -689,7 +696,7 @@ async function resolveFreshActTarget(
     compactV2Authorization === undefined
       ? resolveTarget(fresh, resolutionTarget)
       : resolveAuthorizedCompactV2Target(session, fresh, compactV2Authorization);
-  if (el !== null) return { el, fresh };
+  if (el !== null) return { el, fresh, picker: false };
   if (session.compactV2Active) {
     if (!internalAccess) throwCompactV2StaleRef();
     throw new Error(`${internalLabel}: internal live target changed`);
@@ -1028,7 +1035,7 @@ async function executeAct(
           break;
         }
         // Re-resolve against FRESH elements every act — never trust a stale index.
-        const { el, fresh } = await resolveFreshActTarget(
+        const { el, fresh, picker } = await resolveFreshActTarget(
           session,
           browser,
           compactV2ActionPage,
@@ -1040,7 +1047,7 @@ async function executeAct(
           action.target,
           true,
         );
-        actedCombobox = actsThroughOverlay(el);
+        actedCombobox = actsThroughOverlay(el, picker);
         // Preserve frame identity (origin + path) for the frame-scoped fill.
         if (action.kind === "click" || action.kind === "js_click") {
           const clickPage = compactV2ActionPage ?? browser.page;
@@ -1304,17 +1311,24 @@ export async function dispatchDriveAct(
   } catch (error) {
     if (error instanceof CompactV2StaleRefError) return { kind: "stale", reason: "stale_ref" };
     if (error instanceof TargetStaleError) return { kind: "stale", reason: "stale" };
-    // The click reached the element and only the surrounding call failed —
-    // telling the drive it never executed invites a second submit.
+    const message = error instanceof Error ? error.message : String(error);
+    // A tracked click that reached the element and only then failed did land —
+    // telling the drive it never executed invites a second submit. The evidence
+    // is a CLICK's own dispatch listener, so it says nothing about a type whose
+    // focusing click landed before the keystrokes were written.
     const dispatchStatus =
       error instanceof CompactV2ActionFailureError
         ? error.dispatchStatus
         : clickDispatchStatusForError(error);
-    if (dispatchStatus === "dispatched") return { kind: "ok", combobox: false };
+    if (action.kind === "click" && dispatchStatus === "dispatched") {
+      return { kind: "ok", combobox: false };
+    }
     // A select that could not take the value was refused by the CONTROL; the
-    // drive must not blame the ref and retire it.
-    if (action.kind === "select") return { kind: "stale", reason: "option_missing" };
-    const message = error instanceof Error ? error.message : String(error);
+    // drive must not blame the ref and retire it. A ref that went stale before
+    // the select was ever attempted stays stale.
+    if (action.kind === "select" && !/stale_ref|reobserve_required/i.test(message)) {
+      return { kind: "stale", reason: "option_missing" };
+    }
     return {
       kind: "stale",
       reason: /occluded|intercepts pointer/i.test(message) ? "occluded" : "stale_ref",

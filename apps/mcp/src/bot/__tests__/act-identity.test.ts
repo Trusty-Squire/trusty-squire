@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
   canonicalIndexForDriveRef,
-  driveRefFrameOrdinal,
   identityFromDriveElement,
   interactiveFromIdentity,
   rememberDriveIdentities,
@@ -36,12 +35,6 @@ describe("act control identity", () => {
     expect(el.frameUrl).toBe("https://pay.example.test/fields");
     expect(el.frameOrigin).toBe("https://pay.example.test");
     expect(el.framePath).toBe("0");
-  });
-
-  it("reads the frame ordinal the drive minted the ref in", () => {
-    expect(driveRefFrameOrdinal("@e:f0d6")).toBe(0);
-    expect(driveRefFrameOrdinal("@e:f2d13")).toBe(2);
-    expect(driveRefFrameOrdinal("not-a-drive-ref")).toBe(0);
   });
 
   it("translates a drive ref by node, not by a recomputed label", () => {

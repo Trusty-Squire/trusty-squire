@@ -74,10 +74,9 @@ import {
   waitForNavigationIdle,
 } from "./drive-act.js";
 import {
-  driveRefScope,
   canonicalIndexForDriveRef,
   rememberDriveIdentities,
-  resolveLiveControlIdentity,
+  resolveIdentityScope,
 } from "./act/identity.js";
 import { provisionElementRefs } from "./observe/refs.js";
 import {
@@ -4760,7 +4759,10 @@ async function canonicalDriveRefs(
   const canonical = provisionElementRefs(fresh);
   for (const ref of driveRefs) {
     try {
-      const scope = driveRefScope(page, ref);
+      const identity = session.drive?.identities?.get(ref);
+      if (identity === undefined) continue;
+      const scope = await resolveIdentityScope(page, ref, identity);
+      if (scope === null) continue;
       const frameUrl = scope.url();
       const frameOrigin = frameOriginOf(scope);
       // Frame OBJECT identity, not just url+origin: two live instances of the
@@ -6348,16 +6350,12 @@ async function driveLoop(input: {
         const pageForRetry = session.browser.page;
         if (pageForRetry !== null) {
           const identity = drive.identities?.get(decision.actionKey);
-          const live =
+          const scope =
             identity === undefined
               ? null
-              : await resolveLiveControlIdentity(pageForRetry, decision.actionKey, identity);
-          if (identity !== undefined && live !== null) {
-            await reenterDriveField(
-              driveRefScope(pageForRetry, decision.actionKey),
-              identity.selector,
-              intended,
-            );
+              : await resolveIdentityScope(pageForRetry, decision.actionKey, identity);
+          if (identity !== undefined && scope !== null) {
+            await reenterDriveField(scope, identity.selector, intended);
           }
           const retrySnap = await refreshSnapshot(framesIfNeeded());
           if (retrySnap.timedOut)
