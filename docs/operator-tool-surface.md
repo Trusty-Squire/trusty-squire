@@ -72,12 +72,15 @@ when a click leaves the page waiting with no fill or live choice left and its
 wording or URL says mail is expected (check-your-email text, an Open Gmail
 control, a verify path). It polls that read for up to 45 seconds before handing
 back `needs_value` for `verification_code`, or `stuck` when a link rather than a
-code was expected. It does not gate on confidence. The drive
-loop snapshots and acts with an in-page registry plus CDP input; login,
-inbox, and card still use those primitives. The two-head Jev request,
-structured state, choice validation, WAIT, SELECT option targets, snapshot
-evaluate, and drive rules prose are adapted from browser-use/jev-ultrafast
-(MIT).
+code was expected. It does not gate on confidence. The drive loop takes its own
+in-page snapshot and dispatches click, type, select, and scroll on a control
+that snapshot recorded through the same shared act executor the single-step
+tools use, asking it for no observation and keeping the drive's own settling,
+pacing, occlusion guard, and cross-origin coordinate fallback; any other action
+falls back to the ordinary tool act, which does return one. Login, inbox, and
+card still use those primitives. The two-head Jev request, structured state,
+choice validation, WAIT, SELECT option targets, snapshot evaluate, and drive
+rules prose are adapted from browser-use/jev-ultrafast (MIT).
 
 WAIT and BLOCKED are offered only while no listed work remains: an enabled
 fill, select, choice, or non-OAuth submit that is actually offered keeps both
@@ -96,6 +99,22 @@ budget, and a stale or occluded click ref is withheld until the observation
 fingerprint changes. After five such dead actions on one page, or when they
 leave no actionable operation, the drive ends with `no_progress` and a `reason`
 naming them.
+
+A drive snapshot ref names the control that snapshot recorded — its selector,
+frame, role, label, and a link's destination — not a position within it. Every
+act re-resolves that identity against the live page: when the ref's registered
+node is gone, its selector no longer names that node alone, or the node reads
+back as a different control, the act returns stale rather than acting on
+whatever now sits in that place.
+
+Before each act the loop checks the live page against the snapshot the decision
+came from — the document, plus the identity, role, and enabled/checked state of
+the controls that snapshot rowed, not their typed values, so a countdown or an
+input mask reformatting a field does not trigger it. Unchanged, the act runs;
+changed, the loop re-snapshots and decides again instead of executing a decision
+the page has outgrown. Two consecutive re-decides are allowed; a third ends the
+drive with `no_progress` and the reason `the page kept changing between the
+snapshot and the act`.
 
 It returns a handoff (never a bare page): status, the current compact
 observation with the same stable refs, trajectory, and done/remaining.
@@ -180,7 +199,7 @@ browser-use/jev-ultrafast (MIT) adoptions live in `operate-drive.ts`. Mapping:
 | 9 | Three consecutive non-wait actions with no fingerprint change | `DRIVE_STALE_LIMIT`, `staleNonWait` |
 | 10 | Decision bound to the observation fingerprint, consumed once | `boundFingerprint`, `consumedActionKey` |
 | 11 | Candidate and question budgets; only offered choices can be selected | `driveTargetSets`, `buildDriveQuestions` |
-| 12 | Snapshot, decision, guarded CDP action, then bounded settling; automatic combobox opening follows the policy above | `drive-snapshot.ts`, `drive-act.ts`, `operate-drive.ts` |
+| 12 | Snapshot, decision, guarded act through the shared executor, then bounded settling; automatic combobox opening follows the policy above | `drive-snapshot.ts`, `act/act.ts`, `act/identity.ts`, `drive-act.ts`, `operate-drive.ts` |
 
 The drive considers up to 250 candidates and caps each decision batch at 128
 total choice criteria, including operation and goal-value choices. Truncation

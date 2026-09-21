@@ -15,7 +15,6 @@ import {
   DRIVE_DISPATCH_PACING,
   clickDispatchStatusForError,
   type BrowserController,
-  type DispatchPacing,
   type InteractiveElement,
 } from "../browser.js";
 import {
@@ -1116,11 +1115,7 @@ async function executeAct(
         } else if (action.kind === "type") {
           clearCommittedSelectValue(session, el.selector);
           const actTarget = actDriverTarget(el);
-          if (
-            options?.drive === true &&
-            actedCombobox &&
-            compactV2ActionPage !== undefined
-          ) {
+          if (options?.drive === true && actedCombobox && compactV2ActionPage !== undefined) {
             // The click may remount the field into an overlay that takes focus,
             // so the text goes to whatever is focused — after an explicit
             // select-all, because insertText alone APPENDS to a committed value.
@@ -1328,10 +1323,7 @@ async function selectDriveOptionOrRefuse(
   throw new CompactV2ActionFailureError(outcome);
 }
 
-async function guardDriveOauthTarget(
-  sessionId: string,
-  target: string,
-): Promise<DriveActResult> {
+async function guardDriveOauthTarget(sessionId: string, target: string): Promise<DriveActResult> {
   const session = sessionForCall(sessionId);
   const identity = session?.drive?.identities?.get(target);
   const page = session?.browser.page ?? null;

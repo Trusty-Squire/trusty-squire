@@ -201,8 +201,7 @@ function identityFrameCandidates(page: Page, identity: ActControlIdentity): Fram
   const sameOrigin = page
     .frames()
     .filter(
-      (frame) =>
-        identity.frameOrigin.length === 0 || frameOriginOf(frame) === identity.frameOrigin,
+      (frame) => identity.frameOrigin.length === 0 || frameOriginOf(frame) === identity.frameOrigin,
     );
   const exact = sameOrigin.filter((frame) => frame.url() === identity.frameUrl);
   return exact.length > 0 ? exact : sameOrigin;

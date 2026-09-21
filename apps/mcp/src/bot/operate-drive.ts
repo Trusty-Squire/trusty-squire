@@ -37,9 +37,8 @@ import {
   type ProvisionAction,
 } from "./provision-session.js";
 import { resolveInboxSearch } from "./capture/verification.js";
-import { audit, sessionForCall } from "./session/lifecycle.js";
-import { registrableHost } from "./session/hosts.js";
-import { observedThreeDsChallenge, rememberCompactV2SourcePage } from "./observe/observe.js";
+import { sessionForCall } from "./session/lifecycle.js";
+import { observedThreeDsChallenge } from "./observe/observe.js";
 import { safeStageV2 } from "./compact-observation-v2.js";
 import {
   lastSelectOptions,

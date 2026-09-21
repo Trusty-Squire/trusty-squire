@@ -494,7 +494,10 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
   // The label an act-time check can reproduce: the accessible name under a
   // budget it can re-arm. `truncated` says the walk ran out mid-element, so the
   // recorded spelling is a prefix nothing can derive again.
-  const accessibleName = (element: Element, role: string): { label: string; truncated: boolean } => {
+  const accessibleName = (
+    element: Element,
+    role: string,
+  ): { label: string; truncated: boolean } => {
     const derived = name(element);
     return {
       label: derived || role,

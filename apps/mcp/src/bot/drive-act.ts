@@ -62,7 +62,10 @@ export async function overlayOptionLabels(page: Page): Promise<string[]> {
 // Autocomplete keeps the pre-type rows until the network refresh (~110ms on
 // Flights). Returning at first option PRESENCE snapshots the stale set and the
 // model reads the previous city's suggestions.
-export async function waitForOverlayOptionsToChange(page: Page, before: readonly string[]): Promise<void> {
+export async function waitForOverlayOptionsToChange(
+  page: Page,
+  before: readonly string[],
+): Promise<void> {
   await evaluateBound(
     page,
     async (input) => {
@@ -332,9 +335,7 @@ function inPageSelectOption(input: {
         option.label.toLowerCase() === wantedLower ||
         (option.textContent ?? "").trim().toLowerCase() === wantedLower,
     ) ??
-    options.find((option) =>
-      (option.textContent ?? "").trim().toLowerCase().includes(wantedLower),
-    );
+    options.find((option) => (option.textContent ?? "").trim().toLowerCase().includes(wantedLower));
   if (match === undefined) return "option_missing";
   element.value = match.value;
   element.dispatchEvent(new Event("input", { bubbles: true }));
