@@ -561,6 +561,28 @@ describe("operate_read_inbox picks the NEWEST matching mail out of a real result
     }
   }, 90_000);
 
+  it("an IP-host read whose rows all predate the session reports a plain miss, not a stale match", async () => {
+    // The harness start URL is an IP, so no host scoping applies and EVERY row
+    // is a candidate. A predating row there is some unrelated service's mail,
+    // not evidence that this task's mail was sent and is merely late — so the
+    // hand-back must be the generic one, which tells the host the code may have
+    // gone by SMS and to ask the user, rather than the stale-match one, which
+    // steers to polling for a mail nothing says was ever sent.
+    if (!available) return;
+    const { context } = await multiRowHarness();
+    try {
+      // No backdating and no sender: the session starts NOW, so all fixture
+      // mails predate it, and the service host is the harness IP.
+      const res = await readInbox(context);
+      expect(res.found).toBe(false);
+      expect(res.needs_user?.resume).toBe("code");
+      expect(res.needs_user?.message).not.toContain("BEFORE this task started");
+      expect(res.needs_user?.message).toContain("ask the user for it");
+    } finally {
+      await context.close();
+    }
+  }, 90_000);
+
   it("a transient extraction failure with a sender hint never parses the page-wide list's foreign code", async () => {
     // The unfiltered query means the page-wide list text can carry another
     // sender's code (here Proton's 934870, ranked first by relevance). If the

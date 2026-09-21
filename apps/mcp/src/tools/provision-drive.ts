@@ -1502,6 +1502,10 @@ export const operateReadInboxTool: Tool<z.infer<typeof readInboxSchema>> = {
     "(drive fact `email`, or `recipient`) and the service host from the session " +
     "start URL. A verification mail that matches neither is not a candidate — " +
     "returning another service's newest mail is worse than returning nothing. " +
+    "An IP or localhost start URL is the exception: no From address can ever " +
+    "contain it, so host scoping there would drop every mail and protect " +
+    "nothing — such a read is NOT host-scoped and the newest mail after the " +
+    "session start wins, so cross-check `source_from` before using the code. " +
     "`sender` and `recipient` override those defaults when the caller has a " +
     "narrower hint. The newest matching mail is the one read, cross-checked " +
     "across the search listing AND the real-time All Mail listing (Gmail's " +

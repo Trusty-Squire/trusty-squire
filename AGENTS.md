@@ -751,7 +751,15 @@ that broker is rebuilt. Listing rows do not show To and one row can group
 many same-subject messages. Open a to:-scoped or same-registrable-domain
 row; pick the opened message whose To/body is the session recipient.
 `mailRowMatchesSender` matches the page host to From on eTLD+1 (and the
-display-name SLD), not a substring of `app.service.test`.
+display-name SLD), not a substring of `app.service.test`. Host scoping is
+skipped — and only skipped — when the session's service host is unmatchable by
+construction: an IP literal or `localhost`, which no From address can ever
+contain, so scoping there would drop every row and protect nothing.
+`scopeableServiceHost` is the single normalization every consumer of the
+service host goes through; a single-label intranet name such as `gitlab` IS
+matchable and keeps its scoping. A row admitted only by that skip is not
+evidence of a stale match (`mailRowMatchedSession`), so a genuine miss on an
+IP/localhost host returns the generic hand-back, not the stale-match one.
 `mailRowPredatesSession` floors session start to the minute. Recipient-scoped
 reads do not veto a predating listing row — the plus-address pick happens
 after open. `TRUSTY_SQUIRE_INBOX_READER_DIAG=1` logs `[inbox-reader-diag]`

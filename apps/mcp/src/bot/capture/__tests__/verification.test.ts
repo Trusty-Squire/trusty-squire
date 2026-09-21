@@ -11,6 +11,7 @@ import {
   buildConsentRefusal,
   buildVerificationSearchQuery,
   mailRowIsSessionCandidate,
+  mailRowMatchedSession,
   mailRowMatchesRecipient,
   resolveInboxSearch,
   serviceHostFromUrl,
@@ -164,6 +165,22 @@ describe("buildVerificationResult (Flow A — code-wall hand-back)", () => {
     // Still steers to the retry, and does NOT leak any old link as found.
     expect(r.link).toBeNull();
     expect(r.needs_user?.message).toContain("operate_read_inbox AGAIN");
+  });
+
+  it("names a host scope in the miss hint only when one was actually applied", () => {
+    const scoped = buildVerificationResult("sk_1", null, null, null, false, {
+      query: "newer_than:1d",
+      sender: "app.example.test",
+    });
+    expect(scoped.needs_user?.message).toContain("host:app.example.test");
+    // An IP/localhost read is not host-scoped, so claiming it was would send
+    // the host agent looking for a filter that never ran.
+    const unscoped = buildVerificationResult("sk_1", null, null, null, false, {
+      query: "newer_than:1d",
+      sender: "127.0.0.1",
+    });
+    expect(unscoped.needs_user?.message).toContain("Searched newer_than:1d");
+    expect(unscoped.needs_user?.message).not.toContain("host:");
   });
 
   it("never marks a found result with the stale-match hand-back", () => {
@@ -581,6 +598,80 @@ describe("session-scoped inbox candidates", () => {
     ).toBe(false);
   });
 
+  it("keeps domain scoping for a real hostname and ignores it for an IP/localhost host (#888 IP-host regression)", () => {
+    // A real hostname scopes: a foreign sender's mail is NOT a candidate.
+    const foreign = row({
+      fromEmail: "support@other.test",
+      subject: "Confirm your registration",
+      visibleText: "Confirm your registration",
+    });
+    expect(sessionCandidateReason(foreign, { serviceHost: "app.example.test" }).reason).toBe(
+      "service_host_mismatch",
+    );
+    expect(mailRowIsSessionCandidate(foreign, { serviceHost: "app.example.test" })).toBe(false);
+    // An IP/localhost start URL yields the IP as the service host; no From
+    // address can ever match it, so scoping there blocks every candidate and
+    // protects nothing. The row stays a candidate and the newest-row pick runs.
+    expect(serviceHostFromUrl("http://127.0.0.1:4173/signup")).toBe("127.0.0.1");
+    expect(registrableMailDomain("127.0.0.1")).toBeNull();
+    expect(sessionCandidateReason(foreign, { serviceHost: "127.0.0.1" }).reason).toBe(
+      "unscopeable_host",
+    );
+    expect(mailRowIsSessionCandidate(foreign, { serviceHost: "127.0.0.1" })).toBe(true);
+    expect(mailRowIsSessionCandidate(foreign, { serviceHost: "localhost" })).toBe(true);
+    expect(serviceHostFromUrl("http://[::1]:4173/signup")).toBe("[::1]");
+    expect(mailRowIsSessionCandidate(foreign, { serviceHost: "[::1]" })).toBe(true);
+    // A single-label intranet host has no registrable domain either, but it IS
+    // matchable by From substring/token, so it keeps its scoping: a foreign
+    // sender stays out and the intranet service's own mail stays in.
+    expect(sessionCandidateReason(foreign, { serviceHost: "gitlab" }).reason).toBe(
+      "service_host_mismatch",
+    );
+    expect(mailRowIsSessionCandidate(foreign, { serviceHost: "gitlab" })).toBe(false);
+    expect(
+      sessionCandidateReason(row({ ...foreign, fromEmail: "noreply@gitlab.corp.example" }), {
+        serviceHost: "gitlab",
+      }).reason,
+    ).toBe("service_host");
+    // With a recipient too, an unscopeable host imposes no From requirement.
+    expect(
+      mailRowIsSessionCandidate(foreign, {
+        recipient: "ada+run1@example.test",
+        serviceHost: "127.0.0.1",
+      }),
+    ).toBe(false);
+    expect(
+      mailRowIsSessionCandidate(row({ ...foreign, visibleText: "to ada+run1@example.test" }), {
+        recipient: "ada+run1@example.test",
+        serviceHost: "127.0.0.1",
+      }),
+    ).toBe(true);
+  });
+
+  it("counts a row as MATCHING the session only when it matched recipient or host", () => {
+    const foreign = row({
+      fromEmail: "support@other.test",
+      subject: "Confirm your registration",
+      visibleText: "Confirm your registration",
+    });
+    const own = row({
+      fromEmail: "hello@app.example.test",
+      subject: "Confirm your account",
+      visibleText: "Confirm your account",
+    });
+    expect(mailRowMatchedSession(own, { serviceHost: "app.example.test" })).toBe(true);
+    expect(
+      mailRowMatchedSession(row({ ...foreign, visibleText: "to ada+run1@example.test" }), {
+        recipient: "ada+run1@example.test",
+      }),
+    ).toBe(true);
+    // Admitted only because the host is unscopeable: a candidate, but it
+    // matched nothing about this session, so it is not stale-match evidence.
+    expect(mailRowIsSessionCandidate(foreign, { serviceHost: "127.0.0.1" })).toBe(true);
+    expect(mailRowMatchedSession(foreign, { serviceHost: "127.0.0.1" })).toBe(false);
+    expect(mailRowMatchedSession(foreign, { serviceHost: "app.example.test" })).toBe(false);
+  });
+
   it("opens an unscoped same-service row and rejects the wrong plus-address after open", () => {
     // All Mail never shows To, so a same-service conversation is openable.
     // The wrong plus-address is dropped on the opened message, not the row.
@@ -685,6 +776,42 @@ describe("pickOpenedMailMessage (per-message To, never the conversation's first 
         { recipient: "ada+run1@example.test", sessionStartMs: sessionStart },
       ),
     ).toBeNull();
+  });
+
+  it("picks the newest card for an IP host and still scopes a single-label host", () => {
+    const stale = msg({
+      text: "Your code is 111111",
+      dateTitle: "Sep 20, 2026, 3:10 PM",
+    });
+    const fresh = msg({
+      text: "Your code is 222222",
+      dateTitle: "Sep 20, 2026, 4:25 PM",
+    });
+    // No recipient, IP service host: the From can never match it, so the pool
+    // must stay whole and the newest-after-session card wins. Filtering on the
+    // raw IP empties the pool, which sends the read to the whole-conversation
+    // fallback and returns the older, already-consumed code.
+    expect(
+      pickOpenedMailMessage([stale, fresh], {
+        serviceHost: "127.0.0.1",
+        sessionStartMs: sessionStart,
+      }),
+    ).toBe(fresh);
+    // A single-label host is matchable, so it still filters the pool. It is
+    // dated OLDER than the foreign card on purpose: losing that scoping would
+    // leave both in the pool and the newest-row pick would return `fresh`.
+    const intranet = msg({
+      fromEmail: "noreply@gitlab.corp.example",
+      fromName: "GitLab",
+      text: "Your code is 333333",
+      dateTitle: "Sep 20, 2026, 4:22 PM",
+    });
+    expect(
+      pickOpenedMailMessage([intranet, fresh], {
+        serviceHost: "gitlab",
+        sessionStartMs: sessionStart,
+      }),
+    ).toBe(intranet);
   });
 
   it("returns a matching-To message even when it predates a later re-read session", () => {

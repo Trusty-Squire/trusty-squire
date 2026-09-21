@@ -7,7 +7,7 @@
 // re-exporting the tool layer's import surface; this module imports only from
 // the rest of the tree, never from provision-session.
 
-import { getDomain } from "tldts";
+import { getDomain, parse as parseHost } from "tldts";
 import type { Page } from "playwright";
 import type { BrowserController } from "../browser.js";
 import { withOAuthActionLease } from "../oauth-login.js";
@@ -192,12 +192,13 @@ export function buildVerificationResult(
   const src = sourceFrom !== null ? { source_from: sourceFrom } : {};
   const searchedField = searched === undefined ? {} : { searched };
   if (found) return { session_id: sessionId, found, code, link, ...src, ...searchedField };
+  const scopedHost = scopeableServiceHost(searched?.sender);
   const searchHint =
     searched === undefined
       ? ""
       : ` Searched ${searched.query}` +
         (searched.recipient === undefined ? "" : ` to:${searched.recipient}`) +
-        (searched.sender === undefined ? "" : ` host:${searched.sender}.`);
+        (scopedHost === undefined ? "" : ` host:${scopedHost}.`);
   const needs_user: NeedsUserCode = staleMatchSeen
     ? {
         wall: "verification_code",
@@ -363,21 +364,35 @@ export function registrableMailDomain(value: string | null | undefined): string 
   return domain !== null && domain.length > 0 ? domain.toLowerCase() : null;
 }
 
+/**
+ * The service host to scope mail matching by, or undefined when the host is
+ * unmatchable by construction: an IP literal or localhost can never appear in
+ * any From address, display name, or registrable domain, so scoping on it
+ * drops every candidate and protects nothing. Every other host keeps its
+ * scoping — a single-label intranet name such as "gitlab" IS matchable through
+ * mailRowMatchesSender's substring and token checks, so it must not be widened
+ * away here. Shared by every consumer of the session's service host so one
+ * normalization decides scoping on all of them.
+ */
+export function scopeableServiceHost(value: string | null | undefined): string | undefined {
+  const host = (value ?? "").trim().toLowerCase();
+  if (host.length === 0) return undefined;
+  if (host === "localhost") return undefined;
+  // URL.hostname spells an IPv6 literal bracketed ("[::1]"); tldts accepts both.
+  return parseHost(host).isIp === true ? undefined : host;
+}
+
 export function sessionCandidateReason(
   row: MailResultRow,
   opts: { recipient?: string; serviceHost?: string; listingScopedToRecipient?: boolean },
 ): { ok: boolean; reason: string } {
   const recipient = opts.recipient?.trim();
-  const serviceHost = opts.serviceHost?.trim();
+  const rawServiceHost = opts.serviceHost?.trim();
+  const hasServiceHost = rawServiceHost !== undefined && rawServiceHost.length > 0;
+  const serviceHost = scopeableServiceHost(rawServiceHost);
   const visibleRecip = mailRowMatchesRecipient(row, recipient);
-  const serviceMatch =
-    serviceHost !== undefined && serviceHost.length > 0 && mailRowMatchesSender(row, serviceHost);
-  if (
-    recipient !== undefined &&
-    recipient.length > 0 &&
-    serviceHost !== undefined &&
-    serviceHost.length > 0
-  ) {
+  const serviceMatch = serviceHost !== undefined && mailRowMatchesSender(row, serviceHost);
+  if (recipient !== undefined && recipient.length > 0 && hasServiceHost) {
     // Listing rows omit To. A to:-scoped search already filtered by recipient,
     // so those rows are openable even when From does not substring-match the
     // page host (app.service.test vs noreply@service.test). All Mail is not
@@ -393,7 +408,11 @@ export function sessionCandidateReason(
     if (opts.listingScopedToRecipient === true) return { ok: true, reason: "listing_scoped" };
     return { ok: false, reason: "recipient_not_visible" };
   }
-  if (serviceHost !== undefined && serviceHost.length > 0) {
+  if (hasServiceHost) {
+    // Host present but unscopeable (IP/localhost — see scopeableServiceHost):
+    // there is nothing a From could match, so the row stays a candidate and
+    // the newest-row pick runs.
+    if (serviceHost === undefined) return { ok: true, reason: "unscopeable_host" };
     return serviceMatch
       ? { ok: true, reason: "service_host" }
       : { ok: false, reason: "service_host_mismatch" };
@@ -407,6 +426,21 @@ export function mailRowIsSessionCandidate(
   opts: { recipient?: string; serviceHost?: string; listingScopedToRecipient?: boolean },
 ): boolean {
   return sessionCandidateReason(row, opts).ok;
+}
+
+/**
+ * A candidate that matched something about THIS session — its recipient or its
+ * service host — as opposed to one admitted only because the host was
+ * unscopeable. Stale-match evidence must rest on a real match: an unscopeable
+ * host admits every row, so a predating row there says nothing about whether
+ * this task's mail was sent.
+ */
+export function mailRowMatchedSession(
+  row: MailResultRow,
+  opts: { recipient?: string; serviceHost?: string; listingScopedToRecipient?: boolean },
+): boolean {
+  const verdict = sessionCandidateReason(row, opts);
+  return verdict.ok && verdict.reason !== "unscopeable_host";
 }
 
 // The All Mail listing URL. Gmail's SEARCH results are eventually consistent:
@@ -568,9 +602,9 @@ export function pickOpenedMailMessage(
     // the newest To match. Never return another recipient's message.
     return matching.length > 0 ? dated(matching) : null;
   }
-  const serviceHost = opts.serviceHost?.trim();
+  const serviceHost = scopeableServiceHost(opts.serviceHost);
   const pool =
-    serviceHost !== undefined && serviceHost.length > 0
+    serviceHost !== undefined
       ? messages.filter((m) =>
           mailRowMatchesSender(
             { fromEmail: m.fromEmail, fromName: m.fromName, subject: null },
@@ -656,7 +690,9 @@ async function readAllMailMatchingRows(
   const matching = rows.filter(
     (r) => mailRowIsSessionCandidate(r, candidateOpts) && mailRowIsRecent(r, now),
   );
-  const staleMatchSeen = matching.some((r) => mailRowPredatesSession(r, sessionStartMs));
+  const staleMatchSeen = matching.some(
+    (r) => mailRowMatchedSession(r, candidateOpts) && mailRowPredatesSession(r, sessionStartMs),
+  );
   logInboxReaderListing("all", rows, matching, candidateOpts, sessionStartMs, recipient);
   // Recipient-scoped reads decide predates per opened message (listing dates
   // are the conversation's newest, minute-precision, and omit To). Sender-only
@@ -798,10 +834,11 @@ export async function awaitVerification(
       let code: string | null = null;
       let link: string | null = null;
       let sourceFrom: string | null = null;
-      // A matching row whose own date predates the session start is a
-      // PREVIOUS task's mail (see mailRowPredatesSession): it never becomes
-      // the hit, but if that is all the read ever sees, the final result is
-      // the distinct stale-match not-found instead of the generic one.
+      // A row that matched THIS session (mailRowMatchedSession, not merely a
+      // candidate) whose own date predates the session start is a PREVIOUS
+      // task's mail (see mailRowPredatesSession): it never becomes the hit,
+      // but if that is all the read ever sees, the final result is the
+      // distinct stale-match not-found instead of the generic one.
       let staleMatchSeen = false;
       for (let attempt = 0; attempt < 3 && code === null && link === null; attempt++) {
         sourceFrom = null;
@@ -845,7 +882,13 @@ export async function awaitVerification(
           session.startedAt,
           search.recipient,
         );
-        if (searchRows.some((r) => mailRowPredatesSession(r, session.startedAt)))
+        if (
+          searchRows.some(
+            (r) =>
+              mailRowMatchedSession(r, searchCandidateOpts) &&
+              mailRowPredatesSession(r, session.startedAt),
+          )
+        )
           staleMatchSeen = true;
         // Recipient-scoped: listing date is the conversation's newest minute,
         // not the message To this plus-address. Open the newest candidate and
