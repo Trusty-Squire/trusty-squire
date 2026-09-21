@@ -50,8 +50,10 @@ export type ConnectHolder =
   | { kind: "unknown"; reason: "cross_host" };
 
 // The placement half is whatever the code that PLACED the ceremony browser
-// reported; the other two members are the runs that placed no browser and
-// the runs whose placement never came back.
+// reported; the other two members are the runs that opened no browser at all
+// and the runs whose browser Squire did not place (the `--skip-browser`
+// hand-off to the machine's default browser). A ceremony that ran and never
+// reported a placement is `unreachable`, not `unknown`.
 export type ConnectBrowserLocation =
   | CeremonyBrowserPlacement
   | { kind: "none" }
