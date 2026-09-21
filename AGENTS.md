@@ -793,9 +793,11 @@ Read this file. Follow the rules. Run the verify script. Paste the output. Then 
   cookie store rather than probed says so in `reason`. `browser_location` is
   OBSERVED and handed back by whichever path placed the ceremony browser
   (`onBrowserPlacement` in `bot/google-login.ts`) — never predicted from the
-  CLI process's own environment — and a placement the caller cannot walk up to
-  carries the address that reaches it, never a local display name. Do not add a
-  report variant no path emits.
+  CLI process's own environment — and it never carries an address that will be
+  dead when the report is read: the noVNC tunnel dies with the ceremony, so
+  `virtual` names the display and nothing more. A rejected flag is answered as a
+  usage error, never as a connection state. Do not add a report variant no path
+  emits.
 - **Never quit a Chrome whose profile state you still need with SIGTERM.** Chrome
   routes SIGTERM to its abrupt "session ending" exit and does NOT flush the
   SQLite cookie store (its own commit timer is ~30s out), so a SIGTERM teardown

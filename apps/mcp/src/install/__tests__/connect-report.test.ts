@@ -237,8 +237,10 @@ describe("buildConnectReport", () => {
     });
     expect(report.state).toBe("no-browser");
     expect(report.reason).toBe("requested_provider_missing");
-    expect(report.account).toBeNull();
     expect(report.sign_in_url).toBeNull();
+    // The ceremony landed Google and the session was written: this run knows
+    // exactly which account the machine is bound to, so it says so.
+    expect(report.account).toEqual({ id: "acc_1", providers: ["google"] });
   });
 
   it("names a refused account switch as its own reason", () => {
@@ -341,18 +343,16 @@ describe("emitConnectReport", () => {
   });
 });
 
-// A display nobody is sitting at is only useful with the address that reaches
-// it. Reporting the local X display name (`:99`) left a remote caller back
-// where it started: scanning the terminal for the noVNC link.
-describe("a virtual placement carries the surface that reaches it", () => {
-  it("passes the exposure URL through to the report", () => {
+// The noVNC tunnel and the browser it showed both die with the ceremony, and
+// the report is emitted after that — so any address named here would resolve
+// to nothing. Naming the display without an address is the honest answer; the
+// live one is on stderr while the run is still going.
+describe("a virtual placement", () => {
+  it("names the display without handing back an address", () => {
     const report = classify({
       outcome: { kind: "install_expired" },
-      browser_location: { kind: "virtual", url: "https://tunnel.invalid/#p=secret" },
+      browser_location: { kind: "virtual" },
     });
-    expect(report.browser_location).toEqual({
-      kind: "virtual",
-      url: "https://tunnel.invalid/#p=secret",
-    });
+    expect(report.browser_location).toEqual({ kind: "virtual" });
   });
 });

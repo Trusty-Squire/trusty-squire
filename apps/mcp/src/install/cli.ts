@@ -83,6 +83,7 @@ import {
   decideConnectComplete,
   decideConnectPreflight,
   emitConnectReport,
+  emitConnectUsageError,
   preflightUnverifiedMessage,
   providersConnectMustAwait,
   snapshotConnectHolder,
@@ -92,7 +93,9 @@ import {
 
 const DEFAULT_API_BASE = process.env.TRUSTY_SQUIRE_API_BASE ?? "https://trusty-squire-api.fly.dev";
 // Mirrors PAIR_TTL_MS in apps/api/src/auth/pairing-token.ts. Held as a
-// duration, never as a comparison against the server's clock.
+// duration, never as a comparison against the server's clock. Drift is caught
+// from the server side by apps/api/src/__tests__/pairing-token-ttl.test.ts and
+// from this side by the ceremony-deadline test in install-targets-e2e.
 const PAIRING_TOKEN_TTL_MS = 10 * 60 * 1000;
 // Managed skill-registry URL. Advanced setup decides whether this is written
 // into the MCP config; the URL itself is product-owned and not user-editable.
@@ -386,7 +389,7 @@ export async function runCli(argv: string[]): Promise<void> {
     args = parseArgs(argv);
   } catch (err) {
     if (err instanceof CliUsageError) {
-      reportUnparsedConnect(argv);
+      reportUnparsedConnect(argv, err.message);
       process.exit(64);
     }
     throw err;
@@ -419,18 +422,13 @@ export async function runCli(argv: string[]): Promise<void> {
 }
 
 // A connect that dies inside argv validation never built an `Argv`, so the
-// flag is read off the raw argv — the machine channel still owes one report.
-function reportUnparsedConnect(argv: readonly string[]): void {
+// flag is read off the raw argv — the machine channel still owes an answer.
+// It is NOT a connection report: nothing about a rejected flag says where a
+// browser is or who holds the profile.
+function reportUnparsedConnect(argv: readonly string[], message: string): void {
   if (commandFromArgv(argv) !== "connect" || !argv.includes("--json")) return;
   beginConnectRun();
-  emitConnectReport(
-    buildConnectReport({
-      outcome: { kind: "run_failed" },
-      holder: snapshotConnectHolder(CHROME_PROFILE_DIR),
-      browser_location: { kind: "none" },
-    }),
-    true,
-  );
+  emitConnectUsageError(message, true);
 }
 
 // Store the user-supplied 2Captcha key in the vault (encrypted, never written

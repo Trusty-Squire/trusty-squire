@@ -62,7 +62,8 @@ interface ConnectReportFields {
  * says so, so no run can report an outstanding sign-in with nowhere to send
  * anyone. A `no-browser` run may also still hold a live URL (the ceremony
  * could not be shown here, but the install is still open). `account` is set
- * only when `state` is `connected`; `reason` is null when the other fields
+ * whenever the run proved which account this machine is bound to, which is
+ * not only when it ends `connected`; `reason` is null when the other fields
  * already say everything there is to say.
  */
 export type ConnectReport =
@@ -152,7 +153,9 @@ export function buildConnectReport(input: ConnectReportInput): ConnectReport {
       // must not answer `connected`: the browser is not signed in the way the
       // caller asked for, and the reason names the gap.
       if (gate.reason === "requested_provider_missing") {
-        return settled("no-browser", "requested_provider_missing", input);
+        return settled("no-browser", "requested_provider_missing", input, {
+          account: connectedAccount(outcome.account_id, outcome.providers ?? []),
+        });
       }
       return settled("no-browser", "provider_session_missing", input);
     }
@@ -338,16 +341,37 @@ export function beginConnectRun(): void {
   reported = false;
 }
 
-// Written straight to the descriptor: every reporting path exits immediately
-// afterwards, and `process.exit` does not drain a buffered stdout write —
-// which on a macOS pipe is asynchronous, so the report would be lost exactly
-// where a caller is reading it.
+/**
+ * Connect refused the arguments, so there is no connection state to report —
+ * a rejected flag is not "no browser here is signed in". Distinguished from a
+ * report by carrying `error` where a report carries `state`.
+ */
+export interface ConnectUsageError {
+  error: "usage";
+  message: string;
+}
+
+export function emitConnectUsageError(message: string, json: boolean | undefined): void {
+  if (reported) return;
+  reported = true;
+  if (json !== true) return;
+  writeMachineLine({ error: "usage", message } satisfies ConnectUsageError);
+}
+
 export function emitConnectReport(report: ConnectReport, json: boolean | undefined): void {
   if (reported) return;
   reported = true;
   if (json !== true) return;
+  writeMachineLine(report);
+}
+
+// Written straight to the descriptor: every reporting path exits immediately
+// afterwards, and `process.exit` does not drain a buffered stdout write —
+// which on a macOS pipe is asynchronous, so the line would be lost exactly
+// where a caller is reading it.
+function writeMachineLine(value: ConnectReport | ConnectUsageError): void {
   try {
-    writeSync(process.stdout.fd, `${JSON.stringify(report)}\n`);
+    writeSync(process.stdout.fd, `${JSON.stringify(value)}\n`);
   } catch {
     // A caller that closed the pipe (EPIPE) or a full non-blocking one
     // (EAGAIN) is not a reason to fail a run or to replace its real error

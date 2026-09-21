@@ -648,9 +648,11 @@ function createTrackedLoginBrowserLifecycle(
 // environment before a browser exists.
 export type CeremonyBrowserPlacement =
   | { kind: "host_screen"; display?: string }
-  // A display nobody is sitting at, so it carries the address that reaches it.
-  // The local X display name is not a surface a caller can open.
-  | { kind: "virtual"; url: string }
+  // A display nobody is sitting at. It carries no address: the noVNC tunnel
+  // and the browser it showed are both torn down with the ceremony, so any
+  // address named here would be dead before a caller could read it. The live
+  // one is on stderr for the duration of the run.
+  | { kind: "virtual" }
   | { kind: "unreachable"; reason: string };
 
 // Open the bot's visible Chrome at `url` and run `pollUntilDone` until it
@@ -739,7 +741,7 @@ export interface LoginRunResult {
 // person running connect is already looking at the screen the tab is on.
 // Neither failure path ever touches the display or the browser.
 export type SharedCeremonyExposure =
-  | { kind: "exposed"; url: string; stop: () => Promise<void> }
+  | { kind: "exposed"; stop: () => Promise<void> }
   | { kind: "already_visible"; reason: string }
   | { kind: "unshowable"; reason: string };
 
@@ -787,9 +789,8 @@ export async function exposeSharedBrokerCeremonyDisplay(
   }
   const exposureRig = rig;
   const removeCleanup = registerRemoteLoginRigCleanup(exposureRig, () => undefined);
-  let url: string;
   try {
-    url = await exposeRemoteLoginDisplay(rig, label);
+    await exposeRemoteLoginDisplay(rig, label);
   } catch (err) {
     removeCleanup();
     await teardownRemoteLoginRig(rig).catch(() => undefined);
@@ -800,7 +801,6 @@ export async function exposeSharedBrokerCeremonyDisplay(
   }
   return {
     kind: "exposed",
-    url,
     stop: async () => {
       // Helpers only: the display and the browser belong to the broker daemon.
       removeCleanup();
@@ -1129,9 +1129,7 @@ export async function tryRunCeremonyInSharedBroker(
       );
     }
     opts.onBrowserPlacement?.(
-      exposure.kind === "already_visible"
-        ? { kind: "host_screen" }
-        : { kind: "virtual", url: exposure.url },
+      exposure.kind === "already_visible" ? { kind: "host_screen" } : { kind: "virtual" },
     );
     console.error(
       exposure.kind === "already_visible"
@@ -1390,9 +1388,9 @@ export async function runRemoteLoginChrome(opts: RunInBotChromeOpts): Promise<Lo
         }),
     );
     try {
-      const url = await exposeRemoteLoginDisplay(rig, opts.bannerLabel);
+      await exposeRemoteLoginDisplay(rig, opts.bannerLabel);
       lifecycle.throwIfCancelled();
-      opts.onBrowserPlacement?.({ kind: "virtual", url });
+      opts.onBrowserPlacement?.({ kind: "virtual" });
 
       const completed = await pollUntil(
         opts.deadline,
@@ -1557,6 +1555,10 @@ export async function openInstallConfirmInBotChrome(
     }
     return { status: "timeout", detail: "no install completed before the deadline" };
   } catch (err) {
+    // The profile gate's refusal is the caller's own typed condition — connect
+    // reports it as a holder. Flattening it to a string turned "another
+    // browser has the profile" into "a sign-in is outstanding".
+    if (err instanceof ProfileBusyError) throw err;
     return { status: "error", detail: err instanceof Error ? err.message : String(err) };
   } finally {
     await completion?.close().catch(() => undefined);

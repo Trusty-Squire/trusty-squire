@@ -117,6 +117,7 @@ import {
   probeProviderSessionsAfterCeremony,
 } from "../bot/google-login.js";
 import { clearBrowserProfile, clearProviderCookies } from "../bot/login-state.js";
+import { ProfileBusyError } from "../bot/profile.js";
 import { installInitiate, installPoll } from "../api-client.js";
 import { connect, resolveServerLaunch } from "../install/cli.js";
 import { AGENTS } from "../install/agents.js";
@@ -587,6 +588,48 @@ describe("connect --target=<agent> writes a valid config", () => {
         agent_session_token: "ts_agent_test_token",
         account_id: "acct_test",
       });
+    }
+  });
+
+  // Intent item 4: "whether the profile/browser is currently held by another
+  // session ... as a code". A ceremony the profile gate refuses is exactly
+  // that. Flattening the refusal to a string made it `needs-sign-in` with a
+  // live URL, and a caller that opened it elsewhere claimed the install with
+  // no provider session in the bot's Chrome — which the run's own gate rejects.
+  it("reports a ceremony the profile gate refused as busy, not as a sign-in", async () => {
+    vi.mocked(openInstallConfirmInBotChrome).mockRejectedValueOnce(
+      new ProfileBusyError("another Trusty Squire session is already using the browser"),
+    );
+    const machine = captureMachineChannel();
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const exit = vi.spyOn(process, "exit").mockImplementation((code) => {
+      throw new Error(`exit:${code}`);
+    });
+    try {
+      await expect(
+        connect({
+          command: "connect",
+          target: "hermes",
+          apiBase: "https://test.invalid",
+          skipBrowser: false,
+          forceRelogin: false,
+          noRegistry: false,
+          noInteractive: true,
+          json: true,
+        }),
+      ).rejects.toThrow("exit:1");
+      const report = JSON.parse(machine.read()) as {
+        state: string;
+        sign_in_url: string | null;
+        holder: { kind: string };
+      };
+      expect(report.state).toBe("busy");
+      expect(report.sign_in_url).toBeNull();
+      expect(report.holder).toBeDefined();
+    } finally {
+      exit.mockRestore();
+      error.mockRestore();
+      machine.restore();
     }
   });
 

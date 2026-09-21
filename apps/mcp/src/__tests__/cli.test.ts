@@ -123,10 +123,13 @@ describe("parseArgs deprecated flags", () => {
 });
 
 // `npx @trusty-squire/mcp --json --skip-login` runs the connect command —
-// parseArgs defaults the command when no positional is given — so it owes a
-// report like every other connect exit. Matching argv[0] literally missed it.
+// parseArgs defaults the command when no positional is given — so it owes an
+// answer like every other connect exit. Matching argv[0] literally missed it.
+// What it owes is NOT a connection state: a rejected flag says nothing about
+// where a browser is, and a caller switching on `state` must never be told
+// "no browser here is signed in" because it mistyped an argument.
 describe("the machine channel on a usage failure", () => {
-  it("reports for the bare invocation, not only the explicit `connect` word", async () => {
+  it("answers for the bare invocation, not only the explicit `connect` word", async () => {
     const dir = mkdtempSync(join(tmpdir(), "ts-cli-machine-"));
     const file = join(dir, "machine.json");
     const fd = openSync(file, "w+");
@@ -138,12 +141,14 @@ describe("the machine channel on a usage failure", () => {
     });
     try {
       await expect(runCli(["--json", "--skip-login"])).rejects.toThrow("exit:64");
-      const report = JSON.parse(readFileSync(file, "utf8")) as {
-        state: string;
-        reason: string | null;
+      const answer = JSON.parse(readFileSync(file, "utf8")) as {
+        error?: string;
+        message?: string;
+        state?: string;
       };
-      expect(report.state).toBe("no-browser");
-      expect(report.reason).toBe("run_failed");
+      expect(answer.error).toBe("usage");
+      expect(answer.state).toBeUndefined();
+      expect(answer.message).toContain("--skip-login");
     } finally {
       exit.mockRestore();
       error.mockRestore();
