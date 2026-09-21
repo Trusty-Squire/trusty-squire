@@ -118,6 +118,7 @@ import {
 } from "../bot/google-login.js";
 import { clearBrowserProfile, clearProviderCookies } from "../bot/login-state.js";
 import { ProfileBusyError } from "../bot/profile.js";
+import { BrokerRefusal } from "../bot/broker/refusal.js";
 import { installInitiate, installPoll } from "../api-client.js";
 import { connect, resolveServerLaunch } from "../install/cli.js";
 import { AGENTS } from "../install/agents.js";
@@ -630,6 +631,88 @@ describe("connect --target=<agent> writes a valid config", () => {
       exit.mockRestore();
       error.mockRestore();
       machine.restore();
+    }
+  });
+
+  // A resident broker that refuses the ceremony holds the browser just as
+  // surely as the profile gate does. Flattening its refusal to a string put
+  // `needs-sign-in` and a live URL on the machine channel, and a caller that
+  // opened that URL elsewhere claimed the install with no provider session in
+  // the bot's Chrome — which this run's own gate then rejects.
+  it("reports a resident broker's refusal as busy, not as a sign-in", async () => {
+    vi.mocked(openInstallConfirmInBotChrome).mockRejectedValueOnce(
+      new BrokerRefusal("broker_unavailable", "a stale-credential broker is still serving clients"),
+    );
+    const machine = captureMachineChannel();
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const exit = vi.spyOn(process, "exit").mockImplementation((code) => {
+      throw new Error(`exit:${code}`);
+    });
+    try {
+      await expect(
+        connect({
+          command: "connect",
+          target: "hermes",
+          apiBase: "https://test.invalid",
+          skipBrowser: false,
+          forceRelogin: false,
+          noRegistry: false,
+          noInteractive: true,
+          json: true,
+        }),
+      ).rejects.toThrow("exit:1");
+      const report = JSON.parse(machine.read()) as { state: string; sign_in_url: string | null };
+      expect(report.state).toBe("busy");
+      expect(report.sign_in_url).toBeNull();
+    } finally {
+      exit.mockRestore();
+      error.mockRestore();
+      machine.restore();
+    }
+  });
+
+  // The noVNC address that reaches a virtual display dies with the ceremony.
+  // Naming the display on a run that did not claim points a caller at a screen
+  // nothing can reach any more.
+  it("stops naming a virtual display once the surface that reached it is gone", async () => {
+    vi.mocked(installPoll).mockResolvedValue({ status: "pending" });
+    vi.mocked(openInstallConfirmInBotChrome).mockImplementationOnce(async (options) => {
+      options.onBrowserPlacement?.({ kind: "virtual" });
+      return { status: "timeout" as const };
+    });
+    const machine = captureMachineChannel();
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const exit = vi.spyOn(process, "exit").mockImplementation((code) => {
+      throw new Error(`exit:${code}`);
+    });
+    try {
+      await expect(
+        connect({
+          command: "connect",
+          target: "hermes",
+          apiBase: "https://test.invalid",
+          skipBrowser: false,
+          forceRelogin: false,
+          noRegistry: false,
+          noInteractive: true,
+          json: true,
+        }),
+      ).rejects.toThrow("exit:1");
+      const report = JSON.parse(machine.read()) as {
+        browser_location: { kind: string; reason?: string };
+      };
+      expect(report.browser_location.kind).toBe("unreachable");
+      expect(report.browser_location.reason).toContain("torn down");
+    } finally {
+      exit.mockRestore();
+      error.mockRestore();
+      machine.restore();
+      vi.mocked(installPoll).mockReset();
+      vi.mocked(installPoll).mockResolvedValue({
+        status: "claimed",
+        agent_session_token: "ts_agent_test_token",
+        account_id: "acct_test",
+      });
     }
   });
 

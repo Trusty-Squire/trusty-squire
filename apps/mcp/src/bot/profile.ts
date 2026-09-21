@@ -723,7 +723,7 @@ export async function withProfileOperationGuard<T>(
 // process is gone (stale lock). EPERM = it exists but isn't ours (still
 // alive — do NOT treat as stale). Any other error: assume alive, because
 // yanking a live profile's lock corrupts it.
-function isPidAlive(pid: number): boolean {
+export function isPidAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
     return true;

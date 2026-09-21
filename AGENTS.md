@@ -794,8 +794,11 @@ Read this file. Follow the rules. Run the verify script. Paste the output. Then 
   OBSERVED and handed back by whichever path placed the ceremony browser
   (`onBrowserPlacement` in `bot/google-login.ts`) — never predicted from the
   CLI process's own environment — and it never carries an address that will be
-  dead when the report is read: the noVNC tunnel dies with the ceremony, so
-  `virtual` names the display and nothing more. A rejected flag is answered as a
+  dead when the report is read: the noVNC tunnel dies with the ceremony, so a
+  run that did not claim reports `unreachable` rather than naming a display
+  nothing can reach. A refusal that means another session holds the browser —
+  `ProfileBusyError` or a `BrokerRefusal` — reaches connect typed and reports
+  `busy` with the holder, read from Chrome's lock OR the operation lease. A rejected flag is answered as a
   usage error, never as a connection state. Do not add a report variant no path
   emits.
 - **Never quit a Chrome whose profile state you still need with SIGTERM.** Chrome

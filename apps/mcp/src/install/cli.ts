@@ -65,6 +65,7 @@ import {
   withProfileOperationGuard,
 } from "../bot/profile.js";
 import { VERSION } from "../version.js";
+import { BrokerRefusal } from "../bot/broker/refusal.js";
 import { ensureLatestVersion, VersionUpdateRequiredError } from "./version-check.js";
 import * as ui from "./ui.js";
 import {
@@ -582,13 +583,20 @@ async function connect(args: Argv, argv: readonly string[] = []): Promise<void> 
       },
     );
   } catch (err) {
-    if (err instanceof ProfileBusyError) {
+    // Both refusals mean the same thing to a caller: another session has the
+    // browser. The broker's own message names the resident and the recovery,
+    // so it stays the human copy it has always been.
+    if (err instanceof ProfileBusyError || err instanceof BrokerRefusal) {
       emitConnectStatus(args, {
         outcome: { kind: "profile_busy" },
         profileDir: reportProfileDir,
         browser_location: placed.value ?? { kind: "none" },
       });
-      ui.fail(PROFILE_BUSY_MESSAGE);
+      ui.fail(
+        err instanceof ProfileBusyError
+          ? PROFILE_BUSY_MESSAGE
+          : `Couldn't open the confirm page: ${err.message}`,
+      );
       process.exit(1);
     }
     emitConnectStatus(args, {
@@ -1311,6 +1319,20 @@ export function claimHeartbeatMessage(claimed: boolean): string {
 // What the ceremony settled on, with the two facts a machine caller needs
 // when it did not claim: the sign-in URL that is still live, and where the
 // browser actually went.
+// A virtual display is reachable only through the noVNC address the ceremony
+// stands up, and that address is torn down with the ceremony. A run that did
+// not claim would otherwise point a caller at a display nothing can reach any
+// more — so once the surface is gone, say so rather than name the display.
+function withoutDeadVirtualSurface(location: ConnectBrowserLocation): ConnectBrowserLocation {
+  if (location.kind !== "virtual") return location;
+  return {
+    kind: "unreachable",
+    reason:
+      "the ceremony ran on a virtual display, and the noVNC address that reached it was " +
+      "torn down with the run",
+  };
+}
+
 // One run's observed ceremony placement, shared with the handlers that report
 // it. `null` means no ceremony was attempted, which is the only state in which
 // "no browser was opened" is a fact rather than an assumption.
@@ -1474,25 +1496,30 @@ async function runInstallClaim(
       : {}),
   });
   const browser_location: ConnectBrowserLocation = options.placed.value;
+  const unreachableNow = (): ConnectBrowserLocation => {
+    const gone = withoutDeadVirtualSurface(browser_location);
+    options.placed.value = gone;
+    return gone;
+  };
 
   // rc.33 — surface the underlying error instead of letting the outer
   // wrapper print a generic "browser confirm step never finished."
   // Surface the underlying browser-launch error rather than replacing it
   // with a generic confirmation timeout.
   if (result.status === "error") {
-    if (expired.value) return { kind: "expired", browser_location };
+    if (expired.value) return { kind: "expired", browser_location: unreachableNow() };
     return {
       kind: "confirm_failed",
       detail: result.detail ?? "unknown error",
       confirm_url: initiate.confirm_url,
-      browser_location,
+      browser_location: unreachableNow(),
     };
   }
 
   // Reachable only by the ceremony deadline elapsing, and that deadline IS the
   // pairing token's life — so there is no live URL left to hand anyone.
   if (result.status !== "claimed" || state.value === null) {
-    return { kind: "expired", browser_location };
+    return { kind: "expired", browser_location: unreachableNow() };
   }
 
   return {

@@ -36,6 +36,7 @@ import {
   reclaimStaleCredentialBrokerIfPresent,
   resolveBrokerSocket,
 } from "./broker/discovery.js";
+import { BrokerRefusal } from "./broker/refusal.js";
 import type { BrokerClient } from "./broker/transport.js";
 import { controlLabelV2, wireRoleToSafeRoleV2 } from "./compact-observation-v2.js";
 import { extractGoogleAccountEmail } from "./oauth-login.js";
@@ -1555,10 +1556,12 @@ export async function openInstallConfirmInBotChrome(
     }
     return { status: "timeout", detail: "no install completed before the deadline" };
   } catch (err) {
-    // The profile gate's refusal is the caller's own typed condition — connect
-    // reports it as a holder. Flattening it to a string turned "another
-    // browser has the profile" into "a sign-in is outstanding".
-    if (err instanceof ProfileBusyError) throw err;
+    // A refusal that names another session holding the browser — the profile
+    // gate's, or an identified resident broker's — is the caller's own typed
+    // condition, and connect reports it as a holder. Flattening either to a
+    // string turned "another browser has the profile" into "a sign-in is
+    // outstanding", and sent the caller to claim the install elsewhere.
+    if (err instanceof ProfileBusyError || err instanceof BrokerRefusal) throw err;
     return { status: "error", detail: err instanceof Error ? err.message : String(err) };
   } finally {
     await completion?.close().catch(() => undefined);

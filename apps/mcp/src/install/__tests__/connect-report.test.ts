@@ -1,11 +1,12 @@
 // Pure classifier for connect's machine-readable report. Every reachable
 // state is a typed value; human sentences render from the same object.
 
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { closeSync, mkdtempSync, openSync, symlinkSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
+import { acquireProfileOperationGuard, type ProfileOperationLease } from "../../bot/profile.js";
 import {
   alreadyConnectedMessage,
   beginConnectRun,
@@ -354,5 +355,56 @@ describe("a virtual placement", () => {
       browser_location: { kind: "virtual" },
     });
     expect(report.browser_location).toEqual({ kind: "virtual" });
+  });
+});
+
+// The profile-OPERATION lease is a second holder, and the one a refused run
+// actually collided with: `--force-relogin` takes it and deletes the profile
+// directory — SingletonLock with it — so reading only Chrome's lock answered
+// "nobody holds it" on exactly the run that was turned away.
+describe("snapshotConnectHolder reads the operation lease too", () => {
+  let child: ChildProcess | undefined;
+  let lease: ProfileOperationLease | undefined;
+
+  afterEach(() => {
+    lease?.release();
+    lease = undefined;
+    child?.kill("SIGKILL");
+    child = undefined;
+  });
+
+  // The lease records the acquiring process. Taking it while `process.pid`
+  // reads as a live foreign process is how a test gets a lease owned by
+  // someone else without a second TypeScript runtime.
+  function leaseHeldBy(profileDir: string, pid: number): ProfileOperationLease {
+    const own = Object.getOwnPropertyDescriptor(process, "pid");
+    Object.defineProperty(process, "pid", { value: pid, configurable: true });
+    try {
+      return acquireProfileOperationGuard(profileDir);
+    } finally {
+      if (own !== undefined) Object.defineProperty(process, "pid", own);
+    }
+  }
+
+  it("names the session that holds the lease when no browser lock exists", async () => {
+    const profileDir = mkdtempSync(join(tmpdir(), "ts-connect-lease-"));
+    child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+    await new Promise<void>((resolve) => child?.once("spawn", () => resolve()));
+    lease = leaseHeldBy(profileDir, child.pid!);
+
+    expect(snapshotConnectHolder(profileDir)).toEqual({
+      kind: "other",
+      code: "operation_lease",
+      pid: child.pid,
+    });
+  });
+
+  it("does not name a lease whose process is gone", () => {
+    const profileDir = mkdtempSync(join(tmpdir(), "ts-connect-lease-"));
+    const dead = spawnSync(process.execPath, ["-e", ""]).pid;
+    expect(dead).toBeGreaterThan(0);
+    lease = leaseHeldBy(profileDir, dead!);
+
+    expect(snapshotConnectHolder(profileDir)).toEqual({ kind: "none" });
   });
 });
