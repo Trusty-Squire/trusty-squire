@@ -36,13 +36,16 @@ function classify(
 }
 
 describe("buildConnectReport", () => {
-  it("reports connected only after a live Google session is proven", () => {
+  // The no-ceremony fast path opens nothing — it reads the profile's cookie
+  // store — so its `connected` must not pass for a probed one. The human copy
+  // on that branch already warns those cookies can outlive the real session.
+  it("marks a connected answer read off the cookie store as exactly that", () => {
     const provisioned = classify({
       outcome: { kind: "provisioned", account_id: "acc_1", providers: ["google", "github"] },
     });
     expect(provisioned).toEqual({
       state: "connected",
-      reason: null,
+      reason: "cached_cookie_evidence",
       sign_in_url: null,
       account: { id: "acc_1", providers: ["google", "github"] },
       holder: noneHolder,
@@ -220,9 +223,10 @@ describe("buildConnectReport", () => {
     expect(report.account).toBeNull();
   });
 
-  // Google is live and bound: the machine IS connected. Only the scoped
-  // refresh the run was asked for didn't land, and the reason says so.
-  it("keeps a machine connected when only the scoped provider refresh missed", () => {
+  // This gate makes the run print a failure and exit 1. Answering `connected`
+  // on the machine channel told a caller the opposite of the exit code, and a
+  // caller that asked for GitHub precisely because it needs GitHub believed it.
+  it("does not say connected when the scoped provider refresh missed", () => {
     const report = classify({
       outcome: {
         kind: "ceremony_complete",
@@ -231,9 +235,9 @@ describe("buildConnectReport", () => {
         requested_provider: "github",
       },
     });
-    expect(report.state).toBe("connected");
+    expect(report.state).toBe("no-browser");
     expect(report.reason).toBe("requested_provider_missing");
-    expect(report.account).toEqual({ id: "acc_1", providers: ["google"] });
+    expect(report.account).toBeNull();
     expect(report.sign_in_url).toBeNull();
   });
 
@@ -334,5 +338,21 @@ describe("emitConnectReport", () => {
         writable: true,
       });
     }
+  });
+});
+
+// A display nobody is sitting at is only useful with the address that reaches
+// it. Reporting the local X display name (`:99`) left a remote caller back
+// where it started: scanning the terminal for the noVNC link.
+describe("a virtual placement carries the surface that reaches it", () => {
+  it("passes the exposure URL through to the report", () => {
+    const report = classify({
+      outcome: { kind: "install_expired" },
+      browser_location: { kind: "virtual", url: "https://tunnel.invalid/#p=secret" },
+    });
+    expect(report.browser_location).toEqual({
+      kind: "virtual",
+      url: "https://tunnel.invalid/#p=secret",
+    });
   });
 });

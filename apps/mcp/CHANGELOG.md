@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- `connect --json` prints exactly one typed report on stdout on every exit path (`state`, `sign_in_url`, `account`, `holder`, `browser_location`, plus a narrow `reason`) from the same value the human copy renders. `needs-sign-in` always carries its URL — the ceremony now waits no longer than the sign-in link lives, and a lapsed link reports `install_expired` instead. `browser_location` is reported by the path that placed the ceremony browser and survives into a failed run's report, `holder` is reported as read, `--json` implies `--no-interactive`, and human output is unchanged.
+- `connect --json` prints exactly one typed report on stdout on every exit path (`state`, `sign_in_url`, `account`, `holder`, `browser_location`, plus a narrow `reason`) from the same value the human copy renders. `needs-sign-in` always carries its URL — the ceremony now waits no longer than the sign-in link lives, and a lapsed link reports `install_expired` instead. `browser_location` is reported by the path that placed the ceremony browser and survives into a failed run's report — a virtual display carries the noVNC URL that reaches it rather than a local `:99` — `holder` is reported as read, `state` never says `connected` on a run that exits non-zero, `--json` implies `--no-interactive`, and human output is unchanged.
 
 ## 1.1.14-rc.15 (2026-09-12)
 

@@ -788,11 +788,14 @@ Read this file. Follow the rules. Run the verify script. Paste the output. Then 
   duration counted locally, never by differencing the server's timestamp
   against this machine's clock. A field that names what was OBSERVED (`holder`,
   `browser_location`) carries the observation or an explicit unknown; never an
-  assumption made by an error handler.
-  `browser_location` is
+  assumption made by an error handler. `state` agrees with the exit code: a run
+  that fails never reports `connected`, and a `connected` that was read off the
+  cookie store rather than probed says so in `reason`. `browser_location` is
   OBSERVED and handed back by whichever path placed the ceremony browser
   (`onBrowserPlacement` in `bot/google-login.ts`) — never predicted from the
-  CLI process's own environment. Do not add a report variant no path emits.
+  CLI process's own environment — and a placement the caller cannot walk up to
+  carries the address that reaches it, never a local display name. Do not add a
+  report variant no path emits.
 - **Never quit a Chrome whose profile state you still need with SIGTERM.** Chrome
   routes SIGTERM to its abrupt "session ending" exit and does NOT flush the
   SQLite cookie store (its own commit timer is ~30s out), so a SIGTERM teardown

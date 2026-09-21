@@ -171,7 +171,7 @@ describe("exposeSharedBrokerCeremonyDisplay", () => {
     mockState.attachSucceeds = true;
     try {
       const exposure = await exposeSharedBrokerCeremonyDisplay(profile, "test");
-      expect(exposure.kind).toBe("exposed");
+      expect(exposure).toMatchObject({ kind: "exposed", url: "https://fixture.invalid" });
       expect(mockState.rigs[0]).toMatchObject({ display: ":72", authFile });
       if (exposure.kind === "exposed") await exposure.stop();
       expect(mockState.privateDirs.every((path) => !existsSync(path))).toBe(true);

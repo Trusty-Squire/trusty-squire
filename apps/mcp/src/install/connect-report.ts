@@ -26,6 +26,7 @@ export type ConnectReasonCode =
   | "account_mismatch"
   | "profile_unverifiable"
   | "install_expired"
+  | "cached_cookie_evidence"
   | "run_failed";
 
 export type ConnectHolder =
@@ -133,7 +134,10 @@ export function buildConnectReport(input: ConnectReportInput): ConnectReport {
   const { outcome } = input;
   switch (outcome.kind) {
     case "provisioned":
-      return settled("connected", null, input, {
+      // The no-ceremony fast path reads the profile's cookie store and opens
+      // nothing, so it cannot claim the session is live — the human copy on
+      // this branch says the same.
+      return settled("connected", "cached_cookie_evidence", input, {
         account: connectedAccount(outcome.account_id, outcome.providers),
       });
     case "ceremony_complete": {
@@ -144,12 +148,11 @@ export function buildConnectReport(input: ConnectReportInput): ConnectReport {
         });
       }
       if (gate.reason === "probe_failed") return settled("busy", "profile_unverifiable", input);
-      // The machine IS connected — Google is live and bound; only the scoped
-      // refresh the run was asked for didn't land.
+      // The run fails and exits non-zero on this gate, so the machine channel
+      // must not answer `connected`: the browser is not signed in the way the
+      // caller asked for, and the reason names the gap.
       if (gate.reason === "requested_provider_missing") {
-        return settled("connected", "requested_provider_missing", input, {
-          account: connectedAccount(outcome.account_id, outcome.providers ?? []),
-        });
+        return settled("no-browser", "requested_provider_missing", input);
       }
       return settled("no-browser", "provider_session_missing", input);
     }

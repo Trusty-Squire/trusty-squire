@@ -648,7 +648,9 @@ function createTrackedLoginBrowserLifecycle(
 // environment before a browser exists.
 export type CeremonyBrowserPlacement =
   | { kind: "host_screen"; display?: string }
-  | { kind: "virtual"; display?: string }
+  // A display nobody is sitting at, so it carries the address that reaches it.
+  // The local X display name is not a surface a caller can open.
+  | { kind: "virtual"; url: string }
   | { kind: "unreachable"; reason: string };
 
 // Open the bot's visible Chrome at `url` and run `pollUntilDone` until it
@@ -737,7 +739,7 @@ export interface LoginRunResult {
 // person running connect is already looking at the screen the tab is on.
 // Neither failure path ever touches the display or the browser.
 export type SharedCeremonyExposure =
-  | { kind: "exposed"; stop: () => Promise<void> }
+  | { kind: "exposed"; url: string; stop: () => Promise<void> }
   | { kind: "already_visible"; reason: string }
   | { kind: "unshowable"; reason: string };
 
@@ -785,8 +787,9 @@ export async function exposeSharedBrokerCeremonyDisplay(
   }
   const exposureRig = rig;
   const removeCleanup = registerRemoteLoginRigCleanup(exposureRig, () => undefined);
+  let url: string;
   try {
-    await exposeRemoteLoginDisplay(rig, label);
+    url = await exposeRemoteLoginDisplay(rig, label);
   } catch (err) {
     removeCleanup();
     await teardownRemoteLoginRig(rig).catch(() => undefined);
@@ -797,6 +800,7 @@ export async function exposeSharedBrokerCeremonyDisplay(
   }
   return {
     kind: "exposed",
+    url,
     stop: async () => {
       // Helpers only: the display and the browser belong to the broker daemon.
       removeCleanup();
@@ -1125,7 +1129,9 @@ export async function tryRunCeremonyInSharedBroker(
       );
     }
     opts.onBrowserPlacement?.(
-      exposure.kind === "already_visible" ? { kind: "host_screen" } : { kind: "virtual" },
+      exposure.kind === "already_visible"
+        ? { kind: "host_screen" }
+        : { kind: "virtual", url: exposure.url },
     );
     console.error(
       exposure.kind === "already_visible"
@@ -1384,12 +1390,9 @@ export async function runRemoteLoginChrome(opts: RunInBotChromeOpts): Promise<Lo
         }),
     );
     try {
-      await exposeRemoteLoginDisplay(rig, opts.bannerLabel);
+      const url = await exposeRemoteLoginDisplay(rig, opts.bannerLabel);
       lifecycle.throwIfCancelled();
-      opts.onBrowserPlacement?.({
-        kind: "virtual",
-        ...(rig.display !== undefined ? { display: rig.display } : {}),
-      });
+      opts.onBrowserPlacement?.({ kind: "virtual", url });
 
       const completed = await pollUntil(
         opts.deadline,
