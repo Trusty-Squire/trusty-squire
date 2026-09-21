@@ -4395,6 +4395,38 @@ describe("drive review regressions", () => {
     }
   }, 30_000);
 
+  it("acts on a page whose drive snapshot fell back to the tools observation", async () => {
+    // The in-page snapshot refuses a document whose body it cannot read, so the
+    // loop runs on rows the drive's own identity map never recorded. Those refs
+    // belong to the tools' observation and must still reach the page: reporting
+    // a live control stale here loses the provision with an empty trajectory.
+    const html = `<!doctype html><meta charset="utf-8"><title>Fallback</title>
+<main><button id="go" onclick="document.querySelector('#status').textContent='clicked'">Accept and continue</button>
+<p id="status">idle</p></main>
+<script>Object.defineProperty(document, "body", { get: () => null, configurable: true });</script>`;
+    const { context, page, started } = await openFixture(html, "snapshot-fallback.test");
+    try {
+      expect(await captureFrameSnapshot(page, [], 0)).toBeNull();
+      let decisions = 0;
+      const dependencies = deps(async (_api, _state, questions) => {
+        decisions += 1;
+        return jevFromQuestions(questions, decisions > 1);
+      });
+      const result = await runOperateDrive(
+        { session_id: started.session_id, goal: "accept and continue" },
+        api(),
+        undefined,
+        dependencies,
+      );
+      expect(await page.locator("#status").textContent()).toBe("clicked");
+      expect(result.status).toBe("complete");
+      expect(result.trajectory).toHaveLength(1);
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 60_000);
+
   it("registers compact injection refs and retries after four incomplete fills", async () => {
     const { context, page, started } = await openFixture(
       '<label>Card number <input id="pan" autocomplete="cc-number"></label><label>CVV <input id="cvv" autocomplete="cc-csc"></label>',

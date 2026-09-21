@@ -1062,13 +1062,15 @@ async function executeAct(
         // Preserve frame identity (origin + path) for the frame-scoped fill.
         if (action.kind === "click" || action.kind === "js_click") {
           const clickPage = compactV2ActionPage ?? browser.page;
+          // Only the drive's extra dispatch arms consume a frame scope; the
+          // tools reach a frame through actDriverTarget's frame target, so
+          // walking the positional frame path for them would be dead work.
           const clickScope =
-            clickPage === null || clickPage === undefined
+            options?.drive !== true || clickPage === null || clickPage === undefined
               ? undefined
               : scopeForElement(clickPage, el);
           if (
             action.kind === "click" &&
-            options?.drive === true &&
             clickScope !== undefined &&
             (await clickTargetOccluded(clickScope, el.selector))
           ) {
@@ -1083,15 +1085,11 @@ async function executeAct(
           // would charge every click for the branches that declined.
           const commitsListOption =
             action.kind === "click" &&
-            options?.drive === true &&
             clickPage !== null &&
             clickPage !== undefined &&
             clickScope !== undefined;
           const crossOriginScope =
-            action.kind === "click" &&
-            options?.drive === true &&
-            clickScope !== undefined &&
-            "parentFrame" in clickScope
+            action.kind === "click" && clickScope !== undefined && "parentFrame" in clickScope
               ? clickScope
               : undefined;
           actionPageAfter =
