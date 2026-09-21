@@ -945,7 +945,10 @@ async function runConnectInstall(
       emitConnectStatus(args, {
         outcome: { kind: "install_expired" },
         profileDir,
-        browser_location: placed.value ?? { kind: "none" },
+        browser_location: placed.value ?? {
+          kind: "unreachable",
+          reason: "the ceremony display outlived its own bound without showing the page anywhere",
+        },
         ownBrowserPid: placed.ownBrowserPid,
       }),
     ...(deferredReloginProviders.length ? { forceReloginProviders: deferredReloginProviders } : {}),

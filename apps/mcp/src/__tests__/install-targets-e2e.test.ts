@@ -605,9 +605,17 @@ describe("connect --target=<agent> writes a valid config", () => {
       }>();
       expect(lines[0]).toMatchObject({ state: "needs-sign-in", terminal: false });
       expect(lines.filter((line) => line.terminal)).toHaveLength(1);
-      const report = machine.terminal<{ state: string; reason: string | null }>();
+      const report = machine.terminal<{
+        state: string;
+        reason: string | null;
+        browser_location: { kind: string };
+      }>();
       expect(report.state).toBe("no-browser");
       expect(report.reason).toBe("install_expired");
+      // The rig was stood up and had to be force-reaped, so this run is not
+      // one that "opened no browser at all" — reporting `none` would tell a
+      // caller nothing was left behind.
+      expect(report.browser_location.kind).toBe("unreachable");
     } finally {
       exit.mockRestore();
       error.mockRestore();
