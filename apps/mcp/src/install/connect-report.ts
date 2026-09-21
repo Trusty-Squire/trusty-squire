@@ -1,7 +1,13 @@
 // Machine-readable connect report. One typed value answers the whole
 // question (state, sign-in URL, account, holder, browser location); the
-// human sentences render from it. `connect --json` prints this object once,
-// when the run has settled — interim progress never lands on that stream.
+// human sentences render from it.
+//
+// `connect --json` writes NEWLINE-DELIMITED JSON: one complete, self-sufficient
+// report per line, written when the run's answer changes, and the last line
+// carries `terminal: true`. Connect blocks for minutes waiting on a human, and
+// a stream that only speaks once it settles is silent for exactly the window in
+// which the sign-in URL and the noVNC address are live — which left a caller
+// scraping stderr prose, the thing this surface exists to delete.
 //
 // Connect runs before any MCP server exists, so the CLI carries the
 // contract. A later MCP reader must call the same function, not restated
@@ -60,6 +66,9 @@ export interface ConnectAccount {
 }
 
 interface ConnectReportFields {
+  // False while the run is still going, true on the line that ends it. Every
+  // line is complete on its own; this says whether another one is coming.
+  terminal: boolean;
   reason: ConnectReasonCode | null;
   account: ConnectAccount | null;
   holder: ConnectHolder;
@@ -70,9 +79,9 @@ interface ConnectReportFields {
  * The five fields Beeline drives from, plus the reason code for the cases
  * those five cannot tell apart between them.
  *
- * Every field is always present. `needs-sign-in` CARRIES its URL — the type
- * says so, so no run can report an outstanding sign-in with nowhere to send
- * anyone. A `no-browser` run may also still hold a live URL (the ceremony
+ * Every field is always present, on every line. `needs-sign-in` CARRIES its
+ * URL — the type says so, so no run can report an outstanding sign-in with
+ * nowhere to send anyone. A `no-browser` run may also still hold a live URL (the ceremony
  * could not be shown here, but the install is still open). `account` is set
  * whenever the run proved which account this machine is bound to, which is
  * not only when it ends `connected`, and its `providers` says what the probe
@@ -87,6 +96,11 @@ export type ConnectReport =
     });
 
 export type ConnectOutcome =
+  // The only non-terminal outcome: the pairing link is valid and the run is
+  // about to wait on a human. It goes out before the wait, and again whenever
+  // the browser's placement becomes known, so a caller holds both live
+  // addresses while they still reach something.
+  | { kind: "sign_in_open"; confirm_url: string }
   | { kind: "provisioned"; account_id: string; providers: OAuthProviderId[] }
   | { kind: "unverified"; account_id: string | null }
   | {
@@ -116,6 +130,7 @@ function settled(
 ): ConnectReport {
   return {
     state,
+    terminal: true,
     reason,
     sign_in_url: extras.sign_in_url ?? null,
     account: extras.account ?? null,
@@ -124,9 +139,14 @@ function settled(
   };
 }
 
-function signInOutstanding(input: ConnectReportInput, sign_in_url: string): ConnectReport {
+function signInOutstanding(
+  input: ConnectReportInput,
+  sign_in_url: string,
+  terminal: boolean,
+): ConnectReport {
   return {
     state: "needs-sign-in",
+    terminal,
     reason: null,
     sign_in_url,
     account: null,
@@ -147,6 +167,8 @@ function connectedAccount(account_id: string, providers: OAuthProviderId[] | nul
 export function buildConnectReport(input: ConnectReportInput): ConnectReport {
   const { outcome } = input;
   switch (outcome.kind) {
+    case "sign_in_open":
+      return signInOutstanding(input, outcome.confirm_url, false);
     case "provisioned":
       // The no-ceremony fast path reads the profile's cookie store and opens
       // nothing, so it cannot claim the session is live — the human copy on
@@ -199,7 +221,7 @@ export function buildConnectReport(input: ConnectReportInput): ConnectReport {
       // needs-sign-in unless nothing here could be shown the page at all.
       return input.browser_location.kind === "unreachable"
         ? settled("no-browser", null, input, { sign_in_url: outcome.confirm_url })
-        : signInOutstanding(input, outcome.confirm_url);
+        : signInOutstanding(input, outcome.confirm_url, true);
     case "install_expired":
       return settled("no-browser", "install_expired", input);
     case "account_switch_refused":
@@ -379,13 +401,13 @@ function leaseHolder(profileDir: string): ConnectHolder {
   return { kind: "other", code: "operation_lease", pid: owner.pid };
 }
 
-let reported = false;
+let terminated = false;
 
-// A connect run reports once, on whichever terminal path it reaches. The
-// caller's contract is `JSON.parse(stdout)`, so the run's outermost handler
-// can report unconditionally without risking a second object on the stream.
+// A connect run writes as many lines as its answer changes, then exactly one
+// terminal line. Anything after that is dropped, so the run's outermost
+// handler can report unconditionally without ending the stream twice.
 export function beginConnectRun(): void {
-  reported = false;
+  terminated = false;
 }
 
 /**
@@ -398,16 +420,18 @@ export interface ConnectUsageError {
   message: string;
 }
 
+// A usage error ends the stream like any terminal report.
+
 export function emitConnectUsageError(message: string, json: boolean | undefined): void {
-  if (reported) return;
-  reported = true;
+  if (terminated) return;
+  terminated = true;
   if (json !== true) return;
   writeMachineLine({ error: "usage", message } satisfies ConnectUsageError);
 }
 
 export function emitConnectReport(report: ConnectReport, json: boolean | undefined): void {
-  if (reported) return;
-  reported = true;
+  if (terminated) return;
+  terminated = report.terminal;
   if (json !== true) return;
   writeMachineLine(report);
 }

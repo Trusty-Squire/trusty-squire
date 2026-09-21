@@ -15,6 +15,10 @@ import { join } from "node:path";
 export interface MachineChannelCapture {
   /** Everything written to the channel. Valid before and after `restore`. */
   read: () => string;
+  /** The channel parsed as NDJSON — one report per line, oldest first. */
+  reports: <T = Record<string, unknown>>() => T[];
+  /** The line that ended the run. Throws when the stream has no terminal line. */
+  terminal: <T = Record<string, unknown>>() => T;
   /** Puts the real descriptor back. Always call this in a `finally`. */
   restore: () => void;
 }
@@ -26,8 +30,23 @@ export function captureMachineChannel(): MachineChannelCapture {
   const original = process.stdout.fd;
   Object.defineProperty(process.stdout, "fd", { value: fd, configurable: true, writable: true });
   let written: string | null = null;
+  const read = (): string => written ?? readFileSync(file, "utf8");
+  const lines = (): Record<string, unknown>[] =>
+    read()
+      .split("\n")
+      .filter((line) => line.trim() !== "")
+      .map((line): Record<string, unknown> => JSON.parse(line));
   return {
-    read: () => written ?? readFileSync(file, "utf8"),
+    read,
+    reports: <T>(): T[] => lines() as T[],
+    terminal: <T>(): T => {
+      const last = lines().at(-1);
+      if (last === undefined) throw new Error("machine channel wrote nothing");
+      if (last.terminal !== true && last.error === undefined) {
+        throw new Error(`machine channel never ended: ${JSON.stringify(last)}`);
+      }
+      return last as T;
+    },
     restore: () => {
       if (written !== null) return;
       written = readFileSync(file, "utf8");

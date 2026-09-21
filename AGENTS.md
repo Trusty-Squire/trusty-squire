@@ -781,8 +781,12 @@ Read this file. Follow the rules. Run the verify script. Paste the output. Then 
   report (`state`, `sign_in_url`, `account`, `holder`, `browser_location`) is
   built by [`apps/mcp/src/install/connect-report.ts`](apps/mcp/src/install/connect-report.ts)
   and the human copy renders from the same value. Do not parse connect's English.
-  One report per run, on EVERY exit path — a `--json` caller must never meet
-  an empty stdout. `needs-sign-in` carries its `sign_in_url` by construction
+  The machine channel is NEWLINE-DELIMITED JSON: one complete, self-sufficient
+  report per line, written whenever the run's answer changes, with exactly one
+  `terminal: true` line and it last. A `--json` caller must never meet an empty
+  stdout, and the line naming a live sign-in URL or noVNC address goes out
+  BEFORE the run blocks on a human — a surface that only speaks at settle is
+  silent for the whole window in which those addresses are worth having. `needs-sign-in` carries its `sign_in_url` by construction
   (the type says so); an outcome with no live URL gets a different state, and
   the ceremony never outlives the pairing token that URL belongs to — as a
   duration counted locally, never by differencing the server's timestamp
@@ -794,9 +798,9 @@ Read this file. Follow the rules. Run the verify script. Paste the output. Then 
   OBSERVED and handed back by whichever path placed the ceremony browser
   (`onBrowserPlacement` in `bot/google-login.ts`) — never predicted from the
   CLI process's own environment — and it never carries an address that will be
-  dead when the report is read: the noVNC tunnel dies with the ceremony, so a
-  run that did not claim reports `unreachable` rather than naming a display
-  nothing can reach. A refusal that means another session holds the browser —
+  dead when the report is read: a virtual display's noVNC address ships on the
+  non-terminal line written while that tunnel is up, and the placement is never
+  relabelled afterwards — one value, decided where the browser was placed. A refusal that means another session holds the browser —
   `ProfileBusyError` or a contention `BrokerRefusal` (`broker_unavailable`,
   `profile_busy`) — reaches connect typed and reports `busy` with the holder,
   read from Chrome's lock OR the operation lease. Every other refusal code is

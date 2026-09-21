@@ -549,11 +549,11 @@ describe("connect --target=<agent> writes a valid config", () => {
           json: true,
         }),
       ).rejects.toThrow("exit:1");
-      const report = JSON.parse(machine.read()) as {
+      const report = machine.terminal<{
         state: string;
         reason: string | null;
         sign_in_url: string | null;
-      };
+      }>();
       expect(report.state).toBe("no-browser");
       expect(report.reason).toBe("install_expired");
       expect(report.sign_in_url).toBeNull();
@@ -597,11 +597,11 @@ describe("connect --target=<agent> writes a valid config", () => {
           json: true,
         }),
       ).rejects.toThrow("exit:1");
-      const report = JSON.parse(machine.read()) as {
+      const report = machine.terminal<{
         state: string;
         sign_in_url: string | null;
         holder: { kind: string };
-      };
+      }>();
       expect(report.state).toBe("busy");
       expect(report.sign_in_url).toBeNull();
       expect(report.holder).toBeDefined();
@@ -639,11 +639,11 @@ describe("connect --target=<agent> writes a valid config", () => {
           json: true,
         }),
       ).rejects.toThrow("exit:1");
-      const report = JSON.parse(machine.read()) as {
+      const report = machine.terminal<{
         state: string;
         reason: string | null;
         sign_in_url: string | null;
-      };
+      }>();
       expect(report.state).toBe("busy");
       expect(report.reason).toBeNull();
       expect(report.sign_in_url).toBeNull();
@@ -684,7 +684,7 @@ describe("connect --target=<agent> writes a valid config", () => {
           json: true,
         }),
       ).rejects.toThrow("exit:1");
-      const report = JSON.parse(machine.read()) as { state: string; reason: string | null };
+      const report = machine.terminal<{ state: string; reason: string | null }>();
       expect(report.state).toBe("no-browser");
       expect(report.reason).toBe("run_failed");
       // The human copy is unchanged: the refusal's own message names the
@@ -698,13 +698,46 @@ describe("connect --target=<agent> writes a valid config", () => {
     }
   });
 
-  // The noVNC address that reaches a virtual display dies with the ceremony.
-  // Naming the display on a run that did not claim points a caller at a screen
-  // nothing can reach any more.
-  it("stops naming a virtual display once the surface that reached it is gone", async () => {
+  // Connect blocks for minutes waiting on a human. A channel that only speaks
+  // at settle is silent for exactly the window in which the link is live, which
+  // left a caller scraping the boxen frame on stderr for it.
+  it("puts the sign-in URL on the machine channel before it starts waiting", async () => {
+    const machine = captureMachineChannel();
+    try {
+      await connect({
+        command: "connect",
+        target: "hermes",
+        apiBase: "https://test.invalid",
+        skipBrowser: true,
+        forceRelogin: false,
+        noRegistry: false,
+        noInteractive: true,
+        json: true,
+      });
+      const lines = machine.reports<{
+        terminal: boolean;
+        state: string;
+        sign_in_url: string | null;
+      }>();
+      const first = lines[0];
+      expect(first?.terminal).toBe(false);
+      expect(first?.state).toBe("needs-sign-in");
+      expect(first?.sign_in_url).toBe("https://test.invalid/install?token=test_setup_code");
+      // Exactly one line ends the run, and it is the last one.
+      expect(lines.filter((line) => line.terminal)).toHaveLength(1);
+      expect(lines.at(-1)?.terminal).toBe(true);
+    } finally {
+      machine.restore();
+    }
+  });
+
+  // Item 5 is answered where the browser was placed, and the answer is not
+  // rewritten later. A virtual display carries the address that reaches it, and
+  // that line goes out while the tunnel is up — not at settle, when it is gone.
+  it("reports the virtual display and its live address before the wait", async () => {
     vi.mocked(installPoll).mockResolvedValue({ status: "pending" });
     vi.mocked(openInstallConfirmInBotChrome).mockImplementationOnce(async (options) => {
-      options.onBrowserPlacement?.({ kind: "virtual" });
+      options.onBrowserPlacement?.({ kind: "virtual", url: "https://tunnel.invalid/#p=secret" });
       return { status: "timeout" as const };
     });
     const machine = captureMachineChannel();
@@ -725,11 +758,21 @@ describe("connect --target=<agent> writes a valid config", () => {
           json: true,
         }),
       ).rejects.toThrow("exit:1");
-      const report = JSON.parse(machine.read()) as {
-        browser_location: { kind: string; reason?: string };
-      };
-      expect(report.browser_location.kind).toBe("unreachable");
-      expect(report.browser_location.reason).toContain("torn down");
+      const lines = machine.reports<{
+        terminal: boolean;
+        state: string;
+        sign_in_url: string | null;
+        browser_location: { kind: string; url?: string };
+      }>();
+      const live = lines.find((line) => line.browser_location.kind === "virtual");
+      expect(live, "a virtual placement is reported while the tunnel is up").toBeDefined();
+      expect(live?.terminal).toBe(false);
+      expect(live?.state).toBe("needs-sign-in");
+      expect(live?.sign_in_url).toBe("https://test.invalid/install?token=test_setup_code");
+      expect(live?.browser_location.url).toBe("https://tunnel.invalid/#p=secret");
+      // The placement is reported as observed on the settled line too, never
+      // relabelled into something it was not.
+      expect(lines.at(-1)?.browser_location.kind).toBe("virtual");
     } finally {
       exit.mockRestore();
       error.mockRestore();
@@ -759,9 +802,9 @@ describe("connect --target=<agent> writes a valid config", () => {
         noInteractive: true,
         json: true,
       });
-      const report = JSON.parse(machine.read()) as {
+      const report = machine.terminal<{
         browser_location: { kind: string; reason?: string };
-      };
+      }>();
       expect(report.browser_location.kind).toBe("unknown");
       expect(report.browser_location.reason).toContain("default browser");
     } finally {

@@ -46,6 +46,7 @@ describe("buildConnectReport", () => {
     });
     expect(provisioned).toEqual({
       state: "connected",
+      terminal: true,
       reason: "cached_cookie_evidence",
       sign_in_url: null,
       account: { id: "acc_1", providers: ["google", "github"] },
@@ -288,7 +289,7 @@ describe("buildConnectReport", () => {
     expect(report.sign_in_url).toBeNull();
   });
 
-  it("always emits the same six fields", () => {
+  it("always emits the same seven fields", () => {
     const reports = [
       classify({ outcome: { kind: "provisioned", account_id: "a", providers: ["google"] } }),
       classify({
@@ -299,7 +300,15 @@ describe("buildConnectReport", () => {
     ];
     for (const report of reports) {
       expect(Object.keys(report).sort()).toEqual(
-        ["account", "browser_location", "holder", "reason", "sign_in_url", "state"].sort(),
+        [
+          "account",
+          "browser_location",
+          "holder",
+          "reason",
+          "sign_in_url",
+          "state",
+          "terminal",
+        ].sort(),
       );
     }
   });
@@ -378,17 +387,18 @@ describe("emitConnectReport", () => {
   });
 });
 
-// The noVNC tunnel and the browser it showed both die with the ceremony, and
-// the report is emitted after that — so any address named here would resolve
-// to nothing. Naming the display without an address is the honest answer; the
-// live one is on stderr while the run is still going.
+// A virtual display is only useful with the address that reaches it, and the
+// line carrying it goes out while that tunnel is up.
 describe("a virtual placement", () => {
-  it("names the display without handing back an address", () => {
+  it("carries the address that reaches it", () => {
     const report = classify({
       outcome: { kind: "install_expired" },
-      browser_location: { kind: "virtual" },
+      browser_location: { kind: "virtual", url: "https://tunnel.invalid/#p=secret" },
     });
-    expect(report.browser_location).toEqual({ kind: "virtual" });
+    expect(report.browser_location).toEqual({
+      kind: "virtual",
+      url: "https://tunnel.invalid/#p=secret",
+    });
   });
 });
 
@@ -440,5 +450,33 @@ describe("snapshotConnectHolder reads the operation lease too", () => {
     lease = leaseHeldBy(profileDir, dead!);
 
     expect(snapshotConnectHolder(profileDir)).toEqual({ kind: "none" });
+  });
+});
+
+// Every line is complete on its own; `terminal` says whether another is coming.
+describe("the non-terminal sign-in line", () => {
+  it("carries the live link and is marked as not the last word", () => {
+    const url = "https://trustysquire.ai/install?token=live";
+    const report = classify({ outcome: { kind: "sign_in_open", confirm_url: url } });
+    expect(report.state).toBe("needs-sign-in");
+    expect(report.sign_in_url).toBe(url);
+    expect(report.terminal).toBe(false);
+  });
+
+  it("marks every settled outcome terminal", () => {
+    const outcomes: ConnectReportInput["outcome"][] = [
+      { kind: "provisioned", account_id: "a", providers: ["google"] },
+      { kind: "unverified", account_id: null },
+      { kind: "ceremony_complete", account_id: "a", providers: ["google"] },
+      { kind: "profile_busy" },
+      { kind: "install_unclaimed", confirm_url: "https://example.test/in" },
+      { kind: "install_expired" },
+      { kind: "account_switch_refused" },
+      { kind: "cookie_clear_failed" },
+      { kind: "run_failed" },
+    ];
+    for (const outcome of outcomes) {
+      expect(classify({ outcome }).terminal, outcome.kind).toBe(true);
+    }
   });
 });

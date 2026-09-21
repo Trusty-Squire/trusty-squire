@@ -254,14 +254,15 @@ it("prints the same already-connected facts as JSON without changing the human l
   }
 
   expect(human.join("\n")).toContain("Already connected");
-  // One self-sufficient object on the machine channel: JSON.parse of the whole
-  // stream, not a last-line convention a caller has to know about.
-  const report = JSON.parse(machine.read()) as {
+  // Newline-delimited JSON: each line is a complete report, and the run's last
+  // word is the one marked terminal. This run answers in a single line.
+  expect(machine.reports()).toHaveLength(1);
+  const report = machine.terminal<{
     state: string;
     sign_in_url: string | null;
     account: { id: string; providers: string[] } | null;
     browser_location: { kind: string };
-  };
+  }>();
   expect(report.state).toBe("connected");
   expect(report.sign_in_url).toBeNull();
   expect(report.account).toEqual({ id: "account-id", providers: ["google"] });
@@ -297,7 +298,7 @@ it("still reports on stdout when the run fails before a target is resolved", asy
   }
 
   expect(threw).toBe(true);
-  const report = JSON.parse(machine.read()) as { state: string; reason: string | null };
+  const report = machine.terminal<{ state: string; reason: string | null }>();
   expect(report.state).toBe("no-browser");
   expect(report.reason).toBe("run_failed");
 });

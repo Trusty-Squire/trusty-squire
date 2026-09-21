@@ -529,8 +529,8 @@ async function settings(args: Argv): Promise<void> {
 async function connect(args: Argv, argv: readonly string[] = []): Promise<void> {
   beginConnectRun();
   // Every exit path reports, including one that fails before a target or a
-  // profile is resolved. `emitConnectReport` drops the second object, so this
-  // is a floor under the stream rather than an extra report.
+  // profile is resolved. `emitConnectReport` drops anything after a terminal
+  // line, so this is a floor under the stream rather than an extra report.
   let reportProfileDir = CHROME_PROFILE_DIR;
   // Null until the ceremony is attempted: only then is "no browser opened"
   // something this handler could stop asserting for free.
@@ -935,6 +935,12 @@ async function runConnectInstall(
     applyServerPrefs: !wantInteractive,
     profileDir,
     placed,
+    reportSignInOpen: (confirm_url, browser_location) =>
+      emitConnectStatus(args, {
+        outcome: { kind: "sign_in_open", confirm_url },
+        profileDir,
+        browser_location,
+      }),
     ...(deferredReloginProviders.length ? { forceReloginProviders: deferredReloginProviders } : {}),
   });
   if (claim.kind === "confirm_failed") {
@@ -1323,20 +1329,6 @@ export function claimHeartbeatMessage(claimed: boolean): string {
 // What the ceremony settled on, with the two facts a machine caller needs
 // when it did not claim: the sign-in URL that is still live, and where the
 // browser actually went.
-// A virtual display is reachable only through the noVNC address the ceremony
-// stands up, and that address is torn down with the ceremony. A run that did
-// not claim would otherwise point a caller at a display nothing can reach any
-// more — so once the surface is gone, say so rather than name the display.
-function withoutDeadVirtualSurface(location: ConnectBrowserLocation): ConnectBrowserLocation {
-  if (location.kind !== "virtual") return location;
-  return {
-    kind: "unreachable",
-    reason:
-      "the ceremony ran on a virtual display, and the noVNC address that reached it was " +
-      "torn down with the run",
-  };
-}
-
 // One run's observed ceremony placement, shared with the handlers that report
 // it. `null` means no ceremony was attempted, which is the only state in which
 // "no browser was opened" is a fact rather than an assumption.
@@ -1371,6 +1363,9 @@ async function runInstallClaim(
     // Where the ceremony browser went, recorded for whoever reports the run —
     // including a handler above this frame that never sees the claim.
     placed: BrowserPlacementSlot;
+    // Writes a non-terminal line naming the live pairing link and where the
+    // browser is, before this run blocks on a human.
+    reportSignInOpen: (confirm_url: string, browser_location: ConnectBrowserLocation) => void;
     // Providers whose cookie clear busy-failed and now rides the ceremony
     // (see the --force-relogin block in the caller).
     forceReloginProviders?: readonly OAuthProviderId[];
@@ -1384,6 +1379,9 @@ async function runInstallClaim(
   // window depend on clock skew, which collapses or overshoots it silently.
   const ceremonyDeadline = Date.now() + PAIRING_TOKEN_TTL_MS;
   const expired = { value: false };
+  // The link is valid from here on, and everything after this waits. Say so
+  // now rather than at settle, when it is already spent.
+  options.reportSignInOpen(initiate.confirm_url, options.placed.value ?? { kind: "none" });
 
   // Track the claimed token outside the poll closure so the in-Chrome
   // flow's pollUntilClaimed can read it once the API reports claimed.
@@ -1454,6 +1452,7 @@ async function runInstallClaim(
         }
       : { kind: "none" };
     const handoff: ConnectBrowserLocation = options.placed.value;
+    options.reportSignInOpen(initiate.confirm_url, handoff);
     const ok = await pollForClaim(apiBase, initiate.setup_code);
     if (ok === "expired") return { kind: "expired", browser_location: handoff };
     if (ok === null) {
@@ -1493,6 +1492,7 @@ async function runInstallClaim(
     profileDir: options.profileDir,
     onBrowserPlacement: (placement) => {
       options.placed.value = placement;
+      options.reportSignInOpen(initiate.confirm_url, placement);
     },
     deadline: ceremonyDeadline,
     ...(options.forceReloginProviders?.length
@@ -1500,30 +1500,25 @@ async function runInstallClaim(
       : {}),
   });
   const browser_location: ConnectBrowserLocation = options.placed.value;
-  const unreachableNow = (): ConnectBrowserLocation => {
-    const gone = withoutDeadVirtualSurface(browser_location);
-    options.placed.value = gone;
-    return gone;
-  };
 
   // rc.33 — surface the underlying error instead of letting the outer
   // wrapper print a generic "browser confirm step never finished."
   // Surface the underlying browser-launch error rather than replacing it
   // with a generic confirmation timeout.
   if (result.status === "error") {
-    if (expired.value) return { kind: "expired", browser_location: unreachableNow() };
+    if (expired.value) return { kind: "expired", browser_location };
     return {
       kind: "confirm_failed",
       detail: result.detail ?? "unknown error",
       confirm_url: initiate.confirm_url,
-      browser_location: unreachableNow(),
+      browser_location,
     };
   }
 
   // Reachable only by the ceremony deadline elapsing, and that deadline IS the
   // pairing token's life — so there is no live URL left to hand anyone.
   if (result.status !== "claimed" || state.value === null) {
-    return { kind: "expired", browser_location: unreachableNow() };
+    return { kind: "expired", browser_location };
   }
 
   return {
