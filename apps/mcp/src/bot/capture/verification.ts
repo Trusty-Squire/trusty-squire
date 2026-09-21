@@ -192,12 +192,13 @@ export function buildVerificationResult(
   const src = sourceFrom !== null ? { source_from: sourceFrom } : {};
   const searchedField = searched === undefined ? {} : { searched };
   if (found) return { session_id: sessionId, found, code, link, ...src, ...searchedField };
+  const scopedHost = scopeableServiceHost(searched?.sender);
   const searchHint =
     searched === undefined
       ? ""
       : ` Searched ${searched.query}` +
         (searched.recipient === undefined ? "" : ` to:${searched.recipient}`) +
-        (searched.sender === undefined ? "" : ` host:${searched.sender}.`);
+        (scopedHost === undefined ? "" : ` host:${scopedHost}.`);
   const needs_user: NeedsUserCode = staleMatchSeen
     ? {
         wall: "verification_code",

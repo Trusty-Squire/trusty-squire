@@ -166,6 +166,22 @@ describe("buildVerificationResult (Flow A — code-wall hand-back)", () => {
     expect(r.needs_user?.message).toContain("operate_read_inbox AGAIN");
   });
 
+  it("names a host scope in the miss hint only when one was actually applied", () => {
+    const scoped = buildVerificationResult("sk_1", null, null, null, false, {
+      query: "newer_than:1d",
+      sender: "app.example.test",
+    });
+    expect(scoped.needs_user?.message).toContain("host:app.example.test");
+    // An IP/localhost read is not host-scoped, so claiming it was would send
+    // the host agent looking for a filter that never ran.
+    const unscoped = buildVerificationResult("sk_1", null, null, null, false, {
+      query: "newer_than:1d",
+      sender: "127.0.0.1",
+    });
+    expect(unscoped.needs_user?.message).toContain("Searched newer_than:1d");
+    expect(unscoped.needs_user?.message).not.toContain("host:");
+  });
+
   it("never marks a found result with the stale-match hand-back", () => {
     const r = buildVerificationResult("sk_1", null, "https://x.example/confirm", null, true);
     expect(r.found).toBe(true);
@@ -756,12 +772,14 @@ describe("pickOpenedMailMessage (per-message To, never the conversation's first 
         sessionStartMs: sessionStart,
       }),
     ).toBe(fresh);
-    // A single-label host is matchable, so it still filters the pool.
+    // A single-label host is matchable, so it still filters the pool. It is
+    // dated OLDER than the foreign card on purpose: losing that scoping would
+    // leave both in the pool and the newest-row pick would return `fresh`.
     const intranet = msg({
       fromEmail: "noreply@gitlab.corp.example",
       fromName: "GitLab",
       text: "Your code is 333333",
-      dateTitle: "Sep 20, 2026, 4:30 PM",
+      dateTitle: "Sep 20, 2026, 4:22 PM",
     });
     expect(
       pickOpenedMailMessage([intranet, fresh], {
