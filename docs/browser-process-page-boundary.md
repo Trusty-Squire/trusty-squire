@@ -21,8 +21,10 @@ Each session's `BrowserController` shares its process owner and has an independe
 ## Preserved lifecycle contract
 
 Local operator launches remain **headed**. A host with a screen uses that
-display; Xvfb is created only when `hasDisplay()` is false. The proxy geo
-probe still runs. `OPERATOR_BROWSER_HEADLESS` remains `false`; the
+display; Xvfb is created only when `hasDisplay()` is false. The throwaway
+proxy geo probe still runs, headless — it reads one JSON body and never
+needs a screen, so it opens no window on the user's desktop.
+`OPERATOR_BROWSER_HEADLESS` remains `false` for the operator context; the
 pre-existing headless description in AGENTS.md is not a launch-policy
 change. Launch flags,
 self-launch selection, Patchright `connectOverCDP`, persistent fallback, and

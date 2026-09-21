@@ -15,7 +15,10 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { hostname, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { exposeSharedBrokerCeremonyDisplay } from "../google-login.js";
+import {
+  exposeSharedBrokerCeremonyDisplay,
+  tryRunCeremonyInSharedBroker,
+} from "../google-login.js";
 import { registerLocalBrowserLaunch } from "../browser-process-runtime.js";
 import {
   bindOwnerBrowserLaunch,
@@ -25,6 +28,20 @@ import {
 } from "../owner-process-reaper.js";
 import { profileProcessIdentity } from "../profile.js";
 import type * as RemoteLoginDisplayModule from "../remote-login-display.js";
+
+// The ceremony never reaches a broker once it has yielded to the machine's
+// own screen, so "did the session guard bind?" is the observable that
+// separates the two routes. An unbound session also stops the real call
+// before any socket work, which keeps this suite off the operator's broker.
+const sessionBinds = vi.hoisted(() => ({ count: 0 }));
+vi.mock("../../session-guard.js", () => ({
+  createSessionGuard: () => ({
+    bind: async () => {
+      sessionBinds.count += 1;
+      return null;
+    },
+  }),
+}));
 
 const mockState = {
   rigCreated: 0,
@@ -155,7 +172,18 @@ function screenedHost(): void {
 
 beforeEach(() => {
   headlessHost();
+  sessionBinds.count = 0;
 });
+
+function ceremonyOpts(profileDir: string): Parameters<typeof tryRunCeremonyInSharedBroker>[0] {
+  return {
+    profileDir,
+    url: "https://example.test/install",
+    deadline: Date.now() + 60_000,
+    pollUntilDone: async () => false,
+    bannerLabel: "Complete sign-in.",
+  };
+}
 
 describe("exposeSharedBrokerCeremonyDisplay", () => {
   it("prefers the tracked rig for the holder profile over the process environment", async () => {
@@ -394,5 +422,37 @@ describe("exposeSharedBrokerCeremonyDisplay", () => {
     });
     expect(mockState.rigCreated).toBe(0);
     expect(mockState.attachAttempts).toBe(0);
+  });
+});
+
+describe("ceremony routing when the broker sits on a login rig", () => {
+  // A daemon spawned without DISPLAY (over SSH, from a user service) parks
+  // its Chrome on an Xvfb this repo created. Where connect runs decides:
+  // a host with a screen signs in on that screen, a headless host still
+  // rides the broker and gets its noVNC URL.
+  async function brokerOnOwnedRig(): Promise<string> {
+    const profile = await tempProfile();
+    const child = await spawnHolder({
+      PATH: process.env.PATH ?? "",
+      DISPLAY: ":99",
+      XAUTHORITY: join(tmpdir(), "tsq-login-hidden", "xauthority"),
+    });
+    await holderOwnsProfile(profile, child);
+    return profile;
+  }
+
+  it("yields the ceremony when this host has its own screen", async () => {
+    const profile = await brokerOnOwnedRig();
+    screenedHost();
+    await expect(tryRunCeremonyInSharedBroker(ceremonyOpts(profile))).resolves.toBeNull();
+    expect(sessionBinds.count).toBe(0);
+    expect(mockState.rigCreated).toBe(0);
+    expect(mockState.attachAttempts).toBe(0);
+  });
+
+  it("still offers the ceremony to that broker on a headless host", async () => {
+    const profile = await brokerOnOwnedRig();
+    await expect(tryRunCeremonyInSharedBroker(ceremonyOpts(profile))).resolves.toBeNull();
+    expect(sessionBinds.count).toBe(1);
   });
 });
