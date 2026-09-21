@@ -54,6 +54,7 @@ import {
   teardownRemoteLoginRig,
   type RemoteLoginRig,
 } from "../remote-login-display.js";
+import { LOGIN_RIG_OWNED_LIFETIME_MS } from "../../pairing-ttl.js";
 import { synchronizeSelfManagedChromeTerminationSignalHandlers } from "../browser.js";
 import { spawnOwnerTrackedHelper } from "../owner-process-reaper.js";
 
@@ -703,6 +704,36 @@ process.exit(1);
     }
     expect(set).toHaveBeenNthCalledWith(1, false);
     expect(set).toHaveBeenLastCalledWith(true);
+  });
+
+  // Every other lifetime test hands in a short `lifetimeMs`, so the value a
+  // real `connect` actually arms — the only one that ships — is exercised
+  // nowhere else. A rig that fires early tears the display down mid-ceremony;
+  // one that fires late is not a bound at all.
+  it("arms the pairing-token window plus grace when the caller names no lifetime", async () => {
+    vi.useFakeTimers();
+    try {
+      const { rig, processes } = rigWithProcesses();
+      const runtime = fakeCleanupRuntime();
+      registerRemoteLoginRigCleanup(rig, () => undefined, {}, runtime, {
+        enabled: () => true,
+        set: vi.fn(),
+      });
+
+      await vi.advanceTimersByTimeAsync(LOGIN_RIG_OWNED_LIFETIME_MS - 1);
+      expect(runtime.exit).not.toHaveBeenCalled();
+      for (const child of processes) {
+        expect(child.kill).not.toHaveBeenCalled();
+      }
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(runtime.exit).toHaveBeenCalledWith(1);
+      for (const child of processes) {
+        expect(child.kill).toHaveBeenCalledWith("SIGTERM");
+      }
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("reports the expiry and tears the ceremony helpers down when the lifetime elapses", async () => {
