@@ -271,6 +271,44 @@ it("prints the same already-connected facts as JSON without changing the human l
   expect(report.browser_location).toEqual({ kind: "none" });
 });
 
+// `JSON.parse(stdout)` is the whole machine contract, so a run that dies
+// before it can settle still owes one object — the ambiguous/zero target
+// resolution a dev box hits the moment --target is omitted.
+it("still reports on stdout when the run fails before a target is resolved", async () => {
+  vi.stubEnv("TRUSTY_SQUIRE_PROFILE_DIR", profileDir);
+
+  const machine: string[] = [];
+  const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+  const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+  const write = vi.spyOn(process.stdout, "write").mockImplementation((chunk) => {
+    machine.push(String(chunk));
+    return true;
+  });
+  let threw = false;
+  try {
+    await connect({
+      command: "connect",
+      apiBase: "https://api.example.test",
+      skipBrowser: false,
+      forceRelogin: false,
+      noRegistry: false,
+      noInteractive: true,
+      json: true,
+    });
+  } catch {
+    threw = true;
+  } finally {
+    write.mockRestore();
+    warn.mockRestore();
+    error.mockRestore();
+  }
+
+  expect(threw).toBe(true);
+  const report = JSON.parse(machine.join("")) as { state: string; reason: string | null };
+  expect(report.state).toBe("no-browser");
+  expect(report.reason).toBe("run_failed");
+});
+
 // An ABSENT cookie store and an UNREADABLE one are different answers, and
 // collapsing them is what stranded a bound machine with no profile: it can
 // never be "already connected", and it must never be told to close a browser

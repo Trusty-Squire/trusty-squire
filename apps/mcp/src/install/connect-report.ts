@@ -23,11 +23,11 @@ export type ConnectReasonCode =
   | "provider_session_missing"
   | "requested_provider_missing"
   | "account_mismatch"
-  | "profile_unverifiable";
+  | "profile_unverifiable"
+  | "run_failed";
 
 export type ConnectHolder =
   | { kind: "none" }
-  | { kind: "self"; code: "this_process"; pid: number }
   | { kind: "other"; code: "singleton_lock"; pid: number }
   | { kind: "unknown"; reason: "cross_host" | "identity_unknown" };
 
@@ -44,23 +44,30 @@ export interface ConnectAccount {
   providers: OAuthProviderId[];
 }
 
-/**
- * The five fields Beeline drives from, plus the reason code for the cases
- * those five cannot tell apart between them.
- *
- * Every field is always present. `sign_in_url` is a URL exactly when the run
- * settled still holding a live sign-in URL; `account` is set only when
- * `state` is `connected`; `reason` is null when the other fields already say
- * everything there is to say.
- */
-export interface ConnectReport {
-  state: ConnectState;
+interface ConnectReportFields {
   reason: ConnectReasonCode | null;
-  sign_in_url: string | null;
   account: ConnectAccount | null;
   holder: ConnectHolder;
   browser_location: ConnectBrowserLocation;
 }
+
+/**
+ * The five fields Beeline drives from, plus the reason code for the cases
+ * those five cannot tell apart between them.
+ *
+ * Every field is always present. `needs-sign-in` CARRIES its URL — the type
+ * says so, so no run can report an outstanding sign-in with nowhere to send
+ * anyone. A `no-browser` run may also still hold a live URL (the ceremony
+ * could not be shown here, but the install is still open). `account` is set
+ * only when `state` is `connected`; `reason` is null when the other fields
+ * already say everything there is to say.
+ */
+export type ConnectReport =
+  | (ConnectReportFields & { state: "needs-sign-in"; sign_in_url: string })
+  | (ConnectReportFields & {
+      state: Exclude<ConnectState, "needs-sign-in">;
+      sign_in_url: string | null;
+    });
 
 export type ConnectOutcome =
   | { kind: "provisioned"; account_id: string; providers: OAuthProviderId[] }
@@ -74,9 +81,9 @@ export type ConnectOutcome =
     }
   | { kind: "profile_busy" }
   | { kind: "install_unclaimed"; confirm_url: string }
-  | { kind: "browser_confirm_failed" }
   | { kind: "account_switch_refused" }
-  | { kind: "cookie_clear_failed" };
+  | { kind: "cookie_clear_failed" }
+  | { kind: "run_failed" };
 
 export interface ConnectReportInput {
   outcome: ConnectOutcome;
@@ -85,25 +92,33 @@ export interface ConnectReportInput {
 }
 
 function settled(
-  state: ConnectState,
+  state: Exclude<ConnectState, "needs-sign-in">,
   reason: ConnectReasonCode | null,
   input: ConnectReportInput,
-  extras: Pick<ConnectReport, "sign_in_url" | "account"> = {
-    sign_in_url: null,
-    account: null,
-  },
+  extras: { sign_in_url?: string; account?: ConnectAccount } = {},
 ): ConnectReport {
   return {
     state,
     reason,
-    sign_in_url: extras.sign_in_url,
-    account: extras.account,
+    sign_in_url: extras.sign_in_url ?? null,
+    account: extras.account ?? null,
     // "Busy" and "nobody holds it" are a contradiction to read: a profile we
     // could not answer for is an unknown holder, not an absent one.
     holder:
       state === "busy" && input.holder.kind === "none"
         ? { kind: "unknown", reason: "identity_unknown" }
         : input.holder,
+    browser_location: input.browser_location,
+  };
+}
+
+function signInOutstanding(input: ConnectReportInput, sign_in_url: string): ConnectReport {
+  return {
+    state: "needs-sign-in",
+    reason: null,
+    sign_in_url,
+    account: null,
+    holder: input.holder,
     browser_location: input.browser_location,
   };
 }
@@ -122,42 +137,41 @@ export function buildConnectReport(input: ConnectReportInput): ConnectReport {
   switch (outcome.kind) {
     case "provisioned":
       return settled("connected", null, input, {
-        sign_in_url: null,
         account: connectedAccount(outcome.account_id, outcome.providers),
       });
     case "ceremony_complete": {
       const gate = decideConnectComplete(outcome.providers, outcome.requested_provider);
       if (gate.ok) {
         return settled("connected", null, input, {
-          sign_in_url: null,
           account: connectedAccount(outcome.account_id, outcome.providers ?? []),
         });
       }
       if (gate.reason === "probe_failed") return settled("busy", "profile_unverifiable", input);
+      // The machine IS connected — Google is live and bound; only the scoped
+      // refresh the run was asked for didn't land.
       if (gate.reason === "requested_provider_missing") {
-        return settled("needs-sign-in", "requested_provider_missing", input);
+        return settled("connected", "requested_provider_missing", input, {
+          account: connectedAccount(outcome.account_id, outcome.providers ?? []),
+        });
       }
-      return settled(
-        outcome.skip_browser ? "no-browser" : "needs-sign-in",
-        "provider_session_missing",
-        input,
-      );
+      return settled("no-browser", "provider_session_missing", input);
     }
     case "unverified":
       return settled("busy", "profile_unverifiable", input);
     case "profile_busy":
       return settled("busy", null, input);
     case "install_unclaimed":
-      return settled("needs-sign-in", null, input, {
-        sign_in_url: outcome.confirm_url,
-        account: null,
-      });
-    case "browser_confirm_failed":
-      return settled("no-browser", null, input);
+      // The pairing token is still pending, so the URL is live. It is a
+      // needs-sign-in unless nothing here could be shown the page at all.
+      return input.browser_location.kind === "unreachable"
+        ? settled("no-browser", null, input, { sign_in_url: outcome.confirm_url })
+        : signInOutstanding(input, outcome.confirm_url);
     case "account_switch_refused":
-      return settled("needs-sign-in", "account_mismatch", input);
+      return settled("no-browser", "account_mismatch", input);
     case "cookie_clear_failed":
       return settled("busy", "profile_unverifiable", input);
+    case "run_failed":
+      return settled("no-browser", "run_failed", input);
   }
 }
 
@@ -309,11 +323,21 @@ export function snapshotConnectHolder(profileDir: string): ConnectHolder {
   // A lock whose pid is gone is what `reapLeakedProfileHolder` exists to
   // clear; reporting it as a live holder is the opposite answer.
   if (lock.stale) return { kind: "none" };
-  if (lock.pid === process.pid) return { kind: "self", code: "this_process", pid: lock.pid };
   return { kind: "other", code: "singleton_lock", pid: lock.pid };
 }
 
+let reported = false;
+
+// A connect run reports once, on whichever terminal path it reaches. The
+// caller's contract is `JSON.parse(stdout)`, so the run's outermost handler
+// can report unconditionally without risking a second object on the stream.
+export function beginConnectRun(): void {
+  reported = false;
+}
+
 export function emitConnectReport(report: ConnectReport, json: boolean | undefined): void {
+  if (reported) return;
+  reported = true;
   if (json !== true) return;
   process.stdout.write(`${JSON.stringify(report)}\n`);
 }

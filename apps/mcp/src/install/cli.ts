@@ -77,6 +77,7 @@ import chalk from "chalk";
 import { confirm, isCancel } from "@clack/prompts";
 import {
   alreadyConnectedMessage,
+  beginConnectRun,
   buildConnectReport,
   connectIncompleteMessage,
   decideConnectComplete,
@@ -368,27 +369,32 @@ function resolveCopiedNpxServerLaunch(binPath: string): { command: string; args:
 export async function runCli(argv: string[]): Promise<void> {
   const args = parseArgs(argv);
   loadHarvesterEnvFile();
-  switch (args.command) {
-    case "connect":
-      // `npx …/mcp connect` reuses a stale local copy instead of fetching the
-      // latest, and connect then pins the host config to that stale version.
-      // Re-exec on the current release first so the one-liner alone lands it.
-      await ensureLatestVersion(argv);
-      await connect(args);
-      return;
-    case "logout":
-      await logout(args);
-      return;
-    case "settings":
-      await settings(args);
-      return;
-    case "help":
-      printHelp();
-      return;
-    default:
-      console.error(`unknown command: ${args.command}`);
-      printHelp();
-      process.exit(64);
+  try {
+    switch (args.command) {
+      case "connect":
+        // `npx …/mcp connect` reuses a stale local copy instead of fetching the
+        // latest, and connect then pins the host config to that stale version.
+        // Re-exec on the current release first so the one-liner alone lands it.
+        await ensureLatestVersion(argv);
+        await connect(args);
+        return;
+      case "logout":
+        await logout(args);
+        return;
+      case "settings":
+        await settings(args);
+        return;
+      case "help":
+        printHelp();
+        return;
+      default:
+        console.error(`unknown command: ${args.command}`);
+        printHelp();
+        process.exit(64);
+    }
+  } catch (err) {
+    if (err instanceof TargetUnresolvedError) process.exit(2);
+    throw err;
   }
 }
 
@@ -486,10 +492,16 @@ async function settings(args: Argv): Promise<void> {
 }
 
 async function connect(args: Argv): Promise<void> {
-  const { target, agent, wantInteractive } = await prepareConnect(args);
-  const context = await resolveConnectTargetContext(target, agent);
-  const canonicalProfileDir = profilePathIdentity(context.profileDir);
+  beginConnectRun();
+  // Every exit path reports, including one that fails before a target or a
+  // profile is resolved. `emitConnectReport` drops the second object, so this
+  // is a floor under the stream rather than an extra report.
+  let reportProfileDir = CHROME_PROFILE_DIR;
   try {
+    const { target, agent, wantInteractive } = await prepareConnect(args);
+    const context = await resolveConnectTargetContext(target, agent);
+    const canonicalProfileDir = profilePathIdentity(context.profileDir);
+    reportProfileDir = canonicalProfileDir;
     await withConnectTargetEnvironment(
       {
         profileDir: canonicalProfileDir,
@@ -532,12 +544,17 @@ async function connect(args: Argv): Promise<void> {
     if (err instanceof ProfileBusyError) {
       emitConnectStatus(args, {
         outcome: { kind: "profile_busy" },
-        profileDir: canonicalProfileDir,
+        profileDir: reportProfileDir,
         browser_location: { kind: "none" },
       });
       ui.fail(PROFILE_BUSY_MESSAGE);
       process.exit(1);
     }
+    emitConnectStatus(args, {
+      outcome: { kind: "run_failed" },
+      profileDir: reportProfileDir,
+      browser_location: { kind: "none" },
+    });
     throw err;
   }
 }
@@ -867,7 +884,7 @@ async function runConnectInstall(
   });
   if (claim.kind === "confirm_failed") {
     emitConnectStatus(args, {
-      outcome: { kind: "browser_confirm_failed" },
+      outcome: { kind: "install_unclaimed", confirm_url: claim.confirm_url },
       profileDir,
       browser_location: claim.browser_location,
     });
@@ -895,7 +912,7 @@ async function runConnectInstall(
     emitConnectStatus(args, {
       outcome: { kind: "account_switch_refused" },
       profileDir,
-      browser_location: { kind: "none" },
+      browser_location: claim.browser_location,
     });
     ui.fail(
       `The scoped ${args.forceReloginProvider} refresh returned a different Trusty Squire account. ` +
@@ -1243,7 +1260,12 @@ export function claimHeartbeatMessage(claimed: boolean): string {
 type InstallClaimResult =
   | { kind: "claimed"; session: SessionData; browser_location: ConnectBrowserLocation }
   | { kind: "unclaimed"; confirm_url: string; browser_location: ConnectBrowserLocation }
-  | { kind: "confirm_failed"; detail: string; browser_location: ConnectBrowserLocation };
+  | {
+      kind: "confirm_failed";
+      detail: string;
+      confirm_url: string;
+      browser_location: ConnectBrowserLocation;
+    };
 
 async function runInstallClaim(
   apiBase: string,
@@ -1377,6 +1399,7 @@ async function runInstallClaim(
     return {
       kind: "confirm_failed",
       detail: result.detail ?? "unknown error",
+      confirm_url: initiate.confirm_url,
       browser_location,
     };
   }
@@ -1416,6 +1439,10 @@ export function applyInstallPreferences(
   };
 }
 
+// Thrown rather than exited so connect still reports before the process ends;
+// `runCli` keeps the exit code the guidance above has always used.
+class TargetUnresolvedError extends Error {}
+
 async function resolveTarget(explicit: AgentTarget | undefined): Promise<AgentTarget> {
   if (explicit !== undefined) return explicit;
   const detected = await detectInstalledAgents();
@@ -1426,13 +1453,13 @@ async function resolveTarget(explicit: AgentTarget | undefined): Promise<AgentTa
   if (detected.length > 1) {
     console.error("Multiple agents detected. Please pass --target=<agent>:");
     for (const a of detected) console.error(`  --target=${a.target}  (${a.display_name})`);
-    process.exit(2);
+    throw new TargetUnresolvedError("multiple agents detected");
   }
   console.error("No coding agents auto-detected. Pass --target= explicitly:");
   for (const a of Object.values(AGENTS)) {
     console.error(`  --target=${a.target}  (${a.display_name})`);
   }
-  process.exit(2);
+  throw new TargetUnresolvedError("no coding agents auto-detected");
 }
 
 // Logs out ONE account — the one most recently connected, or `--account=<id>`.

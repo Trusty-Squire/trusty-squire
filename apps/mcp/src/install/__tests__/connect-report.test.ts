@@ -105,6 +105,67 @@ describe("buildConnectReport", () => {
     expect(report.browser_location).toEqual({ kind: "none" });
   });
 
+  // A browser that opened on the user's screen and was then closed is not
+  // "no browser": the pairing token is still pending, so the run still holds
+  // the one URL that finishes the job.
+  it("calls a closed-or-abandoned ceremony a sign-in, not a missing browser", () => {
+    const url = "https://trustysquire.ai/install?token=closed";
+    const report = classify({
+      outcome: { kind: "install_unclaimed", confirm_url: url },
+      browser_location: { kind: "host_screen", display: ":0" },
+    });
+    expect(report.state).toBe("needs-sign-in");
+    expect(report.sign_in_url).toBe(url);
+    expect(report.browser_location).toEqual({ kind: "host_screen", display: ":0" });
+  });
+
+  it("calls a ceremony nothing could show a missing browser, URL still in hand", () => {
+    const url = "https://trustysquire.ai/install?token=unreachable";
+    const report = classify({
+      outcome: { kind: "install_unclaimed", confirm_url: url },
+      browser_location: { kind: "unreachable", reason: "no discoverable display" },
+    });
+    expect(report.state).toBe("no-browser");
+    expect(report.sign_in_url).toBe(url);
+  });
+
+  // The central promise: a caller never meets needs-sign-in with nowhere to go.
+  it("never reports needs-sign-in without the URL, for any outcome", () => {
+    const outcomes: ConnectReportInput["outcome"][] = [
+      { kind: "provisioned", account_id: "a", providers: ["google"] },
+      { kind: "unverified" },
+      { kind: "ceremony_complete", account_id: "a", providers: null, skip_browser: false },
+      { kind: "ceremony_complete", account_id: "a", providers: [], skip_browser: false },
+      { kind: "ceremony_complete", account_id: "a", providers: [], skip_browser: true },
+      {
+        kind: "ceremony_complete",
+        account_id: "a",
+        providers: ["google"],
+        requested_provider: "github",
+        skip_browser: false,
+      },
+      { kind: "profile_busy" },
+      { kind: "install_unclaimed", confirm_url: "https://example.test/in" },
+      { kind: "account_switch_refused" },
+      { kind: "cookie_clear_failed" },
+      { kind: "run_failed" },
+    ];
+    for (const outcome of outcomes) {
+      for (const browser_location of [
+        noBrowser,
+        { kind: "host_screen" as const, display: ":0" },
+        { kind: "unreachable" as const, reason: "nothing to show it on" },
+      ]) {
+        const report = classify({ outcome, browser_location });
+        if (report.state === "needs-sign-in") {
+          expect(typeof report.sign_in_url, `${outcome.kind}/${browser_location.kind}`).toBe(
+            "string",
+          );
+        }
+      }
+    }
+  });
+
   it("reports busy with a holder code, not a sentence", () => {
     const report = classify({ outcome: { kind: "profile_busy" }, holder: otherHolder });
     expect(report.state).toBe("busy");
@@ -126,17 +187,12 @@ describe("buildConnectReport", () => {
     }
   });
 
-  it("reports no-browser when Squire could not open the ceremony", () => {
-    const report = classify({
-      outcome: { kind: "browser_confirm_failed" },
-      browser_location: { kind: "unreachable", reason: "no discoverable display" },
-    });
+  it("reports a run that failed before it could settle as no-browser", () => {
+    const report = classify({ outcome: { kind: "run_failed" } });
     expect(report.state).toBe("no-browser");
-    expect(report.reason).toBeNull();
-    expect(report.browser_location).toEqual({
-      kind: "unreachable",
-      reason: "no discoverable display",
-    });
+    expect(report.reason).toBe("run_failed");
+    expect(report.sign_in_url).toBeNull();
+    expect(report.browser_location).toEqual({ kind: "none" });
   });
 
   it("maps skip-browser leftover with no Google session to no-browser", () => {
@@ -153,7 +209,9 @@ describe("buildConnectReport", () => {
     expect(report.account).toBeNull();
   });
 
-  it("maps a missing scoped provider to needs-sign-in", () => {
+  // Google is live and bound: the machine IS connected. Only the scoped
+  // refresh the run was asked for didn't land, and the reason says so.
+  it("keeps a machine connected when only the scoped provider refresh missed", () => {
     const report = classify({
       outcome: {
         kind: "ceremony_complete",
@@ -163,15 +221,20 @@ describe("buildConnectReport", () => {
         skip_browser: false,
       },
     });
-    expect(report.state).toBe("needs-sign-in");
+    expect(report.state).toBe("connected");
     expect(report.reason).toBe("requested_provider_missing");
-    expect(report.account).toBeNull();
+    expect(report.account).toEqual({ id: "acc_1", providers: ["google"] });
+    expect(report.sign_in_url).toBeNull();
   });
 
   it("names a refused account switch as its own reason", () => {
-    const report = classify({ outcome: { kind: "account_switch_refused" } });
-    expect(report.state).toBe("needs-sign-in");
+    const report = classify({
+      outcome: { kind: "account_switch_refused" },
+      browser_location: { kind: "host_screen", display: ":0" },
+    });
+    expect(report.state).toBe("no-browser");
     expect(report.reason).toBe("account_mismatch");
+    expect(report.sign_in_url).toBeNull();
   });
 
   it("always emits the same six fields", () => {
@@ -181,10 +244,7 @@ describe("buildConnectReport", () => {
         outcome: { kind: "install_unclaimed", confirm_url: "https://example.test/in" },
       }),
       classify({ outcome: { kind: "profile_busy" }, holder: otherHolder }),
-      classify({
-        outcome: { kind: "browser_confirm_failed" },
-        browser_location: { kind: "unreachable", reason: "gone" },
-      }),
+      classify({ outcome: { kind: "run_failed" } }),
     ];
     for (const report of reports) {
       expect(Object.keys(report).sort()).toEqual(
@@ -221,14 +281,6 @@ describe("snapshotConnectHolder", () => {
     const dead = spawnSync(process.execPath, ["-e", ""]).pid;
     expect(dead).toBeGreaterThan(0);
     expect(snapshotConnectHolder(lockedProfile(dead!))).toEqual({ kind: "none" });
-  });
-
-  it("reports a live lock held by this process as self", () => {
-    expect(snapshotConnectHolder(lockedProfile(process.pid))).toEqual({
-      kind: "self",
-      code: "this_process",
-      pid: process.pid,
-    });
   });
 
   it("reports no holder when the profile carries no lock at all", () => {

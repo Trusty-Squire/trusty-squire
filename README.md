@@ -110,14 +110,20 @@ Callers that must not parse English can pass `--json`. Connect then writes **exa
 npx @trusty-squire/mcp connect --json --target=codex
 ```
 
+Every exit path reports, including a run that fails before it resolves a target, so the machine channel is never empty.
+
 The report carries six fields:
 
-- `state` — `connected` | `needs-sign-in` | `busy` | `no-browser`.
-- `sign_in_url` — the sign-in URL, set exactly when the run ended still holding a live one (a ceremony that timed out), otherwise `null`.
+- `state` — one of four:
+  - `connected` — the bot's Chrome holds a live Google session bound to your account. `account` is set.
+  - `needs-sign-in` — a sign-in is outstanding **and Squire holds its live URL**. `sign_in_url` is always a string here; this is the only state that promises one.
+  - `busy` — Squire could not read or use the bot profile to answer. `holder` says who has it.
+  - `no-browser` — no browser here is signed in the way this install needs: nothing could be shown the page, the sign-in happened outside Squire's browser, or the ceremony finished without the session the operator needs. `reason` says which.
+- `sign_in_url` — the one sign-in URL, or `null`. Always a string when `state` is `needs-sign-in`; a `no-browser` run may also carry one when the install is still open but nothing here could show it.
 - `account` — `{ id, providers }` when `state` is `connected`, otherwise `null`.
-- `holder` — who holds the bot profile: `{kind:"none"}`, `{kind:"self",code:"this_process",pid}`, `{kind:"other",code:"singleton_lock",pid}`, or `{kind:"unknown",reason:"cross_host"|"identity_unknown"}`. A lock left behind by a dead process is `none`, not a holder.
+- `holder` — who holds the bot profile: `{kind:"none"}`, `{kind:"other",code:"singleton_lock",pid}`, or `{kind:"unknown",reason:"cross_host"|"identity_unknown"}`. A lock left behind by a dead process is `none`, not a holder.
 - `browser_location` — where the ceremony browser actually opened, reported by the code that placed it: `{kind:"host_screen",display?}` (the screen you are at), `{kind:"virtual",display?}` (reachable only through the noVNC URL), `{kind:"unreachable",reason}`, `{kind:"none"}` (no browser was opened), or `{kind:"unknown",reason}`. Squire decides this; callers do not detect screens.
-- `reason` — only what the five fields above cannot say: `provider_session_missing`, `requested_provider_missing`, `account_mismatch`, `profile_unverifiable`. `null` otherwise.
+- `reason` — only what the five fields above cannot say: `provider_session_missing`, `requested_provider_missing`, `account_mismatch`, `profile_unverifiable`, `run_failed`. `null` otherwise.
 
 Supported targets: `claude-code`, `cursor`, `codex`, `opencode`, `goose`, `cline`, `continue`, and `hermes`.
 
