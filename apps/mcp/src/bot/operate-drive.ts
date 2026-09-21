@@ -37,9 +37,8 @@ import {
   type ProvisionAction,
 } from "./provision-session.js";
 import { resolveInboxSearch } from "./capture/verification.js";
-import { audit, sessionForCall } from "./session/lifecycle.js";
-import { registrableHost } from "./session/hosts.js";
-import { observedThreeDsChallenge, rememberCompactV2SourcePage } from "./observe/observe.js";
+import { sessionForCall } from "./session/lifecycle.js";
+import { observedThreeDsChallenge } from "./observe/observe.js";
 import { safeStageV2 } from "./compact-observation-v2.js";
 import {
   lastSelectOptions,
@@ -59,21 +58,25 @@ import {
   type DriveSnapshot,
 } from "./drive-snapshot.js";
 import { DriveEvaluateTimeout, evaluateBound } from "./drive-evaluate.js";
+import type { Frame } from "playwright";
 import type { BrowserController } from "./browser.js";
+import { dispatchDriveAct, type DriveActResult } from "./act/act.js";
 import { frameOriginOf } from "./browser-use-capture.js";
 import {
   documentEpochOf,
   documentOriginOf,
-  driveActOnPage,
-  driveTargetAccessibleName,
+  driveControlDigest,
   pageFingerprintOf,
   reenterDriveField,
-  resolveDriveFrame,
   settleDriveStep,
   waitForInPageChange,
   waitForNavigationIdle,
-  type DriveActResult,
 } from "./drive-act.js";
+import {
+  canonicalIndexForDriveRef,
+  rememberDriveIdentities,
+  resolveIdentityScope,
+} from "./act/identity.js";
 import { provisionElementRefs } from "./observe/refs.js";
 import {
   approvalItemWithNote,
@@ -341,7 +344,10 @@ export interface DriveDependencies {
   askJev: typeof askJev;
   act: typeof act;
   observe: typeof observe;
-  snapshot?: (sessionId: string, omitValueRefs?: readonly string[]) => Promise<Observation>;
+  // Fires once per completed drive snapshot. A test hooks the moment AFTER a
+  // capture; it cannot stand IN for one, because the rows and the identities
+  // their refs name have to come from the same capture.
+  onSnapshot?: () => Promise<void> | void;
   driveAct?: (sessionId: string, action: ProvisionAction) => Promise<DriveActResult>;
   startSession: typeof startProvisionSession;
   awaitVerification: typeof awaitVerification;
@@ -4558,9 +4564,6 @@ function takeActProfile(
   | "observe_ms"
   | "snapshot_script_ms"
   | "snapshot_wall_ms"
-  | "guard_script_ms"
-  | "guard_wall_ms"
-  | "cdp_ms"
   | "prepare_ms"
   | "dispatch_ms"
   | "jev_question_count"
@@ -4727,20 +4730,17 @@ export function paymentArgs(
 
 const DRIVE_REF_RE = /^@e:f\d+d\d+$/;
 
+/** Consecutive pre-act re-decides one decision may cost before the drive stops. */
+const DRIVE_PRE_ACT_REDECIDE_LIMIT = 2;
+
 /** Translate drive snapshot refs into canonical provision refs.
  *
- * Drive refs (`@e:f<frame>d<id>`) name nodes in each frame's in-page
- * `__tsDriveRegistry` — an identity space private to the drive loop. Every
- * canonical primitive (inject_card, operate_act, observe_subtree) resolves
- * refs through the provision-extraction identity, so a raw drive ref is
- * not_found/stale_ref there (review finding R3). This crosses the existing
- * canonical node/ref boundary instead of registering drive rows into the
- * canonical index: re-extract the page's interactive elements, locate each
- * drive node inside its own frame by node identity
- * (`querySelector(selector) === node`), and mint the canonical ref for the
- * matching element via provisionElementRefs. Refs that fail to translate are
- * omitted, so the primitive sees the original drive ref and reports
- * not_found honestly instead of a half-translated target.
+ * The two extractors name the same control differently — the canonical one
+ * prefers the `name` attribute where the drive reads an accessible name — so
+ * the bridge between them is the NODE, not a recomputed label: re-extract live
+ * interactive elements and ask the page which canonical selector resolves to
+ * the node the drive ref registered. Refs that fail to translate are omitted
+ * so the primitive reports not_found honestly.
  */
 async function canonicalDriveRefs(
   session: Session,
@@ -4753,7 +4753,6 @@ async function canonicalDriveRefs(
   if (driveRefs.length === 0) return translated;
   const page = session.browser.page;
   if (page === null) return translated;
-  // Test doubles for the browser controller may not implement extraction.
   if (typeof session.browser.extractInteractiveElements !== "function") return translated;
   let fresh: Awaited<ReturnType<BrowserController["extractInteractiveElements"]>>;
   try {
@@ -4765,13 +4764,17 @@ async function canonicalDriveRefs(
   const canonical = provisionElementRefs(fresh);
   for (const ref of driveRefs) {
     try {
-      // resolveDriveFrame falls back to the main frame for detached ordinals;
-      // the registry lookup then misses and the ref stays untranslated.
-      const frame = resolveDriveFrame(page, ref);
-      const frameUrl = frame.url();
-      const frameOrigin = frameOriginOf(frame);
+      const identity = session.drive?.identities?.get(ref);
+      if (identity === undefined) continue;
+      const scope = await resolveIdentityScope(page, ref, identity);
+      if (scope === null) continue;
+      const frameUrl = scope.url();
+      const frameOrigin = frameOriginOf(scope);
+      // Frame OBJECT identity, not just url+origin: two live instances of the
+      // same hosted-field iframe share both, and a candidate from the wrong one
+      // would mint a canonical ref that aims the PAN at the other frame.
       const candidates = fresh.flatMap((element, index) => {
-        let candidateFrame = page.mainFrame();
+        let candidateFrame: Frame = page.mainFrame();
         if (element.framePath != null) {
           for (const part of element.framePath.split("/")) {
             if (!/^\d+$/.test(part)) return [];
@@ -4781,34 +4784,14 @@ async function canonicalDriveRefs(
           }
         }
         const sameFrame =
-          candidateFrame === frame &&
+          candidateFrame === scope &&
           (element.frameUrl == null
-            ? frame === page.mainFrame()
+            ? scope === page.mainFrame()
             : element.frameUrl === frameUrl && element.frameOrigin === frameOrigin);
         return sameFrame ? [{ index, selector: element.selector }] : [];
       });
-      const index = await evaluateBound(
-        frame,
-        (input: {
-          ref: string;
-          candidates: Array<{ index: number; selector: string }>;
-        }): number => {
-          const registry = (
-            window as Window & { __tsDriveRegistry?: { nodes: Map<string, Element> } }
-          ).__tsDriveRegistry;
-          const node = registry?.nodes.get(input.ref);
-          if (node === undefined || !node.isConnected) return -1;
-          for (const candidate of input.candidates) {
-            try {
-              if (document.querySelector(candidate.selector) === node) return candidate.index;
-            } catch {
-              continue;
-            }
-          }
-          return -1;
-        },
-        { ref, candidates },
-      );
+      if (candidates.length === 0) continue;
+      const index = await evaluateBound(scope, canonicalIndexForDriveRef, { ref, candidates });
       const match = index >= 0 ? fresh[index] : undefined;
       const canonicalRef = match === undefined ? undefined : canonical.get(match);
       if (canonicalRef !== undefined) {
@@ -4903,7 +4886,7 @@ async function finalizeSnapshotOutputs(
   return maskSnapshotOutputs(session, next, rows);
 }
 
-async function snapshotDriveSession(
+async function captureDriveSession(
   session: Session,
   sessionId: string,
   drive: SessionDriveState,
@@ -4918,6 +4901,10 @@ async function snapshotDriveSession(
   timedOut: boolean;
 }> {
   const started = Date.now();
+  // The pre-act guard compares against these, and only the full path below can
+  // refresh them. Clearing first makes "unknown" distinguishable from "differs"
+  // on every fallback return, so a fallback cannot abandon the next decision.
+  drive.snapshotControlDigest = null;
   const timed = (
     observation: Observation,
     rows: WireRow[],
@@ -4932,18 +4919,27 @@ async function snapshotDriveSession(
     snapshotWallMs: wallMs,
     timedOut,
   });
-  if (deps.snapshot !== undefined) {
-    const observation = await deps.snapshot(sessionId, maskedRefsOf(drive));
-    const compactRows = mergeCompactTable([], observation);
-    const finalized = await finalizeSnapshotOutputs(session, sessionId, observation, compactRows);
-    return timed(finalized.observation, finalized.rows);
-  }
+  // A fallback return still has to leave the epoch describing the document the
+  // loop just accounted for. Left pointing at the previous one it reads as
+  // "changed" on every later step, and the pre-act bound then ends the drive
+  // over an act it never dispatched.
+  const fellBack = async (
+    observation: Observation,
+    rows: WireRow[],
+    scriptMs = 0,
+    wallMs = Date.now() - started,
+    timedOut = false,
+  ): Promise<ReturnType<typeof timed>> => {
+    const live = session.browser.page;
+    if (live !== null) drive.lastDocumentEpoch = await documentEpochOf(live);
+    return timed(observation, rows, scriptMs, wallMs, timedOut);
+  };
   const page = session.browser.page;
   if (page === null) {
     const observation = await deps.observe(sessionId, "compact");
     const compactRows = mergeCompactTable([], observation);
     const finalized = await finalizeSnapshotOutputs(session, sessionId, observation, compactRows);
-    return timed(finalized.observation, finalized.rows);
+    return await fellBack(finalized.observation, finalized.rows);
   }
   ensureFrameCacheInvalidation(session);
   const omit = maskedRefsOf(drive);
@@ -4953,7 +4949,7 @@ async function snapshotDriveSession(
     const observation = await deps.observe(sessionId, "compact");
     const compactRows = mergeCompactTable([], observation);
     const finalized = await finalizeSnapshotOutputs(session, sessionId, observation, compactRows);
-    return timed(finalized.observation, finalized.rows);
+    return await fellBack(finalized.observation, finalized.rows);
   }
   if (main.timedOut === true) {
     const finalized = await finalizeSnapshotOutputs(
@@ -4962,7 +4958,7 @@ async function snapshotDriveSession(
       snapshotToObservation(main, sessionId, []),
       [],
     );
-    return timed(finalized.observation, finalized.rows, 0, main.wallMs, true);
+    return await fellBack(finalized.observation, finalized.rows, 0, main.wallMs, true);
   }
   const parts: DriveSnapshot[] = [main];
   if (needFrames) {
@@ -4985,6 +4981,8 @@ async function snapshotDriveSession(
     driveFrameCache.set(session, cache);
   }
   const snapshot = mergeSnapshots(parts);
+  rememberDriveIdentities(drive, snapshot.elements, snapshot.url);
+  drive.snapshotControlDigest = await driveControlDigest(page);
   const rawRows = driveRowsFromSnapshot(snapshot);
   lastSelectOptions.set(session, snapshotSelectOptions(snapshot));
   const previousEpoch = drive.lastDocumentEpoch;
@@ -5033,6 +5031,18 @@ async function snapshotDriveSession(
   );
 }
 
+async function snapshotDriveSession(
+  session: Session,
+  sessionId: string,
+  drive: SessionDriveState,
+  deps: DriveDependencies,
+  needFrames: boolean,
+): Promise<Awaited<ReturnType<typeof captureDriveSession>>> {
+  const snap = await captureDriveSession(session, sessionId, drive, deps, needFrames);
+  if (deps.onSnapshot !== undefined) await deps.onSnapshot();
+  return snap;
+}
+
 function resolveResumeAnswer(
   answer: string,
   snapshotRows: readonly WireRow[],
@@ -5051,8 +5061,6 @@ function resolveResumeAnswer(
   return hit?.[0] ?? answer;
 }
 
-const DRIVE_OPENED_TAB_ADOPTION_GRACE_MS = 300;
-
 async function actDriveSafely(
   session: Session,
   sessionId: string,
@@ -5060,30 +5068,8 @@ async function actDriveSafely(
   deps: DriveDependencies,
 ): Promise<DriveActResult> {
   if (deps.driveAct !== undefined) return await deps.driveAct(sessionId, action);
-  const page = session.browser.page;
-  if (page === null) return { kind: "unsupported" };
-  // A CDP drive click can open a target=_blank tab. The direct click path
-  // below never armed the existing adoption lifecycle, so the next snapshot
-  // read the opener and the drive stalled in no_progress. Arm before the
-  // click and adopt after, exactly like the ordinary act path's
-  // adoptTabOpenedByClick — anything already queued belonged to an earlier
-  // action and is not this click's to follow.
-  const click = action.kind === "click";
-  if (click) session.browser.armOpenedTabAdoption();
-  const acted = await driveActOnPage(page, action);
-  if (click && acted.kind !== "unsupported") {
-    const url = await session.browser
-      .adoptOpenedTab(DRIVE_OPENED_TAB_ADOPTION_GRACE_MS)
-      .catch(() => null);
-    if (url !== null) {
-      const adopted = session.browser.activePage();
-      if (adopted !== null && session.compactV2Active) {
-        rememberCompactV2SourcePage(session, adopted);
-      }
-      audit(session.id, "new_tab_adopted", { host: registrableHost(url) });
-    }
-  }
-  return acted;
+  if (session.browser.page === null) return { kind: "unsupported" };
+  return await dispatchDriveAct(sessionId, action);
 }
 
 async function resolveOauthActTarget(sessionId: string, target: string): Promise<string> {
@@ -5092,9 +5078,7 @@ async function resolveOauthActTarget(sessionId: string, target: string): Promise
   const translated = await canonicalDriveRefs(session, [target]);
   const canonical = translated.get(target);
   if (canonical !== undefined) return canonical;
-  const page = session.browser.page;
-  if (page === null) return target;
-  return (await driveTargetAccessibleName(page, target)) ?? target;
+  return session.drive?.identities?.get(target)?.label ?? target;
 }
 
 async function actSafely(
@@ -5912,17 +5896,40 @@ async function driveLoop(input: {
     const decidedRow = findRow(rows, decision.actionKey, observation.url);
     const targetBinding =
       decidedRow === undefined ? "" : decisionTargetBinding(decidedRow, observation.url);
+    // Before acting, check the page against the snapshot the decision came
+    // from: unchanged, act; changed, re-snapshot and let the decider rule on
+    // the new page instead of executing a decision the model has outgrown.
+    // The signal is the document epoch plus the controls' own state — page text
+    // ticks on its own (countdown, live price) and would re-decide every step.
     if (session.browser.page !== null) {
       const liveEpoch = await documentEpochOf(session.browser.page);
-      if (
+      const liveControls = await driveControlDigest(session.browser.page);
+      const documentChanged =
         typeof drive.lastDocumentEpoch === "string" &&
         drive.lastDocumentEpoch.length > 0 &&
         liveEpoch.length > 0 &&
-        liveEpoch !== drive.lastDocumentEpoch
-      ) {
+        liveEpoch !== drive.lastDocumentEpoch;
+      const controlsChanged =
+        typeof drive.snapshotControlDigest === "string" &&
+        drive.snapshotControlDigest.length > 0 &&
+        liveControls.length > 0 &&
+        liveControls !== drive.snapshotControlDigest;
+      if (documentChanged || controlsChanged) {
+        // The re-decide bound below is what stops a page that never settles;
+        // holding the consumed key as well would let the stall detector end the
+        // drive over an action it never dispatched.
+        drive.consumedActionKey = null;
+        drive.preActRedecides = (drive.preActRedecides ?? 0) + 1;
+        if (drive.preActRedecides > DRIVE_PRE_ACT_REDECIDE_LIMIT) {
+          return finish("no_progress", {
+            reason: "the page kept changing between the snapshot and the act",
+          });
+        }
         const snap = await snapshotOrTimeout(framesIfNeeded());
         if (snap !== "ok") return snap;
+        return "continue";
       }
+      drive.preActRedecides = 0;
     }
     const liveRow = findRow(rows, decision.actionKey, observation.url);
     if (
@@ -6367,13 +6374,6 @@ async function driveLoop(input: {
         observe_ms: snap.snapshotMs,
         snapshot_script_ms: snap.snapshotScriptMs,
         snapshot_wall_ms: snap.snapshotWallMs,
-        ...(acted.kind === "ok"
-          ? {
-              guard_script_ms: acted.guardScriptMs,
-              guard_wall_ms: acted.guardWallMs,
-              cdp_ms: acted.cdpMs,
-            }
-          : {}),
       };
     }
     if (decision.action.kind === "type") {
@@ -6389,7 +6389,14 @@ async function driveLoop(input: {
       ) {
         const pageForRetry = session.browser.page;
         if (pageForRetry !== null) {
-          await reenterDriveField(pageForRetry, decision.actionKey, intended);
+          const identity = drive.identities?.get(decision.actionKey);
+          const scope =
+            identity === undefined
+              ? null
+              : await resolveIdentityScope(pageForRetry, decision.actionKey, identity);
+          if (identity !== undefined && scope !== null) {
+            await reenterDriveField(scope, identity.selector, intended);
+          }
           const retrySnap = await refreshSnapshot(framesIfNeeded());
           if (retrySnap.timedOut)
             return finish("evaluate_timeout", { reason: "in-page evaluate exceeded budget" });
@@ -7148,13 +7155,6 @@ async function driveLoop(input: {
       ...(priorProfile?.snapshot_wall_ms === undefined
         ? {}
         : { snapshot_wall_ms: priorProfile.snapshot_wall_ms }),
-      ...(priorProfile?.guard_script_ms === undefined
-        ? {}
-        : { guard_script_ms: priorProfile.guard_script_ms }),
-      ...(priorProfile?.guard_wall_ms === undefined
-        ? {}
-        : { guard_wall_ms: priorProfile.guard_wall_ms }),
-      ...(priorProfile?.cdp_ms === undefined ? {} : { cdp_ms: priorProfile.cdp_ms }),
       prepare_ms: prepareMs,
       dispatch_ms: Date.now() - dispatchStarted,
       jev_question_count: questionCount,

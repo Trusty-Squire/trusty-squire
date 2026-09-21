@@ -3,6 +3,7 @@
 // node registry keyed by our refs. Used only inside operate_drive.
 
 import type { Frame, Page } from "playwright";
+import { frameOriginOf } from "./browser-use-capture.js";
 import { DriveEvaluateTimeout, evaluateBound } from "./drive-evaluate.js";
 import type { Observation } from "./provision-session.js";
 
@@ -35,8 +36,16 @@ export interface DriveSnapshotElement {
   placeholder?: string;
   /** The control's HTML `name`, when it has one. */
   name?: string;
+  /** The `aria-label` ATTRIBUTE, not the resolved accessible name. */
+  ariaLabel?: string;
+  /** The label is the full accessible name, so an act-time read can match it. */
+  labelComparable?: boolean;
   /** The input `type` (`email`, `text`, …), when the node is an input. */
   inputType?: string;
+  /** Live CSS/Playwright selector for the node, used to re-resolve identity. */
+  selector?: string;
+  frameUrl?: string;
+  frameOrigin?: string;
   /** Resolved href for a link, used to prefer in-app paths over docs. */
   href?: string;
   pattern?: string;
@@ -301,10 +310,13 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
   const deadline = scriptStarted + arg.budgetMs;
   const expired = (): boolean => performance.now() >= deadline;
   if (document.body === null) return null;
+  type ControlDescription = { role: string; label: string; href: string };
   type DriveCache = {
     ids: WeakMap<Element, number>;
     nodes: Map<string, Element>;
     next: number;
+    describe?: (element: Element) => ControlDescription | null;
+    rowDigest?: () => string;
   };
   const root = window as Window & { __tsDriveRegistry?: DriveCache };
   const cache: DriveCache = root.__tsDriveRegistry ?? {
@@ -345,9 +357,16 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
     return style.display !== "none" && style.visibility !== "hidden" && style.opacity !== "0";
   };
   let nameVisits = 0;
+  let nameDeadline = deadline;
   const name = (element: Element | null, seen = new Set<Element>()): string => {
-    if (element === null || seen.has(element) || nameVisits >= arg.maxNameVisits || expired())
+    if (
+      element === null ||
+      seen.has(element) ||
+      nameVisits >= arg.maxNameVisits ||
+      performance.now() >= nameDeadline
+    ) {
       return "";
+    }
     nameVisits += 1;
     seen.add(element);
     const labelledBy = (element.getAttribute("aria-labelledby") ?? "")
@@ -445,6 +464,102 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
     }
     return null;
   };
+  const disabledOf = (element: Element): boolean =>
+    element.matches(":disabled") ||
+    element.closest('[aria-disabled="true"]') !== null ||
+    element.getAttribute("aria-disabled") === "true";
+  const checkedOf = (element: Element): boolean | undefined =>
+    element instanceof HTMLInputElement && ["checkbox", "radio"].includes(element.type)
+      ? element.checked
+      : element.getAttribute("aria-checked") === "true"
+        ? true
+        : element.getAttribute("aria-checked") === "false"
+          ? false
+          : undefined;
+  // The pre-act change signal: the controls the snapshot actually rowed, by
+  // identity and actionability. Not their values (a countdown, a token refresh
+  // or an input mask reformatting churns those), and not every input in the
+  // document (an invisible one mounting during the model call would cost a
+  // step). Registered here so the act-time read is this same derivation.
+  cache.rowDigest = (): string => {
+    const parts: string[] = [];
+    for (const [ref, element] of cache.nodes) {
+      if (!element.isConnected) continue;
+      const role = roleOf(element);
+      if (role === null) continue;
+      parts.push(`${ref}:${role}:${disabledOf(element)}:${checkedOf(element) ?? ""}`);
+    }
+    return parts.sort().join("\n");
+  };
+  // The label an act-time check can reproduce: the accessible name under a
+  // budget it can re-arm. `truncated` says the walk ran out mid-element, so the
+  // recorded spelling is a prefix nothing can derive again.
+  const accessibleName = (
+    element: Element,
+    role: string,
+  ): { label: string; truncated: boolean } => {
+    const derived = name(element);
+    return {
+      label: derived || role,
+      truncated: nameVisits >= arg.maxNameVisits || performance.now() >= nameDeadline,
+    };
+  };
+  // Act-time identity reads the control back through the SAME derivation, with
+  // the name budget re-armed, so a node React mutated in place cannot pass as
+  // the control the decision named.
+  cache.describe = (element: Element): { role: string; label: string; href: string } | null => {
+    const role = roleOf(element);
+    if (role === null) return null;
+    nameVisits = 0;
+    nameDeadline = performance.now() + 250;
+    return {
+      role,
+      label: name(element) || role,
+      href: element instanceof HTMLAnchorElement && element.href.length > 0 ? element.href : "",
+    };
+  };
+  const selectorFor = (node: Element): string => {
+    const namesOnlyThisNode = (candidate: string): boolean => {
+      try {
+        const found = document.querySelectorAll(candidate);
+        return found.length === 1 && found[0] === node;
+      } catch {
+        return false;
+      }
+    };
+    const quoted = (value: string): string => value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+    const tag = node.tagName.toLowerCase();
+    for (const attr of ["data-testid", "data-test-id", "data-test", "data-cy", "data-qa"]) {
+      const value = node.getAttribute(attr);
+      if (value === null || value.length === 0) continue;
+      const candidate = `[${attr}="${quoted(value)}"]`;
+      if (namesOnlyThisNode(candidate)) return candidate;
+    }
+    const id = node.getAttribute("id");
+    if (id !== null && /^[A-Za-z][\w-]*$/.test(id) && namesOnlyThisNode(`#${id}`)) return `#${id}`;
+    const name = node.getAttribute("name");
+    if (name !== null && name.length > 0) {
+      const candidate = `${tag}[name="${quoted(name)}"]`;
+      if (namesOnlyThisNode(candidate)) return candidate;
+    }
+    const parts: string[] = [];
+    let walk: Element | null = node;
+    while (walk !== null) {
+      const cur: Element = walk;
+      const t = cur.tagName.toLowerCase();
+      const parent: Element | null = cur.parentElement;
+      if (parent === null) {
+        parts.unshift(t);
+        break;
+      }
+      const sibs = Array.from(parent.children).filter(
+        (child): child is Element => child.tagName === cur.tagName,
+      );
+      parts.unshift(sibs.length > 1 ? `${t}:nth-of-type(${sibs.indexOf(cur) + 1})` : t);
+      walk = parent;
+    }
+    return parts.join(" > ");
+  };
   const formIds = new WeakMap<Element, number>();
   let nextForm = 1;
   const formIdOf = (element: Element): number | undefined => {
@@ -493,27 +608,19 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
       ) !== null;
     if (!inViewport && !keepOffscreen && !pinned) continue;
     const ref = identity(element);
-    const label =
-      !inViewport && !keepOffscreen
-        ? element.getAttribute("aria-label")?.trim() || role
-        : name(element) || role;
-    const disabled =
-      element.matches(":disabled") ||
-      element.closest('[aria-disabled="true"]') !== null ||
-      element.getAttribute("aria-disabled") === "true";
+    // Offscreen and unkept: the cheap aria-label spelling, which depends on the
+    // viewport at this instant and so is not comparable later.
+    const offscreenLabel = !inViewport && !keepOffscreen;
+    const named = offscreenLabel ? null : accessibleName(element, role);
+    const label = named === null ? element.getAttribute("aria-label")?.trim() || role : named.label;
+    const labelComparable = named !== null && !named.truncated;
+    const disabled = disabledOf(element);
     const required =
       (element instanceof HTMLInputElement ||
         element instanceof HTMLTextAreaElement ||
         element instanceof HTMLSelectElement) &&
       element.required;
-    const checked =
-      element instanceof HTMLInputElement && ["checkbox", "radio"].includes(element.type)
-        ? element.checked
-        : element.getAttribute("aria-checked") === "true"
-          ? true
-          : element.getAttribute("aria-checked") === "false"
-            ? false
-            : undefined;
+    const checked = checkedOf(element);
     const selected =
       element.getAttribute("aria-selected") === "true"
         ? true
@@ -573,6 +680,7 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
     const href =
       element instanceof HTMLAnchorElement && element.href.length > 0 ? element.href : "";
     const placeholder = element.getAttribute("placeholder")?.trim() ?? "";
+    const ariaLabel = element.getAttribute("aria-label")?.trim() ?? "";
     const inputName =
       element instanceof HTMLInputElement ||
       element instanceof HTMLTextAreaElement ||
@@ -603,6 +711,7 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
       label,
       operations,
       frameOrdinal,
+      selector: selectorFor(element),
       ...(value === undefined ? {} : { value }),
       ...(checked === undefined ? {} : { checked }),
       ...(selected === undefined ? {} : { selected }),
@@ -613,6 +722,8 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
       ...(picker ? { picker: true } : {}),
       ...(width === undefined ? {} : { width }),
       ...(placeholder.length > 0 ? { placeholder } : {}),
+      ...(ariaLabel.length > 0 ? { ariaLabel } : {}),
+      ...(labelComparable ? { labelComparable: true } : {}),
       ...(href.length > 0 ? { href } : {}),
       ...(inputName.length > 0 ? { name: inputName } : {}),
       ...(inputType.length > 0 ? { inputType } : {}),
@@ -818,7 +929,17 @@ export async function captureFrameSnapshot(
     });
     const wallMs = Date.now() - wallStarted;
     if (raw === null) return null;
-    return { ...raw, wallMs };
+    const frameUrl = target.url();
+    const frameOrigin = frameOriginOf(target);
+    return {
+      ...raw,
+      wallMs,
+      elements: raw.elements.map((element) => ({
+        ...element,
+        frameUrl,
+        frameOrigin,
+      })),
+    };
   } catch (error) {
     if (!(error instanceof DriveEvaluateTimeout)) return null;
     return {

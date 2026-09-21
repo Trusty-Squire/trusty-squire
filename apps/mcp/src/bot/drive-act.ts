@@ -1,331 +1,19 @@
-// Drive-loop act: registry lookup + occlusion guard, then a Playwright
-// locator click/type (actionability) unless the target is a cross-origin
-// OOPIF the locator cannot reach — that case keeps CDP coordinates.
+// Drive-loop settle and page-change helpers. Click/type/select dispatch lives
+// in the shared executor (`dispatchDriveAct` / `executeAct`).
 
-import type { ElementHandle, Frame, Page } from "playwright";
+import type { Frame, Page } from "playwright";
 import { evaluateBound } from "./drive-evaluate.js";
-import type { ProvisionAction } from "./provision-session.js";
 
 export const DRIVE_SETTLE_MS = 50;
 export const DRIVE_COMBOBOX_WAIT_MS = 400;
-export const DRIVE_OVERLAY_REFRESH_WAIT_MS = 2000;
+const OVERLAY_REFRESH_WAIT_MS = 2000;
 export const DRIVE_NAVIGATION_WAIT_MS = 300;
 export const DRIVE_IN_PAGE_SETTLE_MS = 800;
-
-export type DriveActTimings = {
-  guardScriptMs: number;
-  guardWallMs: number;
-  cdpMs: number;
-};
-
-export type DriveActResult =
-  | ({ kind: "ok"; combobox: boolean; searchSubmit: boolean } & DriveActTimings)
-  | ({ kind: "stale"; reason: string } & DriveActTimings)
-  | { kind: "unsupported" };
-
-const ZERO_ACT_TIMINGS: DriveActTimings = { guardScriptMs: 0, guardWallMs: 0, cdpMs: 0 };
-
-interface GuardOk {
-  ok: true;
-  x: number;
-  y: number;
-  /** The frameElement walk reached window.top (no cross-origin boundary). */
-  reachedTop: boolean;
-  combobox: boolean;
-  searchSubmit: boolean;
-  scriptMs: number;
-}
-
-interface GuardFail {
-  ok: false;
-  reason: string;
-  scriptMs: number;
-}
-
-type GuardResult = GuardOk | GuardFail;
-
-function frameOrdinalOf(ref: string): number {
-  const match = /^@e:f(\d+)d\d+$/.exec(ref);
-  return match === null ? 0 : Number(match[1]);
-}
-
-export function resolveDriveFrame(page: Page, ref: string): Frame {
-  const ordinal = frameOrdinalOf(ref);
-  const frames = page.frames();
-  return frames[ordinal] ?? page.mainFrame();
-}
-
-/** CDP coordinates are only for a cross-origin child frame a locator cannot reach. */
-export function drivePointerUsesCdp(reachedTop: boolean, frameIsMain: boolean): boolean {
-  return !reachedTop && !frameIsMain;
-}
-
-const LOCATOR_ACT_TIMEOUT_MS = 5000;
-
-export async function driveTargetAccessibleName(
-  page: Page,
-  ref: string,
-): Promise<string | undefined> {
-  const frame = resolveDriveFrame(page, ref);
-  const element = await resolveDriveElement(frame, ref);
-  if (element === null) return undefined;
-  try {
-    const name = await element.evaluate((node) => {
-      if (!(node instanceof HTMLElement)) return "";
-      const labelled = node.getAttribute("aria-label");
-      if (labelled !== null && labelled.trim().length > 0) return labelled.trim();
-      return (node.innerText || node.textContent || "").replace(/\s+/g, " ").trim();
-    });
-    return name.length > 0 ? name : undefined;
-  } catch {
-    return undefined;
-  } finally {
-    await element.dispose().catch(() => undefined);
-  }
-}
-
-async function resolveDriveElement(
-  frame: Frame,
-  ref: string,
-): Promise<ElementHandle<Element> | null> {
-  const handle = await frame.evaluateHandle(
-    (input: { ref: string }) => {
-      type DriveCache = { nodes: Map<string, Element> };
-      const root = window as Window & { __tsDriveRegistry?: DriveCache };
-      return root.__tsDriveRegistry?.nodes.get(input.ref) ?? null;
-    },
-    { ref },
-  );
-  const element = handle.asElement();
-  if (element === null) {
-    await handle.dispose().catch(() => undefined);
-    return null;
-  }
-  return element;
-}
-
-async function clickDriveElement(frame: Frame, ref: string): Promise<boolean> {
-  const element = await resolveDriveElement(frame, ref);
-  if (element === null) return false;
-  try {
-    await element.scrollIntoViewIfNeeded().catch(() => undefined);
-    await element.click({ timeout: LOCATOR_ACT_TIMEOUT_MS });
-    return true;
-  } catch {
-    return false;
-  } finally {
-    await element.dispose().catch(() => undefined);
-  }
-}
-
-export async function reenterDriveField(
-  page: Page,
-  ref: string,
-  text: string,
-): Promise<boolean> {
-  const frame = resolveDriveFrame(page, ref);
-  const element = await resolveDriveElement(frame, ref);
-  if (element === null) return false;
-  try {
-    await element.scrollIntoViewIfNeeded().catch(() => undefined);
-    await element.click({ timeout: LOCATOR_ACT_TIMEOUT_MS });
-    return await element.evaluate((node, value) => {
-      if (!(node instanceof HTMLInputElement) && !(node instanceof HTMLTextAreaElement)) {
-        return false;
-      }
-      node.focus();
-      node.select();
-      node.value = value;
-      node.dispatchEvent(
-        new InputEvent("input", { bubbles: true, inputType: "insertReplacementText", data: value }),
-      );
-      node.dispatchEvent(new Event("change", { bubbles: true }));
-      return node.value === value;
-    }, text);
-  } catch {
-    return false;
-  } finally {
-    await element.dispose().catch(() => undefined);
-  }
-}
-
-async function typeDriveElement(frame: Frame, ref: string, text: string): Promise<boolean> {
-  const element = await resolveDriveElement(frame, ref);
-  if (element === null) return false;
-  try {
-    await element.scrollIntoViewIfNeeded().catch(() => undefined);
-    await element.click({ timeout: LOCATOR_ACT_TIMEOUT_MS });
-    const isField = await element.evaluate(
-      (node) => node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement,
-    );
-    if (!isField) return false;
-    await element.fill("");
-    await element.type(text, { delay: 20 });
-    return true;
-  } catch {
-    return false;
-  } finally {
-    await element.dispose().catch(() => undefined);
-  }
-}
-
-function inPageGuard(input: {
-  ref: string;
-  kind: "click" | "type" | "select";
-  text?: string;
-}): GuardResult {
-  const scriptStarted = performance.now();
-  const timed = <T extends Omit<GuardResult, "scriptMs">>(result: T): T & { scriptMs: number } => ({
-    ...result,
-    scriptMs: performance.now() - scriptStarted,
-  });
-  type DriveCache = { nodes: Map<string, Element> };
-  const root = window as Window & { __tsDriveRegistry?: DriveCache };
-  const element = root.__tsDriveRegistry?.nodes.get(input.ref);
-  if (element === undefined || !element.isConnected) {
-    return timed({ ok: false, reason: "detached" });
-  }
-  // The snapshot keeps offscreen fillables so the model can name them. The
-  // CDP click/type path then uses viewport coordinates, so an offscreen
-  // target used to fail the occlusion check and burn the attempt. Scroll
-  // first — the same thing a person does — then measure.
-  const before = element.getBoundingClientRect();
-  const inView =
-    before.width > 0 &&
-    before.height > 0 &&
-    before.bottom > 0 &&
-    before.top < innerHeight &&
-    before.right > 0 &&
-    before.left < innerWidth;
-  if (!inView) {
-    // "instant" is load-bearing: the default honours the page's CSS
-    // scroll-behavior, and a storefront that sets `smooth` animates the scroll
-    // asynchronously, so the rect below would still be the pre-scroll one and
-    // the occlusion check would burn the attempt this scroll exists to save.
-    element.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
-  }
-  const rect = element.getBoundingClientRect();
-  if (rect.width <= 0 || rect.height <= 0) {
-    return timed({ ok: false, reason: "no_box" });
-  }
-  let x = rect.x + rect.width / 2;
-  let y = rect.y + rect.height / 2;
-  // Ascend same-origin ancestor frames, accumulating their offsets. A
-  // cross-origin (OOPIF) boundary stops the walk — the child window reports
-  // no frameElement across it — so report reachedTop=false and let the host
-  // add the remaining offset from the frame's own <iframe> element.
-  let reachedTop = false;
-  try {
-    let view: Window | null = element.ownerDocument.defaultView;
-    let frameEl = view?.frameElement ?? null;
-    while (frameEl instanceof Element) {
-      const frameRect = frameEl.getBoundingClientRect();
-      x += frameRect.x;
-      y += frameRect.y;
-      view = frameEl.ownerDocument.defaultView;
-      frameEl = view?.frameElement ?? null;
-    }
-    reachedTop = view === window.top;
-  } catch {
-    reachedTop = false;
-  }
-  const hit = document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2);
-  if (hit === null || (hit !== element && !element.contains(hit) && !hit.contains(element))) {
-    return timed({ ok: false, reason: "occluded" });
-  }
-  const combobox =
-    element.getAttribute("role") === "combobox" ||
-    element.getAttribute("role") === "searchbox" ||
-    element.getAttribute("aria-haspopup") !== null ||
-    (element instanceof HTMLInputElement &&
-      (element.type === "search" ||
-        element.type === "date" ||
-        element.type === "datetime-local" ||
-        element.type === "month" ||
-        element.readOnly ||
-        element.getAttribute("aria-autocomplete") !== null));
-  const ariaLabel = element.getAttribute("aria-label") ?? "";
-  const placeholder = element instanceof HTMLInputElement ? element.placeholder : "";
-  const searchSubmit =
-    element.getAttribute("role") === "searchbox" ||
-    (element instanceof HTMLInputElement && (element.type === "search" || element.name === "q")) ||
-    /search/i.test(ariaLabel) ||
-    /search/i.test(placeholder);
-  if (input.kind === "select") {
-    if (!(element instanceof HTMLSelectElement)) {
-      return timed({ ok: false, reason: "not_select" });
-    }
-    const wanted = input.text ?? "";
-    const wantedLower = wanted.toLowerCase();
-    const options = Array.from(element.options);
-    // Match exactly first — by value, label, or trimmed visible text, then
-    // case-insensitively — before falling back to a partial substring. A
-    // substring "V" must not select "Visa" when the page offers an exact
-    // option named "V"; two-pass ordering keeps exact matches authoritative.
-    const match =
-      options.find(
-        (option) =>
-          option.value === wanted ||
-          option.label === wanted ||
-          (option.textContent ?? "").trim() === wanted,
-      ) ??
-      options.find(
-        (option) =>
-          option.value.toLowerCase() === wantedLower ||
-          option.label.toLowerCase() === wantedLower ||
-          (option.textContent ?? "").trim().toLowerCase() === wantedLower,
-      ) ??
-      options.find((option) =>
-        (option.textContent ?? "").trim().toLowerCase().includes(wantedLower),
-      );
-    if (match === undefined) return timed({ ok: false, reason: "option_missing" });
-    element.value = match.value;
-    element.dispatchEvent(new Event("input", { bubbles: true }));
-    element.dispatchEvent(new Event("change", { bubbles: true }));
-    return timed({ ok: true, x, y, reachedTop, combobox: false, searchSubmit: false });
-  }
-  // The type path does NOT focus or select here: the host clicks first, then
-  // runs selectAllInPage inside this frame. A guard-side focus races that
-  // click (and is dropped entirely when a cross-origin boundary separates
-  // them), leaving insertText to land in whatever element happens to hold
-  // focus.
-  return timed({ ok: true, x, y, reachedTop, combobox, searchSubmit });
-}
-
-/**
- * Focus the target and select its contents, after the host's click has
- * focused it. Runs inside the element's own frame so cross-origin fields are
- * reached directly; the registry lookup is repeated because the frame may
- * have re-rendered between the guard and this evaluate.
- */
-function selectAllInPage(input: { ref: string }): boolean {
-  type DriveCache = { nodes: Map<string, Element> };
-  const root = window as Window & { __tsDriveRegistry?: DriveCache };
-  const element = root.__tsDriveRegistry?.nodes.get(input.ref);
-  if (element === undefined || !element.isConnected) return false;
-  if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
-    element.focus();
-    element.select();
-    return true;
-  }
-  if (element instanceof HTMLElement) {
-    element.focus();
-    const doc = element.ownerDocument;
-    const selection = doc.getSelection();
-    if (selection === null) return false;
-    const range = doc.createRange();
-    range.selectNodeContents(element);
-    selection.removeAllRanges();
-    selection.addRange(range);
-    return true;
-  }
-  return false;
-}
 
 const OVERLAY_OPTION_SELECTOR =
   '[role="option"],[role="listbox"] a,[role="listbox"] [role="option"],.suggestions a,.suggestion-link,.suggestions-dropdown a,[aria-selected],[role="grid"] button,[role="grid"] [role="gridcell"],[role="gridcell"],[role="dialog"] [role="gridcell"],[role="dialog"] [role="grid"] button';
 
-async function waitForOpenedOverlay(page: Page): Promise<void> {
+export async function waitForOpenedOverlay(page: Page): Promise<void> {
   await evaluateBound(
     page,
     async (input) => {
@@ -350,10 +38,11 @@ async function waitForOpenedOverlay(page: Page): Promise<void> {
   );
 }
 
-async function overlayOptionLabels(page: Page): Promise<string[]> {
+/** Visible suggestion rows right now, as the baseline for a refresh wait. */
+export async function overlayOptionLabels(page: Page): Promise<string[]> {
   return evaluateBound(
     page,
-    (selector) => {
+    (selector: string) => {
       const visible = (node: Element): boolean => {
         if (node.closest('[aria-hidden="true"],[inert]') !== null) return false;
         if (typeof node.checkVisibility === "function") {
@@ -370,7 +59,13 @@ async function overlayOptionLabels(page: Page): Promise<string[]> {
   ).catch(() => [] as string[]);
 }
 
-async function waitForOverlayOptionsToChange(page: Page, before: string[]): Promise<void> {
+// Autocomplete keeps the pre-type rows until the network refresh (~110ms on
+// Flights). Returning at first option PRESENCE snapshots the stale set and the
+// model reads the previous city's suggestions.
+export async function waitForOverlayOptionsToChange(
+  page: Page,
+  before: readonly string[],
+): Promise<void> {
   await evaluateBound(
     page,
     async (input) => {
@@ -399,9 +94,12 @@ async function waitForOverlayOptionsToChange(page: Page, before: string[]): Prom
         await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
       }
     },
-    { selector: OVERLAY_OPTION_SELECTOR, before, cap: DRIVE_OVERLAY_REFRESH_WAIT_MS },
-  );
+    { selector: OVERLAY_OPTION_SELECTOR, before: [...before], cap: OVERLAY_REFRESH_WAIT_MS },
+  ).catch(() => undefined);
 }
+
+const LIST_FILTER_SELECTOR =
+  '[role="combobox"][aria-expanded="true"],[role="listbox"] input,input[aria-autocomplete="list"],input[aria-autocomplete="both"]';
 
 export function listOptionIdentity(
   role: string | null,
@@ -418,11 +116,8 @@ export function listOptionIdentity(
   return null;
 }
 
-const LIST_FILTER_SELECTOR =
-  '[role="combobox"][aria-expanded="true"],[role="listbox"] input,input[aria-autocomplete="list"],input[aria-autocomplete="both"]';
-
-async function listOwnerSignature(frame: Frame): Promise<string> {
-  return frame
+async function listOwnerSignature(scope: Page | Frame): Promise<string> {
+  return scope
     .evaluate(() => {
       const owners = Array.from(
         document.querySelectorAll(
@@ -460,30 +155,40 @@ async function typeIntoOpenFilter(page: Page, text: string): Promise<boolean> {
  * Coordinate clicks miss widgets that re-render the list before the pointer
  * lands. Some options are not real until the filter input receives an input
  * event; some listen for Enter on the highlighted item instead of click.
+ * Returns false when the target is not an option row, leaving the ordinary
+ * click dispatch to run.
  */
-async function clickDriveListOption(frame: Frame, ref: string): Promise<boolean> {
-  const info = await frame
-    .evaluate((input: { ref: string }) => {
-      type DriveCache = { nodes: Map<string, Element> };
-      const root = window as Window & { __tsDriveRegistry?: DriveCache };
-      const element = root.__tsDriveRegistry?.nodes.get(input.ref);
-      if (element === undefined || !element.isConnected) return null;
+export async function commitDriveListOption(
+  page: Page,
+  scope: Page | Frame,
+  selector: string,
+): Promise<boolean> {
+  if (selector.length === 0) return false;
+  const info = await scope
+    .evaluate((sel: string) => {
+      const element = document.querySelector(sel);
+      if (element === null || !element.isConnected) return null;
       const option = element.closest('[role="option"],[role="menuitem"]');
       const item = option ?? element;
-      const role = item.getAttribute("role");
-      const inListbox = item.closest('[role="listbox"]') !== null;
-      const inMenu = item.closest('[role="menu"]') !== null;
-      const text = (item.textContent ?? "").replace(/\s+/g, " ").trim();
-      return { role, inListbox, inMenu, text };
-    }, { ref })
+      return {
+        role: item.getAttribute("role"),
+        inListbox: item.closest('[role="listbox"]') !== null,
+        inMenu: item.closest('[role="menu"]') !== null,
+        text: (item.textContent ?? "").replace(/\s+/g, " ").trim(),
+      };
+    }, selector)
     .catch(() => null);
   if (info === null) return false;
   const identity = listOptionIdentity(info.role, info.inListbox, info.inMenu, info.text);
   if (identity === null) return false;
-  const page = frame.page();
-  const before = await listOwnerSignature(frame);
-  const option = page.getByRole(identity.role, { name: identity.text, exact: true }).first();
-  if ((await option.count().catch(() => 0)) === 0) {
+  const before = await listOwnerSignature(scope);
+  if (
+    (await page
+      .getByRole(identity.role, { name: identity.text, exact: true })
+      .first()
+      .count()
+      .catch(() => 0)) === 0
+  ) {
     await typeIntoOpenFilter(page, identity.text);
   }
   const target = page.getByRole(identity.role, { name: identity.text, exact: true }).first();
@@ -491,9 +196,9 @@ async function clickDriveListOption(frame: Frame, ref: string): Promise<boolean>
   try {
     await target.scrollIntoViewIfNeeded().catch(() => undefined);
     await target.click({ timeout: 5000 });
-    if ((await listOwnerSignature(frame)) !== before) return true;
+    if ((await listOwnerSignature(scope)) !== before) return true;
     await page.keyboard.press("Enter");
-    if ((await listOwnerSignature(frame)) !== before) return true;
+    if ((await listOwnerSignature(scope)) !== before) return true;
     if (await typeIntoOpenFilter(page, identity.text)) {
       await page.keyboard.press("Enter");
     }
@@ -503,182 +208,82 @@ async function clickDriveListOption(frame: Frame, ref: string): Promise<boolean>
   }
 }
 
-export async function driveActOnPage(page: Page, action: ProvisionAction): Promise<DriveActResult> {
-  if (action.kind === "scroll") {
-    const direction = action.direction ?? "down";
-    const wallStarted = Date.now();
-    try {
-      await evaluateBound(
-        page,
-        (dir) => {
-          const height = innerHeight;
-          if (dir === "down") scrollBy(0, Math.min(560, height));
-          else if (dir === "up") scrollBy(0, -Math.min(560, height));
-          else if (dir === "bottom") scrollTo(0, document.documentElement.scrollHeight);
-          else scrollTo(0, 0);
-        },
-        direction,
-      );
-    } catch {
-      return {
-        kind: "stale",
-        reason: "evaluate_timeout",
-        ...ZERO_ACT_TIMINGS,
-        guardWallMs: Date.now() - wallStarted,
-      };
-    }
-    return {
-      kind: "ok",
-      combobox: false,
-      searchSubmit: false,
-      ...ZERO_ACT_TIMINGS,
-      guardWallMs: Date.now() - wallStarted,
-    };
+/** CDP coordinates are only for a cross-origin child frame a locator cannot reach. */
+export function drivePointerUsesCdp(reachedTop: boolean, frameIsMain: boolean): boolean {
+  return !reachedTop && !frameIsMain;
+}
+
+// Viewport point for the target, plus whether the frameElement walk reached
+// window.top. A cross-origin boundary stops the walk — the child window reports
+// no frameElement across it — so the host adds the frame's own offset.
+function inPagePointerTarget(
+  selector: string,
+): { x: number; y: number; reachedTop: boolean } | null {
+  const element = document.querySelector(selector);
+  if (element === null) return null;
+  const before = element.getBoundingClientRect();
+  const inView =
+    before.width > 0 &&
+    before.height > 0 &&
+    before.bottom > 0 &&
+    before.top < innerHeight &&
+    before.right > 0 &&
+    before.left < innerWidth;
+  if (!inView) {
+    element.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
   }
-  if (action.kind === "oauth_login") {
-    const frame = resolveDriveFrame(page, action.target);
-    const guardStarted = Date.now();
-    try {
-      const guard = await evaluateBound(frame, inPageGuard, {
-        ref: action.target,
-        kind: "click",
-      });
-      if (!guard.ok) {
-        return {
-          kind: "stale",
-          reason: guard.reason,
-          ...ZERO_ACT_TIMINGS,
-          guardScriptMs: guard.scriptMs,
-          guardWallMs: Date.now() - guardStarted,
-        };
-      }
-    } catch {
-      return {
-        kind: "stale",
-        reason: "evaluate_timeout",
-        ...ZERO_ACT_TIMINGS,
-        guardWallMs: Date.now() - guardStarted,
-      };
-    }
-    return { kind: "unsupported" };
-  }
-  if (action.kind !== "click" && action.kind !== "type" && action.kind !== "select") {
-    return { kind: "unsupported" };
-  }
-  const frame = resolveDriveFrame(page, action.target);
-  const guardStarted = Date.now();
-  let guard: GuardResult;
+  const rect = element.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0) return null;
+  let x = rect.x + rect.width / 2;
+  let y = rect.y + rect.height / 2;
+  let reachedTop = false;
   try {
-    guard = await evaluateBound(frame, inPageGuard, {
-      ref: action.target,
-      kind: action.kind,
-      ...(action.kind === "select" || action.kind === "type" ? { text: action.text } : {}),
-    });
+    let view: Window | null = element.ownerDocument.defaultView;
+    let frameEl = view?.frameElement ?? null;
+    while (frameEl instanceof Element) {
+      const frameRect = frameEl.getBoundingClientRect();
+      x += frameRect.x;
+      y += frameRect.y;
+      view = frameEl.ownerDocument.defaultView;
+      frameEl = view?.frameElement ?? null;
+    }
+    reachedTop = view === window.top;
   } catch {
-    return {
-      kind: "stale",
-      reason: "evaluate_timeout",
-      ...ZERO_ACT_TIMINGS,
-      guardWallMs: Date.now() - guardStarted,
-    };
+    reachedTop = false;
   }
-  const timings: DriveActTimings = {
-    guardScriptMs: guard.scriptMs,
-    guardWallMs: Date.now() - guardStarted,
-    cdpMs: 0,
-  };
-  if (!guard.ok) return { kind: "stale", reason: guard.reason, ...timings };
-  if (action.kind === "select")
-    return { kind: "ok", combobox: false, searchSubmit: false, ...timings };
-  // Listbox/combobox options: fresh role locator, then Enter, then filter.
-  // Ordinary same-document clicks: Playwright actionability. CDP coordinates
-  // stay only for a cross-origin OOPIF the locator cannot reach.
-  if (action.kind === "click") {
-    const listClicked = await clickDriveListOption(frame, action.target);
-    if (listClicked) {
-      return {
-        kind: "ok",
-        combobox: guard.combobox,
-        searchSubmit: guard.searchSubmit,
-        ...timings,
-      };
-    }
-    if (!drivePointerUsesCdp(guard.reachedTop, frame === page.mainFrame())) {
-      const clicked = await clickDriveElement(frame, action.target);
-      if (!clicked) {
-        return { kind: "stale", reason: "locator_click_failed", ...timings };
-      }
-      return {
-        kind: "ok",
-        combobox: guard.combobox,
-        searchSubmit: guard.searchSubmit,
-        ...timings,
-      };
-    }
-  }
-  if (
-    action.kind === "type" &&
-    !guard.combobox &&
-    !drivePointerUsesCdp(guard.reachedTop, frame === page.mainFrame())
-  ) {
-    const typed = await typeDriveElement(frame, action.target, action.text ?? "");
-    if (typed) {
-      if (guard.searchSubmit) await page.keyboard.press("Enter").catch(() => undefined);
-      return {
-        kind: "ok",
-        combobox: guard.combobox,
-        searchSubmit: guard.searchSubmit,
-        ...timings,
-      };
-    }
-  }
-  // CDP mouse coordinates are main-viewport CSS px; the compositor routes
-  // hits into OOPIFs. When the in-page walk could not reach window.top (a
-  // cross-origin boundary), the guard's x/y are still relative to that
-  // frame's viewport — add the frame's own <iframe> position. Playwright's
-  // boundingBox already accumulates every ancestor frame offset, so a single
-  // hop is the complete correction and further chaining would double-count.
+  return { x, y, reachedTop };
+}
+
+/** Click a target in a cross-origin child frame by viewport coordinates.
+ *
+ * Returns false when the locator CAN reach the target (main frame, or the
+ * frameElement walk reached top), leaving the ordinary dispatch to run. CDP
+ * mouse coordinates are main-viewport CSS px and the compositor routes hits
+ * into OOPIFs; Playwright's boundingBox already accumulates every ancestor
+ * frame offset, so one hop is the complete correction.
+ */
+export async function clickCrossOriginFrameTarget(
+  page: Page,
+  scope: Page | Frame,
+  selector: string,
+): Promise<boolean> {
+  if (!("parentFrame" in scope) || scope === page.mainFrame()) return false;
+  const point = await evaluateBound(scope, inPagePointerTarget, selector).catch(() => null);
+  if (point === null || !drivePointerUsesCdp(point.reachedTop, false)) return false;
   let offsetX = 0;
   let offsetY = 0;
-  if (!guard.reachedTop && frame !== page.mainFrame()) {
-    const element = await frame.frameElement().catch(() => null);
-    if (element !== null) {
-      const box = await element.boundingBox().catch(() => null);
-      if (box !== null) {
-        offsetX = box.x;
-        offsetY = box.y;
-      }
+  const frameElement = await scope.frameElement().catch(() => null);
+  if (frameElement !== null) {
+    const box = await frameElement.boundingBox().catch(() => null);
+    if (box !== null) {
+      offsetX = box.x;
+      offsetY = box.y;
     }
   }
-  const x = guard.x + offsetX;
-  const y = guard.y + offsetY;
-  const context = page.context();
-  const cdpStarted = Date.now();
-  const cdp = await context.newCDPSession(page);
+  const x = point.x + offsetX;
+  const y = point.y + offsetY;
+  const cdp = await page.context().newCDPSession(page);
   try {
-    if (action.kind === "click") {
-      await cdp.send("Input.dispatchMouseEvent", {
-        type: "mousePressed",
-        x,
-        y,
-        button: "left",
-        clickCount: 1,
-      });
-      await cdp.send("Input.dispatchMouseEvent", {
-        type: "mouseReleased",
-        x,
-        y,
-        button: "left",
-        clickCount: 1,
-      });
-      return {
-        kind: "ok",
-        combobox: guard.combobox,
-        searchSubmit: guard.searchSubmit,
-        ...timings,
-        cdpMs: Date.now() - cdpStarted,
-      };
-    }
     await cdp.send("Input.dispatchMouseEvent", {
       type: "mousePressed",
       x,
@@ -693,78 +298,74 @@ export async function driveActOnPage(page: Page, action: ProvisionAction): Promi
       button: "left",
       clickCount: 1,
     });
-    // A picker click focuses the overlay input (Flights "Where else?").
-    // Refocusing the snapshot ref yanks that away and insertText writes
-    // behind the dialog. Match jev-ultrafast: wait for the overlay, then
-    // selectAll+insertText with no in-page focus. Plain fields still
-    // reselect the clicked ref so a detached target cannot type into a neighbor.
-    let overlayLabelsBeforeType: string[] = [];
-    if (guard.combobox) {
-      await waitForOpenedOverlay(page).catch(() => undefined);
-      overlayLabelsBeforeType = await overlayOptionLabels(page);
-    } else {
-      const selected = await evaluateBound(frame, selectAllInPage, { ref: action.target }).catch(
-        () => false,
-      );
-      if (!selected) {
-        return {
-          kind: "stale",
-          reason: "reselection_failed",
-          ...timings,
-          cdpMs: Date.now() - cdpStarted,
-        };
-      }
-    }
-    // Selection API select() / selectNodeContents does not replace a committed
-    // Flights city chip after another overlay has just closed. Issue the
-    // browser's own selectAll command (same as jev-ultrafast) so insertText
-    // overwrites whatever the click focused.
-    const modifier = process.platform === "darwin" ? 4 : 2;
-    await cdp.send("Input.dispatchKeyEvent", {
-      type: "keyDown",
-      key: "a",
-      code: "KeyA",
-      modifiers: modifier,
-      commands: ["selectAll"],
-    });
-    await cdp.send("Input.dispatchKeyEvent", {
-      type: "keyUp",
-      key: "a",
-      code: "KeyA",
-      modifiers: modifier,
-    });
-    await cdp.send("Input.insertText", { text: action.text });
-    // Autocomplete keeps the pre-type rows until the network refresh
-    // (~110ms on Flights). Returning at first option presence snapshots
-    // the stale set and the model BLOCKED.
-    if (guard.combobox) {
-      await waitForOverlayOptionsToChange(page, overlayLabelsBeforeType).catch(() => undefined);
-    }
-    if (guard.searchSubmit) {
-      await cdp.send("Input.dispatchKeyEvent", {
-        type: "keyDown",
-        key: "Enter",
-        code: "Enter",
-        windowsVirtualKeyCode: 13,
-        nativeVirtualKeyCode: 13,
-      });
-      await cdp.send("Input.dispatchKeyEvent", {
-        type: "keyUp",
-        key: "Enter",
-        code: "Enter",
-        windowsVirtualKeyCode: 13,
-        nativeVirtualKeyCode: 13,
-      });
-    }
-    return {
-      kind: "ok",
-      combobox: guard.combobox,
-      searchSubmit: guard.searchSubmit,
-      ...timings,
-      cdpMs: Date.now() - cdpStarted,
-    };
+    return true;
   } finally {
     await cdp.detach().catch(() => undefined);
+  }
+}
+
+// The drive's own select: the option is resolved and committed in the page, and
+// a target that is not a real <select> is refused in milliseconds instead of
+// falling into the tools' combobox machinery (label resolution, a 10s
+// waitForSelector, and clicks on an option row the drive never planned).
+function inPageSelectOption(input: {
+  selector: string;
+  text: string;
+}): "ok" | "not_select" | "option_missing" | "missing" {
+  const element = document.querySelector(input.selector);
+  if (element === null || !element.isConnected) return "missing";
+  if (!(element instanceof HTMLSelectElement)) return "not_select";
+  const wanted = input.text;
+  const wantedLower = wanted.toLowerCase();
+  const options = Array.from(element.options);
+  // Match exactly first — by value, label, or trimmed visible text, then
+  // case-insensitively — before falling back to a partial substring. A
+  // substring "V" must not select "Visa" when the page offers an exact
+  // option named "V"; two-pass ordering keeps exact matches authoritative.
+  const match =
+    options.find(
+      (option) =>
+        option.value === wanted ||
+        option.label === wanted ||
+        (option.textContent ?? "").trim() === wanted,
+    ) ??
+    options.find(
+      (option) =>
+        option.value.toLowerCase() === wantedLower ||
+        option.label.toLowerCase() === wantedLower ||
+        (option.textContent ?? "").trim().toLowerCase() === wantedLower,
+    ) ??
+    options.find((option) => (option.textContent ?? "").trim().toLowerCase().includes(wantedLower));
+  if (match === undefined) return "option_missing";
+  element.value = match.value;
+  element.dispatchEvent(new Event("input", { bubbles: true }));
+  element.dispatchEvent(new Event("change", { bubbles: true }));
+  return "ok";
+}
+
+export async function selectDriveOption(
+  scope: Page | Frame,
+  selector: string,
+  text: string,
+): Promise<{ outcome: "ok" | "not_select" | "option_missing" | "missing"; committed: string }> {
+  const outcome = await evaluateBound(scope, inPageSelectOption, { selector, text });
+  return { outcome, committed: outcome === "ok" ? text : "" };
+}
+
+export async function reenterDriveField(
+  scope: Page | Frame,
+  selector: string,
+  text: string,
+): Promise<boolean> {
+  if (selector.length === 0) return false;
+  const locator = scope.locator(selector);
+  try {
+    await locator.scrollIntoViewIfNeeded().catch(() => undefined);
+    await locator.click({ timeout: 5000 });
+    await locator.fill(text);
+    return (await locator.inputValue().catch(() => "")) === text;
+  } catch {
+    return false;
   }
 }
 
@@ -798,6 +399,20 @@ export async function settleDriveStep(page: Page, combobox: boolean): Promise<nu
     return Date.now() - started;
   }
   return Date.now() - started;
+}
+
+/** The rowed controls' identity and actionability, read back through the
+ *  snapshot's own derivation. */
+export async function driveControlDigest(page: Page): Promise<string> {
+  try {
+    return await evaluateBound(page, () => {
+      type DriveCache = { rowDigest?: () => string };
+      const registry = (window as Window & { __tsDriveRegistry?: DriveCache }).__tsDriveRegistry;
+      return registry?.rowDigest?.() ?? "";
+    });
+  } catch {
+    return "";
+  }
 }
 
 export async function documentEpochOf(page: Page): Promise<string> {

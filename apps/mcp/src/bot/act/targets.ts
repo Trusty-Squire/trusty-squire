@@ -7,6 +7,7 @@
 // One-directional imports only: this module must never runtime-import
 // provision-session (type-only `Observation`-style imports are fine).
 import { AsyncLocalStorage } from "node:async_hooks";
+import type { ClickDispatchStatus } from "../click-dispatch.js";
 import type { FrameTarget, InteractiveElement } from "../browser.js";
 import {
   compactV2LegacyRefForHandle,
@@ -104,7 +105,15 @@ export class CompactV2StaleRefError extends Error {}
 export class CompactV2UnresolvedLabelError extends Error {}
 export class ProvisionTargetNotAllowedError extends Error {}
 export class ProvisionTargetMissingError extends Error {}
-export class CompactV2ActionFailureError extends Error {}
+export class CompactV2ActionFailureError extends Error {
+  /** Whether the underlying browser dispatch reached the page, when known. */
+  readonly dispatchStatus: ClickDispatchStatus;
+
+  constructor(message: string, dispatchStatus: ClickDispatchStatus = "unknown") {
+    super(message);
+    this.dispatchStatus = dispatchStatus;
+  }
+}
 /**
  * A `@label` that names more than one observed control. Extends the
  * already-sealed failure channel so its message survives V2's opaque error

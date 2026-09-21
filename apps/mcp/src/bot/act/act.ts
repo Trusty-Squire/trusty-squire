@@ -9,9 +9,10 @@
 // runtime-import provision-session; `ProvisionAction`/`Observation` come back
 // as type-only imports (the tool layer keeps importing `act` from
 // provision-session, which re-exports it).
-import type { Page } from "playwright";
+import type { Frame, Page } from "playwright";
 import {
   BrowserClickDispatchError,
+  DRIVE_DISPATCH_PACING,
   clickDispatchStatusForError,
   type BrowserController,
   type InteractiveElement,
@@ -88,6 +89,38 @@ import {
 // Type-only cycle back to the facade is fine; no runtime import.
 import type { Observation, ProvisionAction } from "../provision-session.js";
 import type { Session } from "../session/model.js";
+import {
+  resolveIdentityScope,
+  resolveLiveControlIdentity,
+  type ActControlIdentity,
+} from "./identity.js";
+import { evaluateBound } from "../drive-evaluate.js";
+import {
+  clickCrossOriginFrameTarget,
+  commitDriveListOption,
+  selectDriveOption,
+  overlayOptionLabels,
+  waitForOpenedOverlay,
+  waitForOverlayOptionsToChange,
+} from "../drive-act.js";
+
+// `detail:"none"` already owns "return no observation". `drive` is the one
+// switch for everything the drive loop does differently: it settles on its own
+// schedule and pacing, guards for occlusion, commits an option row, falls back
+// to coordinates in a cross-origin frame, and types an overlay-opening control
+// by writing into whatever the overlay focused. The tools' behaviour is the
+// absent value. It is passed by the caller, never read off the session — a tool
+// act issued while a drive session is open keeps tool behaviour.
+export type ActExecutorOptions = {
+  drive?: boolean;
+};
+
+const DRIVE_DISPATCH: ActExecutorOptions = { drive: true };
+
+export type DriveActResult =
+  | { kind: "ok"; combobox: boolean }
+  | { kind: "stale"; reason: string }
+  | { kind: "unsupported" };
 
 async function withOAuthActionBoundary(
   session: Session,
@@ -291,6 +324,7 @@ export interface InternalActResult {
   outcome: {
     selectedOption?: string;
   };
+  combobox?: boolean;
 }
 
 // Fix C: the honest, non-throwing "still waiting on a human" outcome for an
@@ -366,6 +400,7 @@ export async function actInternally(
   detail: ObserveDetail = "compact",
   compactV2Authorization?: CompactV2TargetAuthorization,
   operationPage?: Page,
+  options?: ActExecutorOptions,
 ): Promise<InternalActResult> {
   const session = sessionForCall(sessionId);
   const capturedOperationPage =
@@ -374,17 +409,26 @@ export async function actInternally(
     action.kind === "oauth_login" || action.kind === "oauth_click" ? action.provider : undefined;
   try {
     const execute = async (deadline?: OAuthActionDeadline): Promise<InternalActResult> => {
-      const run = async (): Promise<InternalActResult> =>
-        await executeAct(
-          sessionId,
-          action,
-          detail,
-          true,
-          compactV2Authorization,
-          deadline,
-          capturedOperationPage,
-          false,
-        );
+      const run = async (): Promise<InternalActResult> => {
+        const act = async (): Promise<InternalActResult> =>
+          await executeAct(
+            sessionId,
+            action,
+            detail,
+            true,
+            compactV2Authorization,
+            deadline,
+            capturedOperationPage,
+            false,
+            undefined,
+            "full",
+            true,
+            options,
+          );
+        return session === undefined || options?.drive !== true
+          ? await act()
+          : await session.browser.withDispatchPacing(DRIVE_DISPATCH_PACING, act);
+      };
       return (action.kind === "click" ||
         action.kind === "js_click" ||
         action.kind === "oauth_login" ||
@@ -410,7 +454,10 @@ export async function actInternally(
       return { observation: oauthOnboardingRequiredObservation(session, error), outcome: {} };
     }
     if (session?.compactV2Active === true && !(error instanceof ProvisionTargetMissingError)) {
-      throw new CompactV2ActionFailureError(compactV2ActionFailureReason(error, action.kind));
+      throw new CompactV2ActionFailureError(
+        compactV2ActionFailureReason(error, action.kind),
+        clickDispatchStatusForError(error),
+      );
     }
     throw error;
   }
@@ -539,6 +586,77 @@ function actDriverTarget(el: InteractiveElement): DriverTarget {
   return { kind: "selector", selector: el.selector };
 }
 
+function actsThroughOverlay(el: InteractiveElement, picker: boolean): boolean {
+  if (picker) return true;
+  const role = (el.role ?? "").toLowerCase();
+  const type = (el.type ?? "").toLowerCase();
+  return (
+    role === "combobox" ||
+    role === "searchbox" ||
+    type === "search" ||
+    type === "date" ||
+    type === "datetime-local" ||
+    type === "month"
+  );
+}
+
+function submitsOnEnter(el: InteractiveElement, ariaLabel: string): boolean {
+  const role = (el.role ?? "").toLowerCase();
+  const type = (el.type ?? "").toLowerCase();
+  return (
+    role === "searchbox" ||
+    type === "search" ||
+    el.name === "q" ||
+    /search/i.test(`${ariaLabel} ${el.placeholder ?? ""}`)
+  );
+}
+
+function scopeForElement(page: Page, el: InteractiveElement): Page | Frame {
+  if (el.framePath === undefined || el.framePath === null || el.framePath.length === 0) return page;
+  let frame: Frame = page.mainFrame();
+  for (const part of el.framePath.split("/")) {
+    const child = frame.childFrames()[Number(part)];
+    if (child === undefined) return page;
+    frame = child;
+  }
+  return frame;
+}
+
+// The occlusion guard the drive used to carry in its own dispatch: a cookie
+// banner or sticky footer over the target swallows the click while the page
+// still reports a dispatch, so the caller records a step that never landed.
+// Absent a box (still loading) it says nothing and the actionability waits rule.
+async function clickTargetOccluded(scope: Page | Frame, selector: string): Promise<boolean> {
+  return await evaluateBound(
+    scope,
+    (sel: string) => {
+      const element = document.querySelector(sel);
+      if (element === null) return false;
+      // The snapshot keeps offscreen fillables so the model can name them, and
+      // the dispatch scrolls before clicking — so measure where the click will
+      // actually land, not where the element sits right now. "instant" is
+      // load-bearing: a page with scroll-behavior:smooth would animate and the
+      // rect below would still be the pre-scroll one.
+      const before = element.getBoundingClientRect();
+      const inView =
+        before.width > 0 &&
+        before.height > 0 &&
+        before.bottom > 0 &&
+        before.top < innerHeight &&
+        before.right > 0 &&
+        before.left < innerWidth;
+      if (!inView) {
+        element.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
+      }
+      const rect = element.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return false;
+      const hit = document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2);
+      return hit !== null && hit !== element && !element.contains(hit) && !hit.contains(element);
+    },
+    selector,
+  ).catch(() => false);
+}
+
 // Re-resolve against FRESH elements — never trust a stale index. Shared by the
 // type_secret / select / click-group ref paths; `internalLabel`/`noMatchPrefix`
 // keep each caller's error wording, `withVisibleCandidates` its candidate list.
@@ -553,7 +671,26 @@ async function resolveFreshActTarget(
   noMatchPrefix: string,
   actionTarget: string,
   withVisibleCandidates: boolean,
-): Promise<{ el: InteractiveElement; fresh: InteractiveElement[] }> {
+): Promise<{
+  el: InteractiveElement;
+  fresh: InteractiveElement[];
+  driveIdentity: ActControlIdentity | undefined;
+}> {
+  const driveIdentity = session.drive?.identities?.get(resolutionTarget);
+  const livePage = compactV2ActionPage ?? browser.page;
+  if (driveIdentity !== undefined && livePage !== null) {
+    const live = await resolveLiveControlIdentity(livePage, resolutionTarget, driveIdentity);
+    if (live !== null) {
+      return { el: live, fresh: session.lastElements, driveIdentity };
+    }
+    if (session.compactV2Active) {
+      if (!internalAccess) throwCompactV2StaleRef();
+      throw new CompactV2StaleRefError("stale_ref");
+    }
+    const stale = staleTargetError(session, actionTarget, session.lastElements);
+    if (stale !== null) throw stale;
+    throw new CompactV2StaleRefError("stale_ref");
+  }
   const fresh = (await browser.extractBrowserUseObservation(compactV2ActionPage)).elements;
   retainSessionElements(session, fresh);
   // resolveTarget recomputes identities (incl. volatile positional-group
@@ -563,7 +700,7 @@ async function resolveFreshActTarget(
     compactV2Authorization === undefined
       ? resolveTarget(fresh, resolutionTarget)
       : resolveAuthorizedCompactV2Target(session, fresh, compactV2Authorization);
-  if (el !== null) return { el, fresh };
+  if (el !== null) return { el, fresh, driveIdentity: undefined };
   if (session.compactV2Active) {
     if (!internalAccess) throwCompactV2StaleRef();
     throw new Error(`${internalLabel}: internal live target changed`);
@@ -593,6 +730,7 @@ async function executeAct(
   onScreenshotDispatched?: () => void,
   outputFormat: "compact" | "full" = "full",
   compactMapEmitted = true,
+  options?: ActExecutorOptions,
 ): Promise<InternalActResult> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
@@ -600,8 +738,10 @@ async function executeAct(
   const compactV2ActionPage = operationPage ?? operationPageForSession(session);
   const driveSettle =
     session.drive !== null && action.kind !== "oauth_login" && action.kind !== "oauth_click";
+  const skipToolSettle = options?.drive === true;
   let settleMs = 0;
   const settle = async (combobox = false) => {
+    if (skipToolSettle) return;
     const started = Date.now();
     await settleAfterStateChange(browser, compactV2ActionPage, {
       drive: driveSettle,
@@ -610,6 +750,7 @@ async function executeAct(
     settleMs += Date.now() - started;
   };
   const actStarted = Date.now();
+  let actedCombobox = false;
   let actionPageAfter = compactV2ActionPage;
   let completedAction: ProvisionAction = action;
   let resolutionTarget: string | undefined;
@@ -784,11 +925,15 @@ async function executeAct(
             true,
           )
         ).el;
-        const committedText = await browser.select(
-          actDriverTarget(el),
-          action.text,
-          compactV2ActionPage,
-        );
+        const driveSelectPage = compactV2ActionPage ?? browser.page;
+        const committedText =
+          options?.drive === true && driveSelectPage !== null && driveSelectPage !== undefined
+            ? await selectDriveOptionOrRefuse(
+                scopeForElement(driveSelectPage, el),
+                el.selector,
+                action.text ?? "",
+              )
+            : await browser.select(actDriverTarget(el), action.text, compactV2ActionPage);
         session.committedSelectValues.set(
           compactV2CommittedSelectKey(session, el.selector),
           compactV2CommittedSelectValue(session, committedText),
@@ -898,7 +1043,7 @@ async function executeAct(
           break;
         }
         // Re-resolve against FRESH elements every act — never trust a stale index.
-        const { el, fresh } = await resolveFreshActTarget(
+        const { el, fresh, driveIdentity } = await resolveFreshActTarget(
           session,
           browser,
           compactV2ActionPage,
@@ -910,16 +1055,89 @@ async function executeAct(
           action.target,
           true,
         );
+        actedCombobox = actsThroughOverlay(el, driveIdentity?.picker === true);
+        const ariaLabelAttribute =
+          driveIdentity === undefined ? (el.ariaLabel ?? "") : (driveIdentity.ariaLabel ?? "");
         // Preserve frame identity (origin + path) for the frame-scoped fill.
         if (action.kind === "click" || action.kind === "js_click") {
+          const clickPage = compactV2ActionPage ?? browser.page;
+          // Only the drive's extra dispatch arms consume a frame scope; the
+          // tools reach a frame through actDriverTarget's frame target, so
+          // walking the positional frame path for them would be dead work.
+          const clickScope =
+            options?.drive !== true || clickPage === null || clickPage === undefined
+              ? undefined
+              : scopeForElement(clickPage, el);
+          if (
+            action.kind === "click" &&
+            clickScope !== undefined &&
+            (await clickTargetOccluded(clickScope, el.selector))
+          ) {
+            throw new BrowserClickDispatchError(
+              "not_dispatched",
+              "click target is occluded by an overlay",
+            );
+          }
+          // One adoption arm/grace around whichever dispatch runs: an option row
+          // or a cross-origin coordinate click can open a target=_blank tab
+          // just as an ordinary click can, and paying the grace per candidate
+          // would charge every click for the branches that declined.
+          const commitsListOption =
+            action.kind === "click" &&
+            clickPage !== null &&
+            clickPage !== undefined &&
+            clickScope !== undefined;
+          const crossOriginScope =
+            action.kind === "click" && clickScope !== undefined && "parentFrame" in clickScope
+              ? clickScope
+              : undefined;
           actionPageAfter =
             (await adoptTabOpenedByClick(session, browser, async () => {
+              if (
+                commitsListOption &&
+                clickPage !== null &&
+                clickPage !== undefined &&
+                clickScope !== undefined &&
+                (await commitDriveListOption(clickPage, clickScope, el.selector))
+              ) {
+                return;
+              }
+              if (
+                crossOriginScope !== undefined &&
+                clickPage !== null &&
+                clickPage !== undefined &&
+                (await clickCrossOriginFrameTarget(clickPage, crossOriginScope, el.selector))
+              ) {
+                return;
+              }
               await actClick({ ...actDriverTarget(el), method: action.kind });
             })) ?? actionPageAfter;
         } else if (action.kind === "type") {
           clearCommittedSelectValue(session, el.selector);
           const actTarget = actDriverTarget(el);
-          await actType(actTarget, typedText!, false);
+          if (options?.drive === true && actedCombobox && compactV2ActionPage !== undefined) {
+            // The click may remount the field into an overlay that takes focus,
+            // so the text goes to whatever is focused — after an explicit
+            // select-all, because insertText alone APPENDS to a committed value.
+            // The suggestion baseline is read AFTER the overlay opens; reading
+            // it before would make the refresh wait return on the stale rows.
+            await actClick({ ...actTarget, method: "click" });
+            await waitForOpenedOverlay(compactV2ActionPage).catch(() => undefined);
+            const overlayBefore = await overlayOptionLabels(compactV2ActionPage);
+            await compactV2ActionPage.keyboard.press("ControlOrMeta+a");
+            await compactV2ActionPage.keyboard.insertText(typedText ?? "");
+            await waitForOverlayOptionsToChange(compactV2ActionPage, overlayBefore);
+            if (submitsOnEnter(el, ariaLabelAttribute)) {
+              await compactV2ActionPage.keyboard.press("Enter").catch(() => undefined);
+            }
+          } else {
+            await actType(actTarget, typedText!, false);
+            if (options?.drive === true && submitsOnEnter(el, ariaLabelAttribute)) {
+              await (compactV2ActionPage ?? browser.page)?.keyboard
+                .press("Enter")
+                .catch(() => undefined);
+            }
+          }
           // #635 fix (not a gate on typing): Shopify only enables delivery-rate
           // selection after the required address line is committed by
           // blur/change, not merely after the raw keystrokes land.
@@ -1061,6 +1279,7 @@ async function executeAct(
   if (session.drive !== null) {
     const observeMs = Date.now() - observeStarted;
     session.drive.lastActProfile = {
+      ...session.drive.lastActProfile,
       act_ms: Math.max(0, Date.now() - actStarted - settleMs - observeMs),
       settle_ms: settleMs,
       observe_ms: observeMs,
@@ -1089,7 +1308,102 @@ async function executeAct(
     outcome: {
       ...(completedAction.kind === "select" ? { selectedOption: completedAction.text } : {}),
     },
+    combobox: actedCombobox,
   };
+}
+
+async function selectDriveOptionOrRefuse(
+  scope: Page | Frame,
+  selector: string,
+  text: string,
+): Promise<string> {
+  const { outcome, committed } = await selectDriveOption(scope, selector, text);
+  if (outcome === "ok") return committed;
+  if (outcome === "missing") throw new CompactV2StaleRefError("stale_ref");
+  throw new CompactV2ActionFailureError(outcome);
+}
+
+async function guardDriveOauthTarget(sessionId: string, target: string): Promise<DriveActResult> {
+  const session = sessionForCall(sessionId);
+  const identity = session?.drive?.identities?.get(target);
+  const page = session?.browser.page ?? null;
+  if (session === undefined || identity === undefined || page === null) {
+    return { kind: "unsupported" };
+  }
+  const scope = await resolveIdentityScope(page, target, identity);
+  if (scope === null) return { kind: "stale", reason: "stale_ref" };
+  if (await clickTargetOccluded(scope, identity.selector)) {
+    return { kind: "stale", reason: "occluded" };
+  }
+  return { kind: "unsupported" };
+}
+
+export async function dispatchDriveAct(
+  sessionId: string,
+  action: ProvisionAction,
+): Promise<DriveActResult> {
+  // "unsupported" means the shared executor has no drive verb for this action
+  // and the caller should fall back to the tools path. A DISPATCH failure is a
+  // different thing — the act did not land on the control, which is stale.
+  if (
+    action.kind !== "click" &&
+    action.kind !== "type" &&
+    action.kind !== "select" &&
+    action.kind !== "scroll"
+  ) {
+    // The tools' oauth_login clicks by coordinate after a visibility wait only,
+    // so a banner over the provider button costs the whole OAuth deadline. Hand
+    // the drive the same refusal its own guard gave, and fall through to the
+    // tools path only when the target is clean.
+    if (action.kind === "oauth_login") return await guardDriveOauthTarget(sessionId, action.target);
+    return { kind: "unsupported" };
+  }
+  // A drive ref names the identity its own snapshot recorded. A target with no
+  // such record never came from a drive snapshot — a row from a fallback
+  // observation the drive did not capture — so it is the tools' to resolve.
+  // Dispatching it here would fail resolution and report a live control stale.
+  if (
+    action.kind !== "scroll" &&
+    sessionForCall(sessionId)?.drive?.identities?.get(action.target) === undefined
+  ) {
+    return { kind: "unsupported" };
+  }
+  try {
+    const result = await actInternally(
+      sessionId,
+      action,
+      "none",
+      undefined,
+      undefined,
+      DRIVE_DISPATCH,
+    );
+    return { kind: "ok", combobox: result.combobox === true };
+  } catch (error) {
+    if (error instanceof CompactV2StaleRefError) return { kind: "stale", reason: "stale_ref" };
+    if (error instanceof TargetStaleError) return { kind: "stale", reason: "stale" };
+    const message = error instanceof Error ? error.message : String(error);
+    // A tracked click that reached the element and only then failed did land —
+    // telling the drive it never executed invites a second submit. The evidence
+    // is a CLICK's own dispatch listener, so it says nothing about a type whose
+    // focusing click landed before the keystrokes were written.
+    const dispatchStatus =
+      error instanceof CompactV2ActionFailureError
+        ? error.dispatchStatus
+        : clickDispatchStatusForError(error);
+    if (action.kind === "click" && dispatchStatus === "dispatched") {
+      return { kind: "ok", combobox: false };
+    }
+    // A select that could not take the value was refused by the CONTROL; the
+    // drive must not blame the ref and retire it. A ref that went stale before
+    // the select was ever attempted stays stale.
+    if (action.kind === "select" && !/stale_ref|reobserve_required/i.test(message)) {
+      return { kind: "stale", reason: message === "not_select" ? "not_select" : "option_missing" };
+    }
+    return {
+      kind: "stale",
+      reason: /occluded|intercepts pointer/i.test(message) ? "occluded" : "stale_ref",
+    };
+  }
 }
 
 export function compactV2SelectionFailureReason(error: unknown): string {

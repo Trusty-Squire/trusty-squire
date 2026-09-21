@@ -15,6 +15,7 @@
 // the tool layer passed none.
 import { createHmac, randomBytes } from "node:crypto";
 import type { Buffer } from "node:buffer";
+import type { ActControlIdentity } from "../act/identity.js";
 import type { BrowserController, CheckoutCard, InteractiveElement } from "../browser.js";
 import type { PendingApprovalWait } from "../card-release-approval.js";
 import {
@@ -145,9 +146,6 @@ export interface DriveActProfile {
   observe_ms: number;
   snapshot_script_ms?: number;
   snapshot_wall_ms?: number;
-  guard_script_ms?: number;
-  guard_wall_ms?: number;
-  cdp_ms?: number;
   prepare_ms?: number;
   dispatch_ms?: number;
   jev_question_count?: number;
@@ -167,9 +165,6 @@ export interface DriveTrajectoryStep {
   observe_ms?: number;
   snapshot_script_ms?: number;
   snapshot_wall_ms?: number;
-  guard_script_ms?: number;
-  guard_wall_ms?: number;
-  cdp_ms?: number;
   prepare_ms?: number;
   dispatch_ms?: number;
   jev_question_count?: number;
@@ -204,6 +199,13 @@ export interface SessionDriveState {
   boundFingerprint: string | null;
   consumedActionKey: string | null;
   lastActProfile: DriveActProfile | null;
+  /** Identity stored behind each drive `@e:` token for this snapshot. */
+  identities?: Map<string, ActControlIdentity>;
+  /** Control state at the snapshot the current decision was made from.
+   *  `null` means the snapshot fell back and never read it. */
+  snapshotControlDigest?: string | null;
+  /** Consecutive pre-act re-decides spent on the current decision. */
+  preActRedecides?: number;
   maskedValueRefs?: string[];
   lastDocumentEpoch?: string | null;
   resumeCompactRows?: Array<[string, string, string?]>;

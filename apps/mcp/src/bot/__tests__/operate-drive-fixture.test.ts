@@ -22,6 +22,7 @@ import {
   DRIVE_WAIT_MS,
   applyReleasedCardFacts,
   matchingFactKeys,
+  emptyDriveState,
   runOperateDrive,
   type DriveDependencies,
   type WireRow,
@@ -35,12 +36,11 @@ import {
   awaitVerification,
   injectCardIntoSessionTargets,
 } from "../provision-session.js";
-import {
-  captureFrameSnapshot,
-  driveRowsFromSnapshot,
-  snapshotToObservation,
-} from "../drive-snapshot.js";
-import { driveActOnPage, settleDriveStep } from "../drive-act.js";
+import { captureFrameSnapshot, driveRowsFromSnapshot } from "../drive-snapshot.js";
+import { dispatchDriveAct } from "../act/act.js";
+import { rememberDriveIdentities } from "../act/identity.js";
+import { settleDriveStep } from "../drive-act.js";
+import type { DriveSnapshot } from "../drive-snapshot.js";
 import { sessionForCall } from "../session/lifecycle.js";
 import { DriveEvaluateTimeout } from "../drive-evaluate.js";
 import { attachOperatorRequestAbort, withOperatorRequestContext } from "../request-cancellation.js";
@@ -412,6 +412,19 @@ async function openFixture(
     initialObservation,
   });
   return { context, page, started };
+}
+
+async function actThroughShared(
+  sessionId: string,
+  action: ProvisionAction,
+  snap?: DriveSnapshot | null,
+): Promise<Awaited<ReturnType<typeof dispatchDriveAct>>> {
+  const session = sessionForCall(sessionId);
+  if (session !== undefined && snap !== undefined && snap !== null) {
+    session.drive ??= emptyDriveState("fixture", {});
+    rememberDriveIdentities(session.drive, snap.elements, snap.url);
+  }
+  return await dispatchDriveAct(sessionId, action);
 }
 
 function refFor(started: { safe_table?: unknown }, label: string): string {
@@ -2199,9 +2212,8 @@ describe("operate_drive real-browser fixture", () => {
       const dependencies = deps(async (_api, _state, questions) =>
         jevFromQuestions(questions, true),
       );
-      dependencies.snapshot = async (sessionId) => {
+      dependencies.onSnapshot = () => {
         snapshots += 1;
-        return await observe(sessionId, "compact");
       };
       const result = await runOperateDrive(
         { session_id: started.session_id, goal: "confirm the page is open" },
@@ -2232,9 +2244,8 @@ describe("operate_drive real-browser fixture", () => {
         }
         return jevFromQuestions(questions, true);
       });
-      dependencies.snapshot = async (sessionId) => {
+      dependencies.onSnapshot = () => {
         snapshots += 1;
-        return await observe(sessionId, "compact");
       };
       const result = await runOperateDrive(
         { session_id: started.session_id, goal: "confirm the page is open" },
@@ -2306,21 +2317,13 @@ describe("operate_drive real-browser fixture", () => {
         if (decisions === 2) expect(JSON.stringify(state)).toMatch(/ready.now/i);
         return jevFromQuestions(questions, decisions > 1);
       });
-      dependencies.snapshot = async (sessionId) => {
-        const snapshot = await captureFrameSnapshot(page, [], 0);
-        if (snapshot === null) throw new Error("missing fixture snapshot");
-        const captured = snapshotToObservation(
-          snapshot,
-          sessionId,
-          driveRowsFromSnapshot(snapshot),
-        );
+      dependencies.onSnapshot = async () => {
         snapshots += 1;
         if (snapshots === 2) {
           await page.evaluate(() => {
             document.querySelector("button")!.textContent = "Ready now";
           });
         }
-        return captured;
       };
       const result = await runOperateDrive(
         { session_id: started.session_id, goal: "click and inspect" },
@@ -2517,12 +2520,9 @@ describe("operate_drive real-browser fixture", () => {
           return {
             kind: "stale",
             reason: "card frame remounted",
-            guardScriptMs: 0,
-            guardWallMs: 0,
-            cdpMs: 0,
           };
         }
-        return await driveActOnPage(page, action);
+        return await actThroughShared(started.session_id, action);
       };
       const drive = async (maxSteps: number) =>
         await runOperateDrive(
@@ -2652,7 +2652,7 @@ describe("operate_drive real-browser fixture", () => {
       const value = facts[key!]!;
       expect(value).toBe("30");
 
-      const typed = await driveActOnPage(page, { kind: "type", target: yearRow[0], text: value });
+      const typed = await actThroughShared(started.session_id, { kind: "type", target: yearRow[0], text: value }, snap);
       expect(typed.kind).toBe("ok");
       await settleDriveStep(page, typed.kind === "ok" && typed.combobox);
       expect(await page.locator("#y").inputValue()).toBe("30");
@@ -2677,11 +2677,11 @@ describe("operate_drive real-browser fixture", () => {
       const email = snap.elements.find((element) => element.label.includes("Email"));
       expect(email).toBeDefined();
       if (email === undefined) return;
-      const typed = await driveActOnPage(page, {
+      const typed = await actThroughShared(started.session_id, {
         kind: "type",
         target: email.ref,
         text: "ada@fixture.test",
-      });
+      }, snap);
       expect(typed.kind).toBe("ok");
       await settleDriveStep(page, typed.kind === "ok" && typed.combobox);
       expect(await page.locator("#email").inputValue()).toBe("ada@fixture.test");
@@ -3604,7 +3604,7 @@ describe("operate_drive real-browser fixture", () => {
         return result;
       });
       dependencies.driveAct = async (_sessionId, action) => {
-        const result = await driveActOnPage(page, action);
+        const result = await actThroughShared(started.session_id, action);
         outcomes.push(result.kind);
         return result;
       };
@@ -3677,7 +3677,7 @@ describe("operate_drive real-browser fixture", () => {
         return result;
       });
       dependencies.driveAct = async (_sessionId, action) => {
-        const result = await driveActOnPage(page, action);
+        const result = await actThroughShared(started.session_id, action);
         outcomes.push(result.kind);
         if (outcomes.length === 1) {
           expect(result.kind).toBe("stale");
@@ -3879,14 +3879,16 @@ describe("operate_drive real-browser fixture", () => {
       const from = snap?.elements.find((element) => element.label.includes("Where from?"));
       expect(from).toBeDefined();
       if (from === undefined) return;
-      const typed = await driveActOnPage(page, {
+      const typed = await actThroughShared(started.session_id, {
         kind: "type",
         target: from.ref,
         text: "Zurich",
-      });
+      }, snap);
       expect(typed.kind).toBe("ok");
       expect(await page.locator("#else").inputValue()).toBe("Zurich");
-      expect(await page.locator('[role="option"]').textContent()).toBe("Zurich Airport (ZRH)");
+      await expect
+        .poll(async () => page.locator('[role="option"]').textContent())
+        .toBe("Zurich Airport (ZRH)");
     } finally {
       await finishProvisionSession(started.session_id);
       await context.close();
@@ -3916,7 +3918,7 @@ describe("operate_drive real-browser fixture", () => {
       const departure = snap?.elements.find((element) => element.label.includes("Departure"));
       expect(departure).toBeDefined();
       if (departure === undefined) return;
-      const acted = await driveActOnPage(page, { kind: "click", target: departure.ref });
+      const acted = await actThroughShared(started.session_id, { kind: "click", target: departure.ref }, snap);
       expect(acted.kind).toBe("ok");
       if (acted.kind !== "ok") return;
       expect(acted.combobox).toBe(true);
@@ -4393,6 +4395,38 @@ describe("drive review regressions", () => {
     }
   }, 30_000);
 
+  it("acts on a page whose drive snapshot fell back to the tools observation", async () => {
+    // The in-page snapshot refuses a document whose body it cannot read, so the
+    // loop runs on rows the drive's own identity map never recorded. Those refs
+    // belong to the tools' observation and must still reach the page: reporting
+    // a live control stale here loses the provision with an empty trajectory.
+    const html = `<!doctype html><meta charset="utf-8"><title>Fallback</title>
+<main><button id="go" onclick="document.querySelector('#status').textContent='clicked'">Accept and continue</button>
+<p id="status">idle</p></main>
+<script>Object.defineProperty(document, "body", { get: () => null, configurable: true });</script>`;
+    const { context, page, started } = await openFixture(html, "snapshot-fallback.test");
+    try {
+      expect(await captureFrameSnapshot(page, [], 0)).toBeNull();
+      let decisions = 0;
+      const dependencies = deps(async (_api, _state, questions) => {
+        decisions += 1;
+        return jevFromQuestions(questions, decisions > 1);
+      });
+      const result = await runOperateDrive(
+        { session_id: started.session_id, goal: "accept and continue" },
+        api(),
+        undefined,
+        dependencies,
+      );
+      expect(await page.locator("#status").textContent()).toBe("clicked");
+      expect(result.status).toBe("complete");
+      expect(result.trajectory).toHaveLength(1);
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 60_000);
+
   it("registers compact injection refs and retries after four incomplete fills", async () => {
     const { context, page, started } = await openFixture(
       '<label>Card number <input id="pan" autocomplete="cc-number"></label><label>CVV <input id="cvv" autocomplete="cc-csc"></label>',
@@ -4499,53 +4533,57 @@ describe("drive review regressions", () => {
     30_000,
   );
 
-  it.each(["detached", "timeout"])(
-    "does not type when reselection is %s",
-    async (failure) => {
-      const { context, page, started } = await openFixture(
-        '<label>Email <input id="email" value="original"></label><input id="other">',
-        "reselect.test",
+  it("does not type when the target is gone at act time", async () => {
+    const { context, page, started } = await openFixture(
+      '<label>Email <input id="email" value="original"></label><input id="other">',
+      "reselect.test",
+    );
+    try {
+      const snapshot = await captureFrameSnapshot(page, [], 0);
+      const target = snapshot!.elements.find((element) => element.label.includes("Email"))!;
+      await page.evaluate(() => document.querySelector("#email")?.remove());
+      const result = await actThroughShared(
+        started.session_id,
+        { kind: "type", target: target.ref, text: "new value" },
+        snapshot,
       );
+      expect(result.kind).toBe("stale");
+      expect(await page.locator("#other").inputValue()).toBe("");
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
+  it("does not type when the in-page identity read times out", async () => {
+    const { context, page, started } = await openFixture(
+      '<label>Email <input id="email" value="original"></label><input id="other">',
+      "reselect-timeout.test",
+    );
+    try {
+      const snapshot = await captureFrameSnapshot(page, [], 0);
+      const target = snapshot!.elements.find((element) => element.label.includes("Email"))!;
+      const frame = page.mainFrame();
+      const spy = vi
+        .spyOn(frame, "evaluate")
+        .mockRejectedValueOnce(new DriveEvaluateTimeout(1) as never);
       try {
-        const snapshot = await captureFrameSnapshot(page, [], 0);
-        const target = snapshot!.elements.find((element) => element.label.includes("Email"))!;
-        const frame = page.mainFrame();
-        const original = frame.evaluate.bind(frame);
-        const spy =
-          failure === "timeout"
-            ? vi
-                .spyOn(frame, "evaluate")
-                .mockImplementationOnce(original)
-                .mockRejectedValueOnce(new DriveEvaluateTimeout(1))
-            : undefined;
-        if (failure === "detached") {
-          await page.locator("#email").evaluate((element) =>
-            element.addEventListener("click", () => {
-              element.remove();
-              document.querySelector<HTMLInputElement>("#other")!.focus();
-            }),
-          );
-        }
-        try {
-          const result = await driveActOnPage(page, {
-            kind: "type",
-            target: target.ref,
-            text: "new value",
-          });
-          expect(result.kind).toBe("stale");
-          expect(await page.locator("#other").inputValue()).toBe("");
-          if (failure === "timeout")
-            expect(await page.locator("#email").inputValue()).toBe("original");
-        } finally {
-          spy?.mockRestore();
-        }
+        const result = await actThroughShared(
+          started.session_id,
+          { kind: "type", target: target.ref, text: "new value" },
+          snapshot,
+        );
+        expect(result.kind).toBe("stale");
       } finally {
-        await finishProvisionSession(started.session_id);
-        await context.close();
+        spy.mockRestore();
       }
-    },
-    30_000,
-  );
+      expect(await page.locator("#other").inputValue()).toBe("");
+      expect(await page.locator("#email").inputValue()).toBe("original");
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
 });
 
 describe("operate_drive feedback loop", () => {
@@ -4621,9 +4659,9 @@ describe("operate_drive feedback loop", () => {
       });
       dependencies.driveAct = async (_sessionId, action) => {
         if (action.kind === "click" && action.target === brokenRef) {
-          return { kind: "stale", reason: "occluded", guardScriptMs: 0, guardWallMs: 0, cdpMs: 0 };
+          return { kind: "stale", reason: "occluded" };
         }
-        return await driveActOnPage(page, action);
+        return await actThroughShared(started.session_id, action);
       };
       const handoff = await runOperateDrive(
         { session_id: started.session_id, goal: "open the workspace", max_steps: 8 },
@@ -4892,7 +4930,7 @@ describe("operate_drive feedback loop", () => {
       });
       dependencies.driveAct = async (_sessionId, action) => {
         clicks.push(action);
-        return { kind: "stale", reason: "detached", guardScriptMs: 0, guardWallMs: 0, cdpMs: 0 };
+        return { kind: "stale", reason: "detached" };
       };
       const handoff = await runOperateDrive(
         { session_id: started.session_id, goal: "extract an API key", max_steps: 8 },
@@ -4985,6 +5023,138 @@ describe("capture flow key evidence", () => {
       const extracted = await extractCredentials(started.session_id);
       expect(extracted.credentials.sandbox_read_key).toBe(READ_KEY);
       expect((extracted.masked_remaining ?? []).length).toBeGreaterThan(0);
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
+  it("does not click a reminted ordinal that now belongs to another control", async () => {
+    const html = `<!doctype html><meta charset="utf-8"><title>Remint</title>
+<nav id="nav">
+  <a id="rep" href="/reputation">Reputation</a>
+  <a id="set" href="/settings">Settings</a>
+</nav>
+<p id="hit">none</p>
+<script>
+  Array.from(document.querySelectorAll("a")).forEach(function (a) {
+    a.addEventListener("click", function (event) {
+      event.preventDefault();
+      document.getElementById("hit").textContent = a.id;
+    });
+  });
+</script>`;
+    const { context, page, started } = await openFixture(html, "remint-ordinal.test");
+    try {
+      const snap = await captureFrameSnapshot(page, [], 0);
+      const reputation = snap?.elements.find((element) => element.label === "Reputation");
+      expect(reputation?.ref).toMatch(/^@e:f0d\d+$/);
+      await page.evaluate(() => {
+        const nav = document.getElementById("nav")!;
+        nav.innerHTML = '<a id="new" href="/new">Create app</a><a id="set" href="/settings">Settings</a>';
+        Array.from(nav.querySelectorAll("a")).forEach((a) => {
+          a.addEventListener("click", (event: Event) => {
+            event.preventDefault();
+            document.getElementById("hit")!.textContent = a.id;
+          });
+        });
+      });
+      const result = await actThroughShared(
+        started.session_id,
+        { kind: "click", target: reputation!.ref },
+        snap,
+      );
+      expect(result.kind).toBe("stale");
+      expect(await page.locator("#hit").textContent()).toBe("none");
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
+  it("does not act on a ref after navigation away from the decided page", async () => {
+    const html = `<!doctype html><meta charset="utf-8"><title>Nav</title>
+<a id="rep" href="/reputation">Reputation</a>
+<p id="hit">none</p>`;
+    const { context, page, started } = await openFixture(html, "nav-stale.test");
+    try {
+      const snap = await captureFrameSnapshot(page, [], 0);
+      const reputation = snap?.elements.find((element) => element.label === "Reputation");
+      expect(reputation).toBeDefined();
+      await page.route("**/next", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: `<!doctype html><title>Next</title><a id="rep" href="/other">Other</a><p id="hit">none</p>`,
+        }),
+      );
+      await page.goto("https://nav-stale.test/next");
+      const result = await actThroughShared(
+        started.session_id,
+        { kind: "click", target: reputation!.ref },
+        snap,
+      );
+      expect(result.kind).toBe("stale");
+      expect(await page.locator("#hit").textContent()).toBe("none");
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
+  it("drive and operate_click agree on page result and staleness", async () => {
+    const html = `<!doctype html><meta charset="utf-8"><title>Parity</title>
+<button id="go" type="button">Continue</button>
+<p id="hit">none</p>
+<script>
+  document.getElementById("go").addEventListener("click", () => {
+    document.getElementById("hit").textContent = "clicked";
+  });
+</script>`;
+    const { context, page, started } = await openFixture(html, "act-parity.test");
+    try {
+      const snap = await captureFrameSnapshot(page, [], 0);
+      const go = snap?.elements.find((element) => element.label === "Continue");
+      expect(go).toBeDefined();
+      const toolRef = refFor(started, "@continue");
+      const driveClick = await actThroughShared(
+        started.session_id,
+        { kind: "click", target: go!.ref },
+        snap,
+      );
+      expect(driveClick.kind).toBe("ok");
+      expect(await page.locator("#hit").textContent()).toBe("clicked");
+
+      await page.evaluate(() => {
+        document.getElementById("hit")!.textContent = "none";
+      });
+      await act(started.session_id, { kind: "click", target: toolRef });
+      expect(await page.locator("#hit").textContent()).toBe("clicked");
+
+      await page.evaluate(() => {
+        document.getElementById("go")?.remove();
+        const next = document.createElement("button");
+        next.id = "other";
+        next.textContent = "Create app";
+        next.addEventListener("click", () => {
+          document.getElementById("hit")!.textContent = "trap";
+        });
+        document.body.appendChild(next);
+        document.getElementById("hit")!.textContent = "none";
+      });
+      const driveStale = await actThroughShared(
+        started.session_id,
+        { kind: "click", target: go!.ref },
+        snap,
+      );
+      expect(driveStale.kind).toBe("stale");
+      let toolStale = "";
+      try {
+        await act(started.session_id, { kind: "click", target: toolRef });
+      } catch (error) {
+        toolStale = error instanceof Error ? error.message : String(error);
+      }
+      expect(toolStale).toMatch(/stale_ref|reobserve_required|target_stale/);
+      expect(await page.locator("#hit").textContent()).toBe("none");
     } finally {
       await finishProvisionSession(started.session_id);
       await context.close();
