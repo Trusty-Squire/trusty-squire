@@ -135,7 +135,14 @@ the ceremony runs (bounded by its deadline), anyone holding the URL can see —
 and, x11vnc not being view-only, drive — every tab the shared browser is
 running, including sibling operator sessions' tabs. The window is the
 ceremony deadline, and the URL is single-use: a fresh VNC password is minted
-per ceremony and the quick tunnel is torn down at the lease boundary. The
+per ceremony and the quick tunnel is torn down at the lease boundary. That
+window is held by the exposure helpers themselves, not by whoever is waiting
+on the sign-in: `registerRemoteLoginRigCleanup` arms a rig-owned lifetime —
+`LOGIN_RIG_OWNED_LIFETIME_MS` in `apps/mcp/src/pairing-ttl.ts`, the
+pairing-token window plus a short grace, a constant rather than an
+environment knob — when the rig is registered, so a connect that stops
+polling, wedges, or loses the process that spawned it cannot leave the display
+published past that bound. The
 `isOwnedLoginRigXauthority` check keeps real user desktops out of scope —
 this paragraph covers the broker's own rig only. This is a decision, not an
 oversight: do not narrow it without the maintainer's word.
