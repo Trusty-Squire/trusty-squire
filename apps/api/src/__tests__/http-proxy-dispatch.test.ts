@@ -12,7 +12,7 @@
 import { describe, it, expect } from "vitest";
 import { createServer, type IncomingMessage } from "node:http";
 import { gzipSync, brotliCompressSync } from "node:zlib";
-import { HttpProxyExecutor, ProxyError, substituteSecret } from "../services/http-proxy.js";
+import { HttpProxyExecutor, substituteSecret } from "../services/http-proxy.js";
 
 interface Captured {
   authorization: string;
@@ -330,8 +330,42 @@ describe("HttpProxyExecutor.executeStream", () => {
     }
   });
 
-  it("still stops a compressed body that expands past the decompression ceiling", async () => {
-    // ~1MB of zeros compresses to a couple of KB — the classic bomb shape.
+  it("streams a compressed body past the buffered cap without truncating it", async () => {
+    const payload = "z".repeat(512 * 1024);
+    const body = gzipSync(Buffer.from(payload, "utf8"));
+    const server = createServer((_req, res) => {
+      res.writeHead(200, { "content-type": "text/plain", "content-encoding": "gzip" });
+      res.end(body);
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const addr = server.address();
+    const port = typeof addr === "object" && addr !== null ? addr.port : 0;
+    // The buffered cap is 64 bytes here. Streaming holds nothing, so a gzipped
+    // body must not be cut off where the same bytes served plain are not.
+    const proxy = new HttpProxyExecutor({
+      blockPrivate: false,
+      allowInsecureHttp: true,
+      maxResponseBytes: 64,
+    });
+    try {
+      const streamed = await proxy.executeStream({
+        accountId: "acct-test",
+        http: { method: "GET", url: `http://127.0.0.1:${port}/big.gz`, headers: {} },
+        fields: {},
+      });
+      expect(streamed.headers["content-encoding"]).toBeUndefined();
+      const chunks: Buffer[] = [];
+      for await (const chunk of streamed.body) {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
+      }
+      expect(Buffer.concat(chunks).toString("utf8")).toBe(payload);
+      await expect(streamed.bodyComplete).resolves.toEqual({ bytes: payload.length });
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("execute() bounds a compressed body's decompressed output", async () => {
     const bomb = gzipSync(Buffer.alloc(1024 * 1024, 0x61));
     const server = createServer((_req, res) => {
       res.writeHead(200, { "content-type": "text/plain", "content-encoding": "gzip" });
@@ -343,26 +377,133 @@ describe("HttpProxyExecutor.executeStream", () => {
     const proxy = new HttpProxyExecutor({
       blockPrivate: false,
       allowInsecureHttp: true,
-      maxDecompressedBytes: 4096,
+      maxResponseBytes: 4096,
     });
     try {
-      const streamed = await proxy.executeStream({
-        accountId: "acct-test",
-        http: { method: "GET", url: `http://127.0.0.1:${port}/bomb`, headers: {} },
-        fields: {},
+      await expect(
+        proxy.execute({
+          accountId: "acct-test",
+          http: { method: "GET", url: `http://127.0.0.1:${port}/bomb`, headers: {} },
+          fields: {},
+        }),
+      ).rejects.toMatchObject({ code: "response_too_large" });
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("execute() bounds the WIRE bytes of a compressed body, not just its output", async () => {
+    // Concatenated empty gzip members: ~20 bytes each on the wire, zero bytes
+    // out. Metering only the decoder's output would read this forever.
+    const empty = gzipSync(Buffer.alloc(0));
+    const wire = Buffer.concat(Array.from({ length: 4000 }, () => empty));
+    expect(wire.length).toBeGreaterThan(8 * 1024);
+    const server = createServer((_req, res) => {
+      res.writeHead(200, { "content-type": "text/plain", "content-encoding": "gzip" });
+      res.end(wire);
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const addr = server.address();
+    const port = typeof addr === "object" && addr !== null ? addr.port : 0;
+    const proxy = new HttpProxyExecutor({
+      blockPrivate: false,
+      allowInsecureHttp: true,
+      maxResponseBytes: 8 * 1024,
+    });
+    try {
+      await expect(
+        proxy.execute({
+          accountId: "acct-test",
+          http: { method: "GET", url: `http://127.0.0.1:${port}/padded`, headers: {} },
+          fields: {},
+        }),
+      ).rejects.toMatchObject({ code: "response_too_large" });
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("execute() rejects an over-cap declared length before reading the body", async () => {
+    // Headers promise more than the cap and then the body never arrives. Only a
+    // pre-read check can answer; a mid-stream meter would wait forever.
+    const server = createServer((_req, res) => {
+      res.writeHead(200, { "content-type": "text/plain", "content-length": "100000" });
+      res.write("a");
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const addr = server.address();
+    const port = typeof addr === "object" && addr !== null ? addr.port : 0;
+    const proxy = new HttpProxyExecutor({
+      blockPrivate: false,
+      allowInsecureHttp: true,
+      maxResponseBytes: 1024,
+      headersTimeoutMs: 2000,
+      bodyTimeoutMs: 2000,
+    });
+    try {
+      await expect(
+        proxy.execute({
+          accountId: "acct-test",
+          http: { method: "GET", url: `http://127.0.0.1:${port}/promised`, headers: {} },
+          fields: {},
+        }),
+      ).rejects.toMatchObject({ code: "response_too_large" });
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("returns an empty body for a chunked empty body that still advertises gzip", async () => {
+    // No content-length: 0 to read off — the emptiness is only visible in the
+    // bytes, which is exactly the framing the header enumeration cannot see.
+    const server = createServer((_req, res) => {
+      res.writeHead(200, {
+        "content-type": "application/json",
+        "content-encoding": "gzip",
+        "transfer-encoding": "chunked",
       });
-      let seen = 0;
-      let failure: unknown;
-      try {
-        for await (const chunk of streamed.body) {
-          seen += (Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk))).length;
-        }
-      } catch (err) {
-        failure = err;
+      res.end();
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const addr = server.address();
+    const port = typeof addr === "object" && addr !== null ? addr.port : 0;
+    const proxy = new HttpProxyExecutor({ blockPrivate: false, allowInsecureHttp: true });
+    const http = { method: "GET", url: `http://127.0.0.1:${port}/empty`, headers: {} };
+    try {
+      const buffered = await proxy.execute({ accountId: "acct-test", http, fields: {} });
+      expect(buffered.status).toBe(200);
+      expect(buffered.body).toBe("");
+
+      const streamed = await proxy.executeStream({ accountId: "acct-test", http, fields: {} });
+      const chunks: Buffer[] = [];
+      for await (const chunk of streamed.body) {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
       }
-      expect(failure).toBeInstanceOf(ProxyError);
-      expect((failure as ProxyError).code).toBe("response_too_large");
-      expect(seen).toBeLessThan(1024 * 1024);
+      expect(Buffer.concat(chunks).toString("utf8")).toBe("");
+      await expect(streamed.bodyComplete).resolves.toEqual({ bytes: 0 });
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("passes a 204 through even though it carries no content-type", async () => {
+    const server = createServer((_req, res) => {
+      res.writeHead(204);
+      res.end();
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const addr = server.address();
+    const port = typeof addr === "object" && addr !== null ? addr.port : 0;
+    const proxy = new HttpProxyExecutor({ blockPrivate: false, allowInsecureHttp: true });
+    const http = { method: "DELETE", url: `http://127.0.0.1:${port}/resource/1`, headers: {} };
+    try {
+      const buffered = await proxy.execute({ accountId: "acct-test", http, fields: {} });
+      expect(buffered.status).toBe(204);
+      expect(buffered.body).toBe("");
+
+      const streamed = await proxy.executeStream({ accountId: "acct-test", http, fields: {} });
+      expect(streamed.status).toBe(204);
+      await expect(streamed.bodyComplete).resolves.toEqual({ bytes: 0 });
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }

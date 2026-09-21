@@ -15,10 +15,11 @@
 //   - resulting header value capped at 8KB
 //   - https-only, hostname resolved once + IP pinned (no rebinding),
 //     post-resolution IP checked against private/link-local/CGNAT/NAT64
-//   - MIME allowlist, Set-Cookie stripped. execute() buffers for
-//     use_credential and stays bounded by maxResponseBytes; executeStream()
-//     forwards headers + body bytes as they arrive, unbounded — only the
-//     DECOMPRESSED output of a compressed body keeps a ceiling there.
+//   - MIME allowlist (skipped for a status that carries no body), Set-Cookie
+//     stripped. execute() buffers for use_credential, so maxResponseBytes bounds
+//     it on BOTH sides of any decoder — declared length, wire bytes, and
+//     inflated output. executeStream() holds nothing, so it forwards headers and
+//     body bytes as they arrive with no size gate at all.
 
 import { lookup as dnsLookup } from "node:dns";
 import { request as httpsRequest } from "node:https";
@@ -109,10 +110,6 @@ export class ProxyError extends Error {
 const TOKEN_SRC = "\\$\\{SECRET(_JSON|_BASIC)?(?:\\.([^}]+))?\\}";
 const MAX_HEADER_VALUE_BYTES = 8 * 1024;
 const DEFAULT_MAX_RESPONSE_BYTES = 10 * 1024;
-// A compressed body can expand without bound, so the DECOMPRESSED output keeps
-// a ceiling even on the streaming pass-through. This is process protection, not
-// a gate on the caller — an uncompressed pass-through is forwarded unbounded.
-const DEFAULT_MAX_DECOMPRESSED_BYTES = 256 * 1024 * 1024;
 // Hop-by-hop headers plus content-length: a streamed reply is chunked, so a
 // forwarded Content-Length would lie about (or race) the bytes we actually send.
 const STREAM_RESPONSE_DROP_HEADERS = new Set([
@@ -306,7 +303,6 @@ export interface HttpProxyExecutorOptions {
   blockPrivate?: boolean;
   allowInsecureHttp?: boolean;
   maxResponseBytes?: number;
-  maxDecompressedBytes?: number;
   headersTimeoutMs?: number;
   bodyTimeoutMs?: number;
 }
@@ -317,7 +313,6 @@ export class HttpProxyExecutor {
   private readonly blockPrivate: boolean;
   private readonly allowInsecureHttp: boolean;
   private readonly maxResponseBytes: number;
-  private readonly maxDecompressedBytes: number;
   private readonly headersTimeoutMs: number;
   private readonly bodyTimeoutMs: number;
 
@@ -327,7 +322,6 @@ export class HttpProxyExecutor {
     this.blockPrivate = opts.blockPrivate ?? true;
     this.allowInsecureHttp = opts.allowInsecureHttp ?? false;
     this.maxResponseBytes = opts.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
-    this.maxDecompressedBytes = opts.maxDecompressedBytes ?? DEFAULT_MAX_DECOMPRESSED_BYTES;
     this.headersTimeoutMs = opts.headersTimeoutMs ?? 5000;
     this.bodyTimeoutMs = opts.bodyTimeoutMs ?? 5000;
   }
@@ -344,11 +338,16 @@ export class HttpProxyExecutor {
   }): Promise<ProxyResult> {
     const dispatchInput = await this.buildDispatchInput(input);
     const dispatched = await this.dispatch(dispatchInput);
+    const canHaveBody = responseCanHaveBody(dispatchInput.method, dispatched);
     try {
-      const headers = this.sanitiseHeaders(dispatched.headers);
-      const piped = this.pipeBody(dispatched.bodyStream, headers, this.maxResponseBytes, {
-        canHaveBody: responseCanHaveBody(dispatchInput.method, dispatched),
-      });
+      // A declared length over the cap is knowable before a byte is read; the
+      // meters below catch the undeclared and the compressed cases.
+      const declared = Number(headerValue(dispatched.headers, "content-length") ?? "0");
+      if (Number.isFinite(declared) && declared > this.maxResponseBytes) {
+        throw new ProxyError("response_too_large", "upstream Content-Length exceeds cap");
+      }
+      const headers = this.sanitiseHeaders(dispatched.headers, { canHaveBody });
+      const piped = pipeResponseBody(dispatched.bodyStream, headers, this.maxResponseBytes);
       const body = await readBodyStream(piped.body);
       return { status: dispatched.status, headers, body, truncated: dispatched.truncated };
     } catch (err) {
@@ -372,10 +371,10 @@ export class HttpProxyExecutor {
     const dispatchInput = await this.buildDispatchInput(input);
     const dispatched = await this.dispatch(dispatchInput);
     try {
-      const headers = this.headersForStream(dispatched.headers);
-      const piped = this.pipeBody(dispatched.bodyStream, headers, Number.POSITIVE_INFINITY, {
+      const headers = this.headersForStream(dispatched.headers, {
         canHaveBody: responseCanHaveBody(dispatchInput.method, dispatched),
       });
+      const piped = pipeResponseBody(dispatched.bodyStream, headers, Number.POSITIVE_INFINITY);
       return {
         status: dispatched.status,
         headers,
@@ -461,7 +460,10 @@ export class HttpProxyExecutor {
     return resolved;
   }
 
-  private sanitiseHeaders(raw: Record<string, string | string[]>): Record<string, string> {
+  private sanitiseHeaders(
+    raw: Record<string, string | string[]>,
+    opts: { canHaveBody: boolean },
+  ): Record<string, string> {
     const headers: Record<string, string> = {};
     let contentType = "";
     for (const [k, v] of Object.entries(raw)) {
@@ -471,6 +473,10 @@ export class HttpProxyExecutor {
       if (key === "content-type") contentType = value.toLowerCase();
       headers[key] = value;
     }
+    // A 204, a 304, or a reply to HEAD carries no content-type because it
+    // carries no content — there is nothing to type-check, and refusing it
+    // would turn an ordinary DELETE through a grant into a 502.
+    if (!opts.canHaveBody) return headers;
     const ok =
       contentType.startsWith("application/json") || contentType.startsWith("text/");
     if (!ok) {
@@ -482,21 +488,11 @@ export class HttpProxyExecutor {
     return headers;
   }
 
-  private pipeBody(
-    source: Readable,
-    headers: Record<string, string>,
-    maxBytes: number,
+  private headersForStream(
+    raw: Record<string, string | string[]>,
     opts: { canHaveBody: boolean },
-  ): PipedResponseBody {
-    return pipeResponseBody(source, headers, {
-      maxBytes,
-      maxDecompressedBytes: this.maxDecompressedBytes,
-      canHaveBody: opts.canHaveBody,
-    });
-  }
-
-  private headersForStream(raw: Record<string, string | string[]>): Record<string, string> {
-    const headers = this.sanitiseHeaders(raw);
+  ): Record<string, string> {
+    const headers = this.sanitiseHeaders(raw, opts);
     for (const key of STREAM_RESPONSE_DROP_HEADERS) {
       delete headers[key];
     }
@@ -572,9 +568,16 @@ function decoderForEncoding(enc: string): Transform | undefined {
   return undefined;
 }
 
-// 204/304, an informational status, and any response to HEAD carry no body by
-// definition, and a declared zero length says the same. Handing an empty byte
-// stream to a decompressor makes zlib fail with "unexpected end of file".
+function headerValue(
+  raw: Record<string, string | string[]>,
+  name: string,
+): string | undefined {
+  const value = raw[name];
+  return Array.isArray(value) ? value[0] : value;
+}
+
+// 204/304 and any response to HEAD carry no body by definition, and a declared
+// zero length says the same.
 function responseCanHaveBody(
   method: string,
   dispatched: Pick<DispatchResult, "status" | "headers">,
@@ -582,8 +585,7 @@ function responseCanHaveBody(
   if (method.toUpperCase() === "HEAD") return false;
   const { status } = dispatched;
   if (status === 204 || status === 304) return false;
-  const declared = dispatched.headers["content-length"];
-  return (Array.isArray(declared) ? declared[0] : declared) !== "0";
+  return headerValue(dispatched.headers, "content-length") !== "0";
 }
 
 interface PipedResponseBody {
@@ -591,42 +593,47 @@ interface PipedResponseBody {
   bodyComplete: Promise<ProxyBodyOutcome>;
 }
 
-// Decode (when we know the encoding), meter what leaves, and bound it. Mutates
-// `headers` so they describe the bytes that leave this pipe. `maxBytes` is the
-// caller's own memory bound (Infinity when it streams instead of buffering);
-// `maxDecompressedBytes` is the bomb ceiling that applies whenever we inflate,
-// because zlib's own maxOutputLength is inert for a streaming decompressor.
+// Counts what passes and aborts past `maxBytes`, tearing the source down with
+// it. `onTotal` reports the running count for the caller to read once settled.
+function meter(
+  source: Readable,
+  maxBytes: number,
+  onTotal?: (bytes: number) => void,
+): Transform {
+  let seen = 0;
+  return new Transform({
+    transform(chunk: Buffer, _encoding, cb) {
+      seen += chunk.length;
+      if (seen > maxBytes) {
+        source.destroy();
+        cb(new ProxyError("response_too_large", "upstream body exceeded cap mid-stream"));
+        return;
+      }
+      onTotal?.(seen);
+      cb(null, chunk);
+    },
+  });
+}
+
+// Decode (when we know the encoding) and meter what leaves. Mutates `headers` so
+// they describe the bytes that leave this pipe. `maxBytes` is the caller's own
+// memory bound — Infinity when it streams and therefore holds nothing.
 function pipeResponseBody(
   source: Readable,
   headers: Record<string, string>,
-  limits: { maxBytes: number; maxDecompressedBytes: number; canHaveBody: boolean },
+  maxBytes: number,
 ): PipedResponseBody {
   const enc = (headers["content-encoding"] ?? "").trim().toLowerCase();
-  const decoder =
-    limits.canHaveBody && enc !== "" && enc !== "identity"
-      ? decoderForEncoding(enc)
-      : undefined;
+  const decoder = enc !== "" && enc !== "identity" ? decoderForEncoding(enc) : undefined;
   if (decoder !== undefined) {
     // Body will be plaintext; these headers no longer describe it.
     delete headers["content-encoding"];
     delete headers["content-length"];
   }
-  const limit =
-    decoder !== undefined
-      ? Math.min(limits.maxBytes, limits.maxDecompressedBytes)
-      : limits.maxBytes;
 
   let total = 0;
-  const meter = new Transform({
-    transform(chunk: Buffer, _encoding, cb) {
-      total += chunk.length;
-      if (total > limit) {
-        source.destroy();
-        cb(new ProxyError("response_too_large", "upstream body exceeded cap mid-stream"));
-        return;
-      }
-      cb(null, chunk);
-    },
+  const outMeter = meter(source, maxBytes, (bytes) => {
+    total = bytes;
   });
 
   const dest = new PassThrough();
@@ -654,10 +661,46 @@ function pipeResponseBody(
         : { bytes: total, error: err.message },
     );
   };
-  if (decoder !== undefined) {
-    pipeline(source, decoder, meter, dest, onDone);
+
+  let started = false;
+  const start = (decode: boolean): void => {
+    if (started) return;
+    started = true;
+    if (decode && decoder !== undefined) {
+      // The meter above sees only inflated output, so the wire gets its own —
+      // otherwise a hostile upstream can make the buffered path read unbounded
+      // bytes (concatenated empty gzip members inflate to nothing) for a
+      // result that stays under the cap.
+      pipeline(source, meter(source, maxBytes), decoder, outMeter, dest, onDone);
+    } else {
+      pipeline(source, outMeter, dest, onDone);
+    }
+  };
+
+  if (decoder === undefined) {
+    start(false);
   } else {
-    pipeline(source, meter, dest, onDone);
+    // A decompressor handed zero bytes fails with "unexpected end of file", and
+    // an empty body is empty under every framing — a bodyless status, a declared
+    // zero length, or a chunked body that never produced a chunk. So the decoder
+    // is chosen from the first read rather than from the header alone. Headers
+    // are already on their way out, so this waits only on bytes that do not
+    // exist yet anyway.
+    const startFromFirstRead = (): boolean => {
+      const first: Buffer | string | null = source.read();
+      if (first === null) return false;
+      source.unshift(first);
+      start(true);
+      return true;
+    };
+    if (!startFromFirstRead()) {
+      source.once("end", () => start(false));
+      source.once("error", () => start(false));
+      dest.once("close", () => start(false));
+      source.once("readable", () => {
+        if (!startFromFirstRead()) start(false);
+      });
+    }
   }
   return { body: dest, bodyComplete };
 }
