@@ -271,6 +271,65 @@ describe("HttpProxyExecutor.executeStream", () => {
     }
   });
 
+  it("attributes an upstream reset to the upstream even when the caller never read", async () => {
+    // The inversion guard: `dest` is torn down here too, so a rule that reads
+    // settled stream state could call this a caller cancel. The upstream failed
+    // first, and that ordering is what decides it.
+    const server = createServer((_req, res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write("data: first\n\n");
+      setTimeout(() => res.destroy(), 30);
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const addr = server.address();
+    const port = typeof addr === "object" && addr !== null ? addr.port : 0;
+    const proxy = new HttpProxyExecutor({ blockPrivate: false, allowInsecureHttp: true });
+    try {
+      const streamed = await proxy.executeStream({
+        accountId: "acct-test",
+        http: { method: "GET", url: `http://127.0.0.1:${port}/stream`, headers: {} },
+        fields: {},
+      });
+      const outcome = await streamed.bodyComplete;
+      expect(outcome.clientClosed).toBeUndefined();
+      expect(outcome.error).toBeTypeOf("string");
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("reports a body-phase stall as a timeout, not a generic upstream error", async () => {
+    // Headers arrive, then the upstream goes quiet forever. The dispatch promise
+    // has already settled by then, so the socket budget's ProxyError has to
+    // reach the body reader for the caller to see 504 rather than 502.
+    const server = createServer((_req, res) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.write('{"partial":');
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const addr = server.address();
+    const port = typeof addr === "object" && addr !== null ? addr.port : 0;
+    const proxy = new HttpProxyExecutor({
+      blockPrivate: false,
+      allowInsecureHttp: true,
+      headersTimeoutMs: 150,
+      bodyTimeoutMs: 150,
+    });
+    try {
+      await expect(
+        proxy.execute({
+          accountId: "acct-test",
+          http: { method: "GET", url: `http://127.0.0.1:${port}/slow`, headers: {} },
+          fields: {},
+        }),
+      ).rejects.toMatchObject({ code: "timeout" });
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
   it("attributes a consumer-side teardown to the caller, not to the upstream", async () => {
     const server = createServer((_req, res) => {
       res.writeHead(200, { "content-type": "text/event-stream" });

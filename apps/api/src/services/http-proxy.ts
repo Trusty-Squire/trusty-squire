@@ -67,9 +67,10 @@ export interface StreamedProxyResult {
   headers: Record<string, string>;
   body: Readable;
   truncated: boolean;
-  // Settles once the pass-through ends or is torn down: the byte count metered
-  // on the wire (never buffered) plus, when the body did not finish, what cut
-  // it short. This is what the audit row is amended with.
+  // Settles once the pass-through ends or is torn down: the count of bytes
+  // forwarded to the caller — decompressed, when a decoder ran, so it matches
+  // what the buffered path records — plus, when the body did not finish, what
+  // cut it short. This is what the audit row is amended with.
   bodyComplete: Promise<ProxyBodyOutcome>;
 }
 
@@ -539,6 +540,12 @@ function defaultDispatch(input: DispatchInput): Promise<DispatchResult> {
         },
       },
       (res) => {
+        // The promise settles here, so a request-side failure after this point —
+        // the socket timeout below, above all — has nowhere to reject to. Carry
+        // it onto the body instead, or a body-phase stall reaches the caller as
+        // Node's generic "aborted" (502) rather than as the timeout (504) the
+        // budget exists to report.
+        req.once("error", (err) => res.destroy(err));
         // Resolve on headers so executeStream can start forwarding. IncomingMessage
         // stays paused until the consumer attaches; decode + metering happen there,
         // which is also where the buffered path's size bound lives — one owner.
@@ -645,21 +652,26 @@ function pipeResponseBody(
   const bodyComplete = new Promise<ProxyBodyOutcome>((resolve) => {
     settle = resolve;
   });
-  // Settles on success AND on teardown, attributing the latter to the end that
-  // caused it: a torn transfer must not read back as a completed one, and a
-  // caller cancelling its own stream must not read back as a proxy failure.
-  // `pipeline` propagates the originating error to every OTHER stream, so the
-  // one left without it is where the teardown began.
+  // Which end ended the transfer early, recorded as that end acts rather than
+  // read back afterwards. First writer wins, and cause precedes effect: the
+  // consumer's own destroy of `dest` necessarily happens before anything
+  // propagates from it, and an upstream failure lands on `source` before `dest`
+  // is torn down in response. Inspecting settled stream state instead would
+  // rest on how `pipeline` chooses to propagate, and a runtime change there
+  // would silently relabel every caller cancellation as our own failure.
+  let cause: { error: string } | { clientClosed: true } | undefined;
+  source.once("error", (err: Error) => {
+    cause ??= { error: err.message };
+  });
+  dest.once("close", () => {
+    if (!dest.writableFinished) cause ??= { clientClosed: true };
+  });
   const onDone = (err: Error | null | undefined): void => {
     if (err == null) {
       settle({ bytes: total });
       return;
     }
-    settle(
-      dest.errored == null
-        ? { bytes: total, clientClosed: true }
-        : { bytes: total, error: err.message },
-    );
+    settle({ bytes: total, ...(cause ?? { error: err.message }) });
   };
 
   let started = false;
