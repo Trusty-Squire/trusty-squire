@@ -941,7 +941,7 @@ async function runConnectInstall(
         browser_location,
         ownBrowserPid: placed.ownBrowserPid,
       }),
-    reportCeremonyExpired: () =>
+    reportCeremonyExpired: (ownBrowserPid) =>
       emitConnectStatus(args, {
         outcome: { kind: "install_expired" },
         profileDir,
@@ -949,7 +949,7 @@ async function runConnectInstall(
           kind: "unreachable",
           reason: "the ceremony display outlived its own bound without showing the page anywhere",
         },
-        ownBrowserPid: placed.ownBrowserPid,
+        ownBrowserPid,
       }),
     ...(deferredReloginProviders.length ? { forceReloginProviders: deferredReloginProviders } : {}),
   });
@@ -1386,8 +1386,10 @@ async function runInstallClaim(
     reportSignInOpen: (confirm_url: string, browser_location: ConnectBrowserLocation) => void;
     // Writes the run's terminal line when the ceremony rig outlives its own
     // bound. That path exits the process from inside the rig's cleanup, so
-    // nothing below returns here to report it.
-    reportCeremonyExpired: () => void;
+    // nothing below returns here to report it. The ceremony browser is still
+    // alive when it fires, and `placed` has not recorded it yet, so the pid
+    // arrives with the call rather than off the placement slot.
+    reportCeremonyExpired: (ownBrowserPid: number | null) => void;
     // Providers whose cookie clear busy-failed and now rides the ceremony
     // (see the --force-relogin block in the caller).
     forceReloginProviders?: readonly OAuthProviderId[];

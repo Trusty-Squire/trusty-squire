@@ -691,8 +691,11 @@ export interface RunInBotChromeOpts {
   // Called when the noVNC rig's own lifetime expires — the wedged/never-polled
   // ceremony the rig bound exists for. That path tears the rig down and exits
   // the process, so it never returns through the caller's reporting frame and
-  // the caller reports here instead.
-  onCeremonyExpired?: () => void;
+  // the caller reports here instead. It carries the ceremony Chrome THIS run
+  // launched, because the rig can outlive its bound while that browser is
+  // still holding the profile lock and a report must not name it a foreign
+  // holder; the broker's browser belongs to another session and reports null.
+  onCeremonyExpired?: (ownBrowserPid: number | null) => void;
   // Deferred --force-relogin clears: `clearProviderCookies` busy-failed
   // because the broker's browser holds the profile, so the old provider
   // sessions are signed out through the ceremony's own tab instead (the
@@ -758,7 +761,7 @@ export type SharedCeremonyExposure =
 export async function exposeSharedBrokerCeremonyDisplay(
   profileDir: string,
   label: string,
-  onExpired?: () => void,
+  onExpired?: (ownBrowserPid: number | null) => void,
 ): Promise<SharedCeremonyExposure> {
   const holder = holderCeremonyDisplay(profileDir);
   // Nothing to name. Where windows are drawn natively there is no X display to
@@ -800,7 +803,7 @@ export async function exposeSharedBrokerCeremonyDisplay(
   }
   const exposureRig = rig;
   const removeCleanup = registerRemoteLoginRigCleanup(exposureRig, () => undefined, {
-    ...(onExpired !== undefined ? { onExpired } : {}),
+    ...(onExpired !== undefined ? { onExpired: () => onExpired(null) } : {}),
   });
   let url: string;
   try {
@@ -1382,8 +1385,10 @@ export async function runDisplayedChrome(
 export async function runRemoteLoginChrome(opts: RunInBotChromeOpts): Promise<LoginRunResult> {
   const rig = createRemoteLoginRig();
   let activeTeardown: (() => Promise<void>) | undefined;
+  let ceremonyBrowserPid: number | null = null;
+  const reportExpired = opts.onCeremonyExpired;
   const removeRigCleanup = registerRemoteLoginRigCleanup(rig, () => activeTeardown, {
-    ...(opts.onCeremonyExpired !== undefined ? { onExpired: opts.onCeremonyExpired } : {}),
+    ...(reportExpired !== undefined ? { onExpired: () => reportExpired(ceremonyBrowserPid) } : {}),
   });
   const lifecycle = createTrackedLoginBrowserLifecycle(
     async () => await teardownRemoteLoginRig(rig),
@@ -1405,6 +1410,7 @@ export async function runRemoteLoginChrome(opts: RunInBotChromeOpts): Promise<Lo
         ? { forceReloginProviders: opts.forceReloginProviders }
         : {}),
     });
+    ceremonyBrowserPid = browser.identity?.pid ?? null;
     lifecycle.browserLaunched(
       async () =>
         await teardownLoginBrowser({
@@ -1547,8 +1553,9 @@ export async function openInstallConfirmInBotChrome(
       ownBrowserPid: number | null,
     ) => void;
     // The ceremony's noVNC rig hit its own lifetime and is exiting the
-    // process; the caller reports that outcome from here.
-    onCeremonyExpired?: () => void;
+    // process; the caller reports that outcome from here, with the ceremony
+    // Chrome this run launched when there is one.
+    onCeremonyExpired?: (ownBrowserPid: number | null) => void;
     // Deferred --force-relogin providers (cleared through the ceremony
     // itself when the standalone cookie-clear busy-failed).
     forceReloginProviders?: readonly OAuthProviderId[];
