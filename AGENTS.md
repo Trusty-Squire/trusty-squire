@@ -790,11 +790,12 @@ Read this file. Follow the rules. Run the verify script. Paste the output. Then 
   `browser-close-cookie.test.ts` proves fresh login cookies survive the local
   launch modes; the original plain-login evidence is in `STATE.md`.
 - `BrowserController` local launches stay headed. A real screen wins:
-  `hasDisplay()` (`apps/mcp/src/bot/display-env.ts`) means use the machine
-  display; Xvfb and the noVNC rig exist only on headless hosts.
-  `ownedHeadedBrowserEnvironment` in
+  `hostDisplayAcceptsConnections()` (`apps/mcp/src/bot/display-env.ts`) means
+  use the machine display; Xvfb and the noVNC rig exist only on headless
+  hosts, or when that display stops answering (a daemon outlives the X session
+  that handed it a DISPLAY). `ownedHeadedBrowserEnvironment` in
   `apps/mcp/src/bot/browser-process-owner.ts` is the launch-time gate.
-  Do not start Xvfb when the host already has a screen.
+  Do not start Xvfb when the host already has a live screen.
   Launch helpers live in `browser-process-runtime.ts`; the supported local
   and remote-CDP operator paths stay there.
 - `apps/mcp/src/bot/broker/runtime.ts` owns Chrome's identity runtime and physical

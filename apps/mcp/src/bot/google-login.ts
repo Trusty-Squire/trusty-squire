@@ -64,7 +64,7 @@ import {
   teardownRemoteLoginRig,
   type RemoteLoginRig,
 } from "./remote-login-display.js";
-import { hasDisplay } from "./display-env.js";
+import { hasDisplay, hostDisplayAcceptsConnections } from "./display-env.js";
 export { extractOAuthScopes, scopesAreBasic, scrapeGoogleScopePhrases } from "./oauth-scope.js";
 
 const require = createRequire(import.meta.url);
@@ -686,13 +686,15 @@ const LOGIN_STATUS_CHECK_STALLED_ERROR =
 // persistent profile and both are watched by the same poll loop.
 //
 // Shared-broker stays first: that Chrome already holds the profile, so
-// yielding or flipping order wholesale would only race it against a second
-// persistent context the profile gate then refuses. A real screen wins INSIDE
-// that Chrome — `ownedHeadedBrowserEnvironment` launches it on the host
-// display whenever there is one. The one case the broker cannot serve is a
-// daemon that inherited no DISPLAY and therefore parked its Chrome on a
-// private Xvfb: `tryRunCeremonyInSharedBroker` yields there, and the
-// display-aware path below opens the ceremony on the machine's screen.
+// yielding or flipping order would only race it against a second persistent
+// context the profile gate then refuses — and refusing a connect that used to
+// work is worse than any display it lands on. A real screen wins INSIDE that
+// Chrome: `ownedHeadedBrowserEnvironment` launches it on the host display
+// whenever the daemon can see one. A daemon that inherited no DISPLAY (over
+// SSH, from a user service) parked its Chrome on a private Xvfb before this
+// connect ever ran; it keeps its noVNC exposure, because nothing here can move
+// a live Chrome between X displays and the profile it holds is the one the
+// ceremony needs.
 export async function runInBotChrome(opts: RunInBotChromeOpts): Promise<LoginRunResult> {
   const shared = await tryRunCeremonyInSharedBroker(opts);
   if (shared !== null) return shared;
@@ -704,12 +706,10 @@ export interface LoginRunResult {
   closeState: ProfileCloseState;
 }
 
-// The broker's Chrome uses the machine screen when the daemon's own
-// hasDisplay() is true, and a private Xvfb otherwise. A ceremony tab on the
-// machine screen is already visible. A tab on the owned Xvfb only reaches
-// here on a HEADLESS connect — a connect with a screen never offers the
-// ceremony to that broker — and is invisible until this process exposes
-// that display over noVNC: the same x11vnc +
+// The broker's Chrome uses the machine screen when the daemon can see one,
+// and a private Xvfb otherwise. A ceremony tab on the machine screen is
+// already visible. A tab on the owned Xvfb is invisible until this process
+// exposes that display over noVNC — the same x11vnc +
 // websockify + tunnel stack the standalone remote login uses. Discovery
 // prefers the tracked launch display, then the browser process tree's
 // environment (/proc on Linux); the helpers this call spawns are reaped at
@@ -1011,11 +1011,10 @@ async function logoutProvidersThroughSession(
  * hosts the tab (and keeps the prior-contract / stale-credential reclaim
  * contracts).
  *
- * Returns null when no broker exists to serve (the connect found no socket at
- * all, or the socket was lost mid-handshake), and when a resident broker's
- * Chrome sits on a login rig this repo created while THIS host has a screen:
- * the caller then self-launches, which fail-fasts on the profile gate if a
- * browser actually holds the profile. Any other connect-or-launch failure propagates
+ * Returns null ONLY when no broker exists to serve (the connect found no
+ * socket at all, or the socket was lost mid-handshake): the caller then
+ * self-launches, which fail-fasts on the profile gate if a browser actually
+ * holds the profile. Any other connect-or-launch failure propagates
  * verbatim — in particular an identified resident's refusal (a
  * stale-credential broker still serving clients, an unreclaimed pid, a
  * handshake timeout) names the resident process and the recovery step, and
@@ -1025,12 +1024,6 @@ async function logoutProvidersThroughSession(
 export async function tryRunCeremonyInSharedBroker(
   opts: RunInBotChromeOpts,
 ): Promise<LoginRunResult | null> {
-  // The display decision is made where connect runs, never read off the
-  // broker's inherited environment. A daemon spawned without DISPLAY (over
-  // SSH, or from a user service) parks its Chrome on an Xvfb this repo
-  // created; when this host has a screen the ceremony belongs on that screen,
-  // not on a noVNC URL for a display nobody needs to tunnel to.
-  if (hasDisplay() && holderCeremonyDisplay(opts.profileDir).kind === "owned_rig") return null;
   const session = await createSessionGuard().bind();
   if (session?.agent_session_token === undefined || session.account_id === undefined) return null;
   const socket = resolveBrokerSocket(opts.profileDir);
@@ -1154,12 +1147,12 @@ function openHandbackDetail(observation: unknown): string {
 export async function runLoginBrowserForEnvironment(
   opts: RunInBotChromeOpts,
   runtime: {
-    hasDisplay: () => boolean;
+    hasDisplay: () => boolean | Promise<boolean>;
     runDisplayedChrome: (opts: RunInBotChromeOpts) => Promise<LoginRunResult>;
     runRemoteLoginChrome: (opts: RunInBotChromeOpts) => Promise<LoginRunResult>;
-  } = { hasDisplay, runDisplayedChrome, runRemoteLoginChrome },
+  } = { hasDisplay: hostDisplayAcceptsConnections, runDisplayedChrome, runRemoteLoginChrome },
 ): Promise<LoginRunResult> {
-  return runtime.hasDisplay()
+  return (await runtime.hasDisplay())
     ? await runtime.runDisplayedChrome(opts)
     : await runtime.runRemoteLoginChrome(opts);
 }

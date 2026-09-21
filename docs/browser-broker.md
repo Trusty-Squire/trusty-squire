@@ -88,16 +88,16 @@ with the busy-profile message rather than racing a browser that holds the
 profile. The shared-broker path stays first because that Chrome already
 holds the profile. A host with a screen (`hasDisplay()` in
 `apps/mcp/src/bot/display-env.ts`) launches that Chrome on the machine
-display — no Xvfb, no noVNC. The display decision is made where connect
-runs, never read off the daemon's inherited environment: a broker spawned
-without DISPLAY (over SSH, or from a user service) parks its Chrome on a
-private Xvfb, and a connect that has a screen yields the ceremony rather
-than tunnelling to that rig — `tryRunCeremonyInSharedBroker` returns null
-and the display-aware path opens the ceremony on the machine's screen.
-Headless hosts still use the broker's private Xvfb and connect exposes it
-over noVNC for the ceremony (same x11vnc + websockify + tunnel stack as the
-standalone remote login, reaped at the ceremony's lease boundary) — a tab no
-human can see is a tab no human can complete.
+display — no Xvfb, no noVNC. That decision is the daemon's, taken when it
+launches its Chrome: a broker spawned without DISPLAY (over SSH, or from a
+user service) cannot see the GUI session's display and parks its Chrome on a
+private Xvfb. A later connect from a screened terminal keeps the noVNC
+exposure for that Chrome rather than refusing — nothing here can move a live
+Chrome between X displays, and the profile that Chrome holds is the one the
+ceremony needs. Headless hosts likewise use the broker's private Xvfb and
+connect exposes it over noVNC for the ceremony (same x11vnc + websockify +
+tunnel stack as the standalone remote login, reaped at the ceremony's lease
+boundary) — a tab no human can see is a tab no human can complete.
 Display discovery first reads the holder profile's tracked launch display from
 the owner-reaper manifest, then falls back to the holder's process tree: Chrome
 can erase its main process environment while children retain DISPLAY/XAUTHORITY.

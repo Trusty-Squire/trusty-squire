@@ -8,6 +8,7 @@ import type { PageDriver } from "../page-driver.js";
 const displayState = vi.hoisted(() => ({ present: false }));
 vi.mock("../display-env.js", () => ({
   hasDisplay: () => displayState.present,
+  hostDisplayAcceptsConnections: async () => displayState.present,
 }));
 
 vi.mock("node:fs", async (importOriginal) => {
@@ -47,13 +48,24 @@ beforeEach(() => {
   vi.resetModules();
   vi.clearAllMocks();
   displayState.present = false;
+  // The egress-geo probe is not what any of these assert; a unit test must
+  // not reach the network for it.
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () => new Response("{}", { status: 200 })),
+  );
   vi.stubEnv("BOT_CDP_ENDPOINT", "");
   vi.stubEnv("BOT_NOVNC_W", "");
   vi.stubEnv("BOT_NOVNC_H", "");
   vi.stubEnv("TS_LOGIN_PUBLIC_HOSTNAME", "");
   vi.stubEnv("TS_LOGIN_LOCAL_PORT", "");
 });
-afterEach(() => vi.unstubAllEnvs());
+afterEach(async () => {
+  const { stopOwnerProcessReaper } = await import("../owner-process-reaper.js");
+  stopOwnerProcessReaper();
+  vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
+});
 
 describe("browser display geometry", () => {
   it("starts the operator display at the operator window size", async () => {

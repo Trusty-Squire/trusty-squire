@@ -64,7 +64,7 @@ import {
 } from "./browser-process-runtime.js";
 import type { RemoteLoginRig } from "./remote-login-display.js";
 import type { PageDriver } from "./page-driver.js";
-import { hasDisplay } from "./display-env.js";
+import { hostDisplayAcceptsConnections } from "./display-env.js";
 
 const OPERATOR_BROWSER_WINDOW_SIZE = { width: 1280, height: 1024 };
 
@@ -163,8 +163,10 @@ export class BrowserProcessOwner {
   }
 
   private async ownedHeadedBrowserEnvironment(): Promise<NodeJS.ProcessEnv> {
-    // Real screen wins: Xvfb exists for headless hosts only.
-    if (hasDisplay()) return { ...process.env };
+    // Real screen wins: Xvfb exists for headless hosts only. The display is
+    // verified live — this daemon outlives the X session that handed it a
+    // DISPLAY, and a dead one must fall back to a rig, not fail every launch.
+    if (await hostDisplayAcceptsConnections()) return { ...process.env };
     if (this.ownedDisplayRig === null) {
       const { createXvfbDisplayRig, startRemoteLoginDisplay } =
         await import("./remote-login-display.js");
