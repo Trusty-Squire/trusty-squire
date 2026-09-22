@@ -4414,6 +4414,65 @@ describe("drive review regressions", () => {
     }
   }, 60_000);
 
+  it("keeps re-deciding when the page changes under the decision instead of ending the drive", async () => {
+    // A page that changes between the snapshot and the act must never end the
+    // drive: the act was never dispatched, so no-progress is a false reason to
+    // stop. The old three-strike bound ended this run on the third change; the
+    // re-decide path is now excluded from no-progress accounting entirely, so
+    // the run keeps deciding until the page settles and still reaches the goal.
+    const html = `<!doctype html><meta charset="utf-8"><title>Live control</title>
+<main>
+  <a id="go" href="/details">Show details</a>
+  <input id="agree" type="checkbox" disabled aria-label="Live agreement">
+</main>`;
+    const { context, page, started } = await openFixture(html, "redecide.test");
+    try {
+      // The link's destination is the real outcome the drive must still reach
+      // after re-deciding through more changes than the old bound allowed.
+      await page.route("**/details", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: '<!doctype html><meta charset="utf-8"><title>Details</title><main><h1>Details</h1><p id="done">Here are the details</p></main>',
+        }),
+      );
+      // The change is made by the decider's own turn, after the snapshot the
+      // decision came from: exactly the window the pre-act check watches. It is
+      // a control-state change (checked), not a value or a page-text tick, so
+      // only a real page change re-decides.
+      let decisions = 0;
+      // More page changes than the old three-strike bound allowed (which ended
+      // the drive on the third).
+      const changes = 3;
+      const dependencies = deps(async (_api, _state, questions) => {
+        decisions += 1;
+        if (decisions <= changes) {
+          await page.evaluate(() => {
+            const box = document.querySelector("#agree");
+            if (box instanceof HTMLInputElement) box.checked = !box.checked;
+          });
+        }
+        return jevFromQuestions(questions, decisions > changes + 1);
+      });
+      const result = await runOperateDrive(
+        { session_id: started.session_id, goal: "show details" },
+        api(),
+        undefined,
+        dependencies,
+      );
+      // More changes than the old bound allowed is only meaningful evidence if
+      // the loop actually re-decided on them: a run that skipped the guard
+      // would decide twice (click, then DONE), not once per change plus the act.
+      expect(decisions).toBeGreaterThanOrEqual(changes + 1);
+      expect(page.url()).toContain("/details");
+      expect(result.status).toBe("complete");
+      const clicks = result.trajectory.filter((step) => step.action === "click");
+      expect(clicks).toHaveLength(1);
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 60_000);
+
   it("registers compact injection refs and retries after four incomplete fills", async () => {
     const { context, page, started } = await openFixture(
       '<label>Card number <input id="pan" autocomplete="cc-number"></label><label>CVV <input id="cvv" autocomplete="cc-csc"></label>',

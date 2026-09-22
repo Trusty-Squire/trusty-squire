@@ -112,9 +112,10 @@ came from — the document, plus the identity, role, and enabled/checked state o
 the controls that snapshot rowed, not their typed values, so a countdown or an
 input mask reformatting a field does not trigger it. Unchanged, the act runs;
 changed, the loop re-snapshots and decides again instead of executing a decision
-the page has outgrown. Two consecutive re-decides are allowed; a third ends the
-drive with `no_progress` and the reason `the page kept changing between the
-snapshot and the act`.
+the page has outgrown, and the re-decide is excluded from the no-progress
+accounting: it can never end the drive, because an action that was never
+dispatched is not a no-progress step. A page that never settles spends its
+steps re-deciding and finishes on the step or call budget.
 
 It returns a handoff (never a bare page): status, the current compact
 observation with the same stable refs, trajectory, and done/remaining.
