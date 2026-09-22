@@ -27,7 +27,6 @@ async function withBroker<T>(
   const root = await mkdtemp(join(tmpdir(), prefix));
   const path = join(root, "b.sock");
   const broker = await listenBroker(path, {
-    authenticate: async () => ({ accountId: "account", agentId: "agent" }),
     call: async (_principal, method, params) => await call(method, params),
     disconnect: async () => undefined,
   });
@@ -197,7 +196,6 @@ describe("MCP broker forwarding over the Contract B wire", () => {
       entered = resolve;
     });
     const broker = await listenBroker(path, {
-      authenticate: async () => ({ accountId: "account", agentId: "agent" }),
       call: async () => {
         entered();
         return await new Promise<never>(() => undefined);

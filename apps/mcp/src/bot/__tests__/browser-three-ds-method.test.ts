@@ -97,7 +97,6 @@ describe("native 3DS2 method completion", () => {
       try {
         if (launched) {
           vi.stubEnv("BOT_CDP_ENDPOINT", "");
-          vi.stubEnv("BOT_SELF_LAUNCH", "1");
           // Avoid an unrelated public IP service; do not mock browser execution.
           vi.spyOn(
             (launched as unknown as { processOwner: { probeEgressGeo(): Promise<null> } })

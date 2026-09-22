@@ -388,11 +388,13 @@ export function resolveChannelBinary(channel: string | null): string | null {
 // it is specifically the launch flags/instrumentation Playwright injects at
 // launchPersistentContext time. Self-launching the binary (no
 // --enable-automation et al.) and attaching with connectOverCDP avoids it.
-// Default-ON; opt out with BOT_SELF_LAUNCH=0 for the persistent-context path. Exported for tests.
-export function selfLaunchEnabled(): boolean {
-  const v = process.env.BOT_SELF_LAUNCH;
-  return v !== "0" && v !== "false" && v !== "off";
-}
+//
+// This is not a preference and there is no longer a switch for it: the broker
+// performs exactly this launch, once, and hands every tab out from it. The
+// persistent-context branch below remains only for the two cases the
+// self-launch genuinely cannot serve (no on-disk binary for the channel, or a
+// credentialed proxy the spawned Chrome cannot authenticate) — it is not a
+// configuration route around the broker.
 
 const PERSISTENT_CONTEXT_LAUNCH_TIMEOUT_MS = 30_000;
 

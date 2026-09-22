@@ -16,26 +16,17 @@ import { basename, dirname, join } from "node:path";
 import chalk from "chalk";
 import {
   CHROME_PROFILE_DIR,
-  closeProfileWithProof,
   currentProfileHolderPid,
   launchWithProfileGate,
   ProfileBusyError,
   profileProcessIdentity,
   type ProfileCloseState,
-  type ProfileProcessIdentity,
   waitForProfileFree,
   withProfileOperationGuard,
 } from "./profile.js";
-import { clearProviderCookiesFromContext } from "./login-state.js";
 import { closeBrowserContextWithin, registerLocalBrowserLaunch } from "./browser.js";
 import { createSessionGuard } from "../session-guard.js";
-import {
-  connectOrLaunchBroker,
-  isUnavailable,
-  isUnsupportedCeremonyOpen,
-  reclaimStaleCredentialBrokerIfPresent,
-  resolveBrokerSocket,
-} from "./broker/discovery.js";
+import { connectOrLaunchBroker, resolveBrokerSocket } from "./broker/discovery.js";
 import { BrokerRefusal } from "./broker/refusal.js";
 import type { BrokerClient } from "./broker/transport.js";
 import { controlLabelV2, wireRoleToSafeRoleV2 } from "./compact-observation-v2.js";
@@ -55,17 +46,14 @@ import {
 import type { BrowserContext } from "playwright";
 import type { OAuthProviderId } from "./oauth-providers.js";
 import {
-  assertRemoteLoginRigLive,
   createRemoteLoginRig,
   createRemoteLoginVncSecrets,
   exposeRemoteLoginDisplay,
   registerRemoteLoginRigCleanup,
-  remoteLoginEnvironment,
-  startRemoteLoginDisplay,
   teardownRemoteLoginRig,
   type RemoteLoginRig,
 } from "./remote-login-display.js";
-import { drawsWindowsNatively, hasDisplay, hostDisplayAcceptsConnections } from "./display-env.js";
+import { drawsWindowsNatively, hasDisplay } from "./display-env.js";
 export { extractOAuthScopes, scopesAreBasic, scrapeGoogleScopePhrases } from "./oauth-scope.js";
 
 const require = createRequire(import.meta.url);
@@ -480,169 +468,6 @@ export {
 // ask it without forming a runtime cycle with this login module.
 export { hasDisplay } from "./display-env.js";
 
-export async function teardownLoginBrowser(opts: {
-  profileDir: string;
-  identity: ProfileProcessIdentity | null;
-  closeBrowser: () => Promise<void>;
-  forceClose: () => unknown;
-  isRunning?: () => boolean;
-  timeoutMs?: number;
-}): Promise<ProfileCloseState> {
-  let profileState: ProfileCloseState;
-  if (opts.identity === null && opts.isRunning !== undefined) {
-    const timeoutMs = opts.timeoutMs ?? 15_000;
-    let timer: NodeJS.Timeout | undefined;
-    const closed = await Promise.race([
-      Promise.resolve()
-        .then(opts.closeBrowser)
-        .then(
-          () => true,
-          () => false,
-        ),
-      new Promise<false>((resolve) => {
-        timer = setTimeout(() => resolve(false), timeoutMs);
-      }),
-    ]);
-    if (timer !== undefined) clearTimeout(timer);
-    const waitForExit = async (): Promise<boolean> => {
-      const deadline = Date.now() + 2_000;
-      while (opts.isRunning!() && Date.now() < deadline) {
-        await new Promise<void>((resolve) => setTimeout(resolve, 25));
-      }
-      return !opts.isRunning!();
-    };
-    if (closed && (await waitForExit())) profileState = "closed";
-    else {
-      opts.forceClose();
-      profileState = (await waitForExit()) ? "closed" : "force_closed_unproven";
-    }
-  } else {
-    profileState = await closeProfileWithProof({
-      profileDir: opts.profileDir,
-      identity: opts.identity,
-      close: opts.closeBrowser,
-      forceClose: opts.forceClose,
-      ...(opts.timeoutMs !== undefined ? { closeTimeoutMs: opts.timeoutMs } : {}),
-    });
-  }
-  return profileState;
-}
-
-// --- shutdown coordination with the operator server -------------------
-// Every in-flight login run registers a cancel closure here so an external
-// shutdown owner (the MCP server's disconnect coordinator) can close the
-// OAuth-bootstrap Chrome instead of orphaning it. The closures wrap the run's
-// own proof-checked teardown (closeProfileWithProof over the launch-time
-// process identity), so cancellation never signals a PID it cannot prove
-// ownership of.
-const activeLoginBrowserCancels = new Set<() => Promise<void>>();
-
-// Returns the unregister disposer for the normal completion path.
-export function trackActiveLoginBrowser(cancel: () => Promise<void>): () => void {
-  activeLoginBrowserCancels.add(cancel);
-  return (): void => {
-    activeLoginBrowserCancels.delete(cancel);
-  };
-}
-
-// Cancel every in-flight login run's browser. Called by the MCP server's
-// shutdown path; idempotent and
-// best-effort — a failed teardown must not stall the process exit, whose
-// process-level exit hooks still force-kill anything identity-proven.
-export async function cancelActiveLoginBrowsers(): Promise<void> {
-  const pending = [...activeLoginBrowserCancels];
-  activeLoginBrowserCancels.clear();
-  await Promise.all(pending.map((cancel) => cancel().catch(() => undefined)));
-}
-
-interface TrackedLoginBrowserLifecycle {
-  cancellation: Promise<void>;
-  cancel(): Promise<void>;
-  throwIfCancelled(): void;
-  browserLaunched(teardown: () => Promise<ProfileCloseState>): void;
-  finish(): Promise<ProfileCloseState>;
-}
-
-function createTrackedLoginBrowserLifecycle(
-  teardownRun?: () => Promise<void>,
-): TrackedLoginBrowserLifecycle {
-  let cancelled = false;
-  let launchSettled = false;
-  let resolveLaunchSettlement: (() => void) | undefined;
-  const launchSettlement = new Promise<void>((resolve) => {
-    resolveLaunchSettlement = resolve;
-  });
-  let teardownBrowser: (() => Promise<ProfileCloseState>) | undefined;
-  let browserTeardown: Promise<ProfileCloseState> | undefined;
-  let runTeardown: Promise<void> | undefined;
-  let cancellation: Promise<void> | undefined;
-  let resolveCancellation!: () => void;
-  const cancellationSignal = new Promise<void>((resolve) => {
-    resolveCancellation = resolve;
-  });
-  let finishing: Promise<ProfileCloseState> | undefined;
-
-  const settleLaunch = (): void => {
-    if (launchSettled) return;
-    launchSettled = true;
-    resolveLaunchSettlement?.();
-  };
-  const closeBrowser = (): Promise<ProfileCloseState> => {
-    if (teardownBrowser === undefined) return Promise.resolve("unknown");
-    browserTeardown ??= teardownBrowser();
-    return browserTeardown;
-  };
-  const closeRun = (): Promise<void> => {
-    if (teardownRun === undefined) return Promise.resolve();
-    runTeardown ??= teardownRun();
-    return runTeardown;
-  };
-  let lifecycle!: TrackedLoginBrowserLifecycle;
-  const untrack = trackActiveLoginBrowser(async () => await lifecycle.cancel());
-  lifecycle = {
-    cancellation: cancellationSignal,
-    cancel: (): Promise<void> => {
-      cancelled = true;
-      resolveCancellation();
-      cancellation ??= (async () => {
-        await launchSettlement;
-        try {
-          await closeBrowser();
-        } finally {
-          await closeRun();
-        }
-      })();
-      return cancellation;
-    },
-    throwIfCancelled: (): void => {
-      if (cancelled) throw new Error("login browser cancelled during shutdown");
-    },
-    browserLaunched: (teardown): void => {
-      teardownBrowser = teardown;
-      settleLaunch();
-      lifecycle.throwIfCancelled();
-    },
-    finish: (): Promise<ProfileCloseState> => {
-      settleLaunch();
-      finishing ??= (async () => {
-        let closeState: ProfileCloseState = "unknown";
-        try {
-          closeState = await closeBrowser();
-        } finally {
-          try {
-            await closeRun();
-          } finally {
-            untrack();
-          }
-        }
-        return closeState;
-      })();
-      return finishing;
-    },
-  };
-  return lifecycle;
-}
-
 // Where the ceremony browser ACTUALLY went, named by the path that placed it
 // — the screen the person running connect is at, a display only the noVNC URL
 // reaches, or nowhere showable at all. Nobody predicts this from their own
@@ -659,15 +484,13 @@ export type CeremonyBrowserPlacement =
 // Open the bot's visible Chrome at `url` and run `pollUntilDone` until it
 // resolves true, the deadline passes, or the browser/status check fails.
 //
-// Two launch paths (see the module header): the shared broker's tab, and the
-// self-launched `launchPersistentContext` Chrome. NEITHER is the plain spawn
-// STATE.md's 2026-07-20 bisect cleared — it names launchPersistentContext
-// "also CDP" too, and that plain cell was replaced when the ceremony moved
-// onto the shared browser. That bisect confirmed a CDP attach × Google OAuth
-// failure for the OLD self-launch + connectOverCDP cell; whether either path
-// here trips the same check is the open hypothesis the PATH A/B E2E proofs
-// settle. Nothing drives the user's sign-in in either path: completion
-// arrives out of band, through `connect`'s nonce-scoped Finish callback.
+// There is exactly ONE launch path: a tab in the broker's shared browser. The
+// broker owns the Turnstile-safe launch (self-launched Chrome + connectOverCDP)
+// and hands tabs out from it, so the ceremony and every operator session share
+// the same Chrome, the same profile, and the same cookies. Nothing in this
+// product launches a browser of its own. Nothing drives the user's sign-in:
+// completion arrives out of band, through `connect`'s nonce-scoped Finish
+// callback.
 export interface RunInBotChromeOpts {
   profileDir: string;
   url: string;
@@ -681,25 +504,18 @@ export interface RunInBotChromeOpts {
   // The install flow has a sign-in phase followed by an explicit Finish
   // step. Resolve this lazily so its heartbeat describes the current phase.
   heartbeatMessage?: string | (() => string);
-  onProxyDisposition?: (proxy: LoginProxyDisposition) => void;
-  // Called once by whichever path placed the browser, with where it landed.
-  // `ownBrowserPid` is the Chrome THIS run launched, when it launched one —
-  // the broker's browser belongs to another session and reports null. The
-  // reporter needs it to tell its own ceremony window apart from a foreign
-  // holder of the same profile lock.
+  // Called once by the path that placed the browser, with where it landed.
+  // The ceremony never launches its own Chrome, so `ownBrowserPid` is always
+  // null here: the broker's browser belongs to the broker.
   onBrowserPlacement?: (placement: CeremonyBrowserPlacement, ownBrowserPid: number | null) => void;
   // Called when the noVNC rig's own lifetime expires — the wedged/never-polled
   // ceremony the rig bound exists for. That path tears the rig down and exits
   // the process, so it never returns through the caller's reporting frame and
-  // the caller reports here instead. It carries the ceremony Chrome THIS run
-  // launched, because the rig can outlive its bound while that browser is
-  // still holding the profile lock and a report must not name it a foreign
-  // holder; the broker's browser belongs to another session and reports null.
+  // the caller reports here instead.
   onCeremonyExpired?: (ownBrowserPid: number | null) => void;
   // Deferred --force-relogin clears: `clearProviderCookies` busy-failed
   // because the broker's browser holds the profile, so the old provider
-  // sessions are signed out through the ceremony's own tab instead (the
-  // self-launch path clears them from its context directly).
+  // sessions are signed out through the ceremony's own tab.
   forceReloginProviders?: readonly OAuthProviderId[];
 }
 
@@ -708,25 +524,17 @@ const LOGIN_BROWSER_CLOSED_ERROR =
 const LOGIN_STATUS_CHECK_STALLED_ERROR =
   "the login status check stopped responding before the session completed";
 
-// The install-confirm ceremony: a tab in the shared broker browser when one
-// can serve, otherwise connect's own persistent-context browser (local window
-// or, headless, the noVNC login rig). Both paths keep the user in the bot's
-// persistent profile and both are watched by the same poll loop.
-//
-// Shared-broker stays first: that Chrome already holds the profile, so
-// yielding or flipping order would only race it against a second persistent
-// context the profile gate then refuses — and refusing a connect that used to
-// work is worse than any display it lands on. A real screen wins INSIDE that
-// Chrome: `ownedHeadedBrowserEnvironment` launches it on the host display
-// whenever the daemon can see one. A daemon that inherited no DISPLAY (over
-// SSH, from a user service) parked its Chrome on a private Xvfb before this
-// connect ever ran; it keeps its noVNC exposure, because nothing here can move
-// a live Chrome between X displays and the profile it holds is the one the
-// ceremony needs.
+// The install-confirm ceremony: a tab in the shared broker browser, always.
+// The broker is the only thing that owns a browser, so the ceremony never has
+// to win the profile against one. A real screen wins INSIDE that Chrome:
+// `ownedHeadedBrowserEnvironment` launches it on the host display whenever the
+// daemon can see one. A daemon that inherited no DISPLAY (over SSH, from a
+// user service) parked its Chrome on a private Xvfb before this connect ever
+// ran; it keeps its noVNC exposure, because nothing here can move a live
+// Chrome between X displays and the profile it holds is the one the ceremony
+// needs.
 export async function runInBotChrome(opts: RunInBotChromeOpts): Promise<LoginRunResult> {
-  const shared = await tryRunCeremonyInSharedBroker(opts);
-  if (shared !== null) return shared;
-  return await runLoginBrowserForEnvironment(opts);
+  return await runCeremonyInSharedBroker(opts);
 }
 
 export interface LoginRunResult {
@@ -1052,64 +860,49 @@ async function logoutProvidersThroughSession(
  * operator session), the ceremony reuses it instead of requesting a bare
  * one — a bare request would be refused `incompatible_runtime` while other
  * sessions are live, or would recycle the shared Chrome underneath them
- * when none are. On an enrolled machine with no resident broker, the
- * ordinary connect-or-launch path spawns the broker daemon, whose browser
- * hosts the tab (and keeps the prior-contract / stale-credential reclaim
- * contracts).
+ * when none are.
  *
- * Returns null ONLY when no broker exists to serve (the connect found no
- * socket at all, or the socket was lost mid-handshake): the caller then
- * self-launches, which fail-fasts on the profile gate if a browser actually
- * holds the profile. Any other connect-or-launch failure propagates
- * verbatim — in particular an identified resident's refusal (a
- * stale-credential broker still serving clients, an unreclaimed pid, a
- * handshake timeout) names the resident process and the recovery step, and
- * swallowing it into a self-launch is what replaced that message with the
- * generic "another Trusty Squire session is already using the browser".
+ * The broker is reached with nothing: connecting takes no credential and the
+ * ceremony open names no account, because enrollment CREATES an account
+ * rather than acting as one. A machine with no enrolled account — exactly the
+ * machine that is being enrolled — therefore gets the shared browser, and the
+ * connect-or-launch path starts the daemon when none is resident (the daemon
+ * itself requires no enrollment). An identified resident's refusal (an
+ * unreclaimed pid, a handshake timeout, a profile held elsewhere) propagates
+ * verbatim, naming the process that holds it.
  */
-export async function tryRunCeremonyInSharedBroker(
-  opts: RunInBotChromeOpts,
-): Promise<LoginRunResult | null> {
+export async function runCeremonyInSharedBroker(opts: RunInBotChromeOpts): Promise<LoginRunResult> {
   const session = await createSessionGuard().bind();
-  if (session?.agent_session_token === undefined || session.account_id === undefined) return null;
   const socket = resolveBrokerSocket(opts.profileDir);
+  const connectOptions = {
+    ...(session?.account_id === undefined ? {} : { accountId: session.account_id }),
+    ...(session?.agent_session_token === undefined
+      ? {}
+      : { agentSessionToken: session.agent_session_token }),
+  };
   let client: BrokerClient;
   try {
-    client = await connectOrLaunchBroker(socket, session.agent_session_token, session.account_id);
+    client = await connectOrLaunchBroker(socket, connectOptions);
   } catch (err) {
-    // Genuinely no broker to serve (no listener, connection refused, socket
-    // lost): the self-launch path's profile gate reports the truth about the
-    // profile instead of racing it. Everything else — an identified
-    // resident's refusal above all — reaches connect verbatim.
-    if (isUnavailable(err)) return null;
+    // Nothing left to fall back to: the broker is the only path that owns a
+    // browser. An identified resident's refusal (a broker still serving
+    // clients, an unreclaimed pid, a handshake timeout) names the resident
+    // process and the recovery step, and swallowing it would replace that
+    // message with a generic "another Trusty Squire session is already using
+    // the browser".
     throw err;
   }
   let sessionId: string | undefined;
   let stopExposure: (() => Promise<void>) | null | undefined;
   try {
-    const openCeremony = async () =>
-      (await client.call("open", {
-        serviceUrl: opts.url,
-        // The ceremony IS what creates the live Google session. Keep its open
-        // explicitly marked so it can never be mistaken for a Google-dependent
-        // operator action. The same flag adopts the browser's live identity —
-        // see OpenRequest.
-        ceremony: true,
-      })) as { sessionId?: string; observation?: unknown };
-    let open: Awaited<ReturnType<typeof openCeremony>>;
-    try {
-      open = await openCeremony();
-    } catch (error) {
-      if (!isUnsupportedCeremonyOpen(error)) throw error;
-      // This failed open created no tab. Drop our peer before reclaim so
-      // the existing attached-client refusal only sees other callers.
-      await client.close();
-      if (!(await reclaimStaleCredentialBrokerIfPresent(socket, session.account_id, error)))
-        throw error;
-      client = await connectOrLaunchBroker(socket, session.agent_session_token, session.account_id);
-      // Retry exactly once; another rejection propagates through cleanup.
-      open = await openCeremony();
-    }
+    const open = (await client.call("open", {
+      serviceUrl: opts.url,
+      // The ceremony IS what creates the live Google session. Keep its open
+      // explicitly marked so it can never be mistaken for a Google-dependent
+      // operator action. The same flag adopts the browser's live identity —
+      // see OpenRequest.
+      ceremony: true,
+    })) as { sessionId?: string; observation?: unknown };
     sessionId = open.sessionId;
     if (sessionId === undefined) {
       // The broker minted no live session AND no tab. Nothing in this run
@@ -1199,262 +992,6 @@ function openHandbackDetail(observation: unknown): string {
     if (typeof value === "string" && value.trim() !== "") return `${key}: ${value}`;
   }
   return "";
-}
-
-export async function runLoginBrowserForEnvironment(
-  opts: RunInBotChromeOpts,
-  runtime: {
-    hasDisplay: () => boolean | Promise<boolean>;
-    runDisplayedChrome: (opts: RunInBotChromeOpts) => Promise<LoginRunResult>;
-    runRemoteLoginChrome: (opts: RunInBotChromeOpts) => Promise<LoginRunResult>;
-  } = { hasDisplay: hostDisplayAcceptsConnections, runDisplayedChrome, runRemoteLoginChrome },
-): Promise<LoginRunResult> {
-  return (await runtime.hasDisplay())
-    ? await runtime.runDisplayedChrome(opts)
-    : await runtime.runRemoteLoginChrome(opts);
-}
-
-// The self-launched ceremony browser: a headed persistent-context Chrome on
-// the bot profile — the same launcher class the operator uses, with operator
-// launch custody (marker, reaper bind, graceful close). The profile gate
-// fail-fasts when another browser holds the profile, so a machine with a
-// resident broker that could not be reached is refused honestly instead of
-// racing it.
-export interface CeremonyBrowser {
-  identity: ProfileProcessIdentity | null;
-  isRunning: () => boolean;
-  teardown: () => Promise<void>;
-  forceTeardown: () => Promise<void>;
-}
-
-export async function launchCeremonyBrowserContext(
-  params: {
-    profileDir: string;
-    url: string;
-    window: { width: number; height: number };
-    env: NodeJS.ProcessEnv;
-    forceReloginProviders?: readonly OAuthProviderId[];
-  },
-  runtime: {
-    launchPersistentLoginContext?: typeof launchPersistentLoginContext;
-  } = {},
-): Promise<CeremonyBrowser> {
-  return await withProfileOperationGuard(params.profileDir, async () => {
-    const login = await launchWithProfileGate(
-      params.profileDir,
-      async () =>
-        await (runtime.launchPersistentLoginContext ?? launchPersistentLoginContext)(
-          resolveChromium(),
-          params.profileDir,
-          {
-            headless: false,
-            viewport: null,
-            // The adopted rig's DISPLAY/XAUTHORITY (remote login on a
-            // headless box) must reach Chrome itself, not just the marker
-            // registration — a headed launch with no DISPLAY dies with
-            // "Missing X server or $DISPLAY".
-            env: params.env,
-            args: [
-              `--window-size=${params.window.width},${params.window.height}`,
-              "--lang=en-US",
-              "--no-first-run",
-              "--no-default-browser-check",
-              "--password-store=basic",
-              "--no-sandbox",
-              "--disable-dev-shm-usage",
-            ],
-          },
-        ),
-      { failFast: true },
-    );
-    try {
-      return await prepareCeremonyBrowser(params, login);
-    } catch (err) {
-      // The browser is LIVE from here on, and the caller registers its
-      // teardown only once this function returns — so nothing else can close
-      // it if the page setup below throws. Close it here or a failed first
-      // connect leaks a Chrome until process-exit reaping.
-      await login.close().catch(() => undefined);
-      throw err;
-    }
-  });
-}
-
-async function prepareCeremonyBrowser(
-  params: {
-    profileDir: string;
-    url: string;
-    forceReloginProviders?: readonly OAuthProviderId[];
-  },
-  login: PersistentLoginContext,
-): Promise<CeremonyBrowser> {
-  {
-    const page = login.context.pages()[0] ?? (await login.context.newPage());
-    if (params.forceReloginProviders?.length) {
-      // Deferred --force-relogin clear: the earlier standalone clear
-      // busy-failed, but this context now owns the profile, so the clear
-      // finally has custody. Best-effort — a failed clear warns and continues
-      // rather than recreating the hard refusal finding 3 was about.
-      const both =
-        params.forceReloginProviders.includes("google") &&
-        params.forceReloginProviders.includes("github");
-      const provider = both ? undefined : params.forceReloginProviders[0];
-      try {
-        const cleared = await clearProviderCookiesFromContext(login.context, provider);
-        if (!cleared) {
-          console.error(
-            "[login] some provider cookies could not be cleared in the ceremony browser — continuing.",
-          );
-        }
-      } catch (err) {
-        console.error(
-          `[login] provider cookie clear failed in the ceremony browser ` +
-            `(${err instanceof Error ? err.message : String(err)}) — continuing.`,
-        );
-      }
-    }
-    await page.goto(params.url);
-    const holderPid = currentProfileHolderPid(params.profileDir);
-    const identity =
-      holderPid === null ? null : profileProcessIdentity(holderPid, params.profileDir);
-    const close = async (): Promise<void> => {
-      await login.close();
-    };
-    return {
-      identity,
-      isRunning: () => currentProfileHolderPid(params.profileDir) !== null,
-      teardown: close,
-      forceTeardown: (): Promise<void> => close().catch(() => undefined),
-    };
-  }
-}
-
-export async function runDisplayedChrome(
-  opts: RunInBotChromeOpts,
-  runtime: {
-    launchCeremonyBrowserContext: typeof launchCeremonyBrowserContext;
-  } = { launchCeremonyBrowserContext },
-): Promise<LoginRunResult> {
-  opts.onProxyDisposition?.(null);
-  const lifecycle = createTrackedLoginBrowserLifecycle();
-  let status: LoginRunResult["status"] = "timeout";
-  let closeState: ProfileCloseState = "unknown";
-  try {
-    const browser = await runtime.launchCeremonyBrowserContext({
-      profileDir: opts.profileDir,
-      url: opts.url,
-      window: { width: 1280, height: 800 },
-      env: process.env,
-      ...(opts.forceReloginProviders?.length
-        ? { forceReloginProviders: opts.forceReloginProviders }
-        : {}),
-    });
-    lifecycle.browserLaunched(
-      async () =>
-        await teardownLoginBrowser({
-          profileDir: opts.profileDir,
-          identity: browser.identity,
-          closeBrowser: browser.teardown,
-          forceClose: browser.forceTeardown,
-          isRunning: browser.isRunning,
-        }),
-    );
-    opts.onBrowserPlacement?.(
-      {
-        kind: "host_screen",
-        ...(process.env.DISPLAY !== undefined ? { display: process.env.DISPLAY } : {}),
-      },
-      browser.identity?.pid ?? null,
-    );
-    console.error(`\n[login] A Chrome window has opened. ${opts.bannerLabel}\n`);
-    const ok = await pollUntil(
-      opts.deadline,
-      () => opts.pollUntilDone(),
-      opts.heartbeatMessage,
-      () => {
-        if (!browser.isRunning()) throw new Error(LOGIN_BROWSER_CLOSED_ERROR);
-      },
-    );
-    status = ok ? "satisfied" : "timeout";
-  } finally {
-    closeState = await lifecycle.finish();
-  }
-  return { status, closeState };
-}
-
-export async function runRemoteLoginChrome(
-  opts: RunInBotChromeOpts,
-  runtime: {
-    launchCeremonyBrowserContext: typeof launchCeremonyBrowserContext;
-  } = { launchCeremonyBrowserContext },
-): Promise<LoginRunResult> {
-  const rig = createRemoteLoginRig();
-  let activeTeardown: (() => Promise<void>) | undefined;
-  let ceremonyBrowserPid: number | null = null;
-  const removeRigCleanup = registerRemoteLoginRigCleanup(rig, () => activeTeardown, {
-    onExpired: () => opts.onCeremonyExpired?.(ceremonyBrowserPid),
-  });
-  const lifecycle = createTrackedLoginBrowserLifecycle(
-    async () => await teardownRemoteLoginRig(rig),
-  );
-  activeTeardown = lifecycle.cancel;
-
-  try {
-    await startRemoteLoginDisplay(rig);
-    lifecycle.throwIfCancelled();
-
-    opts.onProxyDisposition?.(null);
-    const browserEnv = remoteLoginEnvironment(rig);
-    const browser = await runtime.launchCeremonyBrowserContext({
-      profileDir: opts.profileDir,
-      url: opts.url,
-      window: { width: rig.width, height: rig.height },
-      env: browserEnv,
-      ...(opts.forceReloginProviders?.length
-        ? { forceReloginProviders: opts.forceReloginProviders }
-        : {}),
-    });
-    ceremonyBrowserPid = browser.identity?.pid ?? null;
-    lifecycle.browserLaunched(
-      async () =>
-        await teardownLoginBrowser({
-          profileDir: opts.profileDir,
-          identity: browser.identity,
-          closeBrowser: browser.teardown,
-          forceClose: browser.forceTeardown,
-        }),
-    );
-    try {
-      const url = await exposeRemoteLoginDisplay(rig, opts.bannerLabel);
-      lifecycle.throwIfCancelled();
-      opts.onBrowserPlacement?.({ kind: "virtual", url }, browser.identity?.pid ?? null);
-
-      const completed = await pollUntil(
-        opts.deadline,
-        () => opts.pollUntilDone(),
-        opts.heartbeatMessage,
-        () => {
-          assertRemoteLoginRigLive(rig);
-          if (!browser.isRunning()) throw new Error(LOGIN_BROWSER_CLOSED_ERROR);
-        },
-      );
-      const closeState = await lifecycle.finish();
-      return {
-        status: completed ? "satisfied" : "timeout",
-        closeState,
-      };
-    } finally {
-      await lifecycle.finish();
-      activeTeardown = undefined;
-    }
-  } finally {
-    try {
-      await lifecycle.finish();
-    } finally {
-      activeTeardown = undefined;
-      removeRigCleanup();
-    }
-  }
 }
 
 // Shared timed-poll helper. `check` is invoked every 3s until it

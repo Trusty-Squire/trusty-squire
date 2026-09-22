@@ -60,7 +60,7 @@ describe("deriveOpenToolArgs", () => {
 
 describe("BrokerRuntime.liveProxyUrl", () => {
   it("reflects the identity the shared browser is live under", () => {
-    const runtime = new BrokerRuntime("fixture-account");
+    const runtime = new BrokerRuntime();
     const internals = runtime as unknown as {
       runtimeIdentity: { settings: { profileDir: string; proxyUrl?: string } | null };
     };

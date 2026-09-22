@@ -56,7 +56,7 @@ it("a close that cannot drain leaves the identity cell serving", async () => {
   // refuses, while the sessions that blocked the drain keep it alive.
   vi.stubEnv("BOT_CDP_ENDPOINT", "http://127.0.0.1:1");
   try {
-    const runtime = new BrokerRuntime("fixture-account");
+    const runtime = new BrokerRuntime();
     // `acquire` launches a real browser, so plant the session bookkeeping a
     // live session would hold directly: `close()` reads only this map.
     const sessions = (runtime as unknown as { sessions: Map<unknown, () => void> }).sessions;
@@ -80,7 +80,7 @@ it("a close whose force-close cannot prove the tree died leaves the cell serving
   // browser no session actually owned.
   vi.stubEnv("BOT_CDP_ENDPOINT", "http://127.0.0.1:1");
   try {
-    const runtime = new BrokerRuntime("fixture-account");
+    const runtime = new BrokerRuntime();
     const internals = runtime as unknown as {
       owner: { close: () => Promise<string>; forceCloseOwnedProcessTree: () => Promise<string> };
     };
@@ -104,7 +104,7 @@ it("a failed close leaves a pre-existing custody-unproven latch set", async () =
   // on exactly this path, and the runtime has to actually retain it.
   vi.stubEnv("BOT_CDP_ENDPOINT", "http://127.0.0.1:1");
   try {
-    const runtime = new BrokerRuntime("fixture-account");
+    const runtime = new BrokerRuntime();
     const internals = runtime as unknown as {
       closing: boolean;
       owner: { close: () => Promise<string>; forceCloseOwnedProcessTree: () => Promise<string> };

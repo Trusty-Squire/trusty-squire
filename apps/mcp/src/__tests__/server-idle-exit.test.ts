@@ -107,10 +107,6 @@ describe("server shutdown call admission", () => {
       entered = resolve;
     });
     const listener = await listenBroker(socket, {
-      authenticate: async (token, _agentId) =>
-        token === account.agent_session_token
-          ? { accountId: account.account_id, agentId: "registry-test" }
-          : null,
       call: async (_principal, method) => {
         if (method === "open") {
           entered();

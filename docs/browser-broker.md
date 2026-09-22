@@ -2,9 +2,10 @@
 
 The broker is the sole production path for MCP operator Chrome custody.
 Independent MCP servers retain their session IDs and forward commands
-over authenticated local IPC. One broker owns one canonical profile, one Chrome,
+over local IPC. One broker owns one canonical profile, one Chrome,
 and the existing operator handlers and payment state. There is no direct-server
-browser launch or fallback.
+browser launch and no fallback anywhere in the product: the broker performs the
+Turnstile-safe self-launch itself, once, and hands every tab out from it.
 
 ## Configuration and operation
 
@@ -38,10 +39,13 @@ session status, action traces, or saved recipes.
 `TRUSTY_SQUIRE_BROKER_IDLE_TIMEOUT_MS` defaults to five minutes, clamped to a
 minimum of one minute. Idle shutdown never
 changes the fact that the next operator call must attach or start a broker.
-The account must already be enrolled through `connect`; authentication reads its
-existing agent session token from session storage, never command-line token
-arguments. `connect` is an ordinary broker client: it authenticates with that
-same enrolled token and holds no separate identity.
+**The broker requires no enrollment.** It is the machine's shared browser, and
+the moment a machine most needs it is the moment it is being enrolled: the
+ceremony has to run somewhere, and an account is exactly what it does not have
+yet. Account identity is named by the calls that act as an account
+(`open`/`command`/`close` carry an optional `account`); connecting takes
+nothing, and getting a tab and driving it takes nothing. `connect` is an
+ordinary broker client and holds no separate identity.
 
 The first client starts `node apps/mcp/dist/bin.js broker` when necessary.
 Socket mode is 0600. No CDP endpoint or browser
@@ -52,6 +56,27 @@ The client wire is the frozen Contract B — `connect`, `open`, `command`,
 `close` (`apps/mcp/src/bot/broker/protocol.ts`). A connection ends with
 `close{}` (the lease boundary, formerly `client_close`), which releases that
 connection's claim without draining or restarting the shared browser.
+
+### Account identity is named by the call, never by the connection
+
+The socket lives in a directory only its owner can reach, so reaching it
+already proves the caller is that user; a credential on the wire protects
+nothing there, and a machine being enrolled has none to present. `connect`
+therefore takes nothing and the broker admits every local caller. An account is
+named by the calls that act as one — `open`, `command`, and `close` each carry
+an optional `account { accountId, agentSessionToken, apiBaseUrl }` — and the
+broker builds (and caches per connection) the API client for it at that call.
+Driving a tab names none. A ceremony open names none: enrollment CREATES an
+account rather than acting as one, so it passes through.
+
+The account is re-read per call by the forwarder, never cached on the
+connection: a session that outlives a re-enrollment acts as the freshly
+enrolled account on its next account-acting call. The profile's on-disk account
+binding is written and checked from the account an open names (the first one
+that acts as an account), so a profile can serve the enrollment ceremony before
+any account exists and still refuse a second account afterwards.
+`broker-only-path-acceptance.test.ts` proves both behaviours against a real
+broker, real Chrome, and real MCP stdio servers.
 
 Connect approaches the browser only when it needs it. The already-provisioned
 preflight — stored session, account-bound plumbing, and a byte-copy read of the
@@ -77,16 +102,10 @@ install claim plus its explicit nonce-scoped Finish callback, never a cookie rea
 When an install does need the login ceremony, the ceremony opens the confirm
 page as a TAB in the shared broker browser — an ordinary `open` on a
 `connectOrLaunchBroker` connection, no drain, no second Chrome, and no touch of
-the profile lease. On an enrolled machine with no resident broker, the ordinary
-connect-or-launch path spawns the broker daemon, whose browser hosts the tab
-(and keeps the reclaim contracts below). The self-launch fallback — a headed
-persistent-context Chrome on the bot profile through the operator's own launch
-custody (`launchCeremonyBrowserContext`) — runs only where no broker can serve
-yet (for example, a first connect on an unenrolled machine, or an unreachable
-broker socket); its profile gate fail-fasts
-with the busy-profile message rather than racing a browser that holds the
-profile. The shared-broker path stays first because that Chrome already
-holds the profile. A host with a screen (`hasDisplay()` in
+the profile lease. **There is no fallback browser.** The broker is the only
+thing in the product that launches one: with no resident broker the ordinary
+connect-or-launch path spawns the daemon (which requires no enrollment), whose
+browser hosts the tab (and keeps the reclaim contracts below). A host with a screen (`hasDisplay()` in
 `apps/mcp/src/bot/display-env.ts`) launches that Chrome on the machine
 display — no Xvfb, no noVNC. That decision is the daemon's, taken when it
 launches its Chrome: a broker spawned without DISPLAY (over SSH, or from a
@@ -118,8 +137,7 @@ unshowable and stops the ceremony immediately — except where windows are drawn
 natively (macOS, Windows), which has no X display to discover and no rig it
 could be hiding on. A failed noVNC exposure stops it immediately too.
 Cleanup removes the ceremony's helpers and tab, preserving the broker's browser
-and display even on setup failure. The self-launch path closes its own browser
-and rig, including when initial page setup fails.
+and display even on setup failure.
 `shared-ceremony-exposure.test.ts` and `broker-connect-attach.test.ts` pin these
 contracts.
 
@@ -176,53 +194,44 @@ and its other sessions intact.
 - A canonical-profile election lease prevents competing broker processes even
   when clients choose different socket paths or temporary directories. A
   separate physical-profile lease coordinates Chrome custody, including the
-  ceremony browser's. Profile enrollment pins the account on disk.
+  ceremony browser's. The first account-acting open pins the account on disk;
+  a ceremony open names none and touches no binding.
 - Default discovery is probe then unlink then bind: a socket path with no live
   listener is a dead predecessor's orphan and is removed and rebound; that orphan
   path has no owner record and no process signaling. A same-contract broker that
   still answers keeps the endpoint. Neither path replays a mutation.
 - After an upgrade, a client that finds a resident prior-contract broker reclaims
   the profile before launching a new-contract daemon. Positive identification is
-  required before any signal: the resident must refuse Contract B's `connect`
-  with the legacy `unauthorized` refusal, still authenticate the pre-Contract-B
-  `hello` handshake (sent only as this post-refusal probe, never a re-added wire
-  operation), and hold this profile's election lease with a live,
-  broker-argv-corroborated owner pid on this host. Reclaim is SIGTERM, then a
-  bounded wait for both the election lease and the socket endpoint to clear,
-  then SIGKILL; if reclaim cannot complete, the client fails with a
-  `broker_unavailable` refusal naming the pid. A just-started same-contract
-  lease holder that has not yet bound its socket is never a reclaim target, and
-  a provably-reborn lease pid is left to the ordinary stale-owner scavenge.
-  The same reclaim runs whenever a client connects-or-launches — the connect
-  ceremony included — before falling back to a self-launched browser.
-- On a rejected handshake, the daemon first re-reads its bound account entry.
-  It retries authentication once after refreshing credentials only if the account
-  and presented token exactly match that entry and refresh succeeds. A store or
-  refresh refusal leaves the original rejection intact.
-- A same-contract resident whose credential digest no longer matches the current
-  agent session token (re-enrollment or a driver/server restart) is a separate
-  reclaim. Positive identification
-  is the current-contract `connect` handshake succeeding as a protocol exchange
-  and rejecting the credential (`unauthorized: Invalid broker credential`), plus
-  the same election-lease and broker-argv owner pid on this host. A rejected
-  credential alone cannot tell a rotated token from another account's broker —
-  one profile and one socket serve every account on the box — so the profile's
-  account binding must name the caller's own enrolled account; a resident on a
-  profile bound elsewhere, or carrying no readable binding, is never signalled
-  and the `unauthorized` refusal propagates unchanged. Reclaim uses
-  the same SIGTERM → bounded wait → SIGKILL mechanics, but only when the
-  resident has no attached clients. A broker with an attached client is never
-  killed; the client fails with one `broker_unavailable` refusal naming the pid
-  and the manual TERM reclaim step. Reclaim timings are internal, never a tool
-  parameter or config
+  required before any signal: the resident must refuse this release's token-less
+  `connect` with the legacy `unauthorized` refusal, still authenticate the
+  pre-Contract-B `hello` handshake (sent only as this post-refusal probe, never
+  a re-added wire operation, and only when the caller has an enrolled agent
+  session token to authenticate it with), and hold this profile's election lease
+  with a live, broker-argv-corroborated owner pid on this host. Reclaim is
+  SIGTERM, then a bounded wait for both the election lease and the socket
+  endpoint to clear, then SIGKILL; if reclaim cannot complete, the client fails
+  with a `broker_unavailable` refusal naming the pid. A just-started
+  same-contract lease holder that has not yet bound its socket is never a
+  reclaim target, and a provably-reborn lease pid is left to the ordinary
+  stale-owner scavenge. The same reclaim runs whenever a client
+  connects-or-launches — the connect ceremony included.
+- A resident from an earlier release that gated `connect` on a credential —
+  every release before the token-less handshake, so this covers an immediate
+  upgrade as well as a rotation that left a broker holding a stale digest — is a
+  separate reclaim. Its refusal of the token-less handshake is the whole upgrade
+  signal; positive identification is the same election-lease and
+  broker-argv-corroborated owner pid on this host plus the profile's account
+  binding naming the caller's own enrolled account. The refusal alone cannot
+  tell an older release from another account's broker — one profile and one
+  socket serve every account on the box — so a resident on a profile bound
+  elsewhere, or carrying no readable binding, is never signalled and the
+  `unauthorized` refusal propagates unchanged. Reclaim uses the same SIGTERM →
+  bounded wait → SIGKILL mechanics, but only when the resident has no attached
+  clients. A broker with an attached client is never killed; the client fails
+  with one `broker_unavailable` refusal naming the pid and the manual TERM
+  reclaim step. Reclaim timings are internal, never a tool parameter or config
   knob. `broker-prior-contract-reclaim.test.ts` pins both reclaim paths with
   real child processes, signals, lease files, and sockets.
-- An older resident whose strict `open` schema rejects `ceremony` or
-  `adoptIdentity` uses the same stale-credential reclaim path. Connect closes
-  its failed connection first, retains the same-account and attached-client
-  refusal contracts, then connects-or-launches and retries ceremony open once.
-  A second rejection propagates; arbitrary open failures do not trigger reclaim.
-  `broker-connect-attach.test.ts` covers this upgrade path.
 - Each session owns a target family and a serialized command queue. A service
   URL does not reserve a site; one authenticated client drives the shared profile.
   Several connections to the same profile attach at once, one per client process,
@@ -342,10 +351,9 @@ The result carries the refusal `code` the same condition would produce on
 `open`, and the client maps code to layer; the wire deliberately carries no
 second copy of that mapping to drift from. Only when **no** broker is resident
 does the client read the profile lock itself, because then there is nothing
-brokered to hold it. A broker that is resident but cannot be asked — no
-enrolled account to authenticate with — is never answered from the lock
-either: that would report the broker's own Chrome as a foreign process to
-close, so `browserBusy` raises `BrowserNeedsUser` instead.
+brokered to hold it. A resident broker is always askable: the probe presents no
+credential, so a machine that is still being enrolled gets the broker's own
+answer instead of a refusal about the account it does not have yet.
 
 A status connection sets `probe: true` on `connect` and is kept out of the
 broker's idle accounting (`BrokerClientRegistry` in `daemon.ts`). Probing is a

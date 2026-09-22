@@ -5,6 +5,7 @@ import {
 } from "../request-cancellation.js";
 import type { OperationReceipt } from "../operation-receipt.js";
 import { brokerBrowserCustody } from "../broker/custody.js";
+import { brokerAdmissionAccount } from "../broker/admission-context.js";
 // Phase 2 of the operator session-management restructure: the session
 // lifecycle, moved out of provision-session.ts as ONE transaction.
 //
@@ -109,7 +110,7 @@ async function acquireWarmBrowser(opts: StartOptions): Promise<AcquiredBrowser> 
   const generation = provisionStartGeneration();
   const custody = brokerBrowserCustody();
   if (custody !== undefined) {
-    const acquired = await custody.acquire(opts);
+    const acquired = await custody.acquire(opts, brokerAdmissionAccount()?.accountId);
     try {
       assertProvisionStartAdmitted(generation);
     } catch (error) {

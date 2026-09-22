@@ -35,6 +35,7 @@ import { BrokerRuntime } from "../broker/runtime.js";
 import { BrokerRefusal } from "../broker/refusal.js";
 import { ProfileBusyError, PROFILE_BUSY_MESSAGE } from "../profile.js";
 import { withBrokerAdmission } from "../broker/admission-context.js";
+import { readBrokerAccountBinding } from "../broker/account-binding.js";
 let root: string;
 beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), "ts-broker-runtime-"));
@@ -61,7 +62,7 @@ it("shares a physical launch, serializes duplicate tab release, and retains sibl
   const first = { closeOwnPagesOnly: closeFirst };
   const second = { closeOwnPagesOnly: vi.fn(async () => "closed") };
   state.attach.mockResolvedValueOnce(first).mockResolvedValueOnce(second);
-  const runtime = new BrokerRuntime("account");
+  const runtime = new BrokerRuntime();
   await Promise.all([runtime.acquire({ profileDir: root }), runtime.acquire({ profileDir: root })]);
   expect(state.start).toHaveBeenCalledTimes(1);
   const a = runtime.release(first as never);
@@ -87,7 +88,7 @@ it("does not classify a physical launch as lost before it finishes connecting", 
   );
   const browser = { closeOwnPagesOnly: vi.fn(async () => "closed") };
   state.attach.mockResolvedValue(browser);
-  const runtime = new BrokerRuntime("account");
+  const runtime = new BrokerRuntime();
 
   const acquiring = runtime.acquire({ profileDir: root });
   await vi.waitFor(() => expect(state.start).toHaveBeenCalledOnce());
@@ -107,7 +108,7 @@ it("does not classify a physical launch as lost before it finishes connecting", 
 it("keeps an uncertain failed admission until its own tab cleanup succeeds", async () => {
   const closePage = vi.fn().mockResolvedValueOnce("unknown").mockResolvedValue("closed");
   state.attach.mockResolvedValue({ closeOwnPagesOnly: closePage });
-  const runtime = new BrokerRuntime("account");
+  const runtime = new BrokerRuntime();
   await withBrokerAdmission({ sessionId: "admission" }, async () => {
     await runtime.acquire({ profileDir: root });
   });
@@ -120,7 +121,7 @@ it("releases orphan tab bookkeeping without closing the owner browser", async ()
   const closePage = vi.fn(async () => "unknown");
   const browser = { closeOwnPagesOnly: closePage };
   state.attach.mockResolvedValue(browser);
-  const runtime = new BrokerRuntime("account");
+  const runtime = new BrokerRuntime();
   const acquired = await withBrokerAdmission(
     { sessionId: "admission" },
     async () => await runtime.acquire({ profileDir: root }),
@@ -136,7 +137,7 @@ it("bounds a hung physical launch and retains an unproven process lease", async 
   state.start.mockImplementation(() => new Promise(() => undefined));
   state.close.mockResolvedValue("unknown");
   vi.stubEnv("BOT_START_TIMEOUT_MS", "10");
-  const runtime = new BrokerRuntime("account");
+  const runtime = new BrokerRuntime();
   await expect(runtime.acquire({ profileDir: root })).rejects.toThrow("launch timed out");
   expect(state.close).toHaveBeenCalledWith({ cancelStart: true });
   expect(state.release).not.toHaveBeenCalled();
@@ -146,19 +147,33 @@ it("bounds a hung physical launch and retains an unproven process lease", async 
   expect(state.release).toHaveBeenCalledTimes(1);
 });
 it("refuses another account on a previously enrolled profile before launching", async () => {
-  const first = new BrokerRuntime("first-account");
+  const first = new BrokerRuntime();
   state.attach.mockResolvedValue({ closeOwnPagesOnly: async () => "closed" });
-  const { browser } = await first.acquire({ profileDir: root });
+  const { browser } = await first.acquire({ profileDir: root }, "account");
   await first.release(browser);
   await first.close();
-  const second = new BrokerRuntime("second-account");
-  await expect(second.acquire({ profileDir: root })).rejects.toThrow("different account");
+  const second = new BrokerRuntime();
+  await expect(second.acquire({ profileDir: root }, "other-account")).rejects.toThrow(
+    "different account",
+  );
   expect(state.start).toHaveBeenCalledTimes(1);
+});
+
+it("serves a profile no account has claimed yet, and binds it on the first account-acting open", async () => {
+  const runtime = new BrokerRuntime();
+  state.attach.mockResolvedValue({ closeOwnPagesOnly: async () => "closed" });
+  // The enrollment ceremony names no account: it creates one rather than
+  // acting as one, so it must reach the browser on an unclaimed profile.
+  const { browser } = await runtime.acquire({ profileDir: root });
+  expect(await readBrokerAccountBinding(root)).toBeNull();
+  await runtime.release(browser);
+  await runtime.acquire({ profileDir: root }, "account");
+  expect(await readBrokerAccountBinding(root)).toBe("account");
 });
 
 it("recycles a differing proxy in-band when no other session is active", async () => {
   state.attach.mockResolvedValue({ closeOwnPagesOnly: vi.fn(async () => "closed") });
-  const runtime = new BrokerRuntime("account");
+  const runtime = new BrokerRuntime();
   const first = await runtime.acquire({ profileDir: root });
   expect(state.start).toHaveBeenCalledTimes(1);
   expect(state.constructed[0]).toEqual({ profileDir: root });
@@ -183,7 +198,7 @@ it("recycles a differing proxy in-band when no other session is active", async (
 
 it("refuses a differing proxy while another session is active on the shared profile", async () => {
   state.attach.mockResolvedValue({ closeOwnPagesOnly: vi.fn(async () => "closed") });
-  const runtime = new BrokerRuntime("account");
+  const runtime = new BrokerRuntime();
   const first = await runtime.acquire({ profileDir: root });
 
   await expect(
@@ -201,7 +216,7 @@ it("refuses a differing proxy while another session is active on the shared prof
 
 it("refuses to recycle when the previous browser does not close", async () => {
   state.attach.mockResolvedValue({ closeOwnPagesOnly: vi.fn(async () => "closed") });
-  const runtime = new BrokerRuntime("account");
+  const runtime = new BrokerRuntime();
   const first = await runtime.acquire({ profileDir: root });
   await runtime.release(first.browser);
   state.close.mockResolvedValue("unknown");
@@ -214,7 +229,7 @@ it("refuses to recycle when the previous browser does not close", async () => {
 
 it("refuses the recycled start when a close drains the cell mid-recycle", async () => {
   state.attach.mockResolvedValue({ closeOwnPagesOnly: vi.fn(async () => "closed") });
-  const runtime = new BrokerRuntime("account");
+  const runtime = new BrokerRuntime();
   const first = await runtime.acquire({ profileDir: root });
   await runtime.release(first.browser);
   let closed!: (state: string) => void;
@@ -247,7 +262,7 @@ it("persists every concurrent terminal hook before releasing target custody", as
     ),
   };
   state.attach.mockResolvedValue(browser);
-  const runtime = new BrokerRuntime("account");
+  const runtime = new BrokerRuntime();
   await runtime.acquire({ profileDir: root });
   const first = runtime.release(browser as never);
   const persisted = vi.fn(async () => {
@@ -264,7 +279,7 @@ it("persists every concurrent terminal hook before releasing target custody", as
 it("retains target custody when terminal persistence fails and refuses orphan closure proof", async () => {
   const browser = { closeOwnPagesOnly: vi.fn(async () => "closed") };
   state.attach.mockResolvedValue(browser);
-  const runtime = new BrokerRuntime("account");
+  const runtime = new BrokerRuntime();
   await runtime.acquire({ profileDir: root });
   await expect(
     runtime.release(browser as never, async () => {
@@ -289,7 +304,7 @@ it("refuses a held profile lease under the profile-busy code, not a generic fail
   state.guard.mockImplementation(() => {
     throw new ProfileBusyError(PROFILE_BUSY_MESSAGE);
   });
-  const runtime = new BrokerRuntime("account");
+  const runtime = new BrokerRuntime();
   await expect(runtime.acquire({ profileDir: root })).rejects.toSatisfy((error: unknown) => {
     expect(error).toBeInstanceOf(BrokerRefusal);
     expect((error as BrokerRefusal).code).toBe("profile_busy");

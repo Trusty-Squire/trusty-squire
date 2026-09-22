@@ -1,9 +1,9 @@
 import { brokerNotifier } from "./transport.js";
 import { withBrokerAdmission } from "./admission-context.js";
 import { brokerBrowserCustody } from "./custody.js";
-import { timingSafeEqual, createHash } from "node:crypto";
 import { z } from "zod";
 import { ApiClient, type ApiClientConfig } from "../../api-client.js";
+import { setServingAccountId } from "../../session-guard.js";
 import { buildToolRegistry, findTool } from "../../tools/index.js";
 import {
   finishProvisionSession,
@@ -21,7 +21,7 @@ import { BrokerRefusal } from "./refusal.js";
 import type { BrokerTransportPort } from "./transport.js";
 import { provenPreDispatchMutationFailure } from "../mutation-dispatch-evidence.js";
 import { attachOperatorRequestAbort, withOperatorRequestContext } from "../request-cancellation.js";
-import type { CloseResult, CommandResult, OpenResult } from "./protocol.js";
+import type { BrokerAccount, CloseResult, CommandResult, OpenResult } from "./protocol.js";
 
 class DeliveredPreDispatchFailure {
   constructor(readonly error: "stale_ref") {}
@@ -40,6 +40,13 @@ const commandSchema = z
     sessionId: z.string().min(1),
     name: z.string(),
     args: z.record(z.unknown()),
+    account: z
+      .object({
+        accountId: z.string().min(1),
+        agentSessionToken: z.string().min(1),
+        apiBaseUrl: z.string().min(1),
+      })
+      .optional(),
   })
   .strict();
 // The tool's own input schema stays the single validator (exactly as before
@@ -55,12 +62,26 @@ const openSchema = z
     proxy: z.string().optional(),
     initialObservation: z.literal("drive").optional(),
     ceremony: z.boolean().optional(),
+    account: z
+      .object({
+        accountId: z.string().min(1),
+        agentSessionToken: z.string().min(1),
+        apiBaseUrl: z.string().min(1),
+      })
+      .optional(),
   })
   .strict();
 const closeSchema = z
   .object({
     sessionId: z.string().min(1),
     args: z.record(z.unknown()).optional(),
+    account: z
+      .object({
+        accountId: z.string().min(1),
+        agentSessionToken: z.string().min(1),
+        apiBaseUrl: z.string().min(1),
+      })
+      .optional(),
   })
   .strict();
 
@@ -112,39 +133,57 @@ function closedResult(value: unknown): boolean {
   );
 }
 
-/** Existing handlers run inside the broker with a pinned API client and capability. */
+/** Existing handlers run inside the broker with a per-call API client and
+ * capability. The broker itself holds no account: an account is named by the
+ * calls that act as one, so a machine that is still being enrolled can reach
+ * the shared browser. */
 export class OperatorBroker implements BrokerTransportPort {
   readonly authority: BrokerAuthority;
-  private readonly apis = new Map<string, ApiClient>();
+  private readonly apis = new Map<string, Map<string, ApiClient>>();
   private readonly tools = buildToolRegistry();
   private readonly requestControllers = new Map<
     string,
     { principalId: string; controller: AbortController }
   >();
-  private token: Buffer;
-  constructor(private readonly config: ApiClientConfig & { accountId: string }) {
-    this.authority = new BrokerAuthority(config.accountId);
-    this.token = createHash("sha256").update(config.agentSessionToken).digest();
+  constructor(
+    private readonly config: {
+      registryBaseUrl: string;
+      /** How the broker builds the API client for an account a call named.
+       * The default is a real `ApiClient`; a caller-owned browser/session
+       * harness supplies its own. */
+      apiFactory?: (config: ApiClientConfig) => ApiClient;
+    },
+  ) {
+    this.authority = new BrokerAuthority();
   }
-  refreshCredentials(session: { account_id?: string; agent_session_token?: string }): void {
-    if (session.account_id !== this.config.accountId || !session.agent_session_token)
-      throw new BrokerRefusal("account_mismatch", "Reconnect must preserve the enrolled account");
-    const inventory = this.authority.inventory();
-    if (inventory.sessions || inventory.closing || inventory.admitting)
-      throw new BrokerRefusal("maintenance", "Credential refresh requires drained sessions");
-    this.config.agentSessionToken = session.agent_session_token;
-    this.token = createHash("sha256").update(session.agent_session_token).digest();
-    this.apis.clear();
-  }
-  async authenticate(
-    token: string,
-    agentId?: string,
-  ): Promise<Omit<BrokerPrincipal, "clientId"> | null> {
-    if (!timingSafeEqual(createHash("sha256").update(token).digest(), this.token)) return null;
-    return {
-      accountId: this.config.accountId,
-      agentId: agentId ?? this.config.agentIdentity ?? "local-agent",
-    };
+
+  /**
+   * The API client for one call's named account, cached per connection so a
+   * session reuses one client while its account and token are unchanged. A
+   * re-enrollment changes the token, which yields a fresh client rather than
+   * replaying a revoked one.
+   */
+  private apiFor(principal: BrokerPrincipal, account: BrokerAccount | undefined): ApiClient | null {
+    if (account === undefined) return null;
+    const key = JSON.stringify([account.accountId, account.agentSessionToken, account.apiBaseUrl]);
+    let owned = this.apis.get(principal.clientId);
+    if (owned === undefined) {
+      owned = new Map<string, ApiClient>();
+      this.apis.set(principal.clientId, owned);
+    }
+    let api = owned.get(key);
+    if (api === undefined) {
+      const build = this.config.apiFactory ?? ((config: ApiClientConfig) => new ApiClient(config));
+      api = build({
+        apiBaseUrl: account.apiBaseUrl,
+        registryBaseUrl: this.config.registryBaseUrl,
+        agentSessionToken: account.agentSessionToken,
+        accountId: account.accountId,
+        agentIdentity: principal.agentId,
+      });
+      owned.set(key, api);
+    }
+    return api;
   }
   /** Transport dispatch for the four Contract B operations. Connection-close
    * (a session-less `close`) is the daemon's connect-scoped concern and never
@@ -212,7 +251,12 @@ export class OperatorBroker implements BrokerTransportPort {
       deriveOpenToolArgs(input, brokerBrowserCustody()?.liveProxyUrl?.()),
     ) as Record<string, unknown>;
     if (requestSignal?.aborted) throw requestSignal.reason;
-    const pinnedApi = this.apiFor(principal);
+    const account = input.account;
+    const pinnedApi = this.apiFor(principal, account);
+    // The handler runs tools that resolve the serving account (inbox consent,
+    // registry attribution). Publishing the account this call named keeps that
+    // resolution at the point of use instead of at daemon startup.
+    setServingAccountId(account?.accountId ?? null);
     let observation: unknown;
     let internalId = "";
     let targetId = "no-page";
@@ -226,7 +270,7 @@ export class OperatorBroker implements BrokerTransportPort {
             // The connect re-auth ceremony needs no admission carve-out: starts
             // are deliberately not Google-gated at all.
             await withBrokerAdmission(
-              { sessionId: id },
+              { sessionId: id, ...(account === undefined ? {} : { account }) },
               async () =>
                 await tool.handler(args, pinnedApi, {
                   ...(input.initialObservation === undefined
@@ -262,7 +306,7 @@ export class OperatorBroker implements BrokerTransportPort {
                 )
               : undefined;
           },
-          invoke: async (name, commandArgs, signal, commandId, prepared) => {
+          invoke: async (name, commandArgs, signal, commandId, prepared, callAccount) => {
             if (!session.browser.isConnected())
               throw new BrokerRefusal(
                 "browser_lost",
@@ -273,8 +317,12 @@ export class OperatorBroker implements BrokerTransportPort {
               throw new BrokerRefusal("unknown_tool", "Unknown operator command");
             const translated = { ...commandArgs, session_id: internalId };
             const notifyUser = brokerNotifier();
+            // The account is resolved per command, from the account THIS call
+            // named: a session that outlives a re-enrollment acts as the
+            // freshly enrolled account on its next call.
+            const commandApi = this.apiFor(principal, callAccount);
             const executeHandler = async () =>
-              await command.handler(translated, pinnedApi, {
+              await command.handler(translated, commandApi, {
                 signal,
                 ...(notifyUser ? { notifyUser } : {}),
               });
@@ -382,6 +430,7 @@ export class OperatorBroker implements BrokerTransportPort {
       tool.name,
       args,
       requestSignal,
+      input.account,
     );
     if (result instanceof DeliveredPreDispatchFailure)
       return { preDispatchFailure: { error: result.error, dispatch: "not_dispatched" } };
@@ -399,7 +448,13 @@ export class OperatorBroker implements BrokerTransportPort {
     if (tool === null || !isOperatorCommand(tool.name))
       throw new BrokerRefusal("unknown_tool", "Tool is not an operator command");
     const args = tool.inputSchema.parse(input.args ?? {}) as Record<string, unknown>;
-    const result = await this.authority.finish(principal, input.sessionId, requestId, args);
+    const result = await this.authority.finish(
+      principal,
+      input.sessionId,
+      requestId,
+      args,
+      input.account,
+    );
     if (result instanceof DeliveredPreDispatchFailure)
       return {
         closed: false,
@@ -417,15 +472,6 @@ export class OperatorBroker implements BrokerTransportPort {
     if (parsed.data.args.session_id !== parsed.data.sessionId) return undefined;
     const receipt = this.authority.busyReadReceipt(principal, parsed.data.sessionId);
     return receipt === undefined ? undefined : { result: receipt };
-  }
-
-  private apiFor(principal: BrokerPrincipal): ApiClient {
-    let api = this.apis.get(principal.clientId);
-    if (api === undefined) {
-      api = new ApiClient({ ...this.config, agentIdentity: principal.agentId });
-      this.apis.set(principal.clientId, api);
-    }
-    return api;
   }
 
   async disconnect(principal: BrokerPrincipal, explicit = false): Promise<void> {

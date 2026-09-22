@@ -7,7 +7,6 @@ import {
 } from "../broker/authority.js";
 
 const principal = (clientId: string): BrokerPrincipal => ({
-  accountId: "account",
   agentId: "agent",
   clientId,
 });
@@ -24,7 +23,7 @@ function port(overrides: Partial<BrokerSessionPort> = {}): BrokerSessionPort {
 
 describe("broker authority", () => {
   it("runs one session's commands in dispatch order", async () => {
-    const authority = new BrokerAuthority("account");
+    const authority = new BrokerAuthority();
     const order: string[] = [];
     const owner = principal("a");
     const sessionId = await authority.open(owner, async () =>
@@ -45,7 +44,7 @@ describe("broker authority", () => {
   });
 
   it("refuses a session opened by another connection", async () => {
-    const authority = new BrokerAuthority("account");
+    const authority = new BrokerAuthority();
     const owner = principal("a");
     const sessionId = await authority.open(owner, async () => port());
     expect(() => authority.invoke(principal("b"), sessionId, "r1", "one", {})).toThrow(
@@ -55,7 +54,7 @@ describe("broker authority", () => {
   });
 
   it("answers a read with a busy receipt while a mutation is pending", async () => {
-    const authority = new BrokerAuthority("account");
+    const authority = new BrokerAuthority();
     const owner = principal("a");
     let release!: () => void;
     const gate = new Promise<void>((resolve) => {
@@ -86,7 +85,7 @@ describe("broker authority", () => {
   });
 
   it("delivers terminal finish ahead of the hung mutation tail it cancels", async () => {
-    const authority = new BrokerAuthority("account");
+    const authority = new BrokerAuthority();
     const owner = principal("a");
     const calls: string[] = [];
     const sessionId = await authority.open(owner, async () =>
@@ -107,7 +106,7 @@ describe("broker authority", () => {
   });
 
   it("closes a session once and retains an unproven close in inventory", async () => {
-    const authority = new BrokerAuthority("account");
+    const authority = new BrokerAuthority();
     const owner = principal("a");
     const closes: string[] = [];
     const sessionId = await authority.open(owner, async () =>
@@ -125,7 +124,7 @@ describe("broker authority", () => {
   });
 
   it("forgets a session whose terminal cleanup already settled", async () => {
-    const authority = new BrokerAuthority("account");
+    const authority = new BrokerAuthority();
     const owner = principal("a");
     const sessionId = await authority.open(owner, async () => port());
     authority.retire(owner, sessionId);
@@ -134,7 +133,7 @@ describe("broker authority", () => {
   });
 
   it("closes an explicitly released connection's sessions immediately", async () => {
-    const authority = new BrokerAuthority("account");
+    const authority = new BrokerAuthority();
     const owner = principal("a");
     const closed: string[] = [];
     await authority.open(owner, async (id) =>
@@ -153,7 +152,7 @@ describe("broker authority", () => {
   it("closes a dropped connection's sessions after a short grace", async () => {
     vi.useFakeTimers();
     try {
-      const authority = new BrokerAuthority("account");
+      const authority = new BrokerAuthority();
       const owner = principal("a");
       const closed: string[] = [];
       await authority.open(owner, async (id) =>
@@ -176,7 +175,7 @@ describe("broker authority", () => {
   });
 
   it("cleans up a failed admission that never returned a port", async () => {
-    const authority = new BrokerAuthority("account");
+    const authority = new BrokerAuthority();
     const owner = principal("a");
     const events: string[] = [];
     await expect(
@@ -199,7 +198,7 @@ describe("broker authority", () => {
   });
 
   it("aborts a starting session when its client drops", async () => {
-    const authority = new BrokerAuthority("account");
+    const authority = new BrokerAuthority();
     const owner = principal("a");
     const opening = authority.open(owner, async () => {
       await new Promise((resolve) => setTimeout(resolve, 5));

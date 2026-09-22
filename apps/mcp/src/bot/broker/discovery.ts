@@ -129,42 +129,6 @@ function isUnauthorizedRefusal(error: unknown): boolean {
   return error instanceof BrokerRefusal && error.code === "unauthorized";
 }
 
-/** Contract B processed `connect` and rejected the token digest. A
- * prior-contract daemon never produces this: it refuses `connect` with
- * "Authenticate before issuing commands" and only authenticates `hello`. */
-function isInvalidBrokerCredential(error: unknown): boolean {
-  return (
-    error instanceof BrokerRefusal &&
-    error.code === "unauthorized" &&
-    error.message === "Invalid broker credential"
-  );
-}
-
-/** Older Contract B brokers accept connect but reject ceremony open fields
- * in their strict Zod schema. This is an upgrade signal, not an open retry
- * for arbitrary execution failures. */
-export function isUnsupportedCeremonyOpen(error: unknown): boolean {
-  if (!(error instanceof BrokerRefusal) || error.code !== "broker_execution_failed") return false;
-  try {
-    const issues = JSON.parse(error.message) as {
-      code?: string;
-      keys?: string[];
-      path?: unknown[];
-    }[];
-    return (
-      Array.isArray(issues) &&
-      issues.some(
-        (issue) =>
-          issue.code === "unrecognized_keys" &&
-          issue.path?.length === 0 &&
-          issue.keys?.some((key) => key === "ceremony"),
-      )
-    );
-  } catch {
-    return false;
-  }
-}
-
 const sleep = async (ms: number): Promise<void> =>
   await new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -314,10 +278,15 @@ function staleCredentialUnreclaimedMessage(pid: number): string {
  * throws only when a reclaim was proven possible but could not complete. */
 export async function reclaimPriorContractBrokerIfPresent(
   path: string,
-  token: string,
+  token: string | undefined,
   connectError: unknown,
   timings: ReclaimTimings = RECLAIM_TIMINGS,
 ): Promise<boolean> {
+  // The legacy `hello` handshake is authenticated with the pre-Contract-B
+  // token, so an unenrolled machine cannot positively identify one. There is
+  // nothing to reclaim there anyway: a prior-contract broker could not have
+  // started without an enrollment.
+  if (token === undefined) return false;
   if (!isUnauthorizedRefusal(connectError)) return false;
   if (!(await brokerSpeaksLegacyWire(path, token))) return false;
   const profileDir = profilePathIdentity(currentProfileDir());
@@ -334,26 +303,19 @@ export async function reclaimPriorContractBrokerIfPresent(
   return true;
 }
 
-/** Also serves ceremony opens rejected by an older strict schema, after the
- * caller closes its connection. The same account/lease/attached-client reclaim
- * contract applies to both upgrade causes.
+/** Reclaims a resident broker from an older Contract B release, if one is
+ * positively identified: it refuses the token-less `connect` that this release
+ * sends (`unauthorized: Authenticate before issuing commands`), it holds this
+ * profile's election lease with a live, broker-argv-corroborated owner pid on
+ * this host, and the profile's account binding names the caller's own enrolled
+ * account. Every release before the token-less handshake gated `connect` on a
+ * credential, so that refusal is the upgrade signal; the binding is what
+ * proves the resident is OURS before any signal is sent, and a resident with
+ * attached clients is never killed.
  *
- * Reclaims a same-contract broker whose credential digest no longer matches
- * the current agent session token: Contract B's `connect` handshake is
- * accepted (the current-contract successor of `hello`) and the credential is
- * rejected, the process holds this profile's election lease with a live
- * broker-argv owner on this host, the profile is enrolled to the caller's own
- * account, and the resident has no attached clients.
- *
- * The credential rejection alone cannot tell a rotated token from another
- * account's broker — one profile and one socket serve every account on the
- * box — so the profile's account binding is what proves the resident is ours.
  * A broker bound to another account (or carrying no readable binding) is left
- * alone and the original refusal propagates.
- *
- * A broker with attached clients is never killed; the refusal names the pid
- * and the manual TERM reclaim step. SIGKILL is skipped if a client appears
- * after SIGTERM. Returns whether a reclaim happened; throws when the
+ * alone and the original refusal propagates. SIGKILL is skipped if a client
+ * appears after SIGTERM. Returns whether a reclaim happened; throws when the
  * resident is identified but must not be (or could not be) reclaimed. */
 export async function reclaimStaleCredentialBrokerIfPresent(
   path: string,
@@ -361,11 +323,7 @@ export async function reclaimStaleCredentialBrokerIfPresent(
   connectError: unknown,
   timings: ReclaimTimings = RECLAIM_TIMINGS,
 ): Promise<boolean> {
-  // A prior-contract daemon never produces this exact refusal (it refuses
-  // `connect` with "Authenticate before issuing commands"), so the legacy
-  // reclaim path owns that case and cannot double-signal here.
-  if (!isInvalidBrokerCredential(connectError) && !isUnsupportedCeremonyOpen(connectError))
-    return false;
+  if (!isUnauthorizedRefusal(connectError)) return false;
   if (accountId === undefined) return false;
   const profileDir = profilePathIdentity(currentProfileDir());
   if ((await readBrokerAccountBinding(profileDir)) !== accountId) return false;
@@ -404,7 +362,6 @@ export async function reclaimStaleCredentialBrokerIfPresent(
 
 async function waitForBroker(
   path: string,
-  token: string,
   failure?: () => Error | undefined,
 ): Promise<BrokerClient> {
   const deadline = Date.now() + BROKER_CONNECT_TIMEOUT_MS;
@@ -412,7 +369,7 @@ async function waitForBroker(
     const launchFailure = failure?.();
     if (launchFailure !== undefined) throw launchFailure;
     try {
-      return await BrokerClient.connect(path, token);
+      return await BrokerClient.connect(path);
     } catch (error) {
       if (!isUnavailable(error)) throw error;
     }
@@ -451,47 +408,58 @@ function daemonExitRefusal(
   );
 }
 
+/**
+ * What a caller may supply when connecting-or-launching. Nothing here is
+ * required to reach the broker, and nothing here is an admission credential:
+ * connecting takes nothing. The enrolled account is carried ONLY so an
+ * upgrade can positively identify a resident broker from an older release
+ * before reclaiming it — a pre-Contract-B daemon authenticates the legacy
+ * `hello` probe with that same agent session token.
+ */
+export interface BrokerConnectOptions {
+  accountId?: string | undefined;
+  agentSessionToken?: string | undefined;
+}
+
 export async function connectOrLaunchBroker(
   path: string,
-  token: string,
-  accountId: string | undefined,
+  options: BrokerConnectOptions = {},
 ): Promise<BrokerClient> {
   try {
-    return await BrokerClient.connect(path, token);
+    return await BrokerClient.connect(path);
   } catch (error) {
     if (isUnavailable(error)) {
       // A socket with no live listener is a dead predecessor's orphan; the new
       // broker's own bind reclaims it (probe -> unlink -> bind).
-    } else if (await reclaimPriorContractBrokerIfPresent(path, token, error)) {
+    } else if (await reclaimPriorContractBrokerIfPresent(path, options.agentSessionToken, error)) {
       // A reclaimed prior-contract broker freed the profile: fall through to
       // the ordinary launch of a current-contract daemon.
-    } else if (await reclaimStaleCredentialBrokerIfPresent(path, accountId, error)) {
-      // A reclaimed same-contract broker whose digest lagged a re-enrollment
-      // or skipped maintenance refresh: fall through to a fresh daemon that
-      // reads the current agent session token.
+    } else if (await reclaimStaleCredentialBrokerIfPresent(path, options.accountId, error)) {
+      // A reclaimed same-contract broker whose strict open schema predates a
+      // field this release sends: fall through to a fresh daemon.
     } else {
       throw error;
     }
   }
 
   const profileDir = profilePathIdentity(currentProfileDir());
-  if (await brokerElectionIsHeld(profileDir)) return await waitForBroker(path, token);
+  if (await brokerElectionIsHeld(profileDir)) return await waitForBroker(path);
   const launchRoot = brokerLaunchRoot(profileDir);
   let launchLease: ProfileOperationLease;
   try {
     await mkdir(launchRoot, { recursive: true, mode: 0o700 });
     launchLease = acquireProfileOperationGuard(profileDir, launchRoot);
   } catch (error) {
-    if (error instanceof ProfileBusyError) return await waitForBroker(path, token);
+    if (error instanceof ProfileBusyError) return await waitForBroker(path);
     throw error;
   }
   try {
     try {
-      return await BrokerClient.connect(path, token);
+      return await BrokerClient.connect(path);
     } catch (error) {
       if (!isUnavailable(error)) throw error;
     }
-    if (await brokerElectionIsHeld(profileDir)) return await waitForBroker(path, token);
+    if (await brokerElectionIsHeld(profileDir)) return await waitForBroker(path);
     // The broker's stderr carries its diagnostic channel (audit unseal lines,
     // captcha/handoff diag). "ignore" made every standard deployment mute —
     // measured while debugging the Bluesky signup gate (2026-09): the broker
@@ -524,7 +492,7 @@ export async function connectOrLaunchBroker(
       failure = daemonExitRefusal(profileDir, signal ?? code);
     });
     child.unref();
-    return await waitForBroker(path, token, () => failure);
+    return await waitForBroker(path, () => failure);
   } finally {
     launchLease.release();
   }

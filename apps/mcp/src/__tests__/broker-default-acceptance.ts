@@ -100,7 +100,6 @@ export async function checkDefaultBrokerAcceptance(
     TRUSTY_SQUIRE_REAPER_TERM_GRACE_MS: "20",
     UNIVERSAL_BOT_CHANNEL: "chrome",
     UNIVERSAL_BOT_CHROME_BINARY: chromium.executablePath(),
-    BOT_SELF_LAUNCH: "1",
     BOT_CDP_ENDPOINT: "",
   });
   const clients: Client[] = [];

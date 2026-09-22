@@ -594,7 +594,9 @@ status, cancellation, timing, and refusal contracts are defined in
 teardown; launch helpers in `browser-process-runtime.ts`) and one `PageDriver`
 (`page-driver.ts`, page/tab ownership, navigation, adoption). The broker owns
 one shared process; each session gets independent page state. MCP servers always
-forward over authenticated local IPC; see `docs/browser-broker.md`.
+forward over the broker's local IPC — the 0700 socket directory is the boundary,
+not a wire credential — and account identity is named by the calls that act as
+an account; see `docs/browser-broker.md`.
 [`docs/browser-process-page-boundary.md`](docs/browser-process-page-boundary.md)
 owns the boundary and the preserved close/cancellation ordering;
 `browser-process-page-boundary.test.ts` pins it.

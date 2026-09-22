@@ -74,7 +74,6 @@ function send(socket: Socket, value: unknown): void {
 }
 
 export interface BrokerTransportPort {
-  authenticate(token: string, agentId?: string): Promise<Omit<BrokerPrincipal, "clientId"> | null>;
   /** Extra fields returned by the connect hook are merged into the
    * connect result. */
   connected?(
@@ -235,11 +234,11 @@ export async function listenBroker(
     });
     const dispatch = async (request: Request): Promise<unknown> => {
       if (principal === undefined) {
-        if (
-          request.method !== "connect" ||
-          authenticating ||
-          typeof request.params.token !== "string"
-        ) {
+        // Connecting takes nothing: no credential, no account. Reaching this
+        // socket already proves the caller is the user who owns the 0700
+        // directory it lives in. Identity is named later, by the calls that
+        // act as an account.
+        if (request.method !== "connect" || authenticating) {
           throw new BrokerRefusal("unauthorized", "Authenticate before issuing commands");
         }
         authenticating = true;
@@ -247,9 +246,7 @@ export async function listenBroker(
           typeof request.params.agentId === "string" ? request.params.agentId : "local-agent";
         if (agentId.length === 0 || agentId.length > 128)
           throw new BrokerRefusal("unauthorized", "Invalid agent identity");
-        const identity = await port.authenticate(request.params.token, agentId);
-        if (identity === null) throw new BrokerRefusal("unauthorized", "Invalid broker credential");
-        const candidate = { ...identity, clientId: randomUUID() };
+        const candidate = { agentId, clientId: randomUUID() };
         let extra: Record<string, unknown> | void;
         try {
           extra = await port.connected?.(candidate, request.params);
@@ -407,7 +404,6 @@ export class BrokerClient {
   }
   static async connect(
     path: string,
-    token: string,
     options: { probe?: boolean; handshakeTimeoutMs?: number } = {},
   ): Promise<BrokerClient> {
     const socket = createConnection(path);
@@ -426,7 +422,6 @@ export class BrokerClient {
         socket.once("error", reject);
       });
       const request: ConnectRequest = {
-        token,
         agentId: process.env.TRUSTY_SQUIRE_AGENT_IDENTITY ?? "local-agent",
         ...(options.probe ? { probe: true } : {}),
       };

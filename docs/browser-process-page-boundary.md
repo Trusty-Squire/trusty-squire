@@ -30,8 +30,11 @@ needs a screen, so it opens no window on the user's desktop.
 `OPERATOR_BROWSER_HEADLESS` remains `false` for the operator context; the
 pre-existing headless description in AGENTS.md is not a launch-policy
 change. Launch flags,
-self-launch selection, Patchright `connectOverCDP`, persistent fallback, and
-remote attach remain the existing paths.
+the self-launch decision, Patchright `connectOverCDP`, and remote attach remain
+the existing paths. The self-launch decision has no configuration switch: the
+broker always self-launches when it can, and the persistent-context branch
+remains only for the two cases the spawn cannot serve (no on-disk binary for
+the channel, a credentialed proxy the spawned Chrome cannot authenticate).
 
 Close first disposes page ownership and document subscriptions. Harness teardown
 only drops its references. Normal teardown marks the launch terminal, captures

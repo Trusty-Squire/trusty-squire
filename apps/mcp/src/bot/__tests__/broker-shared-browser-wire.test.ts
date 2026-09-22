@@ -30,13 +30,16 @@ try {
 }
 const describeChromium = chromiumAvailable ? describe : describe.skip;
 
+// Each agent's forwarder names the enrolled account on its calls; the broker
+// builds a client for it. The harness tools below never touch the API, so a
+// stub client is enough.
 const account = {
-  accountId: "account",
-  agentSessionToken: "token",
-  apiBaseUrl: "http://unused.test",
-  registryBaseUrl: "http://unused.test",
+  account_id: "account",
+  agent_session_token: "token",
+  api_base_url: "http://unused.test",
 };
-const guard = { bind: async () => ({ agent_session_token: "token" }) } as unknown as SessionGuard;
+const apiStub = { setRequestingAgent: () => undefined } as unknown as ApiClient;
+const guard = { bind: async () => account } as unknown as SessionGuard;
 
 describeChromium("two agents sharing one real browser over the Contract B wire", () => {
   let browser: Browser;
@@ -84,19 +87,16 @@ describeChromium("two agents sharing one real browser over the Contract B wire",
   async function harness() {
     const dir = await mkdtemp(join(tmpdir(), "ts-broker-shared-"));
     const socket = join(dir, "b.sock");
-    const broker = new OperatorBroker(account);
+    const broker = new OperatorBroker({
+      registryBaseUrl: "http://unused.test",
+      apiFactory: () => apiStub,
+    });
     const tools = [
       sharedStartTool(),
       ...buildToolRegistry().filter((tool) => tool.name !== "operate_start"),
     ];
     Object.defineProperty(broker, "tools", { value: tools });
     const listener = await listenBroker(socket, {
-      authenticate: async (token, agentId) => await broker.authenticate(token, agentId),
-      connected: (principal) => {
-        (broker as unknown as { apis: Map<string, ApiClient> }).apis.set(principal.clientId, {
-          setRequestingAgent: () => undefined,
-        } as unknown as ApiClient);
-      },
       call: async (principal, method, params, requestId) =>
         method === "open" || method === "command"
           ? await broker.withRegisteredRequest(

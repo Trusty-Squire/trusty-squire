@@ -49,7 +49,6 @@ import {
   resolveChannelBinary,
   resolveExplicitProxy,
   resolvePersistentFallbackIdentity,
-  selfLaunchEnabled,
   selfManagedChromes,
   signalOwnedChromeProcessTree,
   spawnLocalBrowser,
@@ -73,7 +72,7 @@ export class BrowserProcessOwner {
   // A persistent browser context backed by the user's real Chrome profile.
   context: BrowserContext | null = null;
 
-  // Self-launch path (Turnstile-safe; see selfLaunchEnabled). When we spawn
+  // Self-launch path (Turnstile-safe; see launchSelfManagedContext). When we spawn
   // Chrome ourselves and attach over CDP, these hold the child process and
   // the connected Browser so close() can tear both down.
   private childChrome: ChildProcess | null = null;
@@ -273,7 +272,7 @@ export class BrowserProcessOwner {
   }
 
   // Launch Chrome ourselves and attach over CDP — the Turnstile-safe launch
-  // (see selfLaunchEnabled for the proof). The profile dir is the SAME shared
+  // (see the launchSelfManagedContext comment for the proof). The profile dir is the SAME shared
   // profile launchPersistentContext would use, so the OAuth session carries
   // over. Options that a default connectOverCDP context can't take at creation
   // are applied differently:
@@ -579,9 +578,13 @@ export class BrowserProcessOwner {
       "clipboard-read",
       "clipboard-write",
     ];
-    const selfLaunchBinary = selfLaunchEnabled()
-      ? (resolveChannelBinary(channel) ?? (channel === null ? launcher.executablePath() : null))
-      : null;
+    // The Turnstile-safe launch is not optional: the broker always launches
+    // the binary itself and attaches over CDP when it can. The only remaining
+    // fallbacks are the two the spawn genuinely cannot serve — no on-disk
+    // binary for the channel, and a credentialed proxy the spawned Chrome
+    // cannot authenticate — never a configuration choice.
+    const selfLaunchBinary =
+      resolveChannelBinary(channel) ?? (channel === null ? launcher.executablePath() : null);
     const useSelfLaunch =
       selfLaunchBinary !== null && existsSync(selfLaunchBinary) && canSelfLaunchWithProxy(proxy);
     let context: BrowserContext;

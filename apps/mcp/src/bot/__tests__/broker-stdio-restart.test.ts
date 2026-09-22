@@ -260,7 +260,6 @@ describeChromium("broker-backed MCP stdio restart", () => {
           TRUSTY_SQUIRE_AGENT_IDENTITY: "stdio-restart",
           UNIVERSAL_BOT_CHANNEL: "chrome",
           UNIVERSAL_BOT_CHROME_BINARY: chromium.executablePath(),
-          BOT_SELF_LAUNCH: "1",
           BOT_CDP_ENDPOINT: "",
         },
         stdio: ["ignore", "ignore", "pipe"],

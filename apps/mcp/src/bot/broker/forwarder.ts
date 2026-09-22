@@ -5,7 +5,13 @@ import type { SessionGuard } from "../../session-guard.js";
 import type { BrokerClient, BrokerNotifier } from "./transport.js";
 import { BrokerRefusal } from "./refusal.js";
 import { ProvenPreDispatchMutationError } from "../mutation-dispatch-evidence.js";
-import type { BrokerWireMethod, CloseRequest, CommandRequest, OpenRequest } from "./protocol.js";
+import type {
+  BrokerAccount,
+  BrokerWireMethod,
+  CloseRequest,
+  CommandRequest,
+  OpenRequest,
+} from "./protocol.js";
 
 export class ForwardedResultError extends BrokerRefusal {
   constructor(
@@ -84,14 +90,16 @@ export class OperatorForwarder {
     if (this.connection === undefined) {
       this.connecting = true;
       this.connection = (async () => {
+        // Connecting takes nothing. The enrolled account is carried only so an
+        // upgrade can positively identify a resident broker from an older
+        // release before reclaiming it; it is never an admission credential.
         const session = await this.guard.bind();
-        if (session?.agent_session_token === undefined)
-          throw new BrokerRefusal("unauthorized", "Connect before using the broker");
-        const client = await connectOrLaunchBroker(
-          this.path,
-          session.agent_session_token,
-          session.account_id,
-        );
+        const client = await connectOrLaunchBroker(this.path, {
+          ...(session?.account_id === undefined ? {} : { accountId: session.account_id }),
+          ...(session?.agent_session_token === undefined
+            ? {}
+            : { agentSessionToken: session.agent_session_token }),
+        });
         this.client = client;
         return client;
       })().finally(() => {
@@ -99,6 +107,27 @@ export class OperatorForwarder {
       });
     }
     return this.connection;
+  }
+
+  /**
+   * The account the NEXT call acts as, or undefined on a machine that has no
+   * enrolled account yet. Re-read per call, never cached on the connection:
+   * an enrollment that completes while a session is already live must be
+   * picked up by that session's next account-acting call.
+   */
+  private async callAccount(): Promise<BrokerAccount | undefined> {
+    const session = await this.guard.bind();
+    const accountId = session?.account_id;
+    const agentSessionToken = session?.agent_session_token;
+    const apiBaseUrl = session?.api_base_url;
+    if (
+      accountId === undefined ||
+      agentSessionToken === undefined ||
+      apiBaseUrl === undefined ||
+      apiBaseUrl.length === 0
+    )
+      return undefined;
+    return { accountId, agentSessionToken, apiBaseUrl };
   }
   async invoke(
     name: string,
@@ -142,6 +171,7 @@ export class OperatorForwarder {
     // A fresh connection owns no sessions: its ids belong to the lost socket
     // and the broker refuses them.
     if (reconnecting) this.sessions.clear();
+    const account = await this.callAccount();
     let args = originalArgs;
     if (
       name !== "operate_start" &&
@@ -178,6 +208,7 @@ export class OperatorForwarder {
           serviceUrl: args.service_url,
           ...(args.format === "compact" || args.format === "full" ? { format: args.format } : {}),
           ...(typeof args.proxy === "string" ? { proxy: args.proxy } : {}),
+          ...(account === undefined ? {} : { account }),
         };
         const raw = await dispatch("open", { ...openRequest });
         if (!isRecord(raw))
@@ -214,6 +245,7 @@ export class OperatorForwarder {
           await dispatch("open", {
             serviceUrl: args.url,
             initialObservation: "drive",
+            ...(account === undefined ? {} : { account }),
           }),
         );
         if (opened.owned && opened.sessionId !== undefined) this.sessions.add(opened.sessionId);
@@ -250,7 +282,11 @@ export class OperatorForwarder {
       if (name === "operate_finish") {
         if (sessionId === undefined)
           throw new BrokerRefusal("stale_lease", "Session is not owned by this MCP connection");
-        const closeRequest: CloseRequest = { sessionId, args };
+        const closeRequest: CloseRequest = {
+          sessionId,
+          args,
+          ...(account === undefined ? {} : { account }),
+        };
         const raw = await dispatch("close", { ...closeRequest });
         if (!isRecord(raw))
           throw new ForwardedResultError("Broker returned a non-object close reply", {
@@ -271,7 +307,12 @@ export class OperatorForwarder {
 
       if (sessionId === undefined)
         throw new BrokerRefusal("stale_lease", "Session is not owned by this MCP connection");
-      const commandRequest: CommandRequest = { sessionId, name, args };
+      const commandRequest: CommandRequest = {
+        sessionId,
+        name,
+        args,
+        ...(account === undefined ? {} : { account }),
+      };
       const rawReply = await dispatch("command", { ...commandRequest });
       if (!isRecord(rawReply))
         throw new ForwardedResultError("Broker returned a non-object command reply", {
