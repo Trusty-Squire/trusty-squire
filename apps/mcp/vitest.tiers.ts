@@ -98,6 +98,7 @@ export function excludingRealBrowser(files: string[]): string[] {
 // full suite still covers everything as a drift backstop.
 export const REQUIRED_BEHAVIOR_FILES = [
   "src/bot/__tests__/drive-act.test.ts",
+  "src/bot/__tests__/drive-email-code-submit.test.ts",
   "src/bot/__tests__/browser-display-geometry.test.ts",
   "src/__tests__/broker-default-start.test.ts",
   "src/bot/__tests__/broker-discovery.test.ts",
