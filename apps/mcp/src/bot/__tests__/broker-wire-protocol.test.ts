@@ -53,7 +53,6 @@ import { OperatorForwarder } from "../broker/forwarder.js";
 import { listenBroker } from "../broker/transport.js";
 
 const account = {
-  accountId: "account",
   agentSessionToken: "token",
   apiBaseUrl: "http://unused.test",
   registryBaseUrl: "http://unused.test",
@@ -97,7 +96,6 @@ async function harness(tools: Tool[]) {
   const broker = new OperatorBroker(account);
   Object.defineProperty(broker, "tools", { value: tools });
   const listener = await listenBroker(socket, {
-    authenticate: async (token, agentId) => await broker.authenticate(token, agentId),
     connected: (principal) => {
       (broker as unknown as { apis: Map<string, ApiClient> }).apis.set(principal.clientId, api());
     },

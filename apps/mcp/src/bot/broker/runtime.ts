@@ -20,7 +20,11 @@ interface Settings {
 }
 
 /** Physical custody belongs to the broker. The otherwise-unused root controller
- * configures the context once and never becomes an operate session. */
+ * configures the context once and never becomes an operate session.
+ *
+ * The runtime holds no account: the profile's binding is written and checked
+ * from the account a call names (see bindAccount), so a broker can serve the
+ * enrollment ceremony before any account exists. */
 export class BrokerRuntime implements BrokerBrowserCustody {
   private readonly runtimeIdentity = new IdentityRuntime<BrowserController, Settings>();
   private readonly sessions = new Map<BrowserController, () => void>();
@@ -36,8 +40,6 @@ export class BrokerRuntime implements BrokerBrowserCustody {
   private recycling = false;
   private pending = 0;
 
-  constructor(private readonly accountId: string) {}
-
   claimProfile(profileDir = CHROME_PROFILE_DIR): void {
     const identity = profilePathIdentity(profileDir);
     if (this.lease !== undefined) {
@@ -49,10 +51,39 @@ export class BrokerRuntime implements BrokerBrowserCustody {
     this.leaseProfile = identity;
   }
 
-  async acquire(options: {
-    profileDir?: string;
-    proxyUrl?: string;
-  }): Promise<{ browser: BrowserController; profileDir: string }> {
+  /**
+   * Bind the physical profile to the account a call named. Called before every
+   * acquire that acts as an account, so the check holds for a browser that is
+   * already live as well as for the launch that creates it. A call that names
+   * no account (the enrollment ceremony) touches nothing: the profile's
+   * binding is written the first time a call acts as one.
+   */
+  private async bindAccount(profileDir: string, accountId: string): Promise<void> {
+    await mkdir(profileDir, { recursive: true, mode: 0o700 });
+    const bindingPath = brokerAccountBindingPath(profileDir);
+    try {
+      await writeFile(bindingPath, JSON.stringify({ version: 1, accountId }), {
+        flag: "wx",
+        mode: 0o600,
+      });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      const binding = JSON.parse(await readFile(bindingPath, "utf8")) as {
+        version: number;
+        accountId: string;
+      };
+      if (binding.version !== 1 || binding.accountId !== accountId)
+        throw new BrokerRefusal("account_mismatch", "Profile is enrolled to a different account");
+    }
+  }
+
+  async acquire(
+    options: {
+      profileDir?: string;
+      proxyUrl?: string;
+    },
+    accountId?: string,
+  ): Promise<{ browser: BrowserController; profileDir: string }> {
     if (this.closing) throw new BrokerRefusal("maintenance", "Identity cell is draining");
     // Distinct from incompatible_runtime: that code means "not now, finish the
     // sessions pinning this identity". This is a standing configuration choice
@@ -67,6 +98,7 @@ export class BrokerRuntime implements BrokerBrowserCustody {
     // the next start, instead of handing out pages from a dead browser.
     if (this.browserLost()) await this.recycleLostBrowser();
     const profileDir = profilePathIdentity(options.profileDir ?? CHROME_PROFILE_DIR);
+    if (accountId !== undefined) await this.bindAccount(profileDir, accountId);
     const settings = {
       profileDir,
       ...(options.proxyUrl === undefined ? {} : { proxyUrl: options.proxyUrl }),
@@ -103,25 +135,6 @@ export class BrokerRuntime implements BrokerBrowserCustody {
           if (!(await waitForProfileFree(settings.profileDir, { deadlineMs: 0 })))
             throw new BrokerRefusal("profile_busy", "Profile is already open");
           await mkdir(settings.profileDir, { recursive: true, mode: 0o700 });
-          const bindingPath = brokerAccountBindingPath(settings.profileDir);
-          try {
-            await writeFile(
-              bindingPath,
-              JSON.stringify({ version: 1, accountId: this.accountId }),
-              { flag: "wx", mode: 0o600 },
-            );
-          } catch (error) {
-            if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-            const binding = JSON.parse(await readFile(bindingPath, "utf8")) as {
-              version: number;
-              accountId: string;
-            };
-            if (binding.version !== 1 || binding.accountId !== this.accountId)
-              throw new BrokerRefusal(
-                "account_mismatch",
-                "Profile is enrolled to a different account",
-              );
-          }
           const owner = new BrowserController(settings);
           this.owner = owner;
           let timer: ReturnType<typeof setTimeout> | undefined;

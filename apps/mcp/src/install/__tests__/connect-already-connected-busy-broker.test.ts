@@ -188,7 +188,6 @@ it("reports already connected while the broker owns the profile and its browser"
 
   const socket = path.join(socketRoot, "b.sock");
   broker = await listenBroker(socket, {
-    authenticate: async () => ({ accountId: "account-id", agentId: "connect" }),
     connected: async () => undefined,
     call: async () => ({ closed: true }),
     disconnect: async () => undefined,

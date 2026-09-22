@@ -3,7 +3,6 @@ import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
-import { z } from "zod";
 import type * as BrokerTransport from "../broker/transport.js";
 import type * as DiscoveryModule from "../broker/discovery.js";
 import type * as ProfileModule from "../profile.js";
@@ -62,20 +61,6 @@ const sleep = async (ms: number) => await new Promise((resolve) => setTimeout(re
  *   authenticates `hello` with the token — a Contract B broker refuses
  *   `hello` instead. It dies on default SIGTERM exactly like the
  *   pre-wire-collapse daemon, unless told to ignore it. */
-// Execute the older strict open schema to generate the actual wire error a
-// pre-ceremony broker produces for the ceremony field.
-const oldOpenErrors = Object.fromEntries(
-  ["ceremony"].map((field) => {
-    const schema = z.object({ serviceUrl: z.string() }).strict();
-    const result = schema.safeParse({
-      serviceUrl: "https://example.com",
-      ceremony: true,
-    });
-    if (result.success) throw new Error("Old schema unexpectedly accepted ceremony");
-    return [field, result.error.message];
-  }),
-);
-
 const PRIOR_CONTRACT_DAEMON_SCRIPT = `
 const fs = require("node:fs");
 const net = require("node:net");
@@ -121,15 +106,6 @@ if (!mode.includes("no-listen")) {
         if (journalPath) fs.appendFileSync(journalPath, String(request.method) + "\\n");
         const reply = (payload) =>
           socket.write(JSON.stringify({ id: request.id, ...payload }) + "\\n");
-        if (mode.includes("schema-") && request.method === "open") {
-          const errors = ${JSON.stringify(oldOpenErrors)};
-          reply({ error: { code: "broker_execution_failed", message: errors["ceremony"] } });
-          continue;
-        }
-        if (mode.includes("schema-") && request.method === "close") {
-          reply({ result: { closed: true } });
-          continue;
-        }
         const authedMethod = mode.includes("contract-b") ? "connect" : "hello";
         if (request.method !== authedMethod || typeof request.params?.token !== "string") {
           reply({
@@ -192,14 +168,33 @@ async function electionLockPath(
   return join(electionRoot, name);
 }
 
+/** A live SOCK_STREAM peer on the broker socket: what "an attached client"
+ * looks like to the reclaim path. A raw socket, because an older resident
+ * gates `connect` on a credential this release no longer sends. */
+async function attachPeer(socketPath: string): Promise<{ close(): Promise<void> }> {
+  const { createConnection } = await import("node:net");
+  const socket = createConnection(socketPath);
+  await new Promise<void>((resolve, reject) => {
+    socket.once("connect", () => resolve());
+    socket.once("error", reject);
+  });
+  return {
+    close: async () => {
+      await new Promise<void>((resolve) => {
+        socket.once("close", () => resolve());
+        socket.destroy();
+      });
+    },
+  };
+}
+
 /** Wait until the fixture holds its lease and — when listening — answers
  * the socket. Prior-contract fixtures refuse Contract B `connect` (hello
  * only). Current-contract fixtures authenticate `connect` with the token. */
 async function awaitFixtureReady(
   socketPath: string,
   leasePath: string,
-  token: string,
-  options: { listens?: boolean; contract?: "legacy" | "current" } = {},
+  options: { listens?: boolean } = {},
 ): Promise<void> {
   const { BrokerClient } = await import("../broker/transport.js");
   const deadline = Date.now() + 10_000;
@@ -208,26 +203,19 @@ async function awaitFixtureReady(
       let ready = !options.listens;
       if (options.listens) {
         try {
-          await BrokerClient.connect(socketPath, token).then(
+          await BrokerClient.connect(socketPath).then(
             async (client) => {
-              if (options.contract === "current") {
-                ready = true;
-                await client.close();
-                return;
-              }
+              // A token-less listener is already the new contract.
               await client.close();
-              throw new Error("legacy fixture authenticated Contract B connect");
+              ready = true;
             },
             (error) => {
+              // Every fixture here stands in for a resident from an older
+              // release, which gated `connect` on a credential. That refusal
+              // is exactly what the new client must recognize and reclaim.
               if (!(error instanceof Error)) throw error;
-              if (options.contract === "current") {
-                if (!error.message.includes("Invalid broker credential")) throw error;
-                ready = true;
-                return undefined;
-              }
               if (!error.message.includes("Authenticate before issuing commands")) throw error;
               ready = true;
-              return undefined;
             },
           );
         } catch {
@@ -306,7 +294,6 @@ describe("prior-contract broker reclaim on upgrade", () => {
       election ??= profileModule.acquireProfileOperationGuard(profile, electionRoot);
       void sleep(10).then(async () => {
         listener = await transport.listenBroker(socket, {
-          authenticate: async () => ({ accountId: "account", agentId: "agent" }),
           connected: async () => undefined,
           call: async () => ({}),
           disconnect: async () => undefined,
@@ -323,12 +310,15 @@ describe("prior-contract broker reclaim on upgrade", () => {
       const { discovery, profileModule, transport } = await modules();
       lockPath = await electionLockPath(discovery, profileModule, profile);
       const fixture = spawnFixture(socket, lockPath, "token", "");
-      await awaitFixtureReady(socket, lockPath, "token", { listens: true });
+      await awaitFixtureReady(socket, lockPath, { listens: true });
       expect(await leaseOwnerPid(lockPath)).toBe(fixture.pid!);
 
       mockNewContractDaemon(transport, profileModule, discovery.brokerElectionRoot(profile));
 
-      const client = await discovery.connectOrLaunchBroker(socket, "token", ACCOUNT_ID);
+      const client = await discovery.connectOrLaunchBroker(socket, {
+        accountId: ACCOUNT_ID,
+        agentSessionToken: "token",
+      });
 
       // Real termination of the real prior-contract daemon, and a real
       // attach to the new-contract daemon.
@@ -347,11 +337,14 @@ describe("prior-contract broker reclaim on upgrade", () => {
       const { discovery, profileModule, transport } = await modules();
       lockPath = await electionLockPath(discovery, profileModule, profile);
       const fixture = spawnFixture(socket, lockPath, "token", "ignore-sigterm");
-      await awaitFixtureReady(socket, lockPath, "token", { listens: true });
+      await awaitFixtureReady(socket, lockPath, { listens: true });
 
       mockNewContractDaemon(transport, profileModule, discovery.brokerElectionRoot(profile));
 
-      const client = await discovery.connectOrLaunchBroker(socket, "token", ACCOUNT_ID);
+      const client = await discovery.connectOrLaunchBroker(socket, {
+        accountId: ACCOUNT_ID,
+        agentSessionToken: "token",
+      });
 
       expect(await awaitExit(fixture)).toBe("SIGKILL");
       expect(state.spawn).toHaveBeenCalledOnce();
@@ -375,12 +368,12 @@ describe("prior-contract broker reclaim on upgrade", () => {
       const scratchLockPath = join(root, "scratch.lock");
       spawnFixture(socket, scratchLockPath, "token", "");
       const holder = spawnFixture(scratchSocket, lockPath, "token", "no-listen ignore-sigterm");
-      await awaitFixtureReady(socket, scratchLockPath, "token", { listens: true });
-      await awaitFixtureReady(scratchSocket, lockPath, "token");
+      await awaitFixtureReady(socket, scratchLockPath, { listens: true });
+      await awaitFixtureReady(scratchSocket, lockPath);
       const holderPid = holder.pid!;
 
       const { BrokerClient } = await import("../broker/transport.js");
-      const connectError = await BrokerClient.connect(socket, "token").then(
+      const connectError = await BrokerClient.connect(socket).then(
         (client) => client.close().then(() => undefined),
         (error) => error,
       );
@@ -411,13 +404,12 @@ describe("prior-contract broker reclaim on upgrade", () => {
         (await readdir(electionRoot)).find((n) => n.endsWith(".lock"))!,
       );
       listener = await transport.listenBroker(socket, {
-        authenticate: async () => ({ accountId: "account", agentId: "agent" }),
         connected: async () => undefined,
         call: async () => ({}),
         disconnect: async () => undefined,
       });
 
-      const client = await discovery.connectOrLaunchBroker(socket, "token", ACCOUNT_ID);
+      const client = await discovery.connectOrLaunchBroker(socket, { accountId: ACCOUNT_ID });
 
       expect(state.spawn).not.toHaveBeenCalled();
       expect(client.welcome).toBeDefined();
@@ -426,7 +418,7 @@ describe("prior-contract broker reclaim on upgrade", () => {
       const owner = JSON.parse(await readFile(holderLockPath, "utf8")) as { pid: number };
       expect(owner.pid).toBe(process.pid);
       // The same-contract daemon still answers a second client.
-      const second = await discovery.connectOrLaunchBroker(socket, "token", ACCOUNT_ID);
+      const second = await discovery.connectOrLaunchBroker(socket, { accountId: ACCOUNT_ID });
       expect(second.welcome).toBeDefined();
       await Promise.all([client.close(), second.close()]);
     },
@@ -445,10 +437,9 @@ describe("prior-contract broker reclaim on upgrade", () => {
         (await readdir(electionRoot)).find((n) => n.endsWith(".lock"))!,
       );
       // No socket yet: the daemon holds the lease before its socket appears.
-      const connecting = discovery.connectOrLaunchBroker(socket, "token", ACCOUNT_ID);
+      const connecting = discovery.connectOrLaunchBroker(socket, { accountId: ACCOUNT_ID });
       await sleep(50);
       listener = await transport.listenBroker(socket, {
-        authenticate: async () => ({ accountId: "account", agentId: "agent" }),
         connected: async () => undefined,
         call: async () => ({}),
         disconnect: async () => undefined,
@@ -464,21 +455,25 @@ describe("prior-contract broker reclaim on upgrade", () => {
   );
 
   it(
-    "does not reclaim a credential-rejecting listener that is not this profile's elected broker",
+    "does not reclaim a refusing listener that is not this profile's elected broker",
     { timeout: 30_000 },
     async () => {
       const { discovery, transport } = await modules();
       await bindProfileToAccount(profile, ACCOUNT_ID);
       listener = await transport.listenBroker(socket, {
-        authenticate: async () => null,
         connected: async () => undefined,
         call: async () => ({}),
         disconnect: async () => undefined,
       });
-
+      // An older resident refuses the token-less connect. Positive
+      // identification still requires this profile's election lease with a
+      // live broker-argv owner, so a listener holding no lease is never
+      // signalled and the refusal propagates untouched.
+      const { BrokerRefusal } = await import("../broker/refusal.js");
+      const refused = new BrokerRefusal("unauthorized", "Authenticate before issuing commands");
       await expect(
-        discovery.connectOrLaunchBroker(socket, "stale-token", ACCOUNT_ID),
-      ).rejects.toThrow("Invalid broker credential");
+        discovery.reclaimStaleCredentialBrokerIfPresent(socket, ACCOUNT_ID, refused),
+      ).resolves.toBe(false);
       expect(state.spawn).not.toHaveBeenCalled();
     },
   );
@@ -559,7 +554,6 @@ describe("same-contract stale-credential broker reclaim", () => {
       election ??= profileModule.acquireProfileOperationGuard(profile, electionRoot);
       void sleep(10).then(async () => {
         listener = await transport.listenBroker(socket, {
-          authenticate: async () => ({ accountId: "account", agentId: "agent" }),
           connected: async () => undefined,
           call: async () => ({}),
           disconnect: async () => undefined,
@@ -568,112 +562,6 @@ describe("same-contract stale-credential broker reclaim", () => {
       return { once: vi.fn(), unref: vi.fn() };
     });
   }
-
-  it.each([
-    { field: "ceremony", outcome: "completes" },
-    { field: "ceremony", outcome: "refuses attached clients" },
-    { field: "ceremony", outcome: "stops after one retry" },
-  ])("old broker rejecting $field: $outcome", { timeout: 30_000 }, async ({ field, outcome }) => {
-    const { discovery, profileModule, transport } = await modules();
-    vi.stubEnv("TRUSTY_SQUIRE_BROKER_SOCKET", socket);
-    // Whether the ceremony tab is already visible takes BOTH halves: the
-    // holder's display (the stand-in below) and this connect having a screen
-    // of its own. Pin the second half rather than inheriting the host's — a
-    // headless runner would send it down the noVNC path this test is not about.
-    vi.stubEnv("DISPLAY", ":0");
-    vi.stubEnv("XDG_SESSION_TYPE", "x11");
-    vi.stubEnv("SSH_CONNECTION", "");
-    vi.stubEnv("SSH_TTY", "");
-    lockPath = await electionLockPath(discovery, profileModule, profile);
-    const journal = join(root, "ceremony-wire.txt");
-    const fixture = spawnFixture(
-      socket,
-      lockPath,
-      state.sessionToken,
-      `contract-b schema-${field}`,
-      journal,
-    );
-    await awaitFixtureReady(socket, lockPath, state.sessionToken, {
-      listens: true,
-      contract: "current",
-    });
-    const freshCalls: { method: string; params: unknown }[] = [];
-    state.spawn.mockImplementation(() => {
-      election = profileModule.acquireProfileOperationGuard(
-        profile,
-        discovery.brokerElectionRoot(profile),
-      );
-      void sleep(10).then(async () => {
-        // Stand in for the replacement's visible browser process so the
-        // real display-discovery helper can let the ceremony complete.
-        const holder = realSpawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
-          stdio: "ignore",
-          env: { ...process.env, DISPLAY: ":0", XAUTHORITY: join(root, "desktop-auth") },
-        });
-        children.push(holder);
-        await symlink(`${hostname()}-${holder.pid}`, join(profile, "SingletonLock"));
-        listener = await transport.listenBroker(socket, {
-          authenticate: async () => ({ accountId: ACCOUNT_ID, agentId: "agent" }),
-          connected: async () => undefined,
-          call: async (_identity, method, params) => {
-            freshCalls.push({ method, params });
-            if (method === "open" && outcome === "stops after one retry") {
-              const { BrokerRefusal } = await import("../broker/refusal.js");
-              throw new BrokerRefusal("broker_execution_failed", oldOpenErrors[field]!);
-            }
-            return method === "open" ? { sessionId: "fresh-tab" } : { closed: true };
-          },
-          disconnect: async () => undefined,
-        });
-      });
-      return { once: vi.fn(), unref: vi.fn() };
-    });
-    const { tryRunCeremonyInSharedBroker } = await import("../google-login.js");
-    const attached =
-      outcome === "refuses attached clients"
-        ? await transport.BrokerClient.connect(socket, state.sessionToken)
-        : undefined;
-    const running = tryRunCeremonyInSharedBroker({
-      profileDir: profile,
-      url: "https://trustysquire.ai/install/confirm?install=fixture",
-      deadline: Date.now() + 10_000,
-      pollUntilDone: async () => true,
-      bannerLabel: "fixture",
-    });
-    if (attached !== undefined) {
-      try {
-        await expect(running).rejects.toMatchObject({ code: "broker_unavailable" });
-        await expect(running).rejects.toThrow(/attached client/);
-        expect(state.spawn).not.toHaveBeenCalled();
-        expect(fixture.signalCode).toBeNull();
-        expect(fixture.exitCode).toBeNull();
-      } finally {
-        await attached.close();
-      }
-      return;
-    }
-    if (outcome === "stops after one retry") {
-      await expect(running).rejects.toMatchObject({ code: "broker_execution_failed" });
-    } else {
-      await expect(running).resolves.toEqual({ status: "satisfied", closeState: "closed" });
-    }
-    expect(await awaitExit(fixture)).toBe("SIGTERM");
-    expect(state.spawn).toHaveBeenCalledOnce();
-    expect(
-      (await readFile(journal, "utf8")).split("\n").filter((method) => method === "open"),
-    ).toHaveLength(1);
-    expect(freshCalls.filter(({ method }) => method === "open")).toEqual([
-      {
-        method: "open",
-        params: {
-          serviceUrl: "https://trustysquire.ai/install/confirm?install=fixture",
-          ceremony: true,
-        },
-      },
-    ]);
-    if (outcome === "completes")
-      expect(freshCalls).toContainEqual({ method: "close", params: { sessionId: "fresh-tab" } });
-  });
 
   it(
     "reproduces the orphaning path: a resident same-contract broker whose digest lagged a re-enrollment is reclaimed and replaced",
@@ -686,15 +574,12 @@ describe("same-contract stale-credential broker reclaim", () => {
       const { discovery, profileModule, transport } = await modules();
       lockPath = await electionLockPath(discovery, profileModule, profile);
       const fixture = spawnFixture(socket, lockPath, "old-token", "contract-b");
-      await awaitFixtureReady(socket, lockPath, "old-token", {
-        listens: true,
-        contract: "current",
-      });
+      await awaitFixtureReady(socket, lockPath, { listens: true });
       expect(await leaseOwnerPid(lockPath)).toBe(fixture.pid!);
 
       mockNewContractDaemon(transport, profileModule, discovery.brokerElectionRoot(profile));
 
-      const client = await discovery.connectOrLaunchBroker(socket, "new-token", ACCOUNT_ID);
+      const client = await discovery.connectOrLaunchBroker(socket, { accountId: ACCOUNT_ID });
 
       expect(await awaitExit(fixture)).toBe("SIGTERM");
       expect(state.spawn).toHaveBeenCalledOnce();
@@ -710,21 +595,18 @@ describe("same-contract stale-credential broker reclaim", () => {
       const { discovery, profileModule, transport } = await modules();
       lockPath = await electionLockPath(discovery, profileModule, profile);
       const fixture = spawnFixture(socket, lockPath, "old-token", "contract-b");
-      await awaitFixtureReady(socket, lockPath, "old-token", {
-        listens: true,
-        contract: "current",
-      });
+      await awaitFixtureReady(socket, lockPath, { listens: true });
       const holderPid = fixture.pid!;
-      const attached = await transport.BrokerClient.connect(socket, "old-token");
+      const attached = await attachPeer(socket);
       try {
         await expect(
-          discovery.connectOrLaunchBroker(socket, "new-token", ACCOUNT_ID),
+          discovery.connectOrLaunchBroker(socket, { accountId: ACCOUNT_ID }),
         ).rejects.toMatchObject({
           code: "broker_unavailable",
         });
         const message = String(
           await discovery
-            .connectOrLaunchBroker(socket, "new-token", ACCOUNT_ID)
+            .connectOrLaunchBroker(socket, { accountId: ACCOUNT_ID })
             .catch((error: unknown) => (error instanceof Error ? error.message : error)),
         );
         expect(message).toContain(String(holderPid));
@@ -747,14 +629,11 @@ describe("same-contract stale-credential broker reclaim", () => {
       await bindProfileToAccount(profile, "another-account");
       lockPath = await electionLockPath(discovery, profileModule, profile);
       const fixture = spawnFixture(socket, lockPath, "old-token", "contract-b");
-      await awaitFixtureReady(socket, lockPath, "old-token", {
-        listens: true,
-        contract: "current",
-      });
+      await awaitFixtureReady(socket, lockPath, { listens: true });
 
       await expect(
-        discovery.connectOrLaunchBroker(socket, "new-token", ACCOUNT_ID),
-      ).rejects.toThrow("Invalid broker credential");
+        discovery.connectOrLaunchBroker(socket, { accountId: ACCOUNT_ID }),
+      ).rejects.toThrow("Authenticate before issuing commands");
 
       expect(state.spawn).not.toHaveBeenCalled();
       expect(fixture.exitCode).toBeNull();
@@ -771,14 +650,11 @@ describe("same-contract stale-credential broker reclaim", () => {
       await rm(brokerAccountBindingPath(profile), { force: true });
       lockPath = await electionLockPath(discovery, profileModule, profile);
       const fixture = spawnFixture(socket, lockPath, "old-token", "contract-b");
-      await awaitFixtureReady(socket, lockPath, "old-token", {
-        listens: true,
-        contract: "current",
-      });
+      await awaitFixtureReady(socket, lockPath, { listens: true });
 
       await expect(
-        discovery.connectOrLaunchBroker(socket, "new-token", ACCOUNT_ID),
-      ).rejects.toThrow("Invalid broker credential");
+        discovery.connectOrLaunchBroker(socket, { accountId: ACCOUNT_ID }),
+      ).rejects.toThrow("Authenticate before issuing commands");
 
       expect(state.spawn).not.toHaveBeenCalled();
       expect(fixture.exitCode).toBeNull();
@@ -796,12 +672,9 @@ describe("same-contract stale-credential broker reclaim", () => {
       // probe question is answered by real traffic, not by a stubbed call.
       const journal = join(root, "wire-journal.txt");
       const fixture = spawnFixture(socket, lockPath, "old-token", "contract-b", journal);
-      await awaitFixtureReady(socket, lockPath, "old-token", {
-        listens: true,
-        contract: "current",
-      });
+      await awaitFixtureReady(socket, lockPath, { listens: true });
 
-      const connectError = await transport.BrokerClient.connect(socket, "new-token").then(
+      const connectError = await transport.BrokerClient.connect(socket).then(
         async (client) => await client.close().then(() => undefined),
         (error: unknown) => error,
       );
@@ -827,14 +700,14 @@ describe("same-contract stale-credential broker reclaim", () => {
       const { discovery, profileModule, transport } = await modules();
       lockPath = await electionLockPath(discovery, profileModule, profile);
       const fixture = spawnFixture(socket, lockPath, "old-token", "contract-b ignore-sigterm");
-      await awaitFixtureReady(socket, lockPath, "old-token", {
-        listens: true,
-        contract: "current",
-      });
+      await awaitFixtureReady(socket, lockPath, { listens: true });
 
       mockNewContractDaemon(transport, profileModule, discovery.brokerElectionRoot(profile));
 
-      const client = await discovery.connectOrLaunchBroker(socket, "new-token", ACCOUNT_ID);
+      const client = await discovery.connectOrLaunchBroker(socket, {
+        accountId: ACCOUNT_ID,
+        agentSessionToken: "token",
+      });
 
       expect(await awaitExit(fixture)).toBe("SIGKILL");
       expect(state.spawn).toHaveBeenCalledOnce();

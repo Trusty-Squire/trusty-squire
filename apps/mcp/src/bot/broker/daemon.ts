@@ -4,7 +4,6 @@ import { lstat, mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 import { createHash } from "node:crypto";
 import { createSessionGuard, setServingAccountId } from "../../session-guard.js";
-import { openSessionStorage } from "../../session.js";
 import { setSelfManagedChromeTerminationSignalExitEnabled } from "../browser.js";
 import { startOwnerProcessReaper } from "../owner-process-reaper.js";
 import {
@@ -17,7 +16,6 @@ import { brokerBusyStatus } from "./status.js";
 import { installBrokerBrowserCustody } from "./custody.js";
 import { BrokerRuntime } from "./runtime.js";
 import { OperatorBroker } from "./operator.js";
-import { type BrokerPrincipal } from "./authority.js";
 import { BrokerRefusal } from "./refusal.js";
 import { listenBroker } from "./transport.js";
 
@@ -64,47 +62,15 @@ export class BrokerClientRegistry {
   }
 }
 
-/** Strict handshake authentication with one in-place credential refresh
- * (round-12 review-2 — no maintenance window). When connect re-enrolls it
- * mints a fresh agent_session_token, and a resident broker still holding the
- * previous digest would otherwise send every presented credential into the
- * stale-credential reclaim path — which refuses while any lane's client is
- * still attached, wedging the re-enroll behind its own resident. On a null
- * authenticate, re-read THIS daemon's own bound account entry: only a token
- * that matches that entry (same account, same token string) is adopted via
- * refreshCredentials and retried once. Anything else — another account, a
- * token the store has never seen, a refresh refused because live sessions
- * still hold the broker — stays refused, and the reclaim path reports it
- * honestly. */
-export async function authenticateOrAdoptCurrentCredential(
-  operator: OperatorBroker,
-  boundAccountId: string | null,
-  readBoundEntry: () => Promise<{
-    account_id?: string;
-    agent_session_token?: string;
-  } | null>,
-  token: string,
-  agentId?: string,
-): Promise<Omit<BrokerPrincipal, "clientId"> | null> {
-  const principal = await operator.authenticate(token, agentId);
-  if (principal !== null) return principal;
-  if (boundAccountId === null) return null;
-  try {
-    const entry = await readBoundEntry();
-    if (entry?.account_id !== boundAccountId || entry.agent_session_token !== token) return null;
-    operator.refreshCredentials({
-      account_id: entry.account_id,
-      agent_session_token: entry.agent_session_token,
-    });
-    return await operator.authenticate(token, agentId);
-  } catch {
-    // Refresh refused (live sessions still drain-required) or the store read
-    // failed: keep the strict refusal; the reclaim path reports it.
-    return null;
-  }
-}
-
-/** On-demand broker entrypoint; retains custody while clients own sessions. */
+/**
+ * On-demand broker entrypoint; retains custody while clients own sessions.
+ *
+ * The daemon requires NO enrollment. It is the machine's shared browser, and
+ * the moment a machine most needs it is the moment it is being enrolled — the
+ * ceremony has to run somewhere, and an account is exactly what it does not
+ * have yet. Account identity arrives with the individual calls that act as an
+ * account, so a bare broker serves the ceremony and the operator alike.
+ */
 export async function runBrokerDaemon(): Promise<void> {
   const path = resolveBrokerSocket();
   const parent = await lstat(dirname(path));
@@ -112,16 +78,17 @@ export async function runBrokerDaemon(): Promise<void> {
     throw new Error("Broker socket directory must be owned by this user with mode 0700");
   }
   const guard = createSessionGuard();
-  const session = await guard.bind();
-  if (session?.account_id === undefined || session.agent_session_token === undefined)
-    throw new Error("Broker requires an enrolled account; run connect first");
-  setServingAccountId(session.account_id);
+  // Best effort: an enrolled machine publishes its account so the daemon's own
+  // tool handlers and the account-session-missing surface keep working. An
+  // unenrolled machine publishes nothing and serves anyway.
+  const session = await guard.bind().catch(() => null);
+  setServingAccountId(session?.account_id ?? null);
   const cellId = createHash("sha256")
-    .update(JSON.stringify([session.account_id, profilePathIdentity(CHROME_PROFILE_DIR)]))
+    .update(JSON.stringify([session?.account_id ?? null, profilePathIdentity(CHROME_PROFILE_DIR)]))
     .digest("hex");
   const electionRoot = brokerElectionRoot(CHROME_PROFILE_DIR);
   await mkdir(electionRoot, { recursive: true, mode: 0o700 });
-  const runtime = new BrokerRuntime(session.account_id);
+  const runtime = new BrokerRuntime();
   installBrokerBrowserCustody(runtime);
   setSelfManagedChromeTerminationSignalExitEnabled(false);
   startOwnerProcessReaper();
@@ -130,9 +97,6 @@ export async function runBrokerDaemon(): Promise<void> {
   const profileElection = acquireProfileOperationGuard(CHROME_PROFILE_DIR, electionRoot);
   runtime.claimProfile();
   const operator = new OperatorBroker({
-    accountId: session.account_id,
-    agentSessionToken: session.agent_session_token,
-    apiBaseUrl: session.api_base_url,
     registryBaseUrl: process.env.ADAPTER_REGISTRY_URL ?? "https://registry.trustysquire.ai",
   });
   const clients = new BrokerClientRegistry();
@@ -145,14 +109,6 @@ export async function runBrokerDaemon(): Promise<void> {
     return inventory.sessions === 0 && inventory.admitting === 0 && inventory.closing === 0;
   };
   const listener = await listenBroker(path, {
-    authenticate: async (token, agentId) =>
-      await authenticateOrAdoptCurrentCredential(
-        operator,
-        session.account_id ?? null,
-        async () => await (await openSessionStorage()).read(session.account_id),
-        token,
-        agentId,
-      ),
     connected: async (principal, params) => {
       const probe = params.probe === true;
       clients.admit(principal.clientId, probe);

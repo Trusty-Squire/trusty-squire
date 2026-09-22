@@ -3,7 +3,6 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { BrokerPrincipal } from "../bot/broker/authority.js";
 import { BrokerRefusal } from "../bot/broker/refusal.js";
 import { listenBroker } from "../bot/broker/transport.js";
 import { CHROME_PROFILE_DIR, profilePathIdentity } from "../bot/profile.js";
@@ -29,10 +28,6 @@ async function listenAsBroker(
 ): Promise<{ calls: WireCall[]; close: () => Promise<void> }> {
   const calls: WireCall[] = [];
   const listener = await listenBroker(socket, {
-    authenticate: async (): Promise<Omit<BrokerPrincipal, "clientId">> => ({
-      accountId: "account",
-      agentId: "agent",
-    }),
     call: async (_principal, method, params) => {
       calls.push({ method, params });
       return answer({ method, params });
@@ -275,19 +270,42 @@ describe("browserBusy asks the broker rather than inferring", () => {
     await expect(browserBusy()).resolves.toEqual({ busy: false });
   });
 
-  it("never answers as if nothing runs when a broker is resident it cannot ask", async () => {
-    // `logout` clears the session file without touching the running daemon.
-    // Reading the profile lock here would report the broker's OWN Chrome as a
-    // foreign process to close — the answer its `status` would have denied.
-    await broker(() => ({ closed: true }));
+  it("asks a resident broker even when this machine has no enrolled account", async () => {
+    // The deadlock this replaces: enrollment is what MINTS the agent session
+    // token, so the machine that most needs the shared browser is the one
+    // holding no token at all. Asking takes nothing, so the broker's own
+    // answer is available to it.
+    await broker(({ method }) =>
+      method === "status"
+        ? { busy: true, code: "profile_busy", holder: { pid: 4242, host: hostname() } }
+        : { closed: true },
+    );
     await (await openSessionStorage()).clear();
     symlinkSync(`${hostname()}-${process.pid}`, join(servedProfile(), "SingletonLock"));
-    await expect(browserBusy()).rejects.toSatisfy((error: unknown) => {
-      expect(error).toBeInstanceOf(BrowserNeedsUser);
-      if (!(error instanceof BrowserNeedsUser)) throw new Error("expected needs-user");
-      expect(error.action()).toContain("connect");
-      return true;
+    await expect(browserBusy()).resolves.toEqual({
+      busy: true,
+      reason: {
+        layer: "profile",
+        code: "profile_busy",
+        holder: { pid: 4242, host: hostname() },
+      },
     });
+  });
+
+  it("opens a tab for a machine with no enrolled account", async () => {
+    const calls = await broker(({ method }) => {
+      if (method === "open") return { sessionId: "sess-1", observation: { session_id: "sess-1" } };
+      if (method === "command") return { result: { url: "https://example.test/" } };
+      return { closed: true };
+    });
+    await (await openSessionStorage()).clear();
+    const tab = await openTab({ profile: "default", purpose: "connect:ceremony" });
+    await tab.page.goto("https://example.test/");
+    await tab.release();
+    expect(calls.map((call) => call.method)).toEqual(["open", "command", "close"]);
+    // No account is named on any frame: enrollment creates an account, it
+    // never acts as one.
+    expect(calls.every((call) => call.params.account === undefined)).toBe(true);
   });
 
   it("falls back to the profile lock when no broker is resident", async () => {

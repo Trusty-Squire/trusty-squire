@@ -24,7 +24,6 @@ import {
 } from "../profile.js";
 import { OPERATOR_BROWSER_MARKER_ENV } from "../operator-browser-watchdog.js";
 import {
-  cancelActiveLoginBrowsers,
   openInstallConfirmInBotChrome,
   classifyGoogleAuthState,
   extractGoogleHumanChallenge,
@@ -35,14 +34,9 @@ import {
   extractOAuthScopes,
   hasDisplay,
   pollUntil,
-  runLoginBrowserForEnvironment,
-  runDisplayedChrome,
   scopesAreBasic,
   scrapeGoogleScopePhrases,
-  trackActiveLoginBrowser,
-  launchCeremonyBrowserContext,
   launchPersistentLoginContext,
-  type CeremonyBrowser,
   type PersistentLauncher,
   type RunInBotChromeOpts,
 } from "../google-login.js";
@@ -107,44 +101,6 @@ describe("interactive login display detection", () => {
   });
 });
 
-describe("interactive login display routing", () => {
-  const opts: RunInBotChromeOpts = {
-    profileDir: "/unused/profile",
-    url: "https://example.test/login",
-    deadline: Date.now() + 60_000,
-    pollUntilDone: async () => false,
-    bannerLabel: "Complete sign-in.",
-  };
-
-  it("routes a headless login to the remote noVNC path", async () => {
-    const displayed = vi.fn(async () => ({ status: "timeout", closeState: "closed" }) as const);
-    const remote = vi.fn(async () => ({ status: "satisfied", closeState: "closed" }) as const);
-
-    await expect(
-      runLoginBrowserForEnvironment(opts, {
-        hasDisplay: () => false,
-        runDisplayedChrome: displayed,
-        runRemoteLoginChrome: remote,
-      }),
-    ).resolves.toMatchObject({ status: "satisfied" });
-    expect(remote).toHaveBeenCalledOnce();
-    expect(displayed).not.toHaveBeenCalled();
-  });
-
-  it("keeps a user-visible desktop on the local headed path", async () => {
-    const displayed = vi.fn(async () => ({ status: "satisfied", closeState: "closed" }) as const);
-    const remote = vi.fn(async () => ({ status: "timeout", closeState: "closed" }) as const);
-
-    await runLoginBrowserForEnvironment(opts, {
-      hasDisplay: () => true,
-      runDisplayedChrome: displayed,
-      runRemoteLoginChrome: remote,
-    });
-    expect(displayed).toHaveBeenCalledOnce();
-    expect(remote).not.toHaveBeenCalled();
-  });
-});
-
 describe("install completion callback", () => {
   it("waits for the explicit Finish callback rather than profile files", async () => {
     const pollUntilClaimed = vi.fn(
@@ -186,70 +142,6 @@ function fakeProcess(name: string): ChildProcess {
     kill: vi.fn(),
   }) as unknown as ChildProcess;
 }
-
-describe("operator shutdown — OAuth-bootstrap login browser cancellation", () => {
-  it("cancels every tracked login browser once and drains the registry", async () => {
-    const closed: string[] = [];
-    trackActiveLoginBrowser(async () => {
-      closed.push("displayed");
-    });
-    trackActiveLoginBrowser(async () => {
-      closed.push("headless");
-      throw new Error("teardown failed mid-shutdown");
-    });
-
-    await cancelActiveLoginBrowsers();
-    expect(closed.sort()).toEqual(["displayed", "headless"]);
-
-    // Drained: a second shutdown trigger must not double-tear anything.
-    await cancelActiveLoginBrowsers();
-    expect(closed).toHaveLength(2);
-  });
-
-  it("skips a login run that already completed and unregistered", async () => {
-    const cancel = vi.fn(async () => undefined);
-    const untrack = trackActiveLoginBrowser(cancel);
-    untrack();
-
-    await cancelActiveLoginBrowsers();
-    expect(cancel).not.toHaveBeenCalled();
-  });
-
-  it("shares one teardown when shutdown cancels a deferred displayed launch", async () => {
-    let finishLaunch: ((browser: CeremonyBrowser) => void) | undefined;
-    const launch = new Promise<CeremonyBrowser>((resolve) => {
-      finishLaunch = resolve;
-    });
-    const teardown = vi.fn(async () => undefined);
-    const forceTeardown = vi.fn(async () => undefined);
-    const browser: CeremonyBrowser = {
-      identity: null,
-      isRunning: () => true,
-      teardown,
-      forceTeardown,
-    };
-    const running = runDisplayedChrome(
-      {
-        profileDir: "/unused/profile",
-        url: "https://example.test/login",
-        deadline: Date.now() + 60_000,
-        pollUntilDone: async () => false,
-        bannerLabel: "Complete sign-in.",
-      },
-      {
-        launchCeremonyBrowserContext: async () => await launch,
-      },
-    );
-    await Promise.resolve();
-
-    const shutdown = cancelActiveLoginBrowsers();
-    finishLaunch?.(browser);
-
-    await shutdown;
-    await expect(running).rejects.toThrow("login browser cancelled during shutdown");
-    expect(teardown).toHaveBeenCalledOnce();
-  });
-});
 
 describe("login browser lifecycle guards", () => {
   it("keeps cleaning a wedged persistent launch through its spawn window", async () => {
@@ -494,37 +386,6 @@ describe("login browser lifecycle guards", () => {
     ).rejects.toThrow(
       "another Trusty Squire session is already using the browser — close it first",
     );
-  });
-});
-
-describe("self-launched login profile contention", () => {
-  // The gate's refusal stays a ProfileBusyError all the way out. Flattening it
-  // into the generic `{status:"error", detail}` left connect unable to tell
-  // "another browser has the profile" from "the confirm page failed to open",
-  // and it reported the contended run as an outstanding sign-in.
-  it("raises the typed already-in-use refusal immediately instead of waiting", async () => {
-    const profileDir = mkdtempSync(join(tmpdir(), "ts-login-profile-"));
-    symlinkSync(`${hostname()}-${process.pid}`, join(profileDir, "SingletonLock"));
-
-    try {
-      // Exercise the real self-launch profile gate without broker discovery or
-      // host-dependent noVNC setup. Broker reuse has its own attach regressions.
-      const pollUntilClaimed = vi.fn(async () => "pending" as const);
-      await expect(
-        openInstallConfirmInBotChrome(
-          {
-            confirmUrl: "https://example.test/install",
-            pollUntilClaimed,
-            profileDir,
-            deadline: Date.now() + 60_000,
-          },
-          runDisplayedChrome,
-        ),
-      ).rejects.toThrow(ProfileBusyError);
-      expect(pollUntilClaimed).not.toHaveBeenCalled();
-    } finally {
-      rmSync(profileDir, { recursive: true, force: true });
-    }
   });
 });
 
@@ -1154,107 +1015,5 @@ describe("scopesAreBasic (T7)", () => {
 
   it("rejects an empty scope list — absence is not confirmation", () => {
     expect(scopesAreBasic([])).toBe(false);
-  });
-});
-
-// The ceremony browser is LIVE the moment launchPersistentLoginContext
-// resolves, but the caller only registers its teardown once
-// launchCeremonyBrowserContext RETURNS. So anything that throws in between —
-// a page that will not open, a confirm URL that will not navigate — has to be
-// cleaned up here, or a failed first connect leaves a Chrome on the bot
-// profile for process-exit reaping to find.
-describe("launchCeremonyBrowserContext post-launch failure", () => {
-  const ceremonyProfile = (): string => mkdtempSync(join(tmpdir(), "ts-ceremony-launch-"));
-
-  function loginDouble(context: unknown): {
-    login: { context: unknown; marker: string; close: () => Promise<void> };
-    closed: () => number;
-  } {
-    let closes = 0;
-    return {
-      login: {
-        context,
-        marker: "v1:1:ceremony-double",
-        close: async (): Promise<void> => {
-          closes += 1;
-        },
-      },
-      closed: () => closes,
-    };
-  }
-
-  it("closes the browser when the confirm page will not navigate", async () => {
-    const profileDir = ceremonyProfile();
-    const goto = vi.fn(async () => {
-      throw new Error("net::ERR_CONNECTION_REFUSED");
-    });
-    const { login, closed } = loginDouble({
-      pages: () => [{ goto }],
-    });
-    try {
-      await expect(
-        launchCeremonyBrowserContext(
-          {
-            profileDir,
-            url: "https://trustysquire.ai/install/confirm",
-            window: { width: 1280, height: 800 },
-            env: process.env,
-          },
-          { launchPersistentLoginContext: async () => login as never },
-        ),
-      ).rejects.toThrow("net::ERR_CONNECTION_REFUSED");
-      expect(goto).toHaveBeenCalledOnce();
-      expect(closed()).toBe(1);
-    } finally {
-      rmSync(profileDir, { recursive: true, force: true });
-    }
-  });
-
-  it("closes the browser when no page can be opened", async () => {
-    const profileDir = ceremonyProfile();
-    const { login, closed } = loginDouble({
-      pages: () => [],
-      newPage: async () => {
-        throw new Error("Target page, context or browser has been closed");
-      },
-    });
-    try {
-      await expect(
-        launchCeremonyBrowserContext(
-          {
-            profileDir,
-            url: "https://trustysquire.ai/install/confirm",
-            window: { width: 1280, height: 800 },
-            env: process.env,
-          },
-          { launchPersistentLoginContext: async () => login as never },
-        ),
-      ).rejects.toThrow("Target page, context or browser has been closed");
-      expect(closed()).toBe(1);
-    } finally {
-      rmSync(profileDir, { recursive: true, force: true });
-    }
-  });
-
-  it("leaves the browser open on the success path — the caller owns it then", async () => {
-    const profileDir = ceremonyProfile();
-    const goto = vi.fn(async () => undefined);
-    const { login, closed } = loginDouble({ pages: () => [{ goto }] });
-    try {
-      const ceremony = await launchCeremonyBrowserContext(
-        {
-          profileDir,
-          url: "https://trustysquire.ai/install/confirm",
-          window: { width: 1280, height: 800 },
-          env: process.env,
-        },
-        { launchPersistentLoginContext: async () => login as never },
-      );
-      expect(closed()).toBe(0);
-      await ceremony.teardown();
-      expect(closed()).toBe(1);
-    } finally {
-      rmSync(profileDir, { recursive: true, force: true });
-    }
   });
 });

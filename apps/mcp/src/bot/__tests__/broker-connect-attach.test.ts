@@ -41,8 +41,6 @@ vi.mock("../../session-guard.js", () => ({
   }),
 }));
 
-const TOKEN = "fixture-token";
-const WRONG_TOKEN = "wrong-token";
 const CONFIRM_URL = "https://trustysquire.ai/install/confirm?install=fixture";
 // Minted by the same function the real observation uses, so the fixture can
 // never encode a label shape production does not emit.
@@ -63,7 +61,7 @@ const fs = require("node:fs");
 const net = require("node:net");
 const os = require("node:os");
 const path = require("node:path");
-const [marker, socketPath, lockPath, token, openNeedsUser, profileDir] = process.argv.slice(2);
+const [marker, socketPath, lockPath, connectMode, openNeedsUser, profileDir] = process.argv.slice(2);
 const CONFIRM_URL = ${JSON.stringify(CONFIRM_URL)};
 if (marker !== "broker") process.exit(78);
 function startTime() {
@@ -107,8 +105,13 @@ const server = net.createServer((socket) => {
       }
       const reply = (payload) => socket.write(JSON.stringify({ id: request.id, ...payload }) + "\\n");
       if (request.method === "connect") {
-        if (request.params?.token !== token) {
-          reply({ error: { code: "unauthorized", message: "Invalid broker credential" } });
+        // A current-contract fixture admits the connection with no credential
+        // at all; the "legacy" stand-in refuses it exactly as every release
+        // before the token-less handshake did.
+        if (connectMode === "legacy") {
+          reply({
+            error: { code: "unauthorized", message: "Authenticate before issuing commands" },
+          });
           continue;
         }
         reply({ result: { version: 1, clientId: "fixture" } });
@@ -247,7 +250,9 @@ async function profileLockPath(
 async function connectFixture(
   opts: {
     forceReloginProviders?: readonly string[];
-    brokerToken?: string;
+    /** Stand in for a resident from an older release, which gated `connect`
+     * on a credential this release no longer sends. */
+    legacyConnect?: boolean;
     openNeedsUser?: boolean;
     pollUntilDone?: () => Promise<boolean>;
   } = {},
@@ -291,7 +296,7 @@ async function connectFixture(
   process.env.TRUSTY_SQUIRE_PROFILE_DIR = targetProfile;
 
   const discovery = await import("../broker/discovery.js");
-  const { tryRunCeremonyInSharedBroker } = await import("../google-login.js");
+  const { runCeremonyInSharedBroker } = await import("../google-login.js");
 
   const socketPath = discovery.defaultBrokerSocket(targetProfile);
   await mkdir(dirname(socketPath), { recursive: true, mode: 0o700 });
@@ -305,7 +310,7 @@ async function connectFixture(
       "broker",
       socketPath,
       lockPath,
-      opts.brokerToken ?? TOKEN,
+      opts.legacyConnect === true ? "legacy" : "current",
       opts.openNeedsUser === true ? "needs-user" : "",
       targetProfile,
     ],
@@ -321,7 +326,7 @@ async function connectFixture(
   await waitFor(() => existsSync(lockPath) && existsSync(socketPath));
 
   await waitFor(() => existsSync(lockPath + ".seen"), 5_000).catch(() => undefined);
-  const result = await tryRunCeremonyInSharedBroker({
+  const result = await runCeremonyInSharedBroker({
     profileDir: targetProfile,
     url: CONFIRM_URL,
     deadline: Date.now() + 5_000,
@@ -431,22 +436,21 @@ describe("connect attaches to the live broker for the profile it is connecting",
   );
 
   it(
-    "propagates an identified resident's refusal instead of swallowing it into a self-launch",
+    "propagates an identified resident's refusal instead of reporting a generic busy browser",
     { timeout: 30_000 },
     async () => {
-      // A live resident broker whose credential no longer matches the
-      // connecting client: the connect handshake is refused `unauthorized`,
-      // the reclaim paths decline (the account binding does not name this
-      // account), and connectOrLaunchBroker throws. The old ceremony caught
-      // that and returned null — connect then self-launched into the profile
-      // the resident still holds and reported the generic "another Trusty
-      // Squire session is already using the browser", discarding the refusal
-      // that names the resident and its recovery step. The refusal must
-      // surface verbatim.
-      const outcome = await connectFixture({ brokerToken: WRONG_TOKEN });
+      // A live resident from an older release refuses the token-less
+      // handshake, the reclaim paths decline (the profile carries no account
+      // binding naming this account), and connectOrLaunchBroker throws. The
+      // old ceremony caught that and returned null — connect then raced the
+      // profile the resident still holds and reported the generic "another
+      // Trusty Squire session is already using the browser", discarding the
+      // refusal that names the resident and its recovery step. The refusal
+      // must surface verbatim.
+      const outcome = await connectFixture({ legacyConnect: true });
       expect(outcome.result).toBeInstanceOf(Error);
       const refusal = outcome.result as Error & { code?: string };
-      expect(refusal.message).toContain("Invalid broker credential");
+      expect(refusal.message).toContain("Authenticate before issuing commands");
       expect(refusal.code).toBe("unauthorized");
     },
   );

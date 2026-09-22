@@ -27,9 +27,23 @@ import type { Observation } from "../provision-session.js";
 /** The four operations the wire expresses, plus the read that answers for them. */
 export type BrokerWireMethod = "connect" | "open" | "command" | "close" | "status";
 
-/** connect: authenticate the local MCP process and mint its connection id. */
+/**
+ * The account a call acts as. It is named by the call that spends that
+ * account's credentials, never by the connection: the socket lives in a
+ * directory only this user can reach, so reaching it already proves the
+ * caller is the user, and a machine that is being enrolled has no account yet
+ * — enrollment is what mints one. Identity belongs at the point of use.
+ */
+export interface BrokerAccount {
+  accountId: string;
+  agentSessionToken: string;
+  apiBaseUrl: string;
+}
+
+/** connect: admit the local MCP process and mint its connection id.
+ * Connecting takes nothing: there is no credential to present and no account
+ * to name. */
 export interface ConnectRequest {
-  token: string;
   agentId: string;
   /**
    * Connect-only concern: this connection will only read `status`. It is a
@@ -62,8 +76,13 @@ export interface OpenRequest {
    * (the deferred --force-relogin logout drive rides it) and still counts in
    * the inventory. Ceremony-only by construction: the only sender is the
    * connect ceremony in google-login.ts, and the agent-facing `operate_start`
-   * surface has no such field and no forwarder path that could add one. */
+   * surface has no such field and no forwarder path that could add one.
+   *
+   * A ceremony open names no account: enrollment CREATES an account rather
+   * than acting as one, so it passes through. */
   ceremony?: boolean;
+  /** Present only when this open acts as an account (see BrokerAccount). */
+  account?: BrokerAccount;
 }
 export interface OpenResult {
   /**
@@ -79,6 +98,12 @@ export interface CommandRequest {
   sessionId: string;
   name: string;
   args: Record<string, unknown>;
+  /**
+   * Present only when this verb acts as an account. Driving a tab needs none;
+   * a verb that spends the account's credentials (a captcha key, a vault
+   * write, a card release) names the account here, at the call.
+   */
+  account?: BrokerAccount;
 }
 export interface CommandResult {
   result?: unknown;
@@ -95,6 +120,8 @@ export interface CloseRequest {
   sessionId?: string;
   /** `operate_finish` payload when closing a session. */
   args?: Record<string, unknown>;
+  /** Present only when this finish acts as an account (a credential outcome). */
+  account?: BrokerAccount;
 }
 export interface CloseResult {
   closed: boolean;

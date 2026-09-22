@@ -7522,7 +7522,6 @@ export {
   resolveChannelBinary,
   resolveExplicitProxy,
   resolvePersistentFallbackIdentity,
-  selfLaunchEnabled,
   setSelfManagedChromeTerminationSignalExitEnabled,
   signalOwnedChromeProcessTree,
   synchronizeSelfManagedChromeTerminationSignalHandlers,

@@ -9,7 +9,7 @@ import { describe, expect, it } from "vitest";
 import { BrokerClient, listenBroker } from "../broker/transport.js";
 const require = createRequire(import.meta.url);
 
-describe("authenticated broker IPC", () => {
+describe("broker IPC", () => {
   it("preserves the hello timeout cause when a connected socket never replies", async () => {
     const root = await mkdtemp(join(tmpdir(), "ts-ipc-wedged-"));
     const path = join(root, "broker.sock");
@@ -21,7 +21,7 @@ describe("authenticated broker IPC", () => {
     });
     await new Promise<void>((resolve) => server.listen(path, resolve));
     try {
-      await expect(BrokerClient.connect(path, "token")).rejects.toMatchObject({
+      await expect(BrokerClient.connect(path)).rejects.toMatchObject({
         code: "broker_handshake_timeout",
       });
     } finally {
@@ -36,17 +36,16 @@ describe("authenticated broker IPC", () => {
     const path = join(root, "broker.sock");
     const releases: boolean[] = [];
     const broker = await listenBroker(path, {
-      authenticate: async () => ({ accountId: "account", agentId: "agent" }),
       call: async () => ({}),
       disconnect: async (_principal, explicit) => {
         releases.push(explicit === true);
       },
     });
     try {
-      const dropped = await BrokerClient.connect(path, "token");
+      const dropped = await BrokerClient.connect(path);
       await dropped.close();
       await expect.poll(() => releases).toEqual([false]);
-      const released = await BrokerClient.connect(path, "token");
+      const released = await BrokerClient.connect(path);
       await released.release();
       await expect.poll(() => releases).toEqual([false, true]);
     } finally {
@@ -65,8 +64,6 @@ describe("authenticated broker IPC", () => {
       release = resolve;
     });
     const broker = await listenBroker(path, {
-      authenticate: async (token) =>
-        ["a", "b", "c"].includes(token) ? { accountId: "account", agentId: token } : null,
       call: async (principal, method, params) => {
         expect(method).toBe("overlap");
         active.add(principal.clientId);
@@ -88,18 +85,14 @@ describe("authenticated broker IPC", () => {
     });
     try {
       expect((await stat(path)).mode & 0o777).toBe(0o600);
-      await expect(BrokerClient.connect(path, "foreign")).rejects.toThrow(
-        "Invalid broker credential",
-      );
       const outputs = await Promise.all(
         ["a", "b", "c"].map(
-          async (token) =>
+          async () =>
             await new Promise<string>((resolve, reject) => {
               const child = spawn(process.execPath, [
                 require.resolve("tsx/cli"),
                 fileURLToPath(new URL("fixtures/broker-client.ts", import.meta.url)),
                 path,
-                token,
               ]);
               let output = "",
                 error = "";
@@ -138,7 +131,6 @@ describe("authenticated broker IPC", () => {
     const path = join(root, "b.sock");
     let dispatches = 0;
     const port = {
-      authenticate: async () => ({ accountId: "account", agentId: "agent" }),
       call: async () => ++dispatches,
       disconnect: async () => undefined,
     };
@@ -146,7 +138,7 @@ describe("authenticated broker IPC", () => {
     let client: BrokerClient | undefined;
     try {
       await expect(listenBroker(path, port)).rejects.toThrow("EADDRINUSE");
-      client = await BrokerClient.connect(path, "test");
+      client = await BrokerClient.connect(path);
       expect(await client.call("charge", {}, "charge-one")).toBe(1);
       expect(await client.call("charge", {}, "charge-one")).toBe(1);
       expect(await client.call("charge", { changed: true }, "charge-one")).toBe(1);
@@ -177,18 +169,16 @@ describe("authenticated broker IPC", () => {
       await new Promise<void>((resolve) => child.once("exit", () => resolve()));
       expect((await stat(path)).isSocket()).toBe(true);
       const broker = await listenBroker(path, {
-        authenticate: async () => ({ accountId: "account", agentId: "agent" }),
         call: async () => ({}),
         disconnect: async () => undefined,
       });
       let client: BrokerClient | undefined;
       try {
-        client = await BrokerClient.connect(path, "test");
+        client = await BrokerClient.connect(path);
         expect(await client.call("ping", {})).toEqual({});
         // The reclaim served this bind; a live incumbent still wins election.
         await expect(
           listenBroker(path, {
-            authenticate: async () => ({ accountId: "account", agentId: "agent" }),
             call: async () => ({}),
             disconnect: async () => undefined,
           }),
@@ -208,14 +198,13 @@ describe("authenticated broker IPC", () => {
     const path = join(root, "b.sock");
     let dispatches = 0;
     const port = {
-      authenticate: async () => ({ accountId: "account", agentId: "agent" }),
       call: async () => ++dispatches,
       disconnect: async () => undefined,
     };
     const broker = await listenBroker(path, port);
     let client: BrokerClient | undefined;
     try {
-      client = await BrokerClient.connect(path, "test");
+      client = await BrokerClient.connect(path);
       for (let index = 0; index < 600; index += 1)
         await client.call("command", {}, `request-${index}`);
       expect(await client.call("command", {}, "request-599")).toBe(600);

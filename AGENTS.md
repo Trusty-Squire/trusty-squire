@@ -464,8 +464,13 @@ Raw live runtime evaluation remains internal rather than a public read API.
 The broker exclusively owns the physical operator browser; sessions own independent
 families of tabs. Preserve the election, physical-profile lease, and process-marker
 watchdog/reaper contracts in [`docs/browser-broker.md`](docs/browser-broker.md).
-A resident broker whose credential no longer matches the enrolled agent session
-token is reclaimed or refused by that guide's stale-credential contract; do not
+The broker is the ONLY browser path in the product: it performs the
+Turnstile-safe self-launch itself and hands every tab out from it, the connect
+ceremony included, and it starts with no enrollment so the machine being
+enrolled can reach it. Account identity is named by the calls that act as an
+account, never by the connection; do not reintroduce a credential on `connect`.
+A resident broker from an earlier release that refuses the token-less handshake
+is reclaimed or refused by that guide's reclaim contract; do not
 diagnose it as a missing CLI kill-switch. `stale_lease` means another connection
 owns a live session, never a session that was never created — a wall-refused
 start's `session_id` replays its wall. The underlying bounded teardown and

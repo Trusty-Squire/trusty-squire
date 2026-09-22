@@ -20,7 +20,6 @@ import {
 import { BrokerRefusal } from "./bot/broker/refusal.js";
 import { BrokerClient, brokerEndpointHasLiveListener } from "./bot/broker/transport.js";
 import { CHROME_PROFILE_DIR, profilePathIdentity, readLockHolder } from "./bot/profile.js";
-import { createSessionGuard } from "./session-guard.js";
 
 /**
  * Wire codes that mean "not now", each mapped onto exactly one layer. Private
@@ -294,28 +293,18 @@ async function callWithWireAbort(
   }
 }
 
-async function agentSessionToken(): Promise<
-  { token: string; accountId: string | undefined } | undefined
-> {
-  const session = await createSessionGuard().bind();
-  if (session?.agent_session_token === undefined) return undefined;
-  return { token: session.agent_session_token, accountId: session.account_id };
-}
-
 /**
  * Ask the broker. A resident broker is the only thing that can see the
  * custody drain state and knows whether the Chrome on the profile is its own;
  * when none is resident there is nothing to ask and nothing brokered to hold.
+ * Asking takes nothing: no account is named, so a machine that is still being
+ * enrolled gets the broker's own answer instead of a refusal about the
+ * account it does not have yet.
  */
 export async function browserBusy(): Promise<BrowserStatus> {
   const socket = brokerSocketPath();
   if (!(await brokerEndpointHasLiveListener(socket))) return unbrokeredBrowserStatus();
-  const credentials = await agentSessionToken();
-  if (credentials === undefined)
-    throw new BrowserNeedsUser(
-      "A broker is running but this machine has no enrolled account, so its answer cannot be asked for",
-    );
-  const client = await BrokerClient.connect(socket, credentials.token, { probe: true });
+  const client = await BrokerClient.connect(socket, { probe: true });
   try {
     return statusFromWire(await client.call("status", {}));
   } finally {
@@ -333,16 +322,9 @@ export async function openTab(options: OpenTabOptions): Promise<TabHandle> {
   const served = servedBrowserProfile();
   if (profile !== served) throw new UnservableProfileError(profile, served);
   const purpose = options.purpose;
-  const credentials = await agentSessionToken();
-  if (credentials === undefined)
-    throw new BrowserNeedsUser("No enrolled account on this machine; no tab was opened");
   let client: BrokerClient;
   try {
-    client = await connectOrLaunchBroker(
-      resolveBrokerSocket(),
-      credentials.token,
-      credentials.accountId,
-    );
+    client = await connectOrLaunchBroker(resolveBrokerSocket());
   } catch (error) {
     throw mapBrokerRefusal(error) ?? error;
   }

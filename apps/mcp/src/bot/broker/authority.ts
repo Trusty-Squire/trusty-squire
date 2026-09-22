@@ -1,9 +1,14 @@
 import { composeOperatorSignals } from "../request-cancellation.js";
 import { randomUUID } from "node:crypto";
 import { BrokerRefusal } from "./refusal.js";
+import type { BrokerAccount } from "./protocol.js";
 
+/**
+ * Who is calling. Deliberately NOT an account: the connection proves only that
+ * the caller is the user who owns the socket directory. An account is named by
+ * the individual calls that act as one (see BrokerAccount).
+ */
 export interface BrokerPrincipal {
-  accountId: string;
   agentId: string;
   clientId: string;
 }
@@ -16,6 +21,7 @@ export interface BrokerSessionPort {
     signal: AbortSignal,
     requestId: string,
     prepared?: unknown,
+    account?: BrokerAccount,
   ): Promise<unknown>;
   /** True only after owned tabs and pending outcome custody are resolved. */
   close(reason?: "finish" | "disconnect" | "expiry"): Promise<boolean>;
@@ -40,23 +46,16 @@ interface Actor {
 }
 
 /** This object lives only in the broker. No Page, Browser or CDP handle crosses
- * the transport. A principal is established by authenticated connection setup.
- * A session is named by a plain session id and owned by the connection that
- * opened it: there are no capabilities, leases, or detached states. */
+ * the transport. A principal is established by connection setup, which takes
+ * no credential and names no account. A session is named by a plain session id
+ * and owned by the connection that opened it: there are no capabilities,
+ * leases, or detached states. */
 export class BrokerAuthority {
   private readonly actors = new Map<string, Actor>();
   private readonly admissions = new Map<string, Admission>();
   private readonly pendingGraceCloses = new Set<string>();
 
-  constructor(readonly accountId: string) {}
-
-  private assertPrincipal(principal: BrokerPrincipal): void {
-    if (principal.accountId !== this.accountId)
-      throw new BrokerRefusal("unauthorized", "Client is not admitted to this identity cell");
-  }
-
   private resolve(principal: BrokerPrincipal, sessionId: string): Actor {
-    this.assertPrincipal(principal);
     const actor = this.actors.get(sessionId);
     if (actor === undefined || actor.principal.clientId !== principal.clientId)
       throw new BrokerRefusal("stale_lease", "Session does not name an owned live session");
@@ -73,7 +72,6 @@ export class BrokerAuthority {
     orphanFailedAdmission?: (sessionId: string) => Promise<void>,
     requestSignal?: AbortSignal,
   ): Promise<string> {
-    this.assertPrincipal(principal);
     const id = randomUUID();
     const abort = new AbortController();
     const composed = composeOperatorSignals([
@@ -134,6 +132,7 @@ export class BrokerAuthority {
     name: string,
     args: Record<string, unknown>,
     requestSignal?: AbortSignal,
+    account?: BrokerAccount,
   ): Promise<unknown> {
     const actor = this.resolve(principal, sessionId);
     if (["operate_observe", "operate_screenshot"].includes(name) && actor.pending > 0)
@@ -162,7 +161,7 @@ export class BrokerAuthority {
     actor.pending += 1;
     const invokePrepared = async (prepared: unknown): Promise<unknown> => {
       if (signal.aborted) throw new BrokerRefusal("cancelled", "Command fenced before dispatch");
-      return await actor.port.invoke(name, args, signal, requestId, prepared);
+      return await actor.port.invoke(name, args, signal, requestId, prepared, account);
     };
     const result =
       preparation === undefined
@@ -193,10 +192,18 @@ export class BrokerAuthority {
     sessionId: string,
     requestId: string,
     args: Record<string, unknown>,
+    account?: BrokerAccount,
   ): Promise<unknown> {
     const actor = this.resolve(principal, sessionId);
     actor.abort.abort(new BrokerRefusal("cancelled", "Session finishing"));
-    return await actor.port.invoke("operate_finish", args, new AbortController().signal, requestId);
+    return await actor.port.invoke(
+      "operate_finish",
+      args,
+      new AbortController().signal,
+      requestId,
+      undefined,
+      account,
+    );
   }
 
   /** Terminal cleanup already removed the session; drop its broker bookkeeping. */
@@ -239,7 +246,6 @@ export class BrokerAuthority {
   }
 
   async disconnect(principal: BrokerPrincipal, explicit = false): Promise<void> {
-    this.assertPrincipal(principal);
     for (const admission of this.admissions.values())
       if (admission.clientId === principal.clientId) admission.abort.abort();
     if (explicit || this.actors.size === 0) {
