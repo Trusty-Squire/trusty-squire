@@ -243,6 +243,7 @@ describe("request building", () => {
       "TYPE_TEXT_target",
       "blocked_by_layer",
       "dead_end",
+      "email_code_field",
       "goal_complete",
       "last_action_worked",
       "operation",

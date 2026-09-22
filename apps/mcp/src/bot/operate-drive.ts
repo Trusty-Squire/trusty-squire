@@ -195,6 +195,7 @@ export const DRIVE_FIXED_DONE = "DONE";
 export const DRIVE_FIXED_STUCK = "BLOCKED";
 export const DRIVE_FIXED_NONE = "none";
 export const DRIVE_VALUE_QUESTION = "TYPE_TEXT_value";
+export const DRIVE_EMAIL_CODE_QUESTION = "email_code_field";
 export const DRIVE_CHECK_EMAIL = "check_email";
 export const DRIVE_INJECT_CARD_HISTORY = "inject card";
 export const DRIVE_CHECK_EMAIL_INSTRUCTIONS =
@@ -4052,6 +4053,40 @@ function criteriaFromCandidates(
   return criteria;
 }
 
+/** Offer editable text controls without relying on the page's language or field names. */
+export function emailCodeCandidates(
+  rows: readonly WireRow[],
+  filledRefs: readonly string[] = [],
+): DriveCandidate[] {
+  const filled = new Set(filledRefs);
+  return rows
+    .filter(
+      (row) =>
+        isFillableRow(row) &&
+        !isSelectRow(row) &&
+        !isDisabledRow(row) &&
+        !isOffscreenRow(row) &&
+        !isActedRow(row) &&
+        !filled.has(row[0]) &&
+        rowValueMissing(row) &&
+        !isPaymentRow(row) &&
+        !isCvvRow(row) &&
+        !isPasswordRow(row) &&
+        !isSearchRow(row),
+    )
+    .slice(0, 12)
+    .map((row, index) => {
+      const placeholder = /(?:^|\|)ph=([^|]+)/.exec(row[2] ?? "")?.[1];
+      return {
+        ref: row[0],
+        role: ROLE_LETTERS[row[1]] ?? row[1],
+        slug: `code_field_${index + 1}`,
+        description: `${actionDescription(row, rows)}${placeholder === undefined ? "" : ` (placeholder: ${placeholder})`}`,
+        row,
+      };
+    });
+}
+
 export function buildDriveQuestions(
   rows: readonly WireRow[],
   facts: Record<string, string>,
@@ -4102,6 +4137,20 @@ export function buildDriveQuestions(
       instructions: "Nothing on this page can advance the goal.",
     },
   };
+  const codeCandidates = emailCodeCandidates(rows, filledRefs);
+  if (codeCandidates.length > 0) {
+    questions[DRIVE_EMAIL_CODE_QUESTION] = {
+      type: "choice",
+      instructions:
+        "Is this page asking for a code sent by email? Choose the editable field that accepts that code, or none if the page is not asking for one.",
+      criteria: {
+        ...Object.fromEntries(
+          codeCandidates.map((candidate) => [candidate.slug, candidate.description]),
+        ),
+        [DRIVE_FIXED_NONE]: "The page is not asking for an emailed code",
+      },
+    };
+  }
   if (sets.CLICK.length > 0) {
     questions.CLICK_target = {
       type: "choice",
@@ -4469,6 +4518,41 @@ export function decideAfterJev(input: {
   }
   const continuation = signinContinuationDecision(input.goal, sets.CLICK);
   if (continuation !== undefined) return continuation;
+  const codeQuestion = questions[DRIVE_EMAIL_CODE_QUESTION];
+  const codeCriteria = codeQuestion?.type === "choice" ? codeQuestion.criteria : {};
+  const codeAnswer = input.answers[DRIVE_EMAIL_CODE_QUESTION];
+  if (
+    codeAnswer?.choice !== undefined &&
+    codeAnswer.choice !== DRIVE_FIXED_NONE &&
+    confidenceOf(codeAnswer) >= threshold &&
+    validateChoiceReason(codeCriteria, codeAnswer) === undefined
+  ) {
+    const candidate = emailCodeCandidates(input.rows, input.filledRefs).find(
+      (entry) => entry.slug === codeAnswer.choice,
+    );
+    if (
+      candidate !== undefined &&
+      !(input.boundFingerprint === input.fingerprint && input.consumedActionKey === candidate.ref)
+    ) {
+      const matched = matchingFactKeys(input.facts, candidate.row);
+      if (matched.length > 0) {
+        const filled = fillActionForCandidate(
+          candidate,
+          input.facts,
+          matched[0]!,
+          confidenceOf(codeAnswer),
+        );
+        if (filled !== undefined) return filled;
+      }
+      return {
+        kind: "act",
+        action: { kind: "type", target: candidate.ref, text: "" },
+        actionKey: candidate.ref,
+        confidence: confidenceOf(codeAnswer),
+        special: "inbox",
+      };
+    }
+  }
   const operationQuestion = questions.operation;
   const operationCriteriaMap =
     operationQuestion?.type === "choice"
@@ -6154,15 +6238,35 @@ async function driveLoop(input: {
         reason: decision.reason,
       });
     }
+    const traceUndispatchedOauth = (reason: string): void => {
+      if (decision.action.kind !== "oauth_login") return;
+      appendDriveTrace(session, {
+        at: "oauth_dispatch",
+        step: drive.trajectory.length,
+        dispatch: "not_attempted",
+        reason,
+        url_after: session.browser.currentUrl(),
+      });
+      appendDriveTrace(session, {
+        at: "oauth_handoff",
+        step: drive.trajectory.length,
+        url_before: observation.url,
+        url_after: session.browser.currentUrl(),
+        outcome: "not_attempted",
+        reason,
+      });
+    };
     const fingerprint =
       observation === undefined
         ? progressFingerprint("", rows, drive, session)
         : driveProgressFingerprint(observation, rows, drive, session);
     if (drive.boundFingerprint !== null && fingerprint !== drive.boundFingerprint) {
       drive.consumedActionKey = null;
+      traceUndispatchedOauth("snapshot_changed");
       return "continue";
     }
     if (drive.boundFingerprint === fingerprint && drive.consumedActionKey === decision.actionKey) {
+      traceUndispatchedOauth("already_consumed");
       if (
         nextExploreRow(rows, drive.visitedSectionKeys ?? [], observation.url) !== undefined ||
         pageHasUntriedPendingAction(rows, drive, observation.url, drive.goal)
@@ -6200,6 +6304,7 @@ async function driveLoop(input: {
         liveControls.length > 0 &&
         liveControls !== drive.snapshotControlDigest;
       if (documentChanged || controlsChanged) {
+        traceUndispatchedOauth("live_controls_changed");
         // Re-deciding never ends the drive, and it never counts as a no-progress
         // step: an action that was never dispatched cannot be progress, so its
         // absence cannot be the reason to stop either. A page that never
@@ -6225,6 +6330,7 @@ async function driveLoop(input: {
       targetBinding.length > 0 &&
       !rowMatchesDecisionBinding(liveRow, targetBinding, observation.url)
     ) {
+      traceUndispatchedOauth("target_changed");
       recordUndeliveredDecision(
         drive,
         rows,
@@ -6240,6 +6346,7 @@ async function driveLoop(input: {
       isSubmitLikeRow(liveRow) &&
       outstandingEmptyFill(rows, drive.filledRefs) !== undefined
     ) {
+      traceUndispatchedOauth("required_field_empty");
       recordUndeliveredDecision(
         drive,
         rows,
@@ -6515,7 +6622,40 @@ async function driveLoop(input: {
       }
       return undefined;
     };
-    const acted = await actDriveSafely(session, sessionId, decision.action, dependencies);
+    const oauthPageBefore = decision.action.kind === "oauth_login" ? session.browser.page : null;
+    if (oauthPageBefore !== null) session.browser.armOpenedTabAdoption();
+    let acted: DriveActResult;
+    try {
+      acted = await actDriveSafely(session, sessionId, decision.action, dependencies);
+    } catch (error) {
+      if (decision.action.kind === "oauth_login") {
+        appendDriveTrace(session, {
+          at: "oauth_dispatch",
+          step: drive.trajectory.length,
+          dispatch: "error",
+          url_after: session.browser.currentUrl(),
+        });
+        appendDriveTrace(session, {
+          at: "oauth_handoff",
+          step: drive.trajectory.length,
+          url_before: urlBeforeClick,
+          url_after: session.browser.currentUrl(),
+          outcome: "error",
+        });
+      }
+      throw error;
+    }
+    // An OAuth executor normally owns its popup. If it reports a dispatched
+    // click while leaving the opener active, follow only the tab created by
+    // that click; an unchanged opener is not proof that nothing happened.
+    if (
+      oauthPageBefore !== null &&
+      acted.kind === "ok" &&
+      acted.needsUser === undefined &&
+      session.browser.page === oauthPageBefore
+    ) {
+      await session.browser.adoptOpenedTab(300);
+    }
     if (decision.action.kind === "oauth_login") {
       appendDriveTrace(session, {
         at: "oauth_dispatch",
@@ -6530,6 +6670,16 @@ async function driveLoop(input: {
       });
     }
     if (acted.kind === "stale") {
+      if (decision.action.kind === "oauth_login") {
+        appendDriveTrace(session, {
+          at: "oauth_handoff",
+          step: drive.trajectory.length,
+          url_before: urlBeforeClick,
+          url_after: session.browser.currentUrl(),
+          outcome: "refused",
+          reason: acted.reason,
+        });
+      }
       comboboxMustYield = true;
       selectMustYield = true;
       typeMustYield = true;
@@ -6648,7 +6798,19 @@ async function driveLoop(input: {
       // A drive-dispatched OAuth act can end on a wall without any page change
       // (no live provider session, a 2FA hand-off). Surface it instead of
       // re-observing an unchanged page and calling the step a no-op.
-      if (acted.needsUser !== undefined) return finishOnWall(acted.needsUser);
+      if (acted.needsUser !== undefined) {
+        if (decision.action.kind === "oauth_login") {
+          appendDriveTrace(session, {
+            at: "oauth_handoff",
+            step: drive.trajectory.length,
+            url_before: urlBeforeClick,
+            url_after: session.browser.currentUrl(),
+            outcome: "needs_user",
+            needs_user: acted.needsUser,
+          });
+        }
+        return finishOnWall(acted.needsUser);
+      }
       if (page !== null) {
         settleMs = await settleDriveStep(page, acted.combobox);
         const afterEpoch = await documentEpochOf(page);
@@ -6674,8 +6836,18 @@ async function driveLoop(input: {
         }
       }
       const snap = await refreshSnapshot(framesIfNeeded());
-      if (snap.timedOut)
+      if (snap.timedOut) {
+        if (decision.action.kind === "oauth_login") {
+          appendDriveTrace(session, {
+            at: "oauth_handoff",
+            step: drive.trajectory.length,
+            url_before: urlBeforeClick,
+            url_after: session.browser.currentUrl(),
+            outcome: "snapshot_timeout",
+          });
+        }
         return finish("evaluate_timeout", { reason: "in-page evaluate exceeded budget" });
+      }
       if (decision.action.kind === "oauth_login") {
         appendDriveTrace(session, {
           at: "oauth_handoff",
@@ -7089,7 +7261,14 @@ async function driveLoop(input: {
       steps += 1;
       continue;
     }
-    if (missing !== undefined) {
+    // A required code field may have no recognizable label. Give the model
+    // the page context before treating that field as a missing supplied fact.
+    if (
+      missing !== undefined &&
+      !emailCodeCandidates(rows, drive.filledRefs).some(
+        (candidate) => candidate.ref === missing.ref,
+      )
+    ) {
       const field = fieldLabelForRow(missing.row);
       return finish("needs_value", {
         field,
@@ -7522,6 +7701,7 @@ async function driveLoop(input: {
       delete questions.SELECT_target;
       delete questions.SCROLL_target;
       delete questions[DRIVE_VALUE_QUESTION];
+      delete questions[DRIVE_EMAIL_CODE_QUESTION];
     }
     const stateSeenRefs = new Set<string>();
     const state = buildJevState(
@@ -7530,7 +7710,12 @@ async function driveLoop(input: {
       drive.history,
       observation.url,
       observation.semantic?.title,
-      [...sets.TYPE_TEXT, ...sets.SELECT, ...sets.CLICK].filter((candidate) => {
+      [
+        ...emailCodeCandidates(rows, drive.filledRefs),
+        ...sets.TYPE_TEXT,
+        ...sets.SELECT,
+        ...sets.CLICK,
+      ].filter((candidate) => {
         if (isOffscreenRow(candidate.row) && !offscreenRowStaysOffered(candidate.row, pageUrl))
           return false;
         if (stateSeenRefs.has(candidate.ref)) return false;
@@ -7590,6 +7775,18 @@ async function driveLoop(input: {
       answers = retried.result.answers;
       decision = decide(answers);
     }
+    if (missing !== undefined && answers[DRIVE_EMAIL_CODE_QUESTION]?.choice === DRIVE_FIXED_NONE) {
+      const field = fieldLabelForRow(missing.row);
+      return finish("needs_value", {
+        field,
+        question: {
+          question: `Missing value for ${field}`,
+          options: Object.fromEntries(
+            Object.keys(drive.facts).map((key) => [key, `the provided ${key} value`]),
+          ),
+        },
+      });
+    }
     // goal_complete is a candidate for verification, never completion: for a
     // key goal the capture flow operate_extract runs is the only thing that
     // can finish the drive.
@@ -7621,6 +7818,10 @@ async function driveLoop(input: {
         questions.SELECT_target?.type === "choice" ? questions.SELECT_target.criteria : {},
       TYPE_TEXT_target:
         questions.TYPE_TEXT_target?.type === "choice" ? questions.TYPE_TEXT_target.criteria : {},
+      email_code_field:
+        questions[DRIVE_EMAIL_CODE_QUESTION]?.type === "choice"
+          ? questions[DRIVE_EMAIL_CODE_QUESTION].criteria
+          : {},
       answers,
       decision,
       candidates: {
