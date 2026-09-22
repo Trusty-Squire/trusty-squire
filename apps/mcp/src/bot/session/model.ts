@@ -210,6 +210,8 @@ export interface SessionDriveState {
   cardFillPending?: boolean;
   /** Progress key that already received a delivered captcha token this drive. */
   captchaDeliveredProgressKey?: string | null;
+  /** Progress keys whose untargeted checkbox challenge the drive already pressed. */
+  checkboxChallengePressedKeys?: string[];
   /** Visible text kept from the last submit-like click, for the page's answer. */
   submitBeforeText?: string | null;
   submitExcludeLabels?: string[];

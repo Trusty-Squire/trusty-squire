@@ -220,6 +220,64 @@ const CAPTCHA_CONSUMED_MESSAGE_HTML = `<!doctype html><meta charset="utf-8"><tit
   });
 </script>`;
 
+// A checkbox challenge mounted in a CLOSED shadow root — the shape a login
+// page's Turnstile embed takes. page.locator cannot see the frame, so the
+// widget is only locatable through page.frames() + frameElement(); pressing it
+// is a humanized coordinate click. The mock mints a response token and unmounts
+// itself on a TRUSTED click, exactly as the real widget does.
+const CLOSED_SHADOW_WIDGET_HTML = `<!doctype html><html style="height:100%"><body style="margin:0;height:100%">
+<div id="box" role="checkbox" aria-checked="false" aria-label="Verify you are human"
+  style="width:100%;height:100%;display:flex;align-items:center;padding-left:12px">Verify you are human</div>
+<script>
+  document.getElementById("box").addEventListener("click", (event) => {
+    if (!event.isTrusted) return;
+    document.getElementById("box").setAttribute("aria-checked", "true");
+    window.parent.postMessage("ts-mock-checkbox-solved", "*");
+  });
+</script>
+</body></html>`;
+
+const CLOSED_SHADOW_CHALLENGE_HTML = `<!doctype html><meta charset="utf-8"><title>Checkbox challenge</title>
+<main>
+  <h1>Create account</h1>
+  <p id="status">Ready</p>
+  <form id="f">
+    <label>Email <input id="email" name="email" type="email"></label>
+    <div id="widget-host"></div>
+    <button type="button" id="continue">Continue</button>
+  </form>
+</main>
+<script>
+  const root = document.getElementById("widget-host").attachShadow({ mode: "closed" });
+  const frame = document.createElement("iframe");
+  frame.id = "cf-chl-widget-fixture";
+  frame.title = "Widget containing a security challenge";
+  frame.src =
+    "https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/b/turnstile/f/av0/fixture/normal?lang=en";
+  frame.style.width = "300px";
+  frame.style.height = "65px";
+  root.appendChild(frame);
+  window.addEventListener("message", (event) => {
+    if (event.data !== "ts-mock-checkbox-solved") return;
+    const input = document.createElement("input");
+    input.type = "hidden";
+    input.name = "cf-turnstile-response";
+    input.value = "mock-turnstile-token";
+    document.getElementById("f").appendChild(input);
+    frame.remove();
+  });
+  document.getElementById("continue").addEventListener("click", () => {
+    const token = document.querySelector('input[name="cf-turnstile-response"]');
+    if (token !== null && token.value.length > 0) {
+      document.querySelector("main").innerHTML = "<p id=done>Account created</p>";
+      return;
+    }
+    const btn = document.getElementById("continue");
+    btn.disabled = true;
+    document.getElementById("status").textContent = "Waiting for challenge";
+  });
+</script>`;
+
 const DROPPED_LAST_CHAR_HTML = `<!doctype html><meta charset="utf-8"><title>Dropped last char</title>
 <main>
   <h1>Create account</h1>
@@ -5247,4 +5305,91 @@ describe("capture flow key evidence", () => {
       await context.close();
     }
   }, 30_000);
+
+  it("presses a checkbox challenge framed inside a closed shadow root and continues", async () => {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    // The widget's frame keeps its provider URL so the frame-URL classifier is
+    // exercised for real; only its document is a deterministic mock.
+    await page.route("**/*", (route) =>
+      route.request().url().includes("challenges.cloudflare.com")
+        ? route.fulfill({ contentType: "text/html; charset=utf-8", body: CLOSED_SHADOW_WIDGET_HTML })
+        : route.fulfill({ contentType: "text/html; charset=utf-8", body: CLOSED_SHADOW_CHALLENGE_HTML }),
+    );
+    const url = "https://closed-shadow-challenge.test/";
+    await page.goto(url);
+    expect(await page.locator('iframe[src*="challenges.cloudflare.com"]').count()).toBe(0);
+    const started = await startHarnessProvisionSession({
+      browser: BrowserController.fromHarnessPage(page),
+      serviceUrl: url,
+      format: "compact",
+      initialObservation: "standard",
+    });
+    try {
+      const dependencies = deps(async (_api, _state, questions) => {
+        if ((await page.locator("#done").count()) > 0) return jevFromQuestions(questions, true);
+        const typeKeys = Object.keys(choiceCriteria(questions.TYPE_TEXT_target));
+        if (typeKeys.length > 0) return jevFromQuestions(questions);
+        const clickCriteria = choiceCriteria(questions.CLICK_target);
+        const continueKey = Object.keys(clickCriteria).find((key) =>
+          (clickCriteria[key] ?? "").toLowerCase().includes("continue"),
+        );
+        const opKeys = Object.keys(choiceCriteria(questions.operation));
+        if (continueKey !== undefined) {
+          return {
+            attempts: 1,
+            elapsedMs: 12,
+            result: {
+              answers: {
+                operation: {
+                  choice: "CLICK",
+                  confidence: 0.93,
+                  probabilities: peaked(opKeys, "CLICK"),
+                },
+                CLICK_target: {
+                  choice: continueKey,
+                  confidence: 0.93,
+                  probabilities: peaked(Object.keys(clickCriteria), continueKey),
+                },
+              },
+            },
+          };
+        }
+        return {
+          attempts: 1,
+          elapsedMs: 12,
+          result: {
+            answers: {
+              operation: {
+                choice: "BLOCKED",
+                confidence: 0.93,
+                probabilities: peaked(opKeys, "BLOCKED"),
+              },
+            },
+          },
+        };
+      });
+      dependencies.attemptCaptchaAutoSolve = async () => "no_challenge";
+      const handoff = await runOperateDrive(
+        {
+          session_id: started.session_id,
+          goal: "create an account",
+          facts: { email: "ada@fixture.test" },
+          max_seconds: 120,
+        },
+        api(),
+        undefined,
+        dependencies,
+      );
+      expect(handoff.steps).toBeGreaterThan(0);
+      // The drive pressed the widget and carried the form through: the mock's
+      // submit only completes once the minted response token is present, so the
+      // done page IS the proof the checkbox was pressed and settled.
+      expect(await page.locator("#done").count()).toBe(1);
+      expect(await page.locator('iframe[src*="challenges.cloudflare.com"]').count()).toBe(0);
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 60_000);
 });

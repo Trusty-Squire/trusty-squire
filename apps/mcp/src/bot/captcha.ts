@@ -122,6 +122,32 @@ export function isRecaptchaCheckboxFrameUrl(rawUrl: string): boolean {
 
 export type CaptchaKind = "turnstile" | "recaptcha" | "hcaptcha";
 
+/**
+ * Which checkbox-family widget a captcha frame hosts, from its URL alone. Used
+ * to find the widget when no selector can reach it — an embed mounted in a
+ * CLOSED shadow root is invisible to `querySelector` and to Playwright's
+ * locators (which pierce only OPEN roots), while the frame itself is still a
+ * real child frame. Challenge frames (reCAPTCHA's `bframe`, hCaptcha's
+ * challenge) return null: their whole document is the image grid the operator
+ * must not touch, not a checkbox a human presses.
+ */
+export function captchaWidgetKindForFrameUrl(rawUrl: string): CaptchaKind | null {
+  if (isRecaptchaCheckboxFrameUrl(rawUrl)) return "recaptcha";
+  if (!isCaptchaFrameUrl(rawUrl)) return null;
+  try {
+    const url = new URL(rawUrl);
+    if (/hcaptcha/i.test(url.hostname)) {
+      return /challenge/i.test(`${url.pathname}${url.search}`) ? null : "hcaptcha";
+    }
+    if (/(?:^|\.)challenges\.cloudflare\.com$/i.test(url.hostname)) {
+      return /\/turnstile\//i.test(url.pathname) ? "turnstile" : null;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
 // Finer-grained captcha classification. recaptcha_v2 is the checkbox
 // widget AND v2-invisible that can pop an image grid (render=explicit,
 // type=image, or a visible api2/bframe). recaptcha_v3 is the score API
@@ -552,7 +578,48 @@ async function findCaptchaWidget(
     }
   }
 
+  // Phase 3: the widget's frame, found by URL. A provider embed mounted in a
+  // CLOSED shadow root is invisible to every selector above and to Playwright's
+  // locators, while the frame is still a real child frame. frameElement()
+  // reports its real layout, and the coordinate click below is the same one the
+  // locator path performs. Challenge frames are excluded by the URL classifier,
+  // so only a checkbox widget is returned.
+  for (const frame of page.frames()) {
+    if (frame === page.mainFrame() || frame.isDetached()) continue;
+    const kind = captchaWidgetKindForFrameUrl(frame.url());
+    if (kind === null) continue;
+    const element = await frame.frameElement().catch(() => null);
+    if (element === null) continue;
+    const box = await element.boundingBox().catch(() => null);
+    await element.dispose().catch(() => undefined);
+    if (box === null) continue;
+    if (box.width < 50 || box.height < 30) continue;
+    return { kind, box };
+  }
+
   return null;
+}
+
+/**
+ * A visible checkbox-family captcha widget is mounted on the page right now.
+ *
+ * Cheap by construction — it walks the frame list and reads each candidate
+ * frame's layout, with NO polling loop — so a drive step can ask it every
+ * iteration. `solveVisibleCaptcha` uses the same frame-URL classifier and then
+ * performs the press; this only decides whether a press is worth attempting.
+ */
+export async function hasVisibleCheckboxCaptchaWidget(page: Page | null): Promise<boolean> {
+  if (page === null) return false;
+  for (const frame of page.frames()) {
+    if (frame === page.mainFrame() || frame.isDetached()) continue;
+    if (captchaWidgetKindForFrameUrl(frame.url()) === null) continue;
+    const element = await frame.frameElement().catch(() => null);
+    if (element === null) continue;
+    const box = await element.boundingBox().catch(() => null);
+    await element.dispose().catch(() => undefined);
+    if (box !== null && box.width >= 50 && box.height >= 30) return true;
+  }
+  return false;
 }
 
 // Pure-read captcha classification for spike telemetry (T3.2).
