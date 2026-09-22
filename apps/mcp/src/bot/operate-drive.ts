@@ -1271,6 +1271,10 @@ export function rankDriveCandidates<T extends DriveCandidate>(
 
 export function isSubmitLikeRow(row: WireRow): boolean {
   const label = readableLabel(row).toLowerCase();
+  // A named destination is navigation, even when its label says "Create".
+  // Treating that link as a submit makes the next page's prose look like a
+  // response to a form that was never submitted.
+  if ((row[1] === "l" || row[1] === "link") && rowHref(row) !== undefined) return false;
   // Carousel chrome ("Next slide") is not a form submit. Treating it as one
   // made Fireworks listedWork stay true after the passwords, so settle never
   // waited on the still-disabled Create Account.
@@ -1742,7 +1746,6 @@ export function keyGoalSecretAdvance(
     // that covers it is the next thing to act on (rule 3).
     rowOccluder(row) === undefined &&
     !skipped.has(row[0]) &&
-    !isOffscreenRow(row) &&
     !tried.has(pageUrl.length === 0 ? "" : stableControlKey(row, pageUrl));
   const reveal = rows.find((row) => eligible(row) && isRevealOrCopyRow(row));
   if (reveal !== undefined) return reveal;
@@ -5711,9 +5714,15 @@ async function driveLoop(input: {
       lastCaptchaOutcome = outcome;
       deliveredOutcome = outcome;
     }
+    const priorPath = pagePathKey(observation.url);
     const snap = await snapshotDriveSession(session, sessionId, drive, dependencies, needFrames);
     observation = snap.observation;
     rows = snap.rows;
+    if (pagePathKey(observation.url) !== priorPath) {
+      drive.submitBeforeText = null;
+      drive.submitExcludeLabels = [];
+      drive.lastSubmitResponse = null;
+    }
     drive.pendingRevealScan = false;
     const attached = attachRevealedSecretMarker(observation, rows);
     observation = attached.observation;
@@ -5993,6 +6002,13 @@ async function driveLoop(input: {
       });
       const waitSnap = await snapshotOrTimeout(framesIfNeeded());
       if (waitSnap !== "ok") return waitSnap;
+      appendDriveTrace(session, {
+        at: "after_wait",
+        step: drive.trajectory.length + 1,
+        url_after: observation.url,
+        fingerprint_after: driveProgressFingerprint(observation, rows, drive, session),
+        rows,
+      });
       drive.trajectory.push({
         action: "wait",
         target: "WAIT",
@@ -7086,6 +7102,36 @@ async function driveLoop(input: {
       });
     }
 
+    // A key page can have an unrelated disabled form while the key control is
+    // ready. Advance the key goal before the generic in-flight settle gate.
+    if (isKeyGoal(drive.goal)) {
+      const keyEvidence = await driveKeyEvidence(sessionId);
+      if (driveKeyGoalComplete(keyEvidence)) {
+        const applied = await applyDecision({ kind: "complete", confidence: 1 });
+        if (applied !== "continue") return applied;
+        steps += 1;
+        continue;
+      }
+      const advance = keyGoalSecretAdvance(
+        rows,
+        [...new Set([...(drive.exhaustedActionKeys ?? []), ...(drive.staleClickRefs ?? [])])],
+        { pageUrl, triedStableKeys: drive.triedHere ?? [] },
+      );
+      if (advance !== undefined) {
+        drive.boundFingerprint = driveProgressFingerprint(observation, rows, drive, session);
+        drive.consumedActionKey = null;
+        const applied = await applyDecision({
+          kind: "act",
+          action: { kind: "click", target: advance[0] },
+          actionKey: advance[0],
+          confidence: 1,
+        });
+        if (applied !== "continue") return applied;
+        steps += 1;
+        continue;
+      }
+    }
+
     const remainingFills = fillableCandidates(
       rows,
       drive.facts,
@@ -7422,36 +7468,6 @@ async function driveLoop(input: {
     const skippedActions = [
       ...new Set([...(drive.exhaustedActionKeys ?? []), ...(drive.staleClickRefs ?? [])]),
     ];
-    if (isKeyGoal(drive.goal)) {
-      const keyEvidence = await driveKeyEvidence(sessionId);
-      if (driveKeyGoalComplete(keyEvidence)) {
-        const applied = await applyDecision({ kind: "complete", confidence: 1 });
-        if (applied !== "continue") return applied;
-        steps += 1;
-        continue;
-      }
-      // Extraction stored nothing: the next controls, in order, are a
-      // reveal/show toggle beside a masked value, then a create/generate
-      // control. A control already tried on this page+goal is skipped, so
-      // this cannot spin.
-      const advance = keyGoalSecretAdvance(rows, skippedActions, {
-        pageUrl,
-        triedStableKeys: drive.triedHere ?? [],
-      });
-      if (advance !== undefined) {
-        drive.boundFingerprint = driveProgressFingerprint(observation, rows, drive, session);
-        drive.consumedActionKey = null;
-        const applied = await applyDecision({
-          kind: "act",
-          action: { kind: "click", target: advance[0] },
-          actionKey: advance[0],
-          confidence: 1,
-        });
-        if (applied !== "continue") return applied;
-        steps += 1;
-        continue;
-      }
-    }
     const sets = driveTargetSets(
       rows,
       drive.facts,
