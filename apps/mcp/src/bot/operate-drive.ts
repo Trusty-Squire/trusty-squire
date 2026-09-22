@@ -4082,10 +4082,7 @@ export function emailCodeSubmitRow(
   const formId = rowFormId(field);
   if (formId === undefined) return undefined;
   return rows.find(
-    (row) =>
-      rowFormId(row) === formId &&
-      isSubmitLikeRow(row) &&
-      !isDisabledRow(row),
+    (row) => rowFormId(row) === formId && isSubmitLikeRow(row) && !isDisabledRow(row),
   );
 }
 
@@ -5768,6 +5765,23 @@ async function driveLoop(input: {
   // deterministic key advance can immediately choose the same control again
   // and spend every remaining step in the guard without a new decision.
   let decideAfterPreActChange = false;
+  let dispatchedActs = 0;
+  let countedJevCalls = drive.jevCalls;
+  let countedDispatchedActs = 0;
+  const spendStep = (branch: string): void => {
+    if (drive.jevCalls === countedJevCalls && dispatchedActs === countedDispatchedActs) {
+      appendDriveTrace(session, {
+        at: "unspent_iteration",
+        step: steps,
+        branch,
+        url: observation.url,
+      });
+      return;
+    }
+    countedJevCalls = drive.jevCalls;
+    countedDispatchedActs = dispatchedActs;
+    steps += 1;
+  };
   {
     const startPath = feedbackPagePath(observation.url);
     drive.visitedPages ??= {};
@@ -6249,6 +6263,7 @@ async function driveLoop(input: {
       const beforeFingerprint = driveProgressFingerprint(observation, rows, drive, session);
       const backPage = session.browser.page;
       if (backPage !== null) {
+        dispatchedActs += 1;
         await backPage.goBack({ timeout: 5000 }).catch(() => undefined);
       }
       const backSnap = await refreshSnapshot(framesIfNeeded());
@@ -6475,6 +6490,7 @@ async function driveLoop(input: {
         ...(context?.notifyUser === undefined ? {} : { notifyUser: context.notifyUser }),
         pollBudgetMs: remainingMs(),
       });
+      dispatchedActs += 1;
       if (!cardInjected(payment)) {
         drive.trajectory.push({
           action: "inject_card",
@@ -6581,10 +6597,12 @@ async function driveLoop(input: {
         const acted = await actDriveSafely(session, sessionId, typed, dependencies);
         if (acted.kind !== "ok") {
           const safe = await actSafely(dependencies, sessionId, typed);
+          if (safe.dispatchFailure === undefined) dispatchedActs += 1;
           drive.lastDispatchFailure = safe.dispatchFailure ?? null;
           drive.lastOauthBounceReason = null;
           observation = safe.observation;
         } else {
+          dispatchedActs += 1;
           const page = session.browser.page;
           if (page !== null) await settleDriveStep(page, acted.combobox);
         }
@@ -6593,6 +6611,7 @@ async function driveLoop(input: {
           kind: "goto",
           url: verification.link,
         });
+        if (safe.dispatchFailure === undefined) dispatchedActs += 1;
         drive.lastDispatchFailure = safe.dispatchFailure ?? null;
         drive.lastOauthBounceReason = null;
         observation = safe.observation;
@@ -6806,6 +6825,7 @@ async function driveLoop(input: {
       }
       return "continue";
     }
+    if (acted.kind === "ok") dispatchedActs += 1;
     let actMs = Date.now() - actStarted;
     let settleMs = 0;
     const page = session.browser.page;
@@ -6837,6 +6857,7 @@ async function driveLoop(input: {
         }
         rememberFailedAction(drive, rows, decision.actionKey, observation.url);
       } else {
+        dispatchedActs += 1;
         drive.lastDispatchFailure = null;
         drive.lastOauthBounceReason = null;
         drive.occludedRefusals = null;
@@ -7144,7 +7165,7 @@ async function driveLoop(input: {
       confidence: 1,
     });
     if (applied !== "continue") return applied;
-    steps += 1;
+    spendStep("recover_choice");
     return "continue";
   };
 
@@ -7161,7 +7182,7 @@ async function driveLoop(input: {
       resumeAction(answer, rows, drive.facts, drive.goal, drive.facts.card_ref, observation.url),
     );
     if (resumed !== "continue") return resumed;
-    steps += 1;
+    spendStep("resume");
   }
 
   const ask = async (
@@ -7202,181 +7223,9 @@ async function driveLoop(input: {
       applyReleasedCardFacts(drive.facts, session.releasedPaymentCard?.card),
     );
     const pageUrl = observation.url;
-    const back = backOnlyDecision(rows, drive.trajectory.at(-1)?.action);
-    if (back !== undefined) {
-      const applied = await applyDecision(back);
-      if (applied !== "continue") return applied;
-      steps += 1;
-      continue;
-    }
-    const provider = namedProviderDecision(
-      drive.goal,
-      clickableCandidates(
-        rows,
-        includePayment,
-        drive.failedActionKeys ?? [],
-        pageUrl,
-        drive.filledRefs,
-      ),
-    );
-    if (provider !== undefined) {
-      drive.boundFingerprint = driveProgressFingerprint(observation, rows, drive, session);
-      drive.consumedActionKey = null;
-      const applied = await applyDecision(provider);
-      if (applied !== "continue") return applied;
-      steps += 1;
-      continue;
-    }
     const missing = requiredFillableMissingFact(rows, drive.facts, drive.filledRefs, pageUrl);
     const pageOptions =
       lastSelectOptions.get(session) ?? selectOptionsFromElements(session.lastElements);
-    const comboboxObservation = observationFingerprint(observation.url, rows);
-    const comboboxFill =
-      comboboxMustYield || comboboxAttempts.has(comboboxObservation)
-        ? undefined
-        : requiredFactComboboxAction(rows, drive.facts, drive.filledRefs, pageUrl, drive.goal);
-    comboboxMustYield = false;
-    if (comboboxFill !== undefined) {
-      comboboxAttempts.add(comboboxObservation);
-      drive.boundFingerprint = driveProgressFingerprint(observation, rows, drive, session);
-      drive.consumedActionKey = null;
-      const applied = await applyDecision({
-        kind: "act",
-        action: { kind: "click", target: comboboxFill.target },
-        actionKey: comboboxFill.target,
-        confidence: 1,
-      });
-      if (applied !== "continue") return applied;
-      steps += 1;
-      continue;
-    }
-    // One auto-apply per target per snapshot. A value the control has no option
-    // for comes back stale without touching filledRefs, so an unguarded retry
-    // would pick the same target every iteration until the budget runs out.
-    const selectFill = selectMustYield
-      ? undefined
-      : requiredFactSelectAction(rows, drive.facts, drive.filledRefs, pageUrl, drive.goal);
-    selectMustYield = false;
-    const selectAttemptKey =
-      selectFill === undefined ? undefined : `${comboboxObservation}\t${selectFill.target}`;
-    if (
-      selectFill !== undefined &&
-      selectAttemptKey !== undefined &&
-      !selectAttempts.has(selectAttemptKey)
-    ) {
-      selectAttempts.add(selectAttemptKey);
-      drive.boundFingerprint = driveProgressFingerprint(observation, rows, drive, session);
-      drive.consumedActionKey = null;
-      const applied = await applyDecision({
-        kind: "act",
-        action: { kind: "select", target: selectFill.target, text: selectFill.text },
-        actionKey: selectFill.target,
-        confidence: 1,
-      });
-      if (applied !== "continue") return applied;
-      steps += 1;
-      continue;
-    }
-    const expiryRewrite = typeMustYield
-      ? undefined
-      : requiredExpiryLongRewriteAction(rows, drive.facts, drive.expiryShortWrittenRefs);
-    const typeFill = typeMustYield
-      ? undefined
-      : requiredFactTypeAction(rows, drive.facts, drive.filledRefs, pageUrl, drive.goal);
-    typeMustYield = false;
-    const rewriteTarget = expiryRewrite?.target;
-    const rewriteAttemptKey =
-      rewriteTarget === undefined ? undefined : `${comboboxObservation}\t${rewriteTarget}`;
-    if (
-      expiryRewrite !== undefined &&
-      rewriteTarget !== undefined &&
-      rewriteAttemptKey !== undefined &&
-      !expiryRewriteAttempts.has(rewriteAttemptKey) &&
-      !drive.expiryLongAttemptedRefs.includes(rewriteTarget)
-    ) {
-      expiryRewriteAttempts.add(rewriteAttemptKey);
-      drive.boundFingerprint = driveProgressFingerprint(observation, rows, drive, session);
-      drive.consumedActionKey = null;
-      const applied = await applyDecision({
-        kind: "act",
-        action: { kind: "type", target: expiryRewrite.target, text: expiryRewrite.text },
-        actionKey: expiryRewrite.target,
-        confidence: 1,
-      });
-      if (applied !== "continue") return applied;
-      steps += 1;
-      continue;
-    }
-    const typeAttemptKey =
-      typeFill === undefined ? undefined : `${comboboxObservation}\t${typeFill.target}`;
-    if (
-      typeFill !== undefined &&
-      typeAttemptKey !== undefined &&
-      !typeAttempts.has(typeAttemptKey)
-    ) {
-      typeAttempts.add(typeAttemptKey);
-      drive.boundFingerprint = driveProgressFingerprint(observation, rows, drive, session);
-      drive.consumedActionKey = null;
-      const applied = await applyDecision({
-        kind: "act",
-        action: { kind: "type", target: typeFill.target, text: typeFill.text },
-        actionKey: typeFill.target,
-        confidence: 1,
-      });
-      if (applied !== "continue") return applied;
-      steps += 1;
-      continue;
-    }
-    // A required code field may have no recognizable label. Give the model
-    // the page context before treating that field as a missing supplied fact.
-    if (
-      missing !== undefined &&
-      !emailCodeCandidates(rows, drive.filledRefs).some(
-        (candidate) => candidate.ref === missing.ref,
-      )
-    ) {
-      const field = fieldLabelForRow(missing.row);
-      return finish("needs_value", {
-        field,
-        question: {
-          question: `Missing value for ${field}`,
-          options: Object.fromEntries(
-            Object.keys(drive.facts).map((key) => [key, `the provided ${key} value`]),
-          ),
-        },
-      });
-    }
-
-    // A key page can have an unrelated disabled form while the key control is
-    // ready. Advance the key goal before the generic in-flight settle gate.
-    if (isKeyGoal(drive.goal)) {
-      const keyEvidence = await driveKeyEvidence(sessionId);
-      if (driveKeyGoalComplete(keyEvidence)) {
-        const applied = await applyDecision({ kind: "complete", confidence: 1 });
-        if (applied !== "continue") return applied;
-        steps += 1;
-        continue;
-      }
-      const advance = keyGoalSecretAdvance(
-        rows,
-        [...new Set([...(drive.exhaustedActionKeys ?? []), ...(drive.staleClickRefs ?? [])])],
-        { pageUrl, triedStableKeys: drive.triedHere ?? [] },
-      );
-      if (advance !== undefined && !decideAfterPreActChange) {
-        drive.boundFingerprint = driveProgressFingerprint(observation, rows, drive, session);
-        drive.consumedActionKey = null;
-        const applied = await applyDecision({
-          kind: "act",
-          action: { kind: "click", target: advance[0] },
-          actionKey: advance[0],
-          confidence: 1,
-        });
-        if (applied !== "continue") return applied;
-        steps += 1;
-        continue;
-      }
-    }
-
     const remainingFills = fillableCandidates(
       rows,
       drive.facts,
@@ -7384,334 +7233,510 @@ async function driveLoop(input: {
       drive.filledRefs,
       pageUrl,
     );
-    if (
-      isPreexistingSessionPage({
-        rows,
-        pageUrl,
-        pageText: pageTextFromObservation(observation, [observation.dom ?? ""]),
-        goal: args.goal,
-        submittedThisDrive: drive.submittedThisDrive === true,
-      })
-    ) {
-      if (
-        drive.preexistingRestarted === true ||
-        rows.find((row) => isLogoutRow(row)) === undefined
-      ) {
-        return finish("stuck", { reason: alreadySignedInReason() });
-      }
-      const logout = rows.find((row) => isLogoutRow(row));
-      if (logout === undefined) {
-        return finish("stuck", { reason: alreadySignedInReason() });
-      }
-      drive.preexistingRestarted = true;
-      drive.boundFingerprint = driveProgressFingerprint(observation, rows, drive, session);
-      drive.consumedActionKey = null;
-      const applied = await applyDecision({
-        kind: "act",
-        action: { kind: "click", target: logout[0] },
-        actionKey: logout[0],
-        confidence: 1,
-      });
-      if (applied !== "continue") return applied;
-      const safe = await actSafely(dependencies, sessionId, {
-        kind: "goto",
-        url: session.startUrl,
-      });
-      drive.lastDispatchFailure = safe.dispatchFailure ?? null;
-      drive.lastOauthBounceReason = null;
-      observation = safe.observation;
-      if (observation.needs_user !== undefined) return finishOnWall(observation.needs_user);
-      const restarted = await snapshotOrTimeout(framesIfNeeded());
-      if (restarted !== "ok") return restarted;
-      steps += 1;
-      continue;
-    }
-    let terminalOnly = false;
-    // A same-document stage swap (Shopify one-page checkout) and a hydrating
-    // checkout both leave the snapshot empty for a while, so spend the
-    // re-observation budget before asking anything. Past it the ordinary
-    // question already offers exactly WAIT/DONE/BLOCKED and no target, because
-    // zero rows yield no action candidates — its WAIT keeps a payment settling
-    // behind a blank processor screen for as long as the step and time budgets
-    // allow. The signup repeat-cap must not exhaust that WAIT: an empty
-    // processor screen is not a no-op loop.
-    if (rows.length === 0 && emptySnapshotWaits < DRIVE_EMPTY_SNAPSHOT_WAITS) {
-      emptySnapshotWaits += 1;
-      const applied = await applyDecision({ kind: "wait", confidence: 1 });
-      if (applied !== "continue") return applied;
-      steps += 1;
-      continue;
-    }
-    // Per page, and read before the settle branch below: dead actions recorded
-    // on the page the model just left must not rule on the page it is on now.
-    const progressKey = pageProgressKey(
-      pageUrl,
-      rows,
-      drive.filledRefs,
-      observation.semantic?.headings ?? [],
-    );
-    if (drive.exhaustedProgressKey !== progressKey) {
-      drive.exhaustedProgressKey = progressKey;
-      drive.exhaustedActionKeys = [];
-      settleWaits = 0;
-      widgetWaits = 0;
-      drive.inFlightStartedAt = null;
-    }
-    // Disabled submit: needs_fill first, in_flight waits, widget_unready on a
-    // rendered challenge or after the inbox is silent.
-    const captchaConsumed = drive.captchaDeliveredProgressKey === progressKey;
-    const disableKind = disabledSubmitKind(
-      rows,
-      remainingFills.length,
-      drive.filledRefs,
-      inboxSilent,
-      captchaConsumed,
-    );
-    const finishWithSubmitResponse = (): DriveHandoff | undefined => {
-      const reason = drive.lastSubmitResponse;
-      if (reason === undefined || reason === null || reason.length === 0) return undefined;
-      return finish("stuck", { reason });
-    };
-    // A checkbox challenge ("Verify you are human" / "I'm not a robot") whose
-    // widget is cross-origin: its frame is skipped from the row map by design,
-    // so the decider has no control to click and hands the challenge back.
-    // Press the widget itself with the humanized pointer and let the next
-    // snapshot say whether it settled, once per page state. A rendered image
-    // grid is excluded — that needs a token, and the widget_unready branch
-    // below owns it.
-    if (
-      rows.length > 0 &&
-      session.browser.page !== null &&
-      !pageHasRenderedCaptcha(rows) &&
-      !(drive.checkboxChallengePressedKeys ?? []).includes(progressKey) &&
-      (await hasVisibleCheckboxCaptchaWidget(session.browser.page))
-    ) {
-      drive.checkboxChallengePressedKeys = [
-        ...(drive.checkboxChallengePressedKeys ?? []),
-        progressKey,
-      ];
-      const pressed = await pressCheckboxChallenge();
-      if (pressed.found && pressed.solved) lastCaptchaOutcome = "ok";
-      const pressedSnap = await snapshotOrTimeout(framesIfNeeded());
-      if (pressedSnap !== "ok") return pressedSnap;
-      steps += 1;
-      continue;
-    }
-    if (rows.length > 0 && disableKind === "in_flight") {
-      const afterSubmit = typeof drive.submitBeforeText === "string" || captchaConsumed;
-      const started = drive.inFlightStartedAt ?? now();
-      drive.inFlightStartedAt = started;
-      const waitBudget = afterSubmit
-        ? DRIVE_IN_FLIGHT_MS
-        : DRIVE_EMPTY_SNAPSHOT_WAITS * DRIVE_WAIT_MS;
-      const stillWaiting = afterSubmit
-        ? now() - started < waitBudget
-        : settleWaits < DRIVE_EMPTY_SNAPSHOT_WAITS;
-      if (stillWaiting && !(drive.exhaustedActionKeys ?? []).includes("WAIT")) {
-        settleWaits += 1;
-        const applied = await applyDecision({ kind: "wait", confidence: 1 });
-        if (applied !== "continue") return applied;
-        steps += 1;
-        continue;
-      }
-      const answered = finishWithSubmitResponse();
-      if (answered !== undefined) return answered;
-      terminalOnly = true;
-    } else if (rows.length > 0 && disableKind === "widget_unready") {
-      // One re-observe only for an ambiguous disabled submit. A rendered
-      // challenge goes to the solver immediately — and we never reset this
-      // counter, so an in-progress solve cannot fall back into a bare wait.
-      if (
-        !pageHasRenderedCaptcha(rows) &&
-        widgetWaits < DRIVE_WIDGET_UNREADY_WAITS &&
-        !(drive.exhaustedActionKeys ?? []).includes("WAIT")
-      ) {
-        widgetWaits += 1;
-        const applied = await applyDecision({ kind: "wait", confidence: 1 });
-        if (applied !== "continue") return applied;
-        steps += 1;
-        continue;
-      }
-      const outcome = await solveCaptcha();
-      lastCaptchaOutcome = outcome;
-      if (captchaSolveStartedAt === 0 && captchaSolveStillWorking(outcome)) {
-        captchaSolveStartedAt = now();
-      }
-      const solvedSnap = await snapshotOrTimeout(framesIfNeeded());
-      if (solvedSnap !== "ok") return solvedSnap;
-      markCaptchaDelivered(outcome);
-      const afterSolve = disabledSubmitKind(
-        rows,
-        remainingFills.length,
-        drive.filledRefs,
-        inboxSilent,
-        drive.captchaDeliveredProgressKey ===
-          pageProgressKey(
-            observation.url,
-            rows,
-            drive.filledRefs,
-            observation.semantic?.headings ?? [],
-          ),
-      );
-      if (afterSolve !== "widget_unready") continue;
-      if (!solverOutcomeBlocksSubmit(outcome)) {
-        const applied = await applyDecision({ kind: "wait", confidence: 1 });
-        if (applied !== "continue") return applied;
-        steps += 1;
-        continue;
-      }
-      if (captchaSolveStillWorking(outcome)) {
-        if (now() - captchaSolveStartedAt >= RES_TIMEOUT_MS) {
-          return (
-            finishWithSubmitResponse() ??
-            finish("stuck", { reason: widgetUnreadySolveReason(outcome) })
-          );
-        }
-        if (remainingMs() <= RES_POLL_INTERVAL_MS) {
-          return (
-            finishWithSubmitResponse() ??
-            finish("budget", { reason: widgetUnreadySolveReason(outcome) })
-          );
-        }
-        await sleepDrive(RES_POLL_INTERVAL_MS, context?.signal);
-        steps += 1;
-        continue;
-      }
-      return (
-        finishWithSubmitResponse() ?? finish("stuck", { reason: widgetUnreadySolveReason(outcome) })
-      );
-    } else if (
-      rows.length > 0 &&
-      !inboxSilent &&
-      drive.submittedThisDrive === true &&
-      lastNonWaitWasClick(drive.trajectory) &&
-      context?.consentInboxRead !== false &&
-      (disabledSubmitKind(rows, remainingFills.length, drive.filledRefs, true) ===
-        "widget_unready" ||
-        pageSuggestsInboxWait(
-          rows,
-          pageUrl,
-          pageTextFromObservation(observation, [observation.dom ?? ""]),
-        ))
-    ) {
-      inboxSilent = true;
-      const lastClick = [...drive.trajectory]
-        .reverse()
-        .find((step) => step.action === "click" || step.action === "oauth_login");
-      const applied = await applyDecision({
-        kind: "act",
-        action: { kind: "click", target: lastClick?.target ?? "inbox_link" },
-        actionKey: "inbox_link",
-        confidence: 1,
-        special: "inbox",
-      });
-      if (applied !== "continue") return applied;
-      steps += 1;
-      continue;
-    }
-
-    const fields = paymentFields(rows);
-    // A pending approval records an inject_card trajectory step, so trajectory
-    // membership says "attempted", not "released". The released card is the
-    // existing payment state: pending (releasedPaymentCard null) must be able
-    // to resume the automatic release after phone approval, while a released
-    // card must not start a second one.
-    const alreadyCard = session.releasedPaymentCard !== null;
-    const cardRetry = alreadyCard && drive.cardFillPending === true;
-    const onCheckout = isCheckoutUrl(observation.url);
-    // inject_card writes only pan/cvv. Expiry, cardholder name, and billing
-    // are typed after release. The gate waits on every fill a fact backs,
-    // dropdowns included: any address edit after the card is in makes the
-    // merchant re-cost the order and remount the card frames, which wipes the
-    // PAN with no path back. An offscreen row still counts — the act path
-    // scrolls it into view. A site-search or promo input the drive has no fact
-    // for is not a fill at all and never enters this list.
-    if (
-      includePayment &&
-      (!alreadyCard || cardRetry) &&
-      onCheckout &&
-      remainingFills.length === 0 &&
-      (fields.pan !== undefined || fields.cvv !== undefined)
-    ) {
-      // Bind the automatic decision to the current snapshot before applying
-      // it. The last ordinary fill changed the page, so boundFingerprint still
-      // describes the preceding action; without rebinding, applyDecision's
-      // consume-once gate returns "continue" forever and this branch spins
-      // without acting until the time budget expires.
-      drive.boundFingerprint = driveProgressFingerprint(observation, rows, drive, session);
-      drive.consumedActionKey = null;
-      const applied = await applyDecision({
-        kind: "act",
-        action: { kind: "click", target: fields.pan ?? fields.cvv ?? "card" },
-        actionKey: fields.pan ?? fields.cvv ?? "card",
-        confidence: 1,
-        special: "card",
-      });
-      if (applied !== "continue") return applied;
-      steps += 1;
-      continue;
-    }
-
-    const missingPay = paymentSubmitControlMissing({
-      rows,
-      includePayment,
-      alreadyCard,
-      cardRetry,
-      pageUrl,
-      remainingFills: remainingFills.length,
-      history: drive.history,
-    });
-    if (missingPay === undefined) {
-      paySubmitWaits = 0;
-    } else if (paySubmitWaits < DRIVE_PAY_SUBMIT_WAITS) {
-      // A checkout that is still hydrating already carries its header and
-      // footer buttons, so the snapshot is non-empty while the pay control has
-      // not mounted. Spend a bounded re-observation budget before calling a
-      // paid-for order stuck.
-      paySubmitWaits += 1;
-      const applied = await applyDecision({ kind: "wait", confidence: 1 });
-      if (applied !== "continue") return applied;
-      steps += 1;
-      continue;
-    } else {
-      return finish("stuck", { reason: missingPay });
-    }
-
-    if (goalExcludesOauth(args.goal) && pageOffersOnlyThirdPartySignup(rows)) {
-      return finish("stuck", { reason: noOtherSignupPathReason() });
-    }
-
-    const codeSubmit = emailCodeSubmitRow(
-      rows,
-      drive.trajectory[drive.trajectory.length - 1],
-    );
-    if (codeSubmit !== undefined) {
-      drive.boundFingerprint = driveProgressFingerprint(observation, rows, drive, session);
-      drive.consumedActionKey = null;
-      const applied = await applyDecision({
-        kind: "act",
-        action: { kind: "click", target: codeSubmit[0] },
-        actionKey: codeSubmit[0],
-        confidence: 1,
-      });
-      if (applied !== "continue") return applied;
-      steps += 1;
-      continue;
-    }
-
     const hasGoalDestination = rows.some(
       (row) =>
         rowCarriesGoalNoun(row, args.goal) &&
         isGoalDestinationRow(row) &&
         !isOffProductNavRow(row, pageUrl),
     );
-    drive.awaitingDecideAfterExplore = false;
+    let terminalOnly = false;
+    // A rejected pre-act choice must reach the model on the refreshed page.
+    // None of the automatic choices below may consume that opportunity.
+    automaticDecisions: {
+      if (decideAfterPreActChange) break automaticDecisions;
+      const back = backOnlyDecision(rows, drive.trajectory.at(-1)?.action);
+      if (back !== undefined) {
+        const applied = await applyDecision(back);
+        if (applied !== "continue") return applied;
+        spendStep("back");
+        continue;
+      }
+      const provider = namedProviderDecision(
+        drive.goal,
+        clickableCandidates(
+          rows,
+          includePayment,
+          drive.failedActionKeys ?? [],
+          pageUrl,
+          drive.filledRefs,
+        ),
+      );
+      if (provider !== undefined) {
+        drive.boundFingerprint = driveProgressFingerprint(observation, rows, drive, session);
+        drive.consumedActionKey = null;
+        const applied = await applyDecision(provider);
+        if (applied !== "continue") return applied;
+        spendStep("named_provider");
+        continue;
+      }
+      const comboboxObservation = observationFingerprint(observation.url, rows);
+      const comboboxFill =
+        comboboxMustYield || comboboxAttempts.has(comboboxObservation)
+          ? undefined
+          : requiredFactComboboxAction(rows, drive.facts, drive.filledRefs, pageUrl, drive.goal);
+      comboboxMustYield = false;
+      if (comboboxFill !== undefined) {
+        comboboxAttempts.add(comboboxObservation);
+        drive.boundFingerprint = driveProgressFingerprint(observation, rows, drive, session);
+        drive.consumedActionKey = null;
+        const applied = await applyDecision({
+          kind: "act",
+          action: { kind: "click", target: comboboxFill.target },
+          actionKey: comboboxFill.target,
+          confidence: 1,
+        });
+        if (applied !== "continue") return applied;
+        spendStep("combobox");
+        continue;
+      }
+      // One auto-apply per target per snapshot. A value the control has no option
+      // for comes back stale without touching filledRefs, so an unguarded retry
+      // would pick the same target every iteration until the budget runs out.
+      const selectFill = selectMustYield
+        ? undefined
+        : requiredFactSelectAction(rows, drive.facts, drive.filledRefs, pageUrl, drive.goal);
+      selectMustYield = false;
+      const selectAttemptKey =
+        selectFill === undefined ? undefined : `${comboboxObservation}\t${selectFill.target}`;
+      if (
+        selectFill !== undefined &&
+        selectAttemptKey !== undefined &&
+        !selectAttempts.has(selectAttemptKey)
+      ) {
+        selectAttempts.add(selectAttemptKey);
+        drive.boundFingerprint = driveProgressFingerprint(observation, rows, drive, session);
+        drive.consumedActionKey = null;
+        const applied = await applyDecision({
+          kind: "act",
+          action: { kind: "select", target: selectFill.target, text: selectFill.text },
+          actionKey: selectFill.target,
+          confidence: 1,
+        });
+        if (applied !== "continue") return applied;
+        spendStep("select");
+        continue;
+      }
+      const expiryRewrite = typeMustYield
+        ? undefined
+        : requiredExpiryLongRewriteAction(rows, drive.facts, drive.expiryShortWrittenRefs);
+      const typeFill = typeMustYield
+        ? undefined
+        : requiredFactTypeAction(rows, drive.facts, drive.filledRefs, pageUrl, drive.goal);
+      typeMustYield = false;
+      const rewriteTarget = expiryRewrite?.target;
+      const rewriteAttemptKey =
+        rewriteTarget === undefined ? undefined : `${comboboxObservation}\t${rewriteTarget}`;
+      if (
+        expiryRewrite !== undefined &&
+        rewriteTarget !== undefined &&
+        rewriteAttemptKey !== undefined &&
+        !expiryRewriteAttempts.has(rewriteAttemptKey) &&
+        !drive.expiryLongAttemptedRefs.includes(rewriteTarget)
+      ) {
+        expiryRewriteAttempts.add(rewriteAttemptKey);
+        drive.boundFingerprint = driveProgressFingerprint(observation, rows, drive, session);
+        drive.consumedActionKey = null;
+        const applied = await applyDecision({
+          kind: "act",
+          action: { kind: "type", target: expiryRewrite.target, text: expiryRewrite.text },
+          actionKey: expiryRewrite.target,
+          confidence: 1,
+        });
+        if (applied !== "continue") return applied;
+        spendStep("expiry_rewrite");
+        continue;
+      }
+      const typeAttemptKey =
+        typeFill === undefined ? undefined : `${comboboxObservation}\t${typeFill.target}`;
+      if (
+        typeFill !== undefined &&
+        typeAttemptKey !== undefined &&
+        !typeAttempts.has(typeAttemptKey)
+      ) {
+        typeAttempts.add(typeAttemptKey);
+        drive.boundFingerprint = driveProgressFingerprint(observation, rows, drive, session);
+        drive.consumedActionKey = null;
+        const applied = await applyDecision({
+          kind: "act",
+          action: { kind: "type", target: typeFill.target, text: typeFill.text },
+          actionKey: typeFill.target,
+          confidence: 1,
+        });
+        if (applied !== "continue") return applied;
+        spendStep("type");
+        continue;
+      }
+      // A required code field may have no recognizable label. Give the model
+      // the page context before treating that field as a missing supplied fact.
+      if (
+        missing !== undefined &&
+        !emailCodeCandidates(rows, drive.filledRefs).some(
+          (candidate) => candidate.ref === missing.ref,
+        )
+      ) {
+        const field = fieldLabelForRow(missing.row);
+        return finish("needs_value", {
+          field,
+          question: {
+            question: `Missing value for ${field}`,
+            options: Object.fromEntries(
+              Object.keys(drive.facts).map((key) => [key, `the provided ${key} value`]),
+            ),
+          },
+        });
+      }
 
-    // Rule 1: undo a narrowing input the drive itself typed before the loop
-    // decides anything else, then re-offer the control it removed.
-    if (drive.pendingAbsentBinding !== null && drive.pendingAbsentBinding !== undefined) {
-      const recovered = await recoverUndeliveredChoice();
-      if (recovered !== "continue") return recovered;
+      // A key page can have an unrelated disabled form while the key control is
+      // ready. Advance the key goal before the generic in-flight settle gate.
+      if (isKeyGoal(drive.goal)) {
+        const keyEvidence = await driveKeyEvidence(sessionId);
+        if (driveKeyGoalComplete(keyEvidence)) {
+          const applied = await applyDecision({ kind: "complete", confidence: 1 });
+          if (applied !== "continue") return applied;
+          spendStep("key_complete");
+          continue;
+        }
+        const advance = keyGoalSecretAdvance(
+          rows,
+          [...new Set([...(drive.exhaustedActionKeys ?? []), ...(drive.staleClickRefs ?? [])])],
+          { pageUrl, triedStableKeys: drive.triedHere ?? [] },
+        );
+        if (advance !== undefined && !decideAfterPreActChange) {
+          drive.boundFingerprint = driveProgressFingerprint(observation, rows, drive, session);
+          drive.consumedActionKey = null;
+          const applied = await applyDecision({
+            kind: "act",
+            action: { kind: "click", target: advance[0] },
+            actionKey: advance[0],
+            confidence: 1,
+          });
+          if (applied !== "continue") return applied;
+          spendStep("key_advance");
+          continue;
+        }
+      }
+
+      if (
+        isPreexistingSessionPage({
+          rows,
+          pageUrl,
+          pageText: pageTextFromObservation(observation, [observation.dom ?? ""]),
+          goal: args.goal,
+          submittedThisDrive: drive.submittedThisDrive === true,
+        })
+      ) {
+        if (
+          drive.preexistingRestarted === true ||
+          rows.find((row) => isLogoutRow(row)) === undefined
+        ) {
+          return finish("stuck", { reason: alreadySignedInReason() });
+        }
+        const logout = rows.find((row) => isLogoutRow(row));
+        if (logout === undefined) {
+          return finish("stuck", { reason: alreadySignedInReason() });
+        }
+        drive.preexistingRestarted = true;
+        drive.boundFingerprint = driveProgressFingerprint(observation, rows, drive, session);
+        drive.consumedActionKey = null;
+        const applied = await applyDecision({
+          kind: "act",
+          action: { kind: "click", target: logout[0] },
+          actionKey: logout[0],
+          confidence: 1,
+        });
+        if (applied !== "continue") return applied;
+        const safe = await actSafely(dependencies, sessionId, {
+          kind: "goto",
+          url: session.startUrl,
+        });
+        drive.lastDispatchFailure = safe.dispatchFailure ?? null;
+        drive.lastOauthBounceReason = null;
+        observation = safe.observation;
+        if (observation.needs_user !== undefined) return finishOnWall(observation.needs_user);
+        const restarted = await snapshotOrTimeout(framesIfNeeded());
+        if (restarted !== "ok") return restarted;
+        spendStep("preexisting_restart");
+        continue;
+      }
+      // A same-document stage swap (Shopify one-page checkout) and a hydrating
+      // checkout both leave the snapshot empty for a while, so spend the
+      // re-observation budget before asking anything. Past it the ordinary
+      // question already offers exactly WAIT/DONE/BLOCKED and no target, because
+      // zero rows yield no action candidates — its WAIT keeps a payment settling
+      // behind a blank processor screen for as long as the step and time budgets
+      // allow. The signup repeat-cap must not exhaust that WAIT: an empty
+      // processor screen is not a no-op loop.
+      if (rows.length === 0 && emptySnapshotWaits < DRIVE_EMPTY_SNAPSHOT_WAITS) {
+        emptySnapshotWaits += 1;
+        const applied = await applyDecision({ kind: "wait", confidence: 1 });
+        if (applied !== "continue") return applied;
+        spendStep("empty_snapshot_wait");
+        continue;
+      }
+      // Per page, and read before the settle branch below: dead actions recorded
+      // on the page the model just left must not rule on the page it is on now.
+      const progressKey = pageProgressKey(
+        pageUrl,
+        rows,
+        drive.filledRefs,
+        observation.semantic?.headings ?? [],
+      );
+      if (drive.exhaustedProgressKey !== progressKey) {
+        drive.exhaustedProgressKey = progressKey;
+        drive.exhaustedActionKeys = [];
+        settleWaits = 0;
+        widgetWaits = 0;
+        drive.inFlightStartedAt = null;
+      }
+      // Disabled submit: needs_fill first, in_flight waits, widget_unready on a
+      // rendered challenge or after the inbox is silent.
+      const captchaConsumed = drive.captchaDeliveredProgressKey === progressKey;
+      const disableKind = disabledSubmitKind(
+        rows,
+        remainingFills.length,
+        drive.filledRefs,
+        inboxSilent,
+        captchaConsumed,
+      );
+      const finishWithSubmitResponse = (): DriveHandoff | undefined => {
+        const reason = drive.lastSubmitResponse;
+        if (reason === undefined || reason === null || reason.length === 0) return undefined;
+        return finish("stuck", { reason });
+      };
+      // A checkbox challenge ("Verify you are human" / "I'm not a robot") whose
+      // widget is cross-origin: its frame is skipped from the row map by design,
+      // so the decider has no control to click and hands the challenge back.
+      // Press the widget itself with the humanized pointer and let the next
+      // snapshot say whether it settled, once per page state. A rendered image
+      // grid is excluded — that needs a token, and the widget_unready branch
+      // below owns it.
+      if (
+        rows.length > 0 &&
+        session.browser.page !== null &&
+        !pageHasRenderedCaptcha(rows) &&
+        !(drive.checkboxChallengePressedKeys ?? []).includes(progressKey) &&
+        (await hasVisibleCheckboxCaptchaWidget(session.browser.page))
+      ) {
+        drive.checkboxChallengePressedKeys = [
+          ...(drive.checkboxChallengePressedKeys ?? []),
+          progressKey,
+        ];
+        const pressed = await pressCheckboxChallenge();
+        if (pressed.found) dispatchedActs += 1;
+        if (pressed.found && pressed.solved) lastCaptchaOutcome = "ok";
+        const pressedSnap = await snapshotOrTimeout(framesIfNeeded());
+        if (pressedSnap !== "ok") return pressedSnap;
+        spendStep("checkbox_challenge");
+        continue;
+      }
+      if (rows.length > 0 && disableKind === "in_flight") {
+        const afterSubmit = typeof drive.submitBeforeText === "string" || captchaConsumed;
+        const started = drive.inFlightStartedAt ?? now();
+        drive.inFlightStartedAt = started;
+        const waitBudget = afterSubmit
+          ? DRIVE_IN_FLIGHT_MS
+          : DRIVE_EMPTY_SNAPSHOT_WAITS * DRIVE_WAIT_MS;
+        const stillWaiting = afterSubmit
+          ? now() - started < waitBudget
+          : settleWaits < DRIVE_EMPTY_SNAPSHOT_WAITS;
+        if (stillWaiting && !(drive.exhaustedActionKeys ?? []).includes("WAIT")) {
+          settleWaits += 1;
+          const applied = await applyDecision({ kind: "wait", confidence: 1 });
+          if (applied !== "continue") return applied;
+          spendStep("in_flight_wait");
+          continue;
+        }
+        const answered = finishWithSubmitResponse();
+        if (answered !== undefined) return answered;
+        terminalOnly = true;
+      } else if (rows.length > 0 && disableKind === "widget_unready") {
+        // One re-observe only for an ambiguous disabled submit. A rendered
+        // challenge goes to the solver immediately — and we never reset this
+        // counter, so an in-progress solve cannot fall back into a bare wait.
+        if (
+          !pageHasRenderedCaptcha(rows) &&
+          widgetWaits < DRIVE_WIDGET_UNREADY_WAITS &&
+          !(drive.exhaustedActionKeys ?? []).includes("WAIT")
+        ) {
+          widgetWaits += 1;
+          const applied = await applyDecision({ kind: "wait", confidence: 1 });
+          if (applied !== "continue") return applied;
+          spendStep("widget_wait");
+          continue;
+        }
+        const outcome = await solveCaptcha();
+        lastCaptchaOutcome = outcome;
+        if (captchaSolveStartedAt === 0 && captchaSolveStillWorking(outcome)) {
+          captchaSolveStartedAt = now();
+        }
+        const solvedSnap = await snapshotOrTimeout(framesIfNeeded());
+        if (solvedSnap !== "ok") return solvedSnap;
+        markCaptchaDelivered(outcome);
+        const afterSolve = disabledSubmitKind(
+          rows,
+          remainingFills.length,
+          drive.filledRefs,
+          inboxSilent,
+          drive.captchaDeliveredProgressKey ===
+            pageProgressKey(
+              observation.url,
+              rows,
+              drive.filledRefs,
+              observation.semantic?.headings ?? [],
+            ),
+        );
+        if (afterSolve !== "widget_unready") continue;
+        if (!solverOutcomeBlocksSubmit(outcome)) {
+          const applied = await applyDecision({ kind: "wait", confidence: 1 });
+          if (applied !== "continue") return applied;
+          spendStep("captcha_wait");
+          continue;
+        }
+        if (captchaSolveStillWorking(outcome)) {
+          if (now() - captchaSolveStartedAt >= RES_TIMEOUT_MS) {
+            return (
+              finishWithSubmitResponse() ??
+              finish("stuck", { reason: widgetUnreadySolveReason(outcome) })
+            );
+          }
+          if (remainingMs() <= RES_POLL_INTERVAL_MS) {
+            return (
+              finishWithSubmitResponse() ??
+              finish("budget", { reason: widgetUnreadySolveReason(outcome) })
+            );
+          }
+          await sleepDrive(RES_POLL_INTERVAL_MS, context?.signal);
+          spendStep("captcha_poll");
+          continue;
+        }
+        return (
+          finishWithSubmitResponse() ??
+          finish("stuck", { reason: widgetUnreadySolveReason(outcome) })
+        );
+      } else if (
+        rows.length > 0 &&
+        !inboxSilent &&
+        drive.submittedThisDrive === true &&
+        lastNonWaitWasClick(drive.trajectory) &&
+        context?.consentInboxRead !== false &&
+        (disabledSubmitKind(rows, remainingFills.length, drive.filledRefs, true) ===
+          "widget_unready" ||
+          pageSuggestsInboxWait(
+            rows,
+            pageUrl,
+            pageTextFromObservation(observation, [observation.dom ?? ""]),
+          ))
+      ) {
+        inboxSilent = true;
+        const lastClick = [...drive.trajectory]
+          .reverse()
+          .find((step) => step.action === "click" || step.action === "oauth_login");
+        const applied = await applyDecision({
+          kind: "act",
+          action: { kind: "click", target: lastClick?.target ?? "inbox_link" },
+          actionKey: "inbox_link",
+          confidence: 1,
+          special: "inbox",
+        });
+        if (applied !== "continue") return applied;
+        spendStep("inbox");
+        continue;
+      }
+
+      const fields = paymentFields(rows);
+      // A pending approval records an inject_card trajectory step, so trajectory
+      // membership says "attempted", not "released". The released card is the
+      // existing payment state: pending (releasedPaymentCard null) must be able
+      // to resume the automatic release after phone approval, while a released
+      // card must not start a second one.
+      const alreadyCard = session.releasedPaymentCard !== null;
+      const cardRetry = alreadyCard && drive.cardFillPending === true;
+      const onCheckout = isCheckoutUrl(observation.url);
+      // inject_card writes only pan/cvv. Expiry, cardholder name, and billing
+      // are typed after release. The gate waits on every fill a fact backs,
+      // dropdowns included: any address edit after the card is in makes the
+      // merchant re-cost the order and remount the card frames, which wipes the
+      // PAN with no path back. An offscreen row still counts — the act path
+      // scrolls it into view. A site-search or promo input the drive has no fact
+      // for is not a fill at all and never enters this list.
+      if (
+        includePayment &&
+        (!alreadyCard || cardRetry) &&
+        onCheckout &&
+        remainingFills.length === 0 &&
+        (fields.pan !== undefined || fields.cvv !== undefined)
+      ) {
+        // Bind the automatic decision to the current snapshot before applying
+        // it. The last ordinary fill changed the page, so boundFingerprint still
+        // describes the preceding action; without rebinding, applyDecision's
+        // consume-once gate returns "continue" forever and this branch spins
+        // without acting until the time budget expires.
+        drive.boundFingerprint = driveProgressFingerprint(observation, rows, drive, session);
+        drive.consumedActionKey = null;
+        const applied = await applyDecision({
+          kind: "act",
+          action: { kind: "click", target: fields.pan ?? fields.cvv ?? "card" },
+          actionKey: fields.pan ?? fields.cvv ?? "card",
+          confidence: 1,
+          special: "card",
+        });
+        if (applied !== "continue") return applied;
+        spendStep("card");
+        continue;
+      }
+
+      const missingPay = paymentSubmitControlMissing({
+        rows,
+        includePayment,
+        alreadyCard,
+        cardRetry,
+        pageUrl,
+        remainingFills: remainingFills.length,
+        history: drive.history,
+      });
+      if (missingPay === undefined) {
+        paySubmitWaits = 0;
+      } else if (paySubmitWaits < DRIVE_PAY_SUBMIT_WAITS) {
+        // A checkout that is still hydrating already carries its header and
+        // footer buttons, so the snapshot is non-empty while the pay control has
+        // not mounted. Spend a bounded re-observation budget before calling a
+        // paid-for order stuck.
+        paySubmitWaits += 1;
+        const applied = await applyDecision({ kind: "wait", confidence: 1 });
+        if (applied !== "continue") return applied;
+        spendStep("pay_submit_wait");
+        continue;
+      } else {
+        return finish("stuck", { reason: missingPay });
+      }
+
+      if (goalExcludesOauth(args.goal) && pageOffersOnlyThirdPartySignup(rows)) {
+        return finish("stuck", { reason: noOtherSignupPathReason() });
+      }
+
+      const codeSubmit = emailCodeSubmitRow(rows, drive.trajectory[drive.trajectory.length - 1]);
+      if (codeSubmit !== undefined) {
+        drive.boundFingerprint = driveProgressFingerprint(observation, rows, drive, session);
+        drive.consumedActionKey = null;
+        const applied = await applyDecision({
+          kind: "act",
+          action: { kind: "click", target: codeSubmit[0] },
+          actionKey: codeSubmit[0],
+          confidence: 1,
+        });
+        if (applied !== "continue") return applied;
+        spendStep("email_code_submit");
+        continue;
+      }
+
+      drive.awaitingDecideAfterExplore = false;
+
+      // Rule 1: undo a narrowing input the drive itself typed before the loop
+      // decides anything else, then re-offer the control it removed.
+      if (drive.pendingAbsentBinding !== null && drive.pendingAbsentBinding !== undefined) {
+        const recovered = await recoverUndeliveredChoice();
+        if (recovered !== "continue") return recovered;
+      }
     }
 
     if (drive.jevCalls >= DRIVE_MAX_JEV_CALLS) {
@@ -7751,7 +7776,12 @@ async function driveLoop(input: {
     const actionable = sets.operations.filter(
       (op) => op !== "DONE" && op !== "BLOCKED" && op !== "WAIT",
     );
-    if (!terminalOnly && (drive.exhaustedActionKeys ?? []).length > 0 && actionable.length === 0) {
+    if (
+      !decideAfterPreActChange &&
+      !terminalOnly &&
+      (drive.exhaustedActionKeys ?? []).length > 0 &&
+      actionable.length === 0
+    ) {
       if (nextExploreRow(rows, drive.visitedSectionKeys ?? [], pageUrl) === undefined) {
         return finish("no_progress", {
           // A refused/undispatched act or a bounced hand-off is the loop's own
@@ -7976,7 +8006,7 @@ async function driveLoop(input: {
         jevMs,
       );
       if (applied !== "continue") return applied;
-      steps += 1;
+      spendStep("inbox_plan");
       continue;
     }
     if (goalSeeksKey(args.goal) && !pageShowsRevealedKey(rows)) {
@@ -8010,7 +8040,7 @@ async function driveLoop(input: {
         if (applied !== "continue") return applied;
         drive.boundFingerprint = driveProgressFingerprint(observation, rows, drive, session);
         drive.consumedActionKey = null;
-        steps += 1;
+        spendStep("explore");
         continue;
       }
       if (!decisionIsActionable(decision) && !hasGoalDestination && visited.length > 0) {
@@ -8019,7 +8049,7 @@ async function driveLoop(input: {
     }
     const applied = await applyDecision(decision, jevMs, true);
     if (applied !== "continue") return applied;
-    steps += 1;
+    spendStep("model_decision");
   }
 
   const budgetReason = drive.lastSubmitResponse;
