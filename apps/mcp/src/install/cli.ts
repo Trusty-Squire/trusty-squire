@@ -1325,19 +1325,26 @@ async function writeAgentConfig(
   }
 }
 
-// The browser remains open until both the account claim and its explicit Finish
-// callback arrive. The callback is emitted after the visible browser flow
-// completes, so it works for onboarding and forced re-login without inspecting
-// Chrome's on-disk cookie database.
-export function shouldCompleteInstallClaim(claimed: boolean, wizardCompleted = false): boolean {
-  return claimed && wizardCompleted;
+// A claimed enrollment is COMPLETE. The claim is the authoritative fact: the
+// server has bound this machine to the account and handed back its agent
+// token, and the CLI polls that same fact independently of the browser. The
+// browser's Finish control is a courtesy that closes the page early, not a
+// second completion gate — on a headless machine that page exists only behind
+// a single-use pairing link, so a gate on it can expire before the human ever
+// reaches the control and throw away a claim the server already established.
+// A fact already true must never be withheld for want of a confirmation of
+// itself. `_wizardCompleted` remains part of the callback contract (the loopback
+// listener still accepts Finish) but can no longer extend the wait.
+export function shouldCompleteInstallClaim(claimed: boolean, _wizardCompleted = false): boolean {
+  return claimed;
 }
 
-// During normal onboarding, claim happens before the browser's Finish step.
-// Keep the terminal message aligned with that two-phase flow.
+// Once the claim is observed the ceremony returns immediately, so the claimed
+// wording is a one-line acknowledgement only; it never makes the browser's
+// Finish control a requirement.
 export function claimHeartbeatMessage(claimed: boolean): string {
   return claimed
-    ? "Sign-in complete — click Finish in the browser to close it and continue."
+    ? "Sign-in complete — the account is claimed, closing the sign-in window."
     : "Still waiting for you to finish signing in — the URL/window above stays live until you do.";
 }
 
@@ -1436,12 +1443,11 @@ async function runInstallClaim(
       }
     }
     const claimed = state.value !== null;
-    const tearDown = shouldCompleteInstallClaim(claimed, wizardCompleted);
-    if (tearDown) {
+    if (shouldCompleteInstallClaim(claimed, wizardCompleted)) {
+      if (claimedThisPoll) {
+        console.error(chalk.dim(`   ✓ ${claimHeartbeatMessage(true)}`));
+      }
       return { status: "claimed", provider: null };
-    }
-    if (claimedThisPoll) {
-      console.error(chalk.dim(`   ✓ ${claimHeartbeatMessage(true)}`));
     }
     return "pending";
   };

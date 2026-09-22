@@ -102,7 +102,7 @@ describe("interactive login display detection", () => {
 });
 
 describe("install completion callback", () => {
-  it("waits for the explicit Finish callback rather than profile files", async () => {
+  it("reports the explicit Finish callback as wizardCompleted rather than reading profile files", async () => {
     const pollUntilClaimed = vi.fn(
       async () => ({ status: "claimed", provider: "google" }) as const,
     );

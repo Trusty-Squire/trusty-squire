@@ -97,7 +97,8 @@ profile is still busy, it polls committed-cookie snapshots for up to 45 seconds,
 awaiting Google and any explicitly requested provider before accepting early.
 Unreadable snapshots are unknown, not proof of sign-out; no provider list is
 persisted in the account session file. Ceremony completion itself remains the
-install claim plus its explicit nonce-scoped Finish callback, never a cookie read.
+install claim alone, never a cookie read; the browser's nonce-scoped Finish
+callback is a courtesy that closes the page early, never a completion gate.
 
 When an install does need the login ceremony, the ceremony opens the confirm
 page as a TAB in the shared broker browser — an ordinary `open` on a
@@ -164,6 +165,17 @@ published past that bound. The
 `isOwnedLoginRigXauthority` check keeps real user desktops out of scope —
 this paragraph covers the broker's own rig only. This is a decision, not an
 oversight: do not narrow it without the maintainer's word.
+
+The exposure is warned about only where it is a real disclosure. The ceremony
+prints the shared-browser warning only when the tab lands on a real
+human-facing screen in the browser the person running connect is already using
+— the same browser later Trusty Squire sessions keep opening tabs in, so agent
+work then shares a browser with their own browsing. The headless noVNC
+ceremony prints no warning at all: its tabs all belong to the same owner,
+acting for the same account, on a link handed to themselves, so nothing is
+disclosed. The noVNC banner still carries the URL and password.
+`sharedBrowserDisclosureWarning` in `apps/mcp/src/bot/google-login.ts` is the
+single place that decides it.
 
 A deferred
 `--force-relogin` cookie clear rides the same tab as ordinary logout navigation.

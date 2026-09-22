@@ -5,8 +5,9 @@
 // every signup after it is fully automated.
 //
 // Connect ceremony custody, display exposure, and provider-probe contracts are
-// owned by docs/browser-broker.md. Completion is out of band through the install
-// claim and nonce-scoped Finish callback, never inferred from a live page.
+// owned by docs/browser-broker.md. Completion is the install claim, which the
+// CLI polls out of band, never inferred from a live page; the nonce-scoped
+// Finish callback only closes the page early.
 
 import { createRequire } from "node:module";
 import { readFileSync, readdirSync } from "node:fs";
@@ -489,20 +490,21 @@ export type CeremonyBrowserPlacement =
 // and hands tabs out from it, so the ceremony and every operator session share
 // the same Chrome, the same profile, and the same cookies. Nothing in this
 // product launches a browser of its own. Nothing drives the user's sign-in:
-// completion arrives out of band, through `connect`'s nonce-scoped Finish
-// callback.
+// completion is the account claim `connect` polls out of band; the
+// nonce-scoped Finish callback only lets the page close itself early.
 export interface RunInBotChromeOpts {
   profileDir: string;
   url: string;
   deadline: number;
   // Returns true once the ceremony has completed. Re-polled every ~3s. It
   // takes no BrowserContext on purpose: completion is out of band (the
-  // nonce-scoped Finish callback), never a read off the live page.
+  // install claim `connect` polls), never a read off the live page.
   pollUntilDone: () => Promise<boolean>;
   // Short label shown after the local Chrome window opens.
   bannerLabel: string;
-  // The install flow has a sign-in phase followed by an explicit Finish
-  // step. Resolve this lazily so its heartbeat describes the current phase.
+  // The install flow has a sign-in phase; the claim ends it and the Finish
+  // control only closes the page early. Resolve this lazily so its heartbeat
+  // describes the current phase.
   heartbeatMessage?: string | (() => string);
   // Called once by the path that placed the browser, with where it landed.
   // The ceremony never launches its own Chrome, so `ownBrowserPid` is always
@@ -568,7 +570,6 @@ export type SharedCeremonyExposure =
 
 export async function exposeSharedBrokerCeremonyDisplay(
   profileDir: string,
-  label: string,
   onExpired?: (ownBrowserPid: number | null) => void,
 ): Promise<SharedCeremonyExposure> {
   const holder = holderCeremonyDisplay(profileDir);
@@ -615,7 +616,7 @@ export async function exposeSharedBrokerCeremonyDisplay(
   });
   let url: string;
   try {
-    url = await exposeRemoteLoginDisplay(rig, label);
+    url = await exposeRemoteLoginDisplay(rig);
   } catch (err) {
     removeCleanup();
     await teardownRemoteLoginRig(rig).catch(() => undefined);
@@ -739,14 +740,19 @@ const PROVIDER_LOGOUT_URLS: Record<OAuthProviderId, string> = {
 // The accessible name of the confirm control on GitHub's logout page.
 const GITHUB_SIGN_OUT_CONTROL_NAME = "Sign out";
 
-// The label printed inside the noVNC URL box for a SHARED-browser ceremony.
-// Disclosure, not softening: the URL shows the whole shared display for the
-// ceremony deadline — sibling sessions' tabs included — and is single-use.
-const SHARED_DISPLAY_LABEL =
-  "This URL shows the WHOLE display that browser is running on — every window " +
-  "on it, not only the sign-in, and on a machine with its own screen that is " +
-  "that screen — for as long as this ceremony runs. It is single-use: the URL " +
-  "and its password exist for this ceremony only and stop working when it ends.";
+// Whether to print the shared-browser disclosure, returned as the sentence to
+// print. It earns a line in exactly ONE case: the ceremony tab is on a real
+// human-facing screen, in the browser the person running connect is already
+// using — the same browser every later Trusty Squire session opens tabs in, so
+// from here on agent work shares a browser with their own browsing. Every
+// other case is false or moot: on a headless display every other tab belongs
+// to the same owner, acting for the same account, on a link handed to
+// themselves, so nothing is disclosed. `null` means print nothing at all —
+// there is deliberately no shortened or softened variant.
+export function sharedBrowserDisclosureWarning(exposure: SharedCeremonyExposure): string | null {
+  if (exposure.kind !== "already_visible") return null;
+  return "Trusty Squire will keep opening tabs in this browser — the one you're using.";
+}
 
 async function operateCommand(
   client: BrokerClient,
@@ -929,7 +935,6 @@ export async function runCeremonyInSharedBroker(opts: RunInBotChromeOpts): Promi
     // deadline would only burn it (round-12 review-3): fail now.
     const exposure = await exposeSharedBrokerCeremonyDisplay(
       opts.profileDir,
-      SHARED_DISPLAY_LABEL,
       opts.onCeremonyExpired,
     );
     if (exposure.kind === "unshowable") {
@@ -949,16 +954,18 @@ export async function runCeremonyInSharedBroker(opts: RunInBotChromeOpts): Promi
         : { kind: "virtual", url: exposure.url },
       null,
     );
-    console.error(
-      exposure.kind === "already_visible"
-        ? `\n[login] The install page opened as a tab in the shared browser's display ` +
-            `(${exposure.reason}) — complete the sign-in on that screen.\n`
-        : `\n[login] The install page opened as a tab in the shared browser's display — ` +
-            `open the noVNC URL above on any device to see and drive it. That URL shows ` +
-            `the WHOLE shared browser display for the duration of the ceremony — every ` +
-            `tab this browser is running, not only the sign-in — and it is single-use: ` +
-            `it exists for this ceremony only and stops working when the ceremony ends.\n`,
-    );
+    // Only a real human-facing display that is already showing the person this
+    // browser — the one later sessions keep opening tabs in — earns the
+    // disclosure. The headless noVNC path prints nothing: its banner already
+    // carries the URL, and the tabs behind that URL are the same owner's.
+    if (exposure.kind === "already_visible") {
+      console.error(
+        `\n[login] The install page opened as a tab in the shared browser's display ` +
+          `(${exposure.reason}) — complete the sign-in on that screen.\n`,
+      );
+      const warning = sharedBrowserDisclosureWarning(exposure);
+      if (warning !== null) console.error(`${warning}\n`);
+    }
     stopExposure = exposure.kind === "exposed" ? exposure.stop : null;
     const ok = await pollUntil(
       opts.deadline,
@@ -1078,9 +1085,10 @@ export function checkLoginStatusWithin(
 export async function openInstallConfirmInBotChrome(
   opts: {
     confirmUrl: string;
-    // Returns claimed only after the install ceremony succeeds. No path reads
-    // completion off the live page, so the per-run Finish callback is the
-    // completion signal for every install path.
+    // Returns claimed only after the install ceremony succeeds. Completion is
+    // the account claim the caller polls; `wizardCompleted` carries the
+    // browser's courtesy Finish callback, which may close the page early but
+    // is never required (a single-use ceremony page can be unreachable).
     pollUntilClaimed: (wizardCompleted: boolean) => Promise<InstallClaimPollResult>;
     profileDir?: string;
     // Absolute local deadline (ms). The caller owns it because only the
