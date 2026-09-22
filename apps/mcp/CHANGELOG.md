@@ -1,5 +1,10 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.16-rc.6 (2026-09-22)
+
+- refactor(mcp): make the broker the only browser path; account identity moves to the call (#922)
+- fix(mcp): dispatch the drive's own hand-off by observed identity (#921)
+
 ## 1.1.16-rc.5 (2026-09-21)
 
 - fix(mcp): bound ceremony noVNC helpers to the pairing-token window plus grace (#919)
