@@ -50,6 +50,8 @@ export const REAL_BROWSER_FILES = [
   "src/bot/__tests__/captcha-solve-token-signal.test.ts",
   "src/bot/__tests__/click-actionability-bound.test.ts",
   "src/bot/capture/__tests__/credential-capture-browser.test.ts",
+  "src/bot/__tests__/drive-oauth-handoff-dispatch.test.ts",
+  "src/bot/__tests__/drive-stop-reason-prose.test.ts",
   "src/bot/__tests__/hcaptcha-inject-coresident.test.ts",
   "src/bot/__tests__/recaptcha-checkbox-frame-click.test.ts",
   "src/bot/__tests__/recaptcha-v2-invisible-detect.test.ts",

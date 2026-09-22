@@ -118,7 +118,7 @@ export type ActExecutorOptions = {
 const DRIVE_DISPATCH: ActExecutorOptions = { drive: true };
 
 export type DriveActResult =
-  | { kind: "ok"; combobox: boolean }
+  | { kind: "ok"; combobox: boolean; needsUser?: NonNullable<Observation["needs_user"]> }
   | { kind: "stale"; reason: string }
   | { kind: "unsupported" };
 
@@ -217,10 +217,16 @@ async function runSerializedOAuthBoundary(
   deadline: OAuthActionDeadline,
   compactAuthorization?: CompactV2TargetAuthorization,
   bindPreparedTargetAtDispatch = false,
+  driveResolved = false,
 ): Promise<BrowserController> {
-  const authorizedRef = provisionElementRefs(authorizedElements).get(authorizedElement);
-  if (authorizedRef === undefined) {
-    throw new Error("OAuth action target was not present in the authorized action map");
+  // A drive ref is authorized by its own in-page identity record (the caller
+  // already re-proved the node is still the observed control), not by the
+  // tools' action map. Only the tools path needs the map-membership proof.
+  if (!driveResolved) {
+    const authorizedRef = provisionElementRefs(authorizedElements).get(authorizedElement);
+    if (authorizedRef === undefined) {
+      throw new Error("OAuth action target was not present in the authorized action map");
+    }
   }
   const expectedGoogleAccountEmail = session.userEmail ?? undefined;
   const completed = await runSerializedGoogleIdentityOperation(
@@ -1193,21 +1199,43 @@ async function executeAct(
         }
         // Atomic OAuth deliberately accepts only the observed stable ref. A raw
         // locator would lose the same stale-reference guarantees as every other
-        // action before the provider transition begins.
-        const fresh = (await browser.extractBrowserUseObservation(compactV2ActionPage)).elements;
-        retainSessionElements(session, fresh);
-        const el =
-          compactV2Authorization === undefined
-            ? resolveTarget(fresh, resolutionTarget!)
-            : resolveAuthorizedCompactV2Target(session, fresh, compactV2Authorization);
-        if (el === null) {
-          if (session.compactV2Active) {
-            if (!internalAccess) throwCompactV2StaleRef();
+        // action before the provider transition begins. Resolve it by the
+        // identity it was OBSERVED under: a drive ref carries the drive's own
+        // record, a tools ref the tools' authorization/fresh inventory. A
+        // drive session never populates the tools' compact-v2 index, so mixing
+        // the two namespaces is what lost the handoff target.
+        const driveResolved =
+          internalAccess && session.drive?.identities?.get(resolutionTarget!) !== undefined;
+        let fresh: InteractiveElement[];
+        let el: InteractiveElement | null;
+        if (driveResolved) {
+          const livePage = compactV2ActionPage ?? browser.page;
+          const identity = session.drive!.identities!.get(resolutionTarget!)!;
+          fresh = session.lastElements;
+          el =
+            livePage === null
+              ? null
+              : await resolveLiveControlIdentity(livePage, resolutionTarget!, identity);
+          if (el === null) {
+            if (session.compactV2Active) throw new CompactV2StaleRefError("stale_ref");
             throw new Error("oauth_login: internal live target changed");
           }
-          throw new Error(
-            `oauth_login: no element matched target "${action.target}". Re-observe and use the OAuth control ref.`,
-          );
+        } else {
+          fresh = (await browser.extractBrowserUseObservation(compactV2ActionPage)).elements;
+          retainSessionElements(session, fresh);
+          el =
+            compactV2Authorization === undefined
+              ? resolveTarget(fresh, resolutionTarget!)
+              : resolveAuthorizedCompactV2Target(session, fresh, compactV2Authorization);
+          if (el === null) {
+            if (session.compactV2Active) {
+              if (!internalAccess) throwCompactV2StaleRef();
+              throw new Error("oauth_login: internal live target changed");
+            }
+            throw new Error(
+              `oauth_login: no element matched target "${action.target}". Re-observe and use the OAuth control ref.`,
+            );
+          }
         }
         if (oauthDeadline === undefined) {
           throw new Error("OAuth action deadline was not established");
@@ -1215,11 +1243,12 @@ async function executeAct(
         browser = await runSerializedOAuthBoundary(
           session,
           el,
-          fresh,
+          driveResolved ? [el] : fresh,
           action.provider,
           oauthDeadline,
           compactV2Authorization,
           preparedOAuthDispatch,
+          driveResolved,
         );
         const completedPage = browser.completedOAuthPage() ?? undefined;
         rememberOAuthCompletionSourcePage(session, completedPage);
@@ -1328,6 +1357,8 @@ async function guardDriveOauthTarget(sessionId: string, target: string): Promise
   const identity = session?.drive?.identities?.get(target);
   const page = session?.browser.page ?? null;
   if (session === undefined || identity === undefined || page === null) {
+    // No drive identity record: this target came from a fallback observation,
+    // so it is the tools' to resolve, not the drive's to dispatch.
     return { kind: "unsupported" };
   }
   const scope = await resolveIdentityScope(page, target, identity);
@@ -1335,7 +1366,10 @@ async function guardDriveOauthTarget(sessionId: string, target: string): Promise
   if (await clickTargetOccluded(scope, identity.selector)) {
     return { kind: "stale", reason: "occluded" };
   }
-  return { kind: "unsupported" };
+  // Clean and still the control the drive observed: DISPATCH it. An OAuth
+  // handoff is an ordinary action; refusing it here and falling through to the
+  // tools path is what let a drive ref lose its target to the tools' index.
+  return { kind: "ok", combobox: false };
 }
 
 export async function dispatchDriveAct(
@@ -1349,20 +1383,20 @@ export async function dispatchDriveAct(
     action.kind !== "click" &&
     action.kind !== "type" &&
     action.kind !== "select" &&
-    action.kind !== "scroll"
+    action.kind !== "scroll" &&
+    action.kind !== "oauth_login"
   ) {
-    // The tools' oauth_login clicks by coordinate after a visibility wait only,
-    // so a banner over the provider button costs the whole OAuth deadline. Hand
-    // the drive the same refusal its own guard gave, and fall through to the
-    // tools path only when the target is clean.
-    if (action.kind === "oauth_login") return await guardDriveOauthTarget(sessionId, action.target);
     return { kind: "unsupported" };
   }
-  // A drive ref names the identity its own snapshot recorded. A target with no
-  // such record never came from a drive snapshot — a row from a fallback
-  // observation the drive did not capture — so it is the tools' to resolve.
-  // Dispatching it here would fail resolution and report a live control stale.
-  if (
+  // An OAuth handoff is a drive action like any other. The drive guard proves
+  // the control is still the one it observed and refuses an occluded target
+  // BEFORE the OAuth deadline is spent, then the shared executor dispatches it
+  // by that identity — never by the tools' index, which a drive session never
+  // populated. A target with no drive identity record is the tools' to resolve.
+  if (action.kind === "oauth_login") {
+    const guard = await guardDriveOauthTarget(sessionId, action.target);
+    if (guard.kind !== "ok") return guard;
+  } else if (
     action.kind !== "scroll" &&
     sessionForCall(sessionId)?.drive?.identities?.get(action.target) === undefined
   ) {
@@ -1377,7 +1411,17 @@ export async function dispatchDriveAct(
       undefined,
       DRIVE_DISPATCH,
     );
-    return { kind: "ok", combobox: result.combobox === true };
+    // An OAuth act can end on a wall (no live provider session, a 2FA hand-off)
+    // WITHOUT dispatching: the executor returns that as an observation. The
+    // drive must surface it — dropping it here would re-observe the unchanged
+    // page and look like the action did nothing.
+    return {
+      kind: "ok",
+      combobox: result.combobox === true,
+      ...(result.observation.needs_user === undefined
+        ? {}
+        : { needsUser: result.observation.needs_user }),
+    };
   } catch (error) {
     if (error instanceof CompactV2StaleRefError) return { kind: "stale", reason: "stale_ref" };
     if (error instanceof TargetStaleError) return { kind: "stale", reason: "stale" };

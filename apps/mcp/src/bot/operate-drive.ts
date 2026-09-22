@@ -4250,8 +4250,10 @@ export function decideAfterJev(input: {
   boundFingerprint?: string | null;
   sets?: DriveTargetSets;
   questions?: Record<string, JevQuestion>;
-  /** Page notices, used as the reason when NONE_OF_THESE is chosen. */
-  pageNotices?: readonly string[];
+  /** Why the last action never reached the page, if it did not. Named ahead of
+   *  any page description so the reason reports the loop's own dispatch
+   *  failure rather than describing an unchanged page. */
+  dispatchFailure?: string | null;
 }): DriveDecision {
   const threshold = input.threshold ?? DRIVE_CONFIDENCE_THRESHOLD;
   const includePayment = input.cardRef !== undefined;
@@ -4308,8 +4310,12 @@ export function decideAfterJev(input: {
       ? undefined
       : confidenceOf(input.answers.blocked_by_layer);
   const noticeReason = (): string => {
-    const notices = input.pageNotices ?? [];
-    if (notices.length > 0) return notices.join("; ");
+    // The reason is the LOOP's account of why it stopped, never text scraped
+    // from the page. A recorded dispatch failure is named first; otherwise the
+    // statement is deterministic. Page notices stay in the observation, where
+    // the model can read them as evidence.
+    const failure = input.dispatchFailure;
+    if (failure !== undefined && failure !== null && failure.length > 0) return failure;
     return "nothing on the page can advance the goal";
   };
   const decideChosen = (choice: string, confidence: number): DriveDecision => {
@@ -5081,33 +5087,69 @@ async function resolveOauthActTarget(sessionId: string, target: string): Promise
   return session.drive?.identities?.get(target)?.label ?? target;
 }
 
+/** The loop's own, page-independent account of a refused/undispatched act. */
+function dispatchFailureReason(error: unknown): string {
+  return error instanceof TargetStaleError
+    ? "the target was refused before the action could be dispatched"
+    : "the action could not be dispatched";
+}
+
+/** The same account for a refusal the drive executor itself reported. */
+function refusedActReason(reason: string): string {
+  return reason === "occluded"
+    ? "the target was covered before the action could be dispatched"
+    : "the target was refused before the action could be dispatched";
+}
+
+/** A fallback act's result plus, when it never reached the page, the failure. */
+interface SafeDriveActResult {
+  observation: Observation;
+  /** Set when the tools path refused or failed to dispatch the action. A
+   *  dispatch failure is not evidence about the page: the loop must not count
+   *  it toward a dead end, and must name it rather than describing the page. */
+  dispatchFailure?: string;
+}
+
 async function actSafely(
   deps: DriveDependencies,
   sessionId: string,
   action: ProvisionAction,
-): Promise<Observation> {
+): Promise<SafeDriveActResult> {
   const resolved =
     action.kind === "oauth_login"
       ? { ...action, target: await resolveOauthActTarget(sessionId, action.target) }
       : action;
   try {
-    return await deps.act(sessionId, resolved, "compact", "compact", true);
+    return { observation: await deps.act(sessionId, resolved, "compact", "compact", true) };
   } catch (error) {
-    if (error instanceof TargetStaleError) return await deps.observe(sessionId, "compact");
+    if (error instanceof TargetStaleError) {
+      return {
+        observation: await deps.observe(sessionId, "compact"),
+        dispatchFailure: dispatchFailureReason(error),
+      };
+    }
     if (resolved.kind === "select" && "text" in resolved && typeof resolved.text === "string") {
       try {
-        return await deps.act(
-          sessionId,
-          { kind: "type", target: resolved.target, text: resolved.text },
-          "compact",
-          "compact",
-          true,
-        );
-      } catch {
-        return await deps.observe(sessionId, "compact");
+        return {
+          observation: await deps.act(
+            sessionId,
+            { kind: "type", target: resolved.target, text: resolved.text },
+            "compact",
+            "compact",
+            true,
+          ),
+        };
+      } catch (fallbackError) {
+        return {
+          observation: await deps.observe(sessionId, "compact"),
+          dispatchFailure: dispatchFailureReason(fallbackError),
+        };
       }
     }
-    return await deps.observe(sessionId, "compact");
+    return {
+      observation: await deps.observe(sessionId, "compact"),
+      dispatchFailure: dispatchFailureReason(error),
+    };
   }
 }
 
@@ -5492,6 +5534,11 @@ async function driveLoop(input: {
     );
     rememberTriedHere(drive, observation.url, drive.goal, row, label);
   };
+  // The loop's own account of why it stopped: a dispatch refusal first, then a
+  // bounced hand-off, then the deterministic page-independent fallback. Never
+  // page text.
+  const giveUpReason = (fallback: string): string =>
+    drive.lastDispatchFailure ?? drive.lastOauthBounceReason ?? fallback;
   const noteProgress = async (
     fingerprint: string,
     nextFingerprint: string,
@@ -5522,9 +5569,11 @@ async function driveLoop(input: {
         return "continue";
       }
       return finish("no_progress", {
-        reason: cycleReason(
-          observation.url,
-          drive.trajectory.slice(-3).map((step) => step.action),
+        reason: giveUpReason(
+          cycleReason(
+            observation.url,
+            drive.trajectory.slice(-3).map((step) => step.action),
+          ),
         ),
       });
     }
@@ -5536,9 +5585,11 @@ async function driveLoop(input: {
         return "continue";
       }
       return finish("no_progress", {
-        reason: cycleReason(
-          observation.url,
-          drive.trajectory.slice(-3).map((step) => step.action),
+        reason: giveUpReason(
+          cycleReason(
+            observation.url,
+            drive.trajectory.slice(-3).map((step) => step.action),
+          ),
         ),
       });
     }
@@ -5563,7 +5614,9 @@ async function driveLoop(input: {
       if (nextExploreRow(rows, drive.visitedSectionKeys ?? [], observation.url) !== undefined) {
         return "continue";
       }
-      return finish("no_progress");
+      return drive.lastDispatchFailure === undefined || drive.lastDispatchFailure === null
+        ? finish("no_progress")
+        : finish("no_progress", { reason: drive.lastDispatchFailure });
     }
     return "continue";
   };
@@ -5582,7 +5635,7 @@ async function driveLoop(input: {
         return "continue";
       }
       return finish("no_progress", {
-        reason: deadActionReason(drive.exhaustedActionKeys ?? [], observation.url),
+        reason: giveUpReason(deadActionReason(drive.exhaustedActionKeys ?? [], observation.url)),
       });
     }
     return "continue";
@@ -6118,16 +6171,22 @@ async function driveLoop(input: {
         };
         const acted = await actDriveSafely(session, sessionId, typed, dependencies);
         if (acted.kind !== "ok") {
-          observation = await actSafely(dependencies, sessionId, typed);
+          const safe = await actSafely(dependencies, sessionId, typed);
+          drive.lastDispatchFailure = safe.dispatchFailure ?? null;
+          drive.lastOauthBounceReason = null;
+          observation = safe.observation;
         } else {
           const page = session.browser.page;
           if (page !== null) await settleDriveStep(page, acted.combobox);
         }
       } else if (inboxNext === "goto_link" && verification.link !== null) {
-        observation = await actSafely(dependencies, sessionId, {
+        const safe = await actSafely(dependencies, sessionId, {
           kind: "goto",
           url: verification.link,
         });
+        drive.lastDispatchFailure = safe.dispatchFailure ?? null;
+        drive.lastOauthBounceReason = null;
+        observation = safe.observation;
       } else {
         const wall = verification.needs_user;
         return wall !== undefined && wall.wall === "google_session"
@@ -6210,11 +6269,13 @@ async function driveLoop(input: {
           observation.dom ?? "",
           observationNoticeTexts(observation),
         );
+        const bounceReason = oauthReturnedToLoginReason(notice);
+        drive.lastOauthBounceReason = bounceReason;
         if (drive.oauthReturnAttempts >= 2) {
-          return finish("stuck", { reason: oauthReturnedToLoginReason(notice) });
+          return finish("stuck", { reason: bounceReason });
         }
         drive.consumedActionKey = null;
-        drive.history.push(oauthReturnedToLoginReason(notice));
+        drive.history.push(bounceReason);
       }
       return undefined;
     };
@@ -6224,6 +6285,11 @@ async function driveLoop(input: {
       selectMustYield = true;
       typeMustYield = true;
       drive.consumedActionKey = null;
+      // The drive's own executor refused this act before it reached the page.
+      // That is a dispatch failure like any other: name it as the reason the
+      // drive stopped, and never let the refused key consume the dead-end
+      // budget that belongs to controls that were actually dispatched.
+      drive.lastDispatchFailure = refusedActReason(acted.reason);
       drive.staleClickRefs ??= [];
       if (!drive.staleClickRefs.includes(decision.actionKey)) {
         drive.staleClickRefs.push(decision.actionKey);
@@ -6251,34 +6317,54 @@ async function driveLoop(input: {
         ...(clickedBefore === undefined ? {} : { row: clickedBefore }),
         label: historyLine,
       });
-      if (modelChosen) {
-        const dead = markDead(decision.actionKey);
-        if (dead !== "continue") return dead;
-      }
       return "continue";
     }
     let actMs = Date.now() - actStarted;
     let settleMs = 0;
     const page = session.browser.page;
+    // False once the fallback path reports the action never reached the page.
+    // An undispatched act must not count as a tried step, and must never be
+    // evidence that the page itself cannot advance the goal.
+    let actDispatched = true;
     if (acted.kind === "unsupported") {
-      observation = await actSafely(dependencies, sessionId, decision.action);
-      if (observation.needs_user !== undefined) return finishOnWall(observation.needs_user);
-      rows = mergeCompactTable(rows, observation);
-      drive.pendingRevealScan = false;
-      const attached = attachRevealedSecretMarker(observation, rows);
-      observation = attached.observation;
-      rows = attached.rows;
-      actMs = Date.now() - actStarted;
-      if (isKeyGoal(drive.goal) && driveKeyGoalComplete(await driveKeyEvidence(sessionId))) {
-        // The capture flow reveals masked values, so re-snapshot before the
-        // handoff: the returned observation must show what extraction read.
-        const finalSnap = await snapshotOrTimeout(framesIfNeeded());
-        if (finalSnap !== "ok") return finalSnap;
-        return finish("complete");
+      const safe = await actSafely(dependencies, sessionId, decision.action);
+      observation = safe.observation;
+      if (safe.dispatchFailure !== undefined) {
+        actDispatched = false;
+        drive.lastDispatchFailure = safe.dispatchFailure;
+        drive.consumedActionKey = null;
+        drive.staleClickRefs ??= [];
+        if (!drive.staleClickRefs.includes(decision.actionKey)) {
+          drive.staleClickRefs.push(decision.actionKey);
+        }
+        rememberFailedAction(drive, rows, decision.actionKey, observation.url);
+      } else {
+        drive.lastDispatchFailure = null;
+        drive.lastOauthBounceReason = null;
+        if (observation.needs_user !== undefined) return finishOnWall(observation.needs_user);
+        rows = mergeCompactTable(rows, observation);
+        drive.pendingRevealScan = false;
+        const attached = attachRevealedSecretMarker(observation, rows);
+        observation = attached.observation;
+        rows = attached.rows;
+        actMs = Date.now() - actStarted;
+        if (isKeyGoal(drive.goal) && driveKeyGoalComplete(await driveKeyEvidence(sessionId))) {
+          // The capture flow reveals masked values, so re-snapshot before the
+          // handoff: the returned observation must show what extraction read.
+          const finalSnap = await snapshotOrTimeout(framesIfNeeded());
+          if (finalSnap !== "ok") return finalSnap;
+          return finish("complete");
+        }
+        const bounced = finishIfOauthBounced();
+        if (bounced !== undefined) return bounced;
       }
-      const bounced = finishIfOauthBounced();
-      if (bounced !== undefined) return bounced;
     } else {
+      drive.lastDispatchFailure = null;
+      drive.lastOauthBounceReason = null;
+      // A drive-dispatched OAuth act can end on a wall without any page change
+      // (no live provider session, a 2FA hand-off). Surface it instead of
+      // re-observing an unchanged page and calling the step a no-op.
+      if (acted.needsUser !== undefined) return finishOnWall(acted.needsUser);
       if (page !== null) {
         settleMs = await settleDriveStep(page, acted.combobox);
         const afterEpoch = await documentEpochOf(page);
@@ -6376,7 +6462,7 @@ async function driveLoop(input: {
         snapshot_wall_ms: snap.snapshotWallMs,
       };
     }
-    if (decision.action.kind === "type") {
+    if (actDispatched && decision.action.kind === "type") {
       const intended = decision.action.text ?? "";
       const typedRow = findRow(rows, decision.actionKey, observation.url);
       const shown = typedRow === undefined ? undefined : rowCurrentValue(typedRow);
@@ -6410,7 +6496,10 @@ async function driveLoop(input: {
         }
       }
     }
-    if (decision.action.kind === "click" || decision.action.kind === "oauth_login") {
+    if (
+      actDispatched &&
+      (decision.action.kind === "click" || decision.action.kind === "oauth_login")
+    ) {
       const clicked = clickedBefore ?? findRow(rows, decision.actionKey, urlBeforeClick);
       if (clicked !== undefined && shouldRecordVisit(clicked, urlBeforeClick)) {
         drive.visitedSectionKeys ??= [];
@@ -6436,7 +6525,7 @@ async function driveLoop(input: {
       ...takeActProfile(drive),
     });
     drive.history.push(historyLine);
-    if (decision.action.kind === "type" || decision.action.kind === "select") {
+    if (actDispatched && (decision.action.kind === "type" || decision.action.kind === "select")) {
       const completionEpoch =
         acted.kind === "unsupported"
           ? session.browser.page === null
@@ -6462,7 +6551,8 @@ async function driveLoop(input: {
       afterUrl: observation.url,
       action: historyLine,
       step: drive.trajectory.length,
-      executed: true,
+      executed: actDispatched,
+      ...(actDispatched ? {} : { notExecutedReason: "refused" as const }),
       ...(oauthBouncedThisAction ? { bounced: true } : {}),
       beforeFingerprint: fingerprint,
       afterFingerprint: nextFingerprint,
@@ -6480,6 +6570,10 @@ async function driveLoop(input: {
       fingerprint_after: nextFingerprint,
       ...(driveTraceEnabled() ? { native_selects_after: await nativeSelectSnapshot(session) } : {}),
     });
+    // A hand-off that came back to its start page owns its own reason, but it
+    // still dispatched and changed the page: its bookkeeping (stale counters,
+    // fingerprints, cycle records) must run like any other dispatched act. The
+    // reason selection above names the bounce instead of the cycle.
     return await noteProgress(
       fingerprint,
       nextFingerprint,
@@ -6691,10 +6785,13 @@ async function driveLoop(input: {
         confidence: 1,
       });
       if (applied !== "continue") return applied;
-      observation = await actSafely(dependencies, sessionId, {
+      const safe = await actSafely(dependencies, sessionId, {
         kind: "goto",
         url: session.startUrl,
       });
+      drive.lastDispatchFailure = safe.dispatchFailure ?? null;
+      drive.lastOauthBounceReason = null;
+      observation = safe.observation;
       if (observation.needs_user !== undefined) return finishOnWall(observation.needs_user);
       const restarted = await snapshotOrTimeout(framesIfNeeded());
       if (restarted !== "ok") return restarted;
@@ -7009,7 +7106,13 @@ async function driveLoop(input: {
     if (!terminalOnly && (drive.exhaustedActionKeys ?? []).length > 0 && actionable.length === 0) {
       if (nextExploreRow(rows, drive.visitedSectionKeys ?? [], pageUrl) === undefined) {
         return finish("no_progress", {
-          reason: deadActionReason(drive.exhaustedActionKeys ?? [], observation.url),
+          // A refused/undispatched act or a bounced hand-off is the loop's own
+          // account of why nothing advanced. Name it ahead of the
+          // unchanged-page description.
+          reason:
+            drive.lastDispatchFailure ??
+            drive.lastOauthBounceReason ??
+            deadActionReason(drive.exhaustedActionKeys ?? [], observation.url),
         });
       }
     }
@@ -7084,7 +7187,9 @@ async function driveLoop(input: {
         boundFingerprint: drive.boundFingerprint,
         sets,
         questions,
-        pageNotices: observationNoticeTexts(observation),
+        ...(drive.lastDispatchFailure === undefined
+          ? {}
+          : { dispatchFailure: drive.lastDispatchFailure }),
         ...(drive.facts.card_ref === undefined ? {} : { cardRef: drive.facts.card_ref }),
       });
     const jev = await ask(state, questions);

@@ -2877,3 +2877,78 @@ describe("safeBlockersV2 modal dialog", () => {
     expect(safeBlockersV2(root)).toEqual([]);
   });
 });
+
+describe("safeBlockersV2 validation sourcing", () => {
+  const el = (id: string, overrides: Partial<BrowserUseNode>): BrowserUseNode => ({
+    id,
+    nodeType: 1,
+    nodeName: "DIV",
+    value: "",
+    attributes: {},
+    visible: true,
+    snapshot: true,
+    bounds: null,
+    cursor: null,
+    scrollable: false,
+    showScroll: false,
+    scrollText: "",
+    clickListener: false,
+    axRole: null,
+    axProperties: [],
+    axChildIds: null,
+    shadowType: null,
+    hiddenElements: [],
+    hiddenContent: false,
+    children: [],
+    contentDocument: null,
+    ...overrides,
+  });
+  const page = (children: BrowserUseNode[]): BrowserUseNode =>
+    el("root", { nodeType: 9, nodeName: "#document", children });
+  const text = (id: string, value: string): BrowserUseNode =>
+    el(id, { nodeType: 3, nodeName: "#text", value, visible: false });
+
+  it("keeps passive page copy out of validation blockers", () => {
+    const root = page([
+      el("testimonial", {
+        attributes: { role: "status", class: "customer-feedback" },
+        children: [text("testimonial-text", "We must build things that never fail. Cannot wait.")],
+      }),
+      el("payload", {
+        attributes: { role: "status" },
+        children: [text("payload-text", '{"error":"not found","note":"please provide more"}')],
+      }),
+    ]);
+    expect(safeBlockersV2(root)).toEqual([]);
+  });
+
+  it("still reports an assertive error and a control-bound message", () => {
+    const assertive = page([
+      el("settled", {
+        attributes: { role: "alert", id: "error" },
+        children: [text("settled-text", "The External Account was not found")],
+      }),
+    ]);
+    expect(safeBlockersV2(assertive)).toEqual([
+      { kind: "validation", text: "The External Account was not found" },
+    ]);
+
+    const bound = page([
+      el("email", {
+        nodeName: "INPUT",
+        attributes: {
+          type: "email",
+          "aria-invalid": "true",
+          "aria-errormessage": "email-error",
+        },
+      }),
+      el("email-error", {
+        attributes: { id: "email-error" },
+        children: [text("email-error-text", "Please enter a valid work email address.")],
+      }),
+    ]);
+    expect(safeBlockersV2(bound)).toEqual([
+      { kind: "validation", text: "Please enter a valid work email address." },
+    ]);
+  });
+});

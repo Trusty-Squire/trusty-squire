@@ -29,7 +29,7 @@ import {
 } from "../operate-drive.js";
 import { finishProvisionSession, startHarnessProvisionSession } from "../provision-session.js";
 import { extractCredentials } from "../capture/capture.js";
-import type { Observation, ProvisionAction } from "../provision-session.js";
+import type { ProvisionAction } from "../provision-session.js";
 import {
   act,
   observe,
@@ -606,20 +606,12 @@ describe("operate_drive real-browser fixture", () => {
     try {
       const dependencies = deps(async (_api, _state, questions) => jevFromQuestions(questions));
       const actions: ProvisionAction[] = [];
-      dependencies.act = async (sessionId, action) => {
+      // OAuth is the drive's own action now: it goes through the drive
+      // executor, not the tools fallback. Record it and run the real dispatch
+      // so the provider wall is produced by the real session gate.
+      dependencies.driveAct = async (sessionId, action) => {
         actions.push(action);
-        return {
-          session_id: sessionId,
-          format: "browser-use-control-query",
-          stage: "auth",
-          url: "https://google-wall.test/",
-          safe_table: [],
-          needs_user: {
-            wall: "google_session",
-            message: "No live Google session — reconnect with `connect` and retry.",
-            resume: "connect",
-          },
-        } as Observation;
+        return await dispatchDriveAct(sessionId, action);
       };
       const result = await runOperateDrive(
         { session_id: started.session_id, goal: "sign in with Google" },
@@ -650,23 +642,9 @@ describe("operate_drive real-browser fixture", () => {
     try {
       const dependencies = deps(async (_api, _state, questions) => jevFromQuestions(questions));
       const actions: ProvisionAction[] = [];
-      dependencies.act = async (sessionId, action) => {
+      dependencies.driveAct = async (sessionId, action) => {
         actions.push(action);
-        if (action.kind === "oauth_login") {
-          return {
-            session_id: sessionId,
-            format: "browser-use-control-query",
-            stage: "auth",
-            url: "https://oauth-links.test/",
-            safe_table: [],
-            needs_user: {
-              wall: "google_session",
-              message: "No live Google session — reconnect with `connect` and retry.",
-              resume: "connect",
-            },
-          } as Observation;
-        }
-        throw new Error("oauth_login: unexpected non-oauth act");
+        return await dispatchDriveAct(sessionId, action);
       };
       const result = await runOperateDrive(
         { session_id: started.session_id, goal: "create an account" },
@@ -726,6 +704,13 @@ describe("operate_drive real-browser fixture", () => {
     const { context, started } = await openFixture(html, "oauth-links-failed.test");
     try {
       const dependencies = deps(async (_api, _state, questions) => jevFromQuestions(questions));
+      // Force the drive executor to hand the OAuth act back, so the tools
+      // fallback runs and refuses. The refusal must be recorded as a failed
+      // step, never confused with the unchanged page.
+      dependencies.driveAct = async (sessionId, action) =>
+        action.kind === "oauth_login"
+          ? { kind: "unsupported" as const }
+          : await dispatchDriveAct(sessionId, action);
       dependencies.act = async () => {
         throw new Error(
           'oauth_login: no element matched target "@e:f0d2". Re-observe and use the OAuth button ref.',
@@ -4127,14 +4112,14 @@ describe("operate_drive real-browser fixture", () => {
     );
     try {
       const dependencies = deps(async (_api, _state, questions) => jevFromQuestions(questions));
-      dependencies.act = async (sessionId, action) => {
+      dependencies.driveAct = async (sessionId, action) => {
         if (action.kind === "oauth_login") {
           await page.evaluate(() => {
             history.replaceState({}, "", `/login?state=${Math.random().toString(36).slice(2)}`);
           });
-          return observe(sessionId);
+          return { kind: "ok", combobox: false } as const;
         }
-        return act(sessionId, action);
+        return await dispatchDriveAct(sessionId, action);
       };
       const result = await runOperateDrive(
         {
@@ -4148,7 +4133,9 @@ describe("operate_drive real-browser fixture", () => {
       );
       const oauthSteps = result.trajectory.filter((step) => step.action === "oauth_login");
       expect(oauthSteps.length).toBeLessThanOrEqual(2);
-      expect(result.status).toBe("stuck");
+      // A bounce dispatched and changed the page, so a cycle finish is
+      // legitimate; the reason must still name the bounce, not the cycle.
+      expect(result.status).toBe("no_progress");
       expect(result.reason ?? "").toMatch(/sign-in hand-off returned to the login page/);
     } finally {
       await finishProvisionSession(started.session_id);
@@ -4687,6 +4674,53 @@ describe("operate_drive feedback loop", () => {
     }
   }, 30_000);
 
+  it("never counts the drive's own refusal toward a dead end, and names the refusal", async () => {
+    const html = `<!doctype html><meta charset="utf-8"><title>Workspace</title>
+<main><h1>Workspace</h1><button id="advance">Continue</button></main>`;
+    const { context, started } = await openFixture(html, "refused-act.test", "drive");
+    try {
+      const dependencies = deps(async (_api, _state, questions) => {
+        const result = jevFromQuestions(questions);
+        // Once the control is withdrawn after the refusal, answer NONE_OF_THESE
+        // so the drive reports why it stopped instead of inventing a DONE.
+        const clickKeys = Object.keys(choiceCriteria(questions.CLICK_target));
+        const operation = questions.operation;
+        if (
+          clickKeys.length === 0 &&
+          operation?.type === "choice" &&
+          operation.criteria.NONE_OF_THESE !== undefined
+        ) {
+          result.result.answers.operation = {
+            choice: "NONE_OF_THESE",
+            confidence: 0.93,
+            probabilities: peaked(Object.keys(operation.criteria), "NONE_OF_THESE"),
+          };
+        }
+        return result;
+      });
+      // The drive's OWN executor refuses every act before it reaches the page.
+      dependencies.driveAct = async () => ({ kind: "stale", reason: "occluded" });
+      const handoff = await runOperateDrive(
+        { session_id: started.session_id, goal: "open the workspace", max_steps: 6 },
+        api(),
+        undefined,
+        dependencies,
+      );
+      // The refusal is recorded as a not-executed step, never as progress.
+      const trail = sessionForCall(started.session_id)?.drive?.outcomeTrail ?? [];
+      expect(trail.some((entry) => entry.outcome === "not_executed:covered")).toBe(true);
+      // The stop reason is the loop's own dispatch failure, not a description
+      // of the unchanged page and not an exhausted-action tally.
+      expect(handoff.reason ?? "").toMatch(/covered before|refused before/);
+      expect(handoff.reason ?? "").not.toMatch(
+        /nothing on the page can advance the goal|no change after/,
+      );
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
   it("records an OAuth hand-off that returns to the same path as bounced_back", async () => {
     const html = `<!doctype html><meta charset="utf-8"><title>Sign in</title>
 <main><h1>Sign in</h1><a id="google" href="/oauth/google">Continue with Google</a></main>`;
@@ -4696,17 +4730,16 @@ describe("operate_drive feedback loop", () => {
       "standard",
       "/login",
     );
-    const seen: Array<Record<string, unknown>> = [];
     let bounce = 0;
     try {
-      const dependencies = deps(async (_api, state, questions) => {
-        seen.push(state as Record<string, unknown>);
-        return jevFromQuestions(questions);
-      });
-      dependencies.act = async (sessionId) => {
-        bounce += 1;
-        await page.goto(`https://oauth-bounce-trail.test/login?state=s${bounce}`);
-        return await observe(sessionId, "compact");
+      const dependencies = deps(async (_api, _state, questions) => jevFromQuestions(questions));
+      dependencies.driveAct = async (sessionId, action) => {
+        if (action.kind === "oauth_login") {
+          bounce += 1;
+          await page.goto(`https://oauth-bounce-trail.test/login?state=s${bounce}`);
+          return { kind: "ok", combobox: false } as const;
+        }
+        return await dispatchDriveAct(sessionId, action);
       };
       const handoff = await runOperateDrive(
         { session_id: started.session_id, goal: "sign in", max_steps: 8 },
@@ -4714,17 +4747,12 @@ describe("operate_drive feedback loop", () => {
         undefined,
         dependencies,
       );
-      expect(handoff.status).toBe("stuck");
+      expect(handoff.status).toBe("no_progress");
       expect(handoff.reason).toMatch(/hand-off returned to the login page/i);
-      expect(bounce).toBe(2);
-      const outcomes = seen.flatMap((state) =>
-        (state.trail as Array<{ outcome: string; page: string }>).map((entry) => entry.outcome),
-      );
-      expect(outcomes).toContain("bounced_back");
-      const pages = seen.flatMap((state) =>
-        (state.trail as Array<{ page: string }>).map((entry) => entry.page),
-      );
-      expect(pages.every((page) => !page.includes("state="))).toBe(true);
+      expect(bounce).toBe(1);
+      const trail = sessionForCall(started.session_id)?.drive?.outcomeTrail ?? [];
+      expect(trail.map((entry) => entry.outcome)).toContain("bounced_back");
+      expect(trail.every((entry) => !entry.page.includes("state="))).toBe(true);
     } finally {
       await finishProvisionSession(started.session_id);
       await context.close();
