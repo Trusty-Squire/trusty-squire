@@ -4736,9 +4736,6 @@ export function paymentArgs(
 
 const DRIVE_REF_RE = /^@e:f\d+d\d+$/;
 
-/** Consecutive pre-act re-decides one decision may cost before the drive stops. */
-const DRIVE_PRE_ACT_REDECIDE_LIMIT = 2;
-
 /** Translate drive snapshot refs into canonical provision refs.
  *
  * The two extractors name the same control differently — the canonical one
@@ -4927,8 +4924,7 @@ async function captureDriveSession(
   });
   // A fallback return still has to leave the epoch describing the document the
   // loop just accounted for. Left pointing at the previous one it reads as
-  // "changed" on every later step, and the pre-act bound then ends the drive
-  // over an act it never dispatched.
+  // "changed" on every later step, so the loop re-decides without ever acting.
   const fellBack = async (
     observation: Observation,
     rows: WireRow[],
@@ -5968,21 +5964,18 @@ async function driveLoop(input: {
         liveControls.length > 0 &&
         liveControls !== drive.snapshotControlDigest;
       if (documentChanged || controlsChanged) {
-        // The re-decide bound below is what stops a page that never settles;
-        // holding the consumed key as well would let the stall detector end the
-        // drive over an action it never dispatched.
+        // Re-deciding never ends the drive, and it never counts as a no-progress
+        // step: an action that was never dispatched cannot be progress, so its
+        // absence cannot be the reason to stop either. A page that never
+        // settles spends its steps here and finishes on the step or call
+        // budget, which is an honest outcome for it. Holding the consumed key
+        // as well would let the stall detector end the drive over an action it
+        // never dispatched, so it is cleared before re-snapshotting.
         drive.consumedActionKey = null;
-        drive.preActRedecides = (drive.preActRedecides ?? 0) + 1;
-        if (drive.preActRedecides > DRIVE_PRE_ACT_REDECIDE_LIMIT) {
-          return finish("no_progress", {
-            reason: "the page kept changing between the snapshot and the act",
-          });
-        }
         const snap = await snapshotOrTimeout(framesIfNeeded());
         if (snap !== "ok") return snap;
         return "continue";
       }
-      drive.preActRedecides = 0;
     }
     const liveRow = findRow(rows, decision.actionKey, observation.url);
     if (
