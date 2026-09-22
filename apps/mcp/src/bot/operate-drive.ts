@@ -186,6 +186,9 @@ export function inboxPollMissReason(search: {
 export const DRIVE_PAY_SUBMIT_WAITS = 3;
 export const DRIVE_STALE_LIMIT = 3;
 export const DRIVE_EXHAUSTED_ACTION_LIMIT = 5;
+/** How many times the same control may be re-offered after a press refused
+ *  for occlusion before the drive gives up on the refusal itself. */
+export const DRIVE_OCCLUSION_RETRY_LIMIT = 3;
 export const DRIVE_IDENTICAL_RESNAP_MS = 200;
 export const DRIVE_FIXED_DONE = "DONE";
 export const DRIVE_FIXED_STUCK = "BLOCKED";
@@ -455,6 +458,8 @@ export function emptyDriveState(goal: string, facts: Record<string, string>): Se
     submittedThisDrive: false,
     preexistingRestarted: false,
     pendingRevealScan: false,
+    pendingAbsentBinding: null,
+    occludedRefusals: null,
     oauthReturnAttempts: 0,
     checkboxChallengePressedKeys: [],
     outcomeTrail: [],
@@ -773,7 +778,7 @@ export function isConsentRow(row: WireRow): boolean {
 }
 
 const LAYER_CONTROL_LABEL =
-  /^(?:close|dismiss|accept(?:\s+(?:all|cookies?))?|allow(?:\s+(?:all|cookies?))?|got it|ok|copy|done|reject(?:\s+all)?|decline|necessary only)(?:[.…])?$/;
+  /^(?:close|dismiss|skip(?:\s+for\s+now)?|not now|maybe later|no thanks|accept(?:\s+(?:all|cookies?))?|allow(?:\s+(?:all|cookies?))?|got it|ok|copy|done|reject(?:\s+all)?|decline|necessary only)(?:[.…])?$/;
 
 export function pageOcclusionLayer(rows: readonly WireRow[]): "dialog" | "overlay" | undefined {
   if (rows.some((row) => rowOccluder(row) === "dialog")) return "dialog";
@@ -1384,6 +1389,14 @@ export function goalSeeksKey(goal: string): boolean {
   return /api\s*key|access\s*token|credential/.test(goal.toLowerCase());
 }
 
+/** A goal that explicitly asks to search, filter, sort, or look something up.
+ *  Only such a goal may feed a value into a control that narrows the page's
+ *  own listed content. */
+export function goalWantsSearch(goal: string | undefined): boolean {
+  if (goal === undefined || goal.length === 0) return false;
+  return /\b(?:search|find|filter|sort|look\s*up|query)\b/.test(goal.toLowerCase());
+}
+
 export function isListFilterRow(row: WireRow): boolean {
   const label = readableLabel(row).toLowerCase();
   const chooser =
@@ -1707,6 +1720,9 @@ export function keyGoalSecretAdvance(
   const pageUrl = options.pageUrl ?? "";
   const eligible = (row: WireRow): boolean =>
     !isDisabledRow(row) &&
+    // A control the snapshot marks as covered is not actionable; the layer
+    // that covers it is the next thing to act on (rule 3).
+    rowOccluder(row) === undefined &&
     !skipped.has(row[0]) &&
     !isOffscreenRow(row) &&
     !tried.has(pageUrl.length === 0 ? "" : stableControlKey(row, pageUrl));
@@ -2508,6 +2524,20 @@ export function allowsGoalValueAssignment(row: WireRow): boolean {
   return isSearchRow(row) && !isIdentityOrPaymentRow(row);
 }
 
+/** A control that narrows the page's own listed content: a search or filter
+ *  field beside a list of entries can only remove options, never add them.
+ *  A site-search box that navigates to a results page (no list on this page)
+ *  is not one of these. */
+export function narrowsListedContent(
+  row: WireRow,
+  rows: readonly WireRow[],
+  pageUrl: string,
+): boolean {
+  if (isListFilterRow(row)) return true;
+  if (!isSearchRow(row)) return false;
+  return listedItemRows(rows, pageUrl).length > 0;
+}
+
 const FIELD_ALIASES: Record<string, readonly string[]> = {
   email: ["email", "user_email", "login", "username"],
   first_name: ["first_name", "firstname", "first", "given_name"],
@@ -3051,6 +3081,7 @@ export function typeableCandidates(
   includePayment: boolean,
   filledRefs: readonly string[] = [],
   pageUrl: string = "",
+  goal?: string,
 ): DriveCandidate[] {
   const typed = fillableCandidates(rows, facts, includePayment, filledRefs, pageUrl).filter(
     (candidate) => !isSelectRow(candidate.row),
@@ -3066,6 +3097,10 @@ export function typeableCandidates(
     if (isOffscreenRow(row) && !allowOffscreen) continue;
     if (isPaymentRow(row) || isCvvRow(row)) continue;
     if (!isOtpRow(row) && !isSearchRow(row)) continue;
+    // A search/filter field beside a list can only remove options from the
+    // page. It is not offered for a typed value unless the goal asks for a
+    // search; the loop must prefer the listed destinations instead.
+    if (narrowsListedContent(row, rows, pageUrl) && !goalWantsSearch(goal)) continue;
     const role = ROLE_LETTERS[row[1]] ?? row[1];
     const seed = `${row[2] ?? readableLabel(row)}_${role}`;
     const slug = uniqueCriteriaSlug(seed, used);
@@ -3078,7 +3113,10 @@ export function typeableCandidates(
       row,
     });
   }
-  return [...typed, ...extra];
+  return [...typed, ...extra].filter(
+    (candidate) =>
+      !(narrowsListedContent(candidate.row, rows, pageUrl) && !goalWantsSearch(goal)),
+  );
 }
 
 export function selectCandidates(
@@ -3810,7 +3848,7 @@ export function driveTargetSets(
   };
   const typeText = takeCapped(
     rankDriveCandidates(
-      typeableCandidates(rows, facts, includePayment, filledRefs, pageUrl).filter(
+      typeableCandidates(rows, facts, includePayment, filledRefs, pageUrl, aim.goal).filter(
         (candidate) => !skipped.has(candidate.ref) && keepRow(candidate.row),
       ),
       aimInput,
@@ -4468,6 +4506,19 @@ export function decideAfterJev(input: {
       };
     }
     if (choice === "TYPE_TEXT") {
+      // A value typed into a control that narrows the page's own listed
+      // content can only delete options. Never assign one unless the goal
+      // asks for a search; re-plan toward the listed destinations instead.
+      if (
+        narrowsListedContent(row, input.rows, input.pageUrl ?? "") &&
+        !goalWantsSearch(input.goal)
+      ) {
+        return {
+          kind: "replan",
+          confidence,
+          reason: "a value cannot be typed into a control that narrows the page's own content",
+        };
+      }
       // An explicitly supplied matching fact wins over the inbox path: a
       // resumed drive carrying the OTP must type it, not re-read the inbox
       // (which returns the same needs_value handoff when Gmail lags).
@@ -5686,6 +5737,9 @@ async function driveLoop(input: {
     afterText?: string;
     row?: WireRow;
     label?: string;
+    /** Default true. A refused press that never reached the page is not
+     *  evidence about the control, so it must not be recorded as tried. */
+    markTried?: boolean;
   }): string => {
     const outcome = classifyDriveOutcome({
       beforeUrl: input.beforeUrl,
@@ -5708,13 +5762,15 @@ async function driveLoop(input: {
       { step: input.step, page: afterPath, action: input.action, outcome },
       afterPath,
     );
-    rememberTriedHere(
-      drive,
-      input.afterUrl,
-      drive.goal,
-      input.row,
-      input.label ?? (input.row === undefined ? input.action : readableLabel(input.row)),
-    );
+    if (input.markTried !== false) {
+      rememberTriedHere(
+        drive,
+        input.afterUrl,
+        drive.goal,
+        input.row,
+        input.label ?? (input.row === undefined ? input.action : readableLabel(input.row)),
+      );
+    }
     return outcome;
   };
 
@@ -6003,6 +6059,13 @@ async function driveLoop(input: {
         // as well would let the stall detector end the drive over an action it
         // never dispatched, so it is cleared before re-snapshotting.
         drive.consumedActionKey = null;
+        // Remember the chosen control by snapshot binding. If the fresh page
+        // no longer offers it and the drive's own typed input narrowed it
+        // away, the next iteration clears that input and re-offers it. A
+        // document change is a navigation, where the rule does not apply.
+        if (!documentChanged && targetBinding.length > 0) {
+          drive.pendingAbsentBinding = targetBinding;
+        }
         const snap = await snapshotOrTimeout(framesIfNeeded());
         if (snap !== "ok") return snap;
         return "continue";
@@ -6314,11 +6377,30 @@ async function driveLoop(input: {
       // drive stopped, and never let the refused key consume the dead-end
       // budget that belongs to controls that were actually dispatched.
       drive.lastDispatchFailure = refusedActReason(acted.reason);
-      drive.staleClickRefs ??= [];
-      if (!drive.staleClickRefs.includes(decision.actionKey)) {
-        drive.staleClickRefs.push(decision.actionKey);
+      // Rule 3: a press refused because the target was covered is not
+      // evidence about the control. It must never be marked spent, and the
+      // covering layer's own dismiss control is offered next before the same
+      // control is re-offered. The retry is bounded so a page that never
+      // stops covering it ends on the refusal instead of spinning.
+      const occluded = acted.reason === "occluded";
+      if (occluded) {
+        const refusalRow =
+          clickedBefore ?? findRow(rows, decision.actionKey, observation.url);
+        const refusalKey =
+          refusalRow === undefined
+            ? decision.actionKey
+            : decisionTargetBinding(refusalRow, observation.url);
+        const prior = drive.occludedRefusals;
+        const count = prior?.key === refusalKey ? prior.count + 1 : 1;
+        drive.occludedRefusals = { key: refusalKey, count };
+      } else {
+        drive.occludedRefusals = null;
+        drive.staleClickRefs ??= [];
+        if (!drive.staleClickRefs.includes(decision.actionKey)) {
+          drive.staleClickRefs.push(decision.actionKey);
+        }
+        rememberFailedAction(drive, rows, decision.actionKey, observation.url);
       }
-      rememberFailedAction(drive, rows, decision.actionKey, observation.url);
       const staleSnap = await snapshotOrTimeout(framesIfNeeded());
       if (staleSnap !== "ok") return staleSnap;
       noteOutcome({
@@ -6340,7 +6422,14 @@ async function driveLoop(input: {
         ),
         ...(clickedBefore === undefined ? {} : { row: clickedBefore }),
         label: historyLine,
+        ...(occluded ? { markTried: false } : {}),
       });
+      if (
+        occluded &&
+        (drive.occludedRefusals?.count ?? 0) >= DRIVE_OCCLUSION_RETRY_LIMIT
+      ) {
+        return finish("stuck", { reason: drive.lastDispatchFailure ?? undefined });
+      }
       return "continue";
     }
     let actMs = Date.now() - actStarted;
@@ -6365,6 +6454,7 @@ async function driveLoop(input: {
       } else {
         drive.lastDispatchFailure = null;
         drive.lastOauthBounceReason = null;
+        drive.occludedRefusals = null;
         if (observation.needs_user !== undefined) return finishOnWall(observation.needs_user);
         rows = mergeCompactTable(rows, observation);
         drive.pendingRevealScan = false;
@@ -6385,6 +6475,7 @@ async function driveLoop(input: {
     } else {
       drive.lastDispatchFailure = null;
       drive.lastOauthBounceReason = null;
+      drive.occludedRefusals = null;
       // A drive-dispatched OAuth act can end on a wall without any page change
       // (no live provider session, a 2FA hand-off). Surface it instead of
       // re-observing an unchanged page and calling the step a no-op.
@@ -6604,6 +6695,39 @@ async function driveLoop(input: {
       decision.actionKey,
       modelChosen ? beforeKey : undefined,
     );
+  };
+
+  // Rule 1: a control the loop chose that left the page is a state to undo,
+  // not a page to abandon. Clear the input the drive itself typed that
+  // narrowed the control away, then the same control is offered again.
+  const recoverUndeliveredChoice = async (): Promise<DriveHandoff | "continue"> => {
+    const pageUrl = observation.url;
+    const binding = drive.pendingAbsentBinding ?? null;
+    const absent =
+      binding !== null && !rows.some((row) => rowMatchesDecisionBinding(row, binding, pageUrl));
+    if (!absent) {
+      drive.pendingAbsentBinding = null;
+      return "continue";
+    }
+    const narrowing = rows.find(
+      (row) =>
+        narrowsListedContent(row, rows, pageUrl) &&
+        (rowCurrentValue(row) ?? "").length > 0 &&
+        drive.filledRefs.includes(row[0]),
+    );
+    drive.pendingAbsentBinding = null;
+    if (narrowing === undefined) return "continue";
+    drive.boundFingerprint = driveProgressFingerprint(observation, rows, drive, session);
+    drive.consumedActionKey = null;
+    const applied = await applyDecision({
+      kind: "act",
+      action: { kind: "type", target: narrowing[0], text: "" },
+      actionKey: narrowing[0],
+      confidence: 1,
+    });
+    if (applied !== "continue") return applied;
+    steps += 1;
+    return "continue";
   };
 
   if (args.answer !== undefined) {
@@ -7084,6 +7208,13 @@ async function driveLoop(input: {
         !isOffProductNavRow(row, pageUrl),
     );
     drive.awaitingDecideAfterExplore = false;
+
+    // Rule 1: undo a narrowing input the drive itself typed before the loop
+    // decides anything else, then re-offer the control it removed.
+    if (drive.pendingAbsentBinding !== null && drive.pendingAbsentBinding !== undefined) {
+      const recovered = await recoverUndeliveredChoice();
+      if (recovered !== "continue") return recovered;
+    }
 
     if (drive.jevCalls >= DRIVE_MAX_JEV_CALLS) {
       return finish(
