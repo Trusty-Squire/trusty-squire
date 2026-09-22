@@ -2,7 +2,11 @@
 // bot/__tests__/provision-session.test.ts when extractCredentials moved to
 // bot/capture/capture.ts.
 import { describe, it, expect } from "vitest";
-import { sanitizeExtractedCredentials, classifyVouchflowCredentials } from "../capture.js";
+import {
+  sanitizeExtractedCredentials,
+  classifyVouchflowCredentials,
+  maskedCredentialLabels,
+} from "../capture.js";
 
 // Credential-shaped test fixtures are assembled at runtime from harmless
 // fragments so no complete vendor-prefixed token literal appears in this
@@ -91,5 +95,39 @@ describe("classifyVouchflowCredentials (Vouchflow sandbox/live key classificatio
       live_write_key: "vsk_live_1536ea69786f3d176afde8d0d93cab852070245c",
       live_read_key: "vsk_live_read_3cd42451654aac8db0263d13de871f3741dd513e",
     });
+  });
+});
+
+describe("maskedCredentialLabels (a masked display that no readable value covers)", () => {
+  it("clears a masked copy when the same label has a readable value", () => {
+    expect(
+      maskedCredentialLabels([
+        { label: "API key", isMasked: false },
+        { label: "API key", isMasked: true },
+      ]),
+    ).toEqual([]);
+  });
+
+  it("clears a masked display covered by a readable regex-resolved key", () => {
+    expect(maskedCredentialLabels([{ label: "API key", isMasked: true }], ["api_key"])).toEqual([]);
+  });
+
+  it("keeps a genuinely unread sibling under its own label", () => {
+    expect(
+      maskedCredentialLabels([
+        { label: "Read key", isMasked: false },
+        { label: "Write key", isMasked: true },
+      ]),
+    ).toEqual(["Write key"]);
+  });
+
+  it("keeps an unattributed masked value and dedupes repeated labels", () => {
+    expect(
+      maskedCredentialLabels([
+        { label: null, isMasked: true },
+        { label: "Write key", isMasked: true },
+        { label: "Write key", isMasked: true },
+      ]),
+    ).toEqual(["masked credential", "Write key"]);
   });
 });

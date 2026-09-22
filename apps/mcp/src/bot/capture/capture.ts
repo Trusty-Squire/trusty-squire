@@ -57,6 +57,34 @@ const normLabelKey = (label: string): string =>
     .toLowerCase()
     .slice(0, 40);
 
+/** Labels of masked credential candidates that no readable value covers. A
+ * masked display is only "remaining" when nothing readable was captured under
+ * the same label: a page can show the created key in clear while still carrying
+ * a masked copy — or a mask-shaped decoration — beside the same field name, and
+ * the readable value is what decides completion. A genuinely unread sibling has
+ * its own label (or none), so it stays. */
+export function maskedCredentialLabels(
+  candidates: readonly { label: string | null; isMasked: boolean }[],
+  readableKeys: readonly string[] = [],
+): string[] {
+  const readable = new Set<string>(readableKeys.map((key) => normLabelKey(key)));
+  for (const candidate of candidates) {
+    if (candidate.isMasked || candidate.label === null) continue;
+    readable.add(normLabelKey(candidate.label));
+  }
+  return [
+    ...new Set(
+      candidates
+        .filter((candidate) => candidate.isMasked)
+        .filter(
+          (candidate) =>
+            candidate.label === null || !readable.has(normLabelKey(candidate.label)),
+        )
+        .map((candidate) => candidate.label ?? "masked credential"),
+    ),
+  ];
+}
+
 function firstTokenMatching(haystack: string, re: RegExp): string | null {
   const match = haystack.match(re);
   return match?.[0] ?? null;
@@ -761,14 +789,9 @@ export async function extractCredentials(sessionId: string): Promise<ExtractResu
   const found = Object.keys(sanitized).length > 0;
   // A masked credential-shaped value that survived the reveal pass is an
   // UNREAD key, not success. Name it so a caller never believes every key is
-  // vaulted when a sibling is still hidden.
-  const maskedRemaining = [
-    ...new Set(
-      labeled
-        .filter((candidate) => candidate.isMasked)
-        .map((candidate) => candidate.label ?? "masked credential"),
-    ),
-  ];
+  // vaulted when a sibling is still hidden; a masked value covered by a
+  // readable capture under the same label is not remaining (see the helper).
+  const maskedRemaining = maskedCredentialLabels(labeled, Object.keys(credentials));
   audit(sessionId, "extract", { found, candidate_count: labeled.length });
   return {
     session_id: sessionId,

@@ -5078,6 +5078,37 @@ describe("capture flow key evidence", () => {
     }
   }, 30_000);
 
+  it("completes when the created key is readable and a same-label masked copy stays masked", async () => {
+    const html = `<!doctype html><meta charset="utf-8"><title>API keys</title>
+<main>
+  <h1>API keys</h1>
+  <label>API key <input id="key" readonly value="${DRIVE_FIXTURE_KEY}"></label>
+  <div><span>API key</span><code id="masked">••••••••••••</code></div>
+</main>`;
+    const { context, started } = await openFixture(html, "revealed-key-masked-label.test");
+    try {
+      const dependencies = deps(async (_api, _state, questions) =>
+        jevFromQuestions(questions, true),
+      );
+      const handoff = await runOperateDrive(
+        { session_id: started.session_id, goal: "extract an API key", max_steps: 8 },
+        api(),
+        undefined,
+        dependencies,
+      );
+      // The readable key under this label is the credential; a masked copy
+      // that carries the same label is that credential's masked presentation,
+      // not a sibling that stayed unread. The run must finish complete.
+      expect(handoff.status).toBe("complete");
+      const extracted = await extractCredentials(started.session_id);
+      expect(extracted.credentials.api_key).toBe(DRIVE_FIXTURE_KEY);
+      expect(extracted.masked_remaining ?? []).toEqual([]);
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
   it("does not report success while a masked sibling key stays masked", async () => {
     const html = `<!doctype html><meta charset="utf-8"><title>API keys</title>
 <main>
