@@ -722,7 +722,11 @@ export async function loginWithOAuth(
       observedProductContinuation = null;
     }
     productNavigated = true;
-    resolveProductNavigation();
+    // A reload or route change on the relying party can precede the popup.
+    // Only a provider/return navigation proves the opener owns this flow.
+    if (safeOrigin(frame.url()) !== productOrigin || matchesExpectedReturn(frame.url())) {
+      resolveProductNavigation();
+    }
   };
   const completionPage = (): Page | null => {
     // The creation-attributed popup can finish a reused-session redirect
@@ -957,12 +961,10 @@ export async function loginWithOAuth(
       }
       providerPage = await Promise.race([
         popupPromise,
-        // A same-tab provider redirect is just as conclusive as a popup.
-        // Do not burn two seconds of the OAuth budget waiting for a window
-        // that this service will never open.
         productNavigationPromise.then(() => null),
-        browser.sleep(Math.min(remainingBudgetMs(), 2_000)).then(() => null),
+        browser.sleep(remainingBudgetMs()).then(() => null),
       ]);
+      providerPage ??= popupCapture.page;
     } finally {
       product.off("popup", onPopup);
       product.off("close", onProductClose);

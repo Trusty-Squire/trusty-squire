@@ -64,6 +64,7 @@ export const REAL_BROWSER_FILES = [
   "src/bot/__tests__/mutation-checkpoint-boundaries.test.ts",
   "src/bot/__tests__/new-tab-adoption.test.ts",
   "src/bot/__tests__/oauth-login.test.ts",
+  "src/bot/__tests__/oauth-popup-handoff.test.ts",
   "src/bot/__tests__/observation-dom-correctness.test.ts",
   "src/bot/__tests__/observation-prose.test.ts",
   "src/bot/__tests__/observe-jp-mojibake.test.ts",
