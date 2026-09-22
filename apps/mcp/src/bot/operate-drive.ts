@@ -84,7 +84,13 @@ import {
   resolveDriveApprovalAmount,
 } from "./checkout-total.js";
 import { attemptOperateCaptchaAutoSolve } from "./captcha-solve.js";
-import { RES_POLL_INTERVAL_MS, RES_TIMEOUT_MS } from "./captcha.js";
+import {
+  RES_POLL_INTERVAL_MS,
+  RES_TIMEOUT_MS,
+  hasVisibleCheckboxCaptchaWidget,
+  solveVisibleCaptcha,
+} from "./captcha.js";
+import type { CaptchaSolveResult } from "./captcha.js";
 import { findCredentialTokens, isMaskedDisplay } from "./credential-shape.js";
 import { extractCredentials } from "./capture/capture.js";
 import {
@@ -143,6 +149,13 @@ export const DRIVE_EMPTY_SNAPSHOT_WAITS = 3;
 export const DRIVE_IN_FLIGHT_MS = 8_000;
 /** One re-observe for a static disabled submit, then report — do not keep waiting. */
 export const DRIVE_WIDGET_UNREADY_WAITS = 1;
+/**
+ * Budget for pressing an untargeted checkbox challenge ("Verify you are
+ * human" / "I'm not a robot"). The widget's frame is cross-origin, so the
+ * press is a humanized coordinate click plus a poll for the minted token — the
+ * same Tier-2 solve the provision gate uses.
+ */
+export const DRIVE_CHECKBOX_CHALLENGE_PRESS_TIMEOUT_MS = 30_000;
 export const DRIVE_WIDGET_UNREADY_REASON =
   "submit stayed disabled; a required gate widget did not become ready";
 /** Solver is still working — wait, do not finish stuck. */
@@ -354,12 +367,22 @@ export interface DriveDependencies {
   injectCard: InjectCardFn;
   now?: () => number;
   attemptCaptchaAutoSolve?: (session: Session, page?: Page) => Promise<string>;
+  /** Presses a visible checkbox challenge and waits for it to settle. */
+  pressCheckboxChallenge?: (session: Session, page?: Page) => Promise<CaptchaSolveResult>;
 }
 
 const defaultInjectCard: InjectCardFn = async (session, args, api, options) => {
   const { injectCardOnSession } = await import("../tools/inject-card.js");
   return await injectCardOnSession(session, args, api, options);
 };
+
+const defaultPressCheckboxChallenge: NonNullable<DriveDependencies["pressCheckboxChallenge"]> =
+  async (session, page) =>
+    await solveVisibleCaptcha(
+      session.browser,
+      DRIVE_CHECKBOX_CHALLENGE_PRESS_TIMEOUT_MS,
+      page ?? session.browser.page,
+    );
 
 const defaultDependencies: DriveDependencies = {
   askJev,
@@ -391,6 +414,7 @@ export function resetDriveGoalMemory(drive: SessionDriveState): void {
   drive.preexistingRestarted = false;
   drive.pendingRevealScan = false;
   drive.oauthReturnAttempts = 0;
+  drive.checkboxChallengePressedKeys = [];
   drive.outcomeTrail = [];
   drive.lastTrailPage = null;
   drive.visitedPages = {};
@@ -432,6 +456,7 @@ export function emptyDriveState(goal: string, facts: Record<string, string>): Se
     preexistingRestarted: false,
     pendingRevealScan: false,
     oauthReturnAttempts: 0,
+    checkboxChallengePressedKeys: [],
     outcomeTrail: [],
     lastTrailPage: null,
     visitedPages: {},
@@ -5466,6 +5491,12 @@ async function driveLoop(input: {
       session.browser.page ?? undefined,
     );
 
+  const pressCheckboxChallenge = async (): Promise<CaptchaSolveResult> =>
+    await (dependencies.pressCheckboxChallenge ?? defaultPressCheckboxChallenge)(
+      session,
+      session.browser.page ?? undefined,
+    );
+
   const rememberSubmitResponse = (): void => {
     if (typeof drive.submitBeforeText !== "string") return;
     drive.lastSubmitResponse =
@@ -6837,6 +6868,31 @@ async function driveLoop(input: {
       if (reason === undefined || reason === null || reason.length === 0) return undefined;
       return finish("stuck", { reason });
     };
+    // A checkbox challenge ("Verify you are human" / "I'm not a robot") whose
+    // widget is cross-origin: its frame is skipped from the row map by design,
+    // so the decider has no control to click and hands the challenge back.
+    // Press the widget itself with the humanized pointer and let the next
+    // snapshot say whether it settled, once per page state. A rendered image
+    // grid is excluded — that needs a token, and the widget_unready branch
+    // below owns it.
+    if (
+      rows.length > 0 &&
+      session.browser.page !== null &&
+      !pageHasRenderedCaptcha(rows) &&
+      !(drive.checkboxChallengePressedKeys ?? []).includes(progressKey) &&
+      (await hasVisibleCheckboxCaptchaWidget(session.browser.page))
+    ) {
+      drive.checkboxChallengePressedKeys = [
+        ...(drive.checkboxChallengePressedKeys ?? []),
+        progressKey,
+      ];
+      const pressed = await pressCheckboxChallenge();
+      if (pressed.found && pressed.solved) lastCaptchaOutcome = "ok";
+      const pressedSnap = await snapshotOrTimeout(framesIfNeeded());
+      if (pressedSnap !== "ok") return pressedSnap;
+      steps += 1;
+      continue;
+    }
     if (rows.length > 0 && disableKind === "in_flight") {
       const afterSubmit = typeof drive.submitBeforeText === "string" || captchaConsumed;
       const started = drive.inFlightStartedAt ?? now();
