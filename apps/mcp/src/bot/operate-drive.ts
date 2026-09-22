@@ -60,6 +60,7 @@ import {
 import { DriveEvaluateTimeout, evaluateBound } from "./drive-evaluate.js";
 import type { Frame } from "playwright";
 import type { BrowserController } from "./browser.js";
+import { OAUTH_PROVIDERS } from "./oauth-providers.js";
 import { dispatchDriveAct, type DriveActResult } from "./act/act.js";
 import { frameOriginOf } from "./browser-use-capture.js";
 import {
@@ -379,13 +380,14 @@ const defaultInjectCard: InjectCardFn = async (session, args, api, options) => {
   return await injectCardOnSession(session, args, api, options);
 };
 
-const defaultPressCheckboxChallenge: NonNullable<DriveDependencies["pressCheckboxChallenge"]> =
-  async (session, page) =>
-    await solveVisibleCaptcha(
-      session.browser,
-      DRIVE_CHECKBOX_CHALLENGE_PRESS_TIMEOUT_MS,
-      page ?? session.browser.page,
-    );
+const defaultPressCheckboxChallenge: NonNullable<
+  DriveDependencies["pressCheckboxChallenge"]
+> = async (session, page) =>
+  await solveVisibleCaptcha(
+    session.browser,
+    DRIVE_CHECKBOX_CHALLENGE_PRESS_TIMEOUT_MS,
+    page ?? session.browser.page,
+  );
 
 const defaultDependencies: DriveDependencies = {
   askJev,
@@ -1939,9 +1941,94 @@ export function emailsInText(text: string): string[] {
 /** Goal asks to use an already-signed-in third-party identity. */
 export function goalSeeksThirdPartySignin(goal: string): boolean {
   if (goalExcludesOauth(goal)) return false;
+  if (
+    Object.keys(OAUTH_PROVIDERS).some((provider) =>
+      new RegExp(
+        `\\b(?:sign\\s*up|sign\\s*in|log\\s*in|register|create\\s+(?:an?\\s+)?account)\\b[^.!?]{0,100}\\b(?:with|using)\\s+${provider}\\b`,
+        "i",
+      ).test(goal),
+    )
+  )
+    return true;
   return /continue with (?:google|github)|sign(?:\s*up|\s*in) with (?:google|github)|third[- ]party sign-?in|account already signed in/.test(
     goal.toLowerCase(),
   );
+}
+
+export function namedProviderDecision(
+  goal: string,
+  candidates: readonly DriveCandidate[],
+): Extract<DriveDecision, { kind: "act" }> | undefined {
+  if (!goalSeeksThirdPartySignin(goal)) return undefined;
+  const named = candidates.find((candidate) => {
+    const provider = oauthProviderForRow(candidate.row);
+    return provider !== undefined && new RegExp(`\\b${provider}\\b`, "i").test(goal);
+  });
+  if (named === undefined) return undefined;
+  const provider = oauthProviderForRow(named.row)!;
+  return {
+    kind: "act",
+    action: { kind: "oauth_login", target: named.ref, provider },
+    actionKey: named.ref,
+    confidence: 1,
+    special: "oauth",
+  };
+}
+
+export function signinContinuationDecision(
+  goal: string,
+  candidates: readonly DriveCandidate[],
+): DriveDecision | undefined {
+  if (!goalSeeksThirdPartySignin(goal)) return undefined;
+  if (
+    !Object.keys(OAUTH_PROVIDERS).some((provider) =>
+      new RegExp(`\\b${provider}\\b`, "i").test(goal),
+    )
+  ) {
+    return undefined;
+  }
+  if (!candidates.some((candidate) => /\bsso\b/i.test(readableLabel(candidate.row)))) {
+    return undefined;
+  }
+  const next = candidates.find(
+    (candidate) =>
+      /^(?:continue|next)$/i.test(readableLabel(candidate.row)) &&
+      isSubmitLikeRow(candidate.row) &&
+      !isDisabledRow(candidate.row),
+  );
+  if (next === undefined) return undefined;
+  return {
+    kind: "act",
+    action: { kind: "click", target: next.ref },
+    actionKey: next.ref,
+    confidence: 1,
+  };
+}
+
+export function backOnlyDecision(
+  rows: readonly WireRow[],
+  previousAction?: DriveTrajectoryStep["action"],
+): DriveDecision | undefined {
+  if (previousAction !== "click" && previousAction !== "oauth_login") return undefined;
+  const actionable = rows.filter((row) => isClickableRow(row) || isFillableRow(row));
+  if (actionable.length !== 1) return undefined;
+  const back = actionable[0]!;
+  if (!isClickableRow(back)) return undefined;
+  if (
+    !/^(?:back|return|go back)\s+to\s+(?:log\s*in|sign\s*in|login|signin|sign\s*up|signup|registration)$/i.test(
+      readableLabel(back),
+    )
+  ) {
+    return undefined;
+  }
+  return { kind: "go_back", confidence: 1 };
+}
+
+export function shouldInspectSubmitResponse(
+  action: ProvisionAction,
+  row: WireRow | undefined,
+): row is WireRow {
+  return action.kind === "click" && row !== undefined && isSubmitLikeRow(row);
 }
 
 /**
@@ -3114,8 +3201,7 @@ export function typeableCandidates(
     });
   }
   return [...typed, ...extra].filter(
-    (candidate) =>
-      !(narrowsListedContent(candidate.row, rows, pageUrl) && !goalWantsSearch(goal)),
+    (candidate) => !(narrowsListedContent(candidate.row, rows, pageUrl) && !goalWantsSearch(goal)),
   );
 }
 
@@ -4345,6 +4431,18 @@ export function decideAfterJev(input: {
       input.pageOptions ?? new Map(),
       sets,
     );
+  const preferredProvider = namedProviderDecision(input.goal, sets.CLICK);
+  if (
+    preferredProvider !== undefined &&
+    !(
+      input.boundFingerprint === input.fingerprint &&
+      input.consumedActionKey === preferredProvider.actionKey
+    )
+  ) {
+    return preferredProvider;
+  }
+  const continuation = signinContinuationDecision(input.goal, sets.CLICK);
+  if (continuation !== undefined) return continuation;
   const operationQuestion = questions.operation;
   const operationCriteriaMap =
     operationQuestion?.type === "choice"
@@ -6367,6 +6465,19 @@ async function driveLoop(input: {
       return undefined;
     };
     const acted = await actDriveSafely(session, sessionId, decision.action, dependencies);
+    if (decision.action.kind === "oauth_login") {
+      appendDriveTrace(session, {
+        at: "oauth_dispatch",
+        step: drive.trajectory.length,
+        dispatch: acted.kind,
+        ...(acted.kind === "stale" ? { reason: acted.reason } : {}),
+        ...(acted.kind === "ok" && acted.oauth !== undefined ? { oauth: acted.oauth } : {}),
+        ...(acted.kind === "ok" && acted.needsUser !== undefined
+          ? { needs_user: acted.needsUser }
+          : {}),
+        url_after: session.browser.currentUrl(),
+      });
+    }
     if (acted.kind === "stale") {
       comboboxMustYield = true;
       selectMustYield = true;
@@ -6384,8 +6495,7 @@ async function driveLoop(input: {
       // stops covering it ends on the refusal instead of spinning.
       const occluded = acted.reason === "occluded";
       if (occluded) {
-        const refusalRow =
-          clickedBefore ?? findRow(rows, decision.actionKey, observation.url);
+        const refusalRow = clickedBefore ?? findRow(rows, decision.actionKey, observation.url);
         const refusalKey =
           refusalRow === undefined
             ? decision.actionKey
@@ -6424,10 +6534,7 @@ async function driveLoop(input: {
         label: historyLine,
         ...(occluded ? { markTried: false } : {}),
       });
-      if (
-        occluded &&
-        (drive.occludedRefusals?.count ?? 0) >= DRIVE_OCCLUSION_RETRY_LIMIT
-      ) {
+      if (occluded && (drive.occludedRefusals?.count ?? 0) >= DRIVE_OCCLUSION_RETRY_LIMIT) {
         return finish("stuck", { reason: drive.lastDispatchFailure ?? undefined });
       }
       return "continue";
@@ -6442,6 +6549,17 @@ async function driveLoop(input: {
     if (acted.kind === "unsupported") {
       const safe = await actSafely(dependencies, sessionId, decision.action);
       observation = safe.observation;
+      if (decision.action.kind === "oauth_login") {
+        appendDriveTrace(session, {
+          at: "oauth_handoff",
+          step: drive.trajectory.length,
+          url_before: urlBeforeClick,
+          url_after: observation.url,
+          dispatch_failure: safe.dispatchFailure ?? null,
+          notices: observationNoticeTexts(observation),
+          oauth: observation.oauth ?? null,
+        });
+      }
       if (safe.dispatchFailure !== undefined) {
         actDispatched = false;
         drive.lastDispatchFailure = safe.dispatchFailure;
@@ -6507,6 +6625,17 @@ async function driveLoop(input: {
       const snap = await refreshSnapshot(framesIfNeeded());
       if (snap.timedOut)
         return finish("evaluate_timeout", { reason: "in-page evaluate exceeded budget" });
+      if (decision.action.kind === "oauth_login") {
+        appendDriveTrace(session, {
+          at: "oauth_handoff",
+          step: drive.trajectory.length,
+          url_before: urlBeforeClick,
+          url_after: observation.url,
+          notices: observationNoticeTexts(observation),
+          oauth: observation.oauth ?? null,
+          rows,
+        });
+      }
       if (isKeyGoal(drive.goal) && driveKeyGoalComplete(await driveKeyEvidence(sessionId))) {
         // Same as the unsupported branch: extraction may have revealed a
         // masked value, so the handoff needs a snapshot of what it read.
@@ -6526,7 +6655,7 @@ async function driveLoop(input: {
           return finish("stuck", { reason: fresh });
         }
       }
-      if (clickedBefore !== undefined && isSubmitLikeRow(clickedBefore)) {
+      if (shouldInspectSubmitResponse(decision.action, clickedBefore)) {
         const navigated = pagePathKey(observation.url) !== pagePathKey(urlBeforeClick);
         const fieldError = invalidFieldReason(rows, observationNoticeTexts(observation));
         if (fieldError !== undefined) {
@@ -6784,6 +6913,31 @@ async function driveLoop(input: {
       applyReleasedCardFacts(drive.facts, session.releasedPaymentCard?.card),
     );
     const pageUrl = observation.url;
+    const back = backOnlyDecision(rows, drive.trajectory.at(-1)?.action);
+    if (back !== undefined) {
+      const applied = await applyDecision(back);
+      if (applied !== "continue") return applied;
+      steps += 1;
+      continue;
+    }
+    const provider = namedProviderDecision(
+      drive.goal,
+      clickableCandidates(
+        rows,
+        includePayment,
+        drive.failedActionKeys ?? [],
+        pageUrl,
+        drive.filledRefs,
+      ),
+    );
+    if (provider !== undefined) {
+      drive.boundFingerprint = driveProgressFingerprint(observation, rows, drive, session);
+      drive.consumedActionKey = null;
+      const applied = await applyDecision(provider);
+      if (applied !== "continue") return applied;
+      steps += 1;
+      continue;
+    }
     const missing = requiredFillableMissingFact(rows, drive.facts, drive.filledRefs, pageUrl);
     const pageOptions =
       lastSelectOptions.get(session) ?? selectOptionsFromElements(session.lastElements);
