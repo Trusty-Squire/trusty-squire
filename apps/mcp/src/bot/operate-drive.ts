@@ -5628,6 +5628,10 @@ async function driveLoop(input: {
   let captchaAfterSubmit = false;
   let lastCaptchaOutcome: string | undefined;
   let captchaSolveStartedAt = 0;
+  // A pre-act rejection must reach Jev on the refreshed page. Otherwise a
+  // deterministic key advance can immediately choose the same control again
+  // and spend every remaining step in the guard without a new decision.
+  let decideAfterPreActChange = false;
   {
     const startPath = feedbackPagePath(observation.url);
     drive.visitedPages ??= {};
@@ -6208,6 +6212,16 @@ async function driveLoop(input: {
         // as well would let the stall detector end the drive over an action it
         // never dispatched, so it is cleared before re-snapshotting.
         drive.consumedActionKey = null;
+        decideAfterPreActChange = true;
+        appendDriveTrace(session, {
+          at: "pre_act_redecide",
+          step: steps,
+          action_key: decision.actionKey,
+          snapshot_url: observation.url,
+          live_url: session.browser.page.url(),
+          document_changed: documentChanged,
+          controls_changed: controlsChanged,
+        });
         // Remember the chosen control by snapshot binding. If the fresh page
         // no longer offers it and the drive's own typed input narrowed it
         // away, the next iteration clears that input and re-offers it. A
@@ -7117,7 +7131,7 @@ async function driveLoop(input: {
         [...new Set([...(drive.exhaustedActionKeys ?? []), ...(drive.staleClickRefs ?? [])])],
         { pageUrl, triedStableKeys: drive.triedHere ?? [] },
       );
-      if (advance !== undefined) {
+      if (advance !== undefined && !decideAfterPreActChange) {
         drive.boundFingerprint = driveProgressFingerprint(observation, rows, drive, session);
         drive.consumedActionKey = null;
         const applied = await applyDecision({
@@ -7579,6 +7593,7 @@ async function driveLoop(input: {
       });
     const jev = await ask(state, questions);
     if (!("result" in jev)) return jev;
+    decideAfterPreActChange = false;
     const dispatchStarted = Date.now();
     let answers = jev.result.answers;
     let decision = decide(answers);
