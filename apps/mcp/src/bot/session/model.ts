@@ -238,6 +238,13 @@ export interface SessionDriveState {
   pendingRevealScan?: boolean;
   /** OAuth hand-offs that returned to the same login page this drive. */
   oauthReturnAttempts?: number;
+  /** Why the last attempted action never reached the page, if it did not.
+   *  A dispatch failure is the loop's own account; it must never be replaced
+   *  by the unchanged page's text when the drive reports why it stopped. */
+  lastDispatchFailure?: string | null;
+  /** The reason a hand-off that returned to its start page produced. Named
+   *  ahead of a generic cycle description when the drive stops there. */
+  lastOauthBounceReason?: string | null;
   /** Structured trail of what each executed action actually did (capped). */
   outcomeTrail?: DriveTrailEntry[];
   /** Origin+path the last trail entry recorded, for arrival counting. */

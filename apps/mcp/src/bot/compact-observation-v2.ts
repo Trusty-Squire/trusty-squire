@@ -1715,15 +1715,17 @@ export function safeBlockersV2(
   const validationNodes = new Set<BrowserUseNode>();
   for (const node of nodes) {
     const role = (node.attributes.role ?? node.axRole ?? "").toLowerCase();
-    const validationMarker = [node.attributes.id, node.attributes.class]
-      .filter((value): value is string => typeof value === "string")
-      .some((value) => /(?:^|[-_:])(error|invalid|validation|feedback)(?:$|[-_:])/i.test(value));
-    if (
-      visibleFor.get(node) === true &&
-      (["alert", "alertdialog", "status"].includes(role) ||
-        node.attributes["aria-live"] === "assertive" ||
-        validationMarker)
-    ) {
+    // A standalone message is a validation blocker only when it is an
+    // ASSERTIVE surface — `role=alert`/`alertdialog` or an assertive
+    // `aria-live` region — which is what a page uses to interrupt with an
+    // error. Passive commentary is `role=status`, a polite `aria-live` region,
+    // or a widget div with a `*-feedback` class (chat, counts, testimonials,
+    // toasts), and an error-looking class name alone is not an assertion.
+    // Promoting those turned ordinary page prose into the drive's stop reason.
+    // A control-bound message is handled below and needs no assertive surface.
+    const assertiveSurface =
+      role === "alert" || role === "alertdialog" || node.attributes["aria-live"] === "assertive";
+    if (visibleFor.get(node) === true && assertiveSurface) {
       const text = blockerTextV2(node);
       if (
         text !== undefined &&

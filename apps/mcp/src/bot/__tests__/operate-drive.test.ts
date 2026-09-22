@@ -695,6 +695,28 @@ describe("decideAfterJev stop reasons", () => {
     ).toEqual({ kind: "wait", confidence: 0.8 });
   });
 
+  it("names a recorded dispatch failure as the reason", () => {
+    const answers = { operation: valid("NONE_OF_THESE", operationCriteriaMap, 0.9) };
+    // The reason is the loop's own account of why it stopped, never text
+    // scraped from the page.
+    expect(decideAfterJev({ ...base, answers })).toMatchObject({
+      kind: "none_of_these",
+      reason: "nothing on the page can advance the goal",
+    });
+    // A dispatch failure is the loop's own account and is named ahead of any
+    // description of the unchanged page.
+    expect(
+      decideAfterJev({
+        ...base,
+        answers,
+        dispatchFailure: "the action could not be dispatched",
+      }),
+    ).toMatchObject({
+      kind: "none_of_these",
+      reason: "the action could not be dispatched",
+    });
+  });
+
   it("returns needs_value naming the field label when a required fillable has no matching fact", () => {
     const missingFacts = { first_name: "Ada" };
     expect(requiredFillableMissingFact(ROWS, missingFacts)?.ref).toBe("@e:email");
