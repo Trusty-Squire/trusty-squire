@@ -90,6 +90,21 @@ describe("drive covering-layer dismissal", () => {
     expect(Object.values(first.question.options ?? {})).toEqual(["稍后再说", "领取优惠"]);
   });
 
+  it("keeps DONE when a dialog reveals the key", () => {
+    const dialogRows: WireRow[] = [
+      ["@e:key", "t", "Generated API key|n=fixture-revealed-key|oc=dialog"],
+      ["@e:close", "b", "Close"],
+    ];
+    const click = buildDriveQuestions(dialogRows, {}, goal).CLICK_target;
+    if (click?.type !== "choice") throw new Error("missing dialog controls");
+    const close = Object.entries(click.criteria).find(([, label]) => label === "Close")?.[0];
+    if (close === undefined) throw new Error("missing close control");
+
+    expect(decide("DONE", 0.9, close, undefined, dialogRows)).toMatchObject({
+      kind: "complete",
+    });
+  });
+
   it("keeps GO_BACK below the layer threshold", () => {
     expect(decide("GO_BACK", 0.2, laterChoice)).toMatchObject({ kind: "go_back" });
   });

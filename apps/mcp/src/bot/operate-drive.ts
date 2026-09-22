@@ -4866,8 +4866,7 @@ export function decideAfterJev(input: {
     blockedByLayer >= threshold &&
     (tentative === DRIVE_FIXED_GO_BACK ||
       tentative === DRIVE_FIXED_NONE_OF_THESE ||
-      tentative === "BLOCKED" ||
-      tentative === "DONE")
+      tentative === "BLOCKED")
   ) {
     if (dismissCandidates.length === 0) return { kind: "wait", confidence: blockedByLayer };
     const clickAnswer = input.answers.CLICK_target;
