@@ -480,14 +480,36 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
   // identity and actionability. Not their values (a countdown, a token refresh
   // or an input mask reformatting churns those), and not every input in the
   // document (an invisible one mounting during the model call would cost a
-  // step). Registered here so the act-time read is this same derivation.
+  // step). The label is identity, not value: an in-place re-render that changes
+  // what a link says keeps the node, its role and its enabled state, so only
+  // the label catches it. Registered here so the act-time read is this same
+  // derivation, normalised exactly as `inPageSameControl` compares it
+  // (whitespace collapsed, trimmed, case-folded) so a benign re-spelling does
+  // not churn the digest and cost a re-decide. Digit runs collapse to `#` on
+  // top of that: a countdown or live counter ("Resend code in 29s") ticks
+  // during the model call the decision came from, and with re-decides now
+  // unbounded a digest that moved on every tick would never let the drive act.
+  const normalizedLabel = (text: string): string =>
+    text.replace(/\s+/g, " ").trim().toLowerCase().replace(/\d+/g, "#");
   cache.rowDigest = (): string => {
     const parts: string[] = [];
-    for (const [ref, element] of cache.nodes) {
-      if (!element.isConnected) continue;
-      const role = roleOf(element);
-      if (role === null) continue;
-      parts.push(`${ref}:${role}:${disabledOf(element)}:${checkedOf(element) ?? ""}`);
+    // The digest is read twice for every act (after the snapshot, then before
+    // dispatch) and the two reads must agree when the page did not change, so
+    // bound the accessible-name walk by visits, not by a wall clock that would
+    // truncate it differently at each read.
+    const savedDeadline = nameDeadline;
+    nameDeadline = Number.POSITIVE_INFINITY;
+    nameVisits = 0;
+    try {
+      for (const [ref, element] of cache.nodes) {
+        if (!element.isConnected) continue;
+        const role = roleOf(element);
+        if (role === null) continue;
+        const label = normalizedLabel(name(element) || role);
+        parts.push(`${ref}:${role}:${label}:${disabledOf(element)}:${checkedOf(element) ?? ""}`);
+      }
+    } finally {
+      nameDeadline = savedDeadline;
     }
     return parts.sort().join("\n");
   };
