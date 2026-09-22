@@ -24,7 +24,7 @@ describe("in-product drive recovery", () => {
     });
   });
 
-  it("dismisses a covering offer through its skip control when no other rows are exposed", () => {
+  it("uses the model's chosen control on an isolated covering layer", () => {
     const rows: WireRow[] = [
       ["@e:offer", "b", "Get Promotional Credit"],
       ["@e:skip", "b", "Skip for now"],
@@ -32,8 +32,13 @@ describe("in-product drive recovery", () => {
     const goal = "reach the API key page";
     const questions = buildDriveQuestions(rows, {}, goal);
     const criteria = questions.operation;
-    if (criteria?.type !== "choice") throw new Error("missing operation choices");
+    const click = questions.CLICK_target;
+    if (criteria?.type !== "choice" || click?.type !== "choice") {
+      throw new Error("missing choices");
+    }
     const choice = "NONE_OF_THESE";
+    const skip = Object.entries(click.criteria).find(([, label]) => label === "Skip for now")?.[0];
+    if (skip === undefined) throw new Error("missing skip control");
 
     expect(
       decideAfterJev({
@@ -42,6 +47,12 @@ describe("in-product drive recovery", () => {
             choice,
             confidence: 0.9,
             probabilities: peakedProbabilities(Object.keys(criteria.criteria), choice, 0.9),
+          },
+          blocked_by_layer: { noul: 0.9 },
+          CLICK_target: {
+            choice: skip,
+            confidence: 0.9,
+            probabilities: peakedProbabilities(Object.keys(click.criteria), skip, 0.9),
           },
         },
         rows,

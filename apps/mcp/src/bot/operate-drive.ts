@@ -795,22 +795,6 @@ export function isLayerControlRow(row: WireRow, layer: "dialog" | "overlay"): bo
   return layer === "dialog" && isRevealOrCopyRow(row);
 }
 
-/** Some overlays expose only their own buttons, so no covered row carries an
- * occlusion marker. In that narrow snapshot, prefer a refusal/dismissal over
- * an offer, payment, or enrollment action. */
-function isolatedLayerDismissRow(rows: readonly WireRow[]): WireRow | undefined {
-  if (rows.length < 2 || !rows.every((row) => row[1] === "b" || row[1] === "button")) {
-    return undefined;
-  }
-  return rows.find(
-    (row) =>
-      !isDisabledRow(row) &&
-      /^(?:close|dismiss|skip(?:\s+for\s+now)?|not now|maybe later|no thanks|reject(?:\s+all)?|decline|necessary only)(?:[.…])?$/.test(
-        readableLabel(row).toLowerCase().trim(),
-      ),
-  );
-}
-
 export function isLayerCandidateRow(
   row: WireRow,
   rows: readonly WireRow[],
@@ -4598,6 +4582,38 @@ export function decideAfterJev(input: {
     input.answers.blocked_by_layer === undefined
       ? undefined
       : confidenceOf(input.answers.blocked_by_layer);
+  // A layer can hide every main-page row, leaving no occlusion marker in the
+  // snapshot. In that case the model's layer judgment supplies the context.
+  const layer = pageOcclusionLayer(input.rows);
+  const dismissCandidates = sets.CLICK.filter(
+    (candidate) =>
+      !isDisabledRow(candidate.row) &&
+      !isPaymentRow(candidate.row) &&
+      !PAYMENT_SUBMIT_LABEL.test(readableLabel(candidate.row).toLowerCase()) &&
+      !(input.lastActionKey === candidate.ref && input.lastFingerprint === input.fingerprint) &&
+      !(input.boundFingerprint === input.fingerprint && input.consumedActionKey === candidate.ref) &&
+      (layer === undefined || isLayerCandidateRow(candidate.row, input.rows, layer)),
+  );
+  const dismissCriteria = criteriaFromCandidates(dismissCandidates, "CLICK");
+  const dismissInstructions = "Which visible control dismisses the dialog or overlay?";
+  const dismissDecision = (choice: string, confidence: number): DriveDecision => {
+    const target = resolveActionChoice(choice, dismissCandidates);
+    if (target === undefined) {
+      return refusalQuestion(
+        "invalid_answer",
+        dismissInstructions,
+        dismissCriteria,
+        input.answers.layer_dismiss_target,
+        "layer_dismiss_target_missing",
+      );
+    }
+    return {
+      kind: "act",
+      action: { kind: "click", target: target.ref },
+      actionKey: target.ref,
+      confidence,
+    };
+  };
   const noticeReason = (): string => {
     // The reason is the LOOP's account of why it stopped, never text scraped
     // from the page. A recorded dispatch failure is named first; otherwise the
@@ -4609,18 +4625,6 @@ export function decideAfterJev(input: {
   };
   const decideChosen = (choice: string, confidence: number): DriveDecision => {
     if (choice === DRIVE_FIXED_NONE_OF_THESE) {
-      const dismiss = isolatedLayerDismissRow(input.rows);
-      if (
-        dismiss !== undefined &&
-        !(input.lastActionKey === dismiss[0] && input.lastFingerprint === input.fingerprint)
-      ) {
-        return {
-          kind: "act",
-          action: { kind: "click", target: dismiss[0] },
-          actionKey: dismiss[0],
-          confidence,
-        };
-      }
       return { kind: "none_of_these", confidence, reason: noticeReason() };
     }
     if (choice === DRIVE_FIXED_GO_BACK) return { kind: "go_back", confidence };
@@ -4857,6 +4861,36 @@ export function decideAfterJev(input: {
       confidence,
     };
   };
+  if (
+    blockedByLayer !== undefined &&
+    blockedByLayer >= threshold &&
+    (tentative === DRIVE_FIXED_GO_BACK ||
+      tentative === DRIVE_FIXED_NONE_OF_THESE ||
+      tentative === "BLOCKED")
+  ) {
+    if (dismissCandidates.length === 0) return { kind: "wait", confidence: blockedByLayer };
+    const clickAnswer = input.answers.CLICK_target;
+    const clickQuestion = questions.CLICK_target;
+    if (
+      clickQuestion?.type === "choice" &&
+      "ok" in admitsChoice(clickQuestion.criteria, clickAnswer) &&
+      clickAnswer?.choice !== undefined &&
+      resolveActionChoice(clickAnswer.choice, dismissCandidates) !== undefined
+    ) {
+      return dismissDecision(clickAnswer.choice, confidenceOf(clickAnswer));
+    }
+    const dismissAnswer = input.answers.layer_dismiss_target;
+    if (dismissAnswer !== undefined && "ok" in admitsChoice(dismissCriteria, dismissAnswer)) {
+      return dismissDecision(dismissAnswer.choice!, confidenceOf(dismissAnswer));
+    }
+    return refusalQuestion(
+      "invalid_answer",
+      dismissInstructions,
+      dismissCriteria,
+      dismissAnswer,
+      "layer_dismiss_target_missing",
+    );
+  }
   if ("ok" in operationAdmission) {
     if (tentative === undefined) {
       return refuseAdmission(
@@ -7820,10 +7854,22 @@ async function driveLoop(input: {
     let decision = decide(answers);
     let jevMs = jev.elapsedMs;
     if (decision.kind === "invalid_answer") {
-      const retried = await ask(state, questions);
+      const dismissalQuestion = decision.reason === "layer_dismiss_target_missing";
+      const retryQuestions = dismissalQuestion
+        ? {
+            layer_dismiss_target: {
+              type: "choice" as const,
+              instructions: decision.question.question,
+              criteria: decision.question.options ?? {},
+            },
+          }
+        : questions;
+      const retried = await ask(state, retryQuestions);
       if (!("result" in retried)) return retried;
       jevMs += retried.elapsedMs;
-      answers = retried.result.answers;
+      answers = dismissalQuestion
+        ? { ...answers, ...retried.result.answers }
+        : retried.result.answers;
       decision = decide(answers);
     }
     if (missing !== undefined && answers[DRIVE_EMAIL_CODE_QUESTION]?.choice === DRIVE_FIXED_NONE) {
