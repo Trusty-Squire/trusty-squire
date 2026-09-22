@@ -4087,6 +4087,24 @@ export function emailCodeCandidates(
     });
 }
 
+/** Complete the form whose code field the inbox action just filled. */
+export function emailCodeSubmitRow(
+  rows: readonly WireRow[],
+  lastAction: Pick<DriveTrajectoryStep, "action" | "target"> | undefined,
+): WireRow | undefined {
+  if (lastAction?.action !== "type_otp") return undefined;
+  const field = rows.find((row) => row[0] === lastAction.target);
+  if (field === undefined || !isFillableRow(field) || rowValueMissing(field)) return undefined;
+  const formId = rowFormId(field);
+  if (formId === undefined) return undefined;
+  return rows.find(
+    (row) =>
+      rowFormId(row) === formId &&
+      isSubmitLikeRow(row) &&
+      !isDisabledRow(row),
+  );
+}
+
 export function buildDriveQuestions(
   rows: readonly WireRow[],
   facts: Record<string, string>,
@@ -7627,6 +7645,24 @@ async function driveLoop(input: {
 
     if (goalExcludesOauth(args.goal) && pageOffersOnlyThirdPartySignup(rows)) {
       return finish("stuck", { reason: noOtherSignupPathReason() });
+    }
+
+    const codeSubmit = emailCodeSubmitRow(
+      rows,
+      drive.trajectory[drive.trajectory.length - 1],
+    );
+    if (codeSubmit !== undefined) {
+      drive.boundFingerprint = driveProgressFingerprint(observation, rows, drive, session);
+      drive.consumedActionKey = null;
+      const applied = await applyDecision({
+        kind: "act",
+        action: { kind: "click", target: codeSubmit[0] },
+        actionKey: codeSubmit[0],
+        confidence: 1,
+      });
+      if (applied !== "continue") return applied;
+      steps += 1;
+      continue;
     }
 
     const hasGoalDestination = rows.some(
