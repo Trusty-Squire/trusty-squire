@@ -651,10 +651,7 @@ export function generateVncPassword(): string {
   return randomBytes(6).toString("base64url");
 }
 
-export async function exposeRemoteLoginDisplay(
-  rig: RemoteLoginRig,
-  label: string,
-): Promise<string> {
+export async function exposeRemoteLoginDisplay(rig: RemoteLoginRig): Promise<string> {
   if (rig.display === undefined) {
     throw new Error("remote login display has not been started");
   }
@@ -722,7 +719,7 @@ export async function exposeRemoteLoginDisplay(
       publicUrl = `${tunnelUrl}/#p=${password}`;
     }
 
-    printRemoteLoginBanner({ publicUrl, password, label });
+    printRemoteLoginBanner({ publicUrl, password });
     return publicUrl;
   } catch (error) {
     await teardownExposedLoginHelpers(rig, started);
@@ -730,11 +727,7 @@ export async function exposeRemoteLoginDisplay(
   }
 }
 
-function printRemoteLoginBanner(opts: {
-  publicUrl: string;
-  password: string;
-  label: string;
-}): void {
+function printRemoteLoginBanner(opts: { publicUrl: string; password: string }): void {
   const width = Math.max(40, Math.min((process.stdout.columns ?? 80) - 2, 78));
   const styledUrl = process.stderr.isTTY
     ? `\x1b]8;;${opts.publicUrl}\x1b\\${chalk.hex("#cf3a52").underline(opts.publicUrl)}\x1b]8;;\x1b\\`
@@ -742,8 +735,7 @@ function printRemoteLoginBanner(opts: {
   const body =
     `Open this on any device, any network:\n\n` +
     `  ${styledUrl}\n\n` +
-    `If asked for a VNC password:  ${chalk.bold(opts.password)}\n\n` +
-    opts.label;
+    `If asked for a VNC password:  ${chalk.bold(opts.password)}`;
   console.error(
     "\n" +
       boxen(body, {

@@ -440,7 +440,7 @@ setInterval(() => undefined, 1000);
       process.env.TS_LOGIN_PUBLIC_HOSTNAME = "vnc.example.test";
       process.env.TS_LOGIN_LOCAL_PORT = String(namedPort);
 
-      await expect(exposeRemoteLoginDisplay(rig, "fallback proof")).resolves.toBe(
+      await expect(exposeRemoteLoginDisplay(rig)).resolves.toBe(
         "https://fallback-proof.trycloudflare.com/#p=test-password",
       );
       expect(log.mock.calls.flat().join("\n")).toContain("one-off Cloudflare tunnel");
@@ -532,7 +532,7 @@ process.exit(1);
       delete process.env.TS_LOGIN_PUBLIC_HOSTNAME;
       delete process.env.TS_LOGIN_LOCAL_PORT;
 
-      await expect(exposeRemoteLoginDisplay(rig, "failure proof")).rejects.toThrow(
+      await expect(exposeRemoteLoginDisplay(rig)).rejects.toThrow(
         /websockify exited before becoming ready \(code 1\)[\s\S]*Errno 98/,
       );
       const x11vncPid = Number(readFileSync(x11vncPidFile, "utf8"));

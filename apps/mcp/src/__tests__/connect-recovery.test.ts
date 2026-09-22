@@ -2,8 +2,8 @@
 //  #1 — `connect` must not short-circuit on a present-but-EXPIRED agent
 //       token (agent sessions have a 24h absolute cap). agentTokenStillValid
 //       probes the server; only an auth rejection counts as invalid.
-//  #3 — the confirm browser must stay open until
-//       explicit Finish during normal onboarding.
+//  #3 — the confirm browser's completion is the account claim; the wizard's
+//       explicit Finish only closes the page early and must never gate it.
 
 import {
   existsSync,
@@ -114,7 +114,7 @@ describe("decideProvisioned (fast-path gate: write config without a re-claim)", 
   });
 });
 
-describe("shouldCompleteInstallClaim (explicit browser completion)", () => {
+describe("shouldCompleteInstallClaim (claim-only completion)", () => {
   it("canonicalizes a symlinked profile before touching it", async () => {
     // connect resolves the target profile's realpath identity BEFORE any
     // browser or lease work, so a reset through the alias clears the same
@@ -140,23 +140,28 @@ describe("shouldCompleteInstallClaim (explicit browser completion)", () => {
     }
   });
 
-  it("waits for both an account claim and the browser Finish callback", () => {
+  it("completes on the account claim alone, with no browser Finish signal", () => {
+    // The captain's stranding: the claim was observed and held, then thrown
+    // away when the ceremony deadline passed because the Finish callback —
+    // which only ever arrives from a control inside the single-use ceremony
+    // page — never did. The claim is the authoritative fact; Finish is a
+    // courtesy. It must never gate completion, in either direction.
     expect(shouldCompleteInstallClaim(false, false)).toBe(false);
-    expect(shouldCompleteInstallClaim(true, false)).toBe(false);
     expect(shouldCompleteInstallClaim(false, true)).toBe(false);
+    expect(shouldCompleteInstallClaim(true, false)).toBe(true);
     expect(shouldCompleteInstallClaim(true, true)).toBe(true);
   });
 });
 
-describe("claimHeartbeatMessage (claimed install awaiting Finish)", () => {
+describe("claimHeartbeatMessage (ceremony phase copy)", () => {
   it("asks for sign-in only before the install is claimed", () => {
     expect(claimHeartbeatMessage(false)).toMatch(/finish signing in/i);
   });
 
-  it("asks for the Finish click after sign-in has claimed the install", () => {
+  it("never makes the browser Finish control a requirement after the claim", () => {
     const message = claimHeartbeatMessage(true);
     expect(message).toMatch(/sign-in complete/i);
-    expect(message).toMatch(/click Finish/i);
+    expect(message).not.toMatch(/click Finish/i);
     expect(message).not.toMatch(/waiting.*signing in/i);
   });
 });

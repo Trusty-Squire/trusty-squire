@@ -771,6 +771,29 @@ after open. `TRUSTY_SQUIRE_INBOX_READER_DIAG=1` logs `[inbox-reader-diag]`
 to broker stderr (listing, per-row candidate/predates, which row opened,
 opened-view yield). No bodies, links, codes, or full From addresses.
 
+### 23. A claimed enrollment completes on the claim alone, and the shared-display warning prints only where it is true
+
+`connect` completes on the **account claim alone**. The claim is the
+authoritative fact — the CLI polls the same `/state` the wizard posts — and the
+wizard's Finish button is a courtesy that closes the page early, never a
+second completion gate. On a headless machine the wizard page exists only
+behind the single-use pairing link, so gating completion on a control inside
+it can strand an enrollment the server already established (a completed Google
+sign-in whose `session.json` held only the API base and a machine token).
+`shouldCompleteInstallClaim` in `apps/mcp/src/install/cli.ts` is the gate; do
+not re-add a second signal, and do not "fix" an expiry by extending the
+deadline — a longer window is still a window.
+
+The shared-browser disclosure prints only where it is a real disclosure: a
+real human-facing display, with the login tab in the browser the person is
+using (the browser later Trusty Squire sessions keep opening tabs in). On a
+headless display every other tab belongs to the same owner, acting for the
+same account, on a link handed to themselves, so
+`sharedBrowserDisclosureWarning` (`apps/mcp/src/bot/google-login.ts`) returns
+null and nothing prints — there is deliberately no shortened variant. The
+noVNC banner still carries the URL and password. Regression:
+`apps/mcp/src/bot/__tests__/shared-ceremony-exposure.test.ts`.
+
 ## Final note
 
 You are reading this file because a prior agent burned four version numbers, confused users, and forced a human to intervene. The agent was not malicious. It was not lazy. It was pattern-matching on its own prose instead of on tool output.

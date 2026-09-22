@@ -267,6 +267,39 @@ describe("connect --target=<agent> writes a valid config", () => {
     });
   }
 
+  // The stranding bug: the machine session file held only an API base and a
+  // machine token — no account, no session token — even though the wizard
+  // printed "sign-in complete". The account had been claimed and the claim
+  // discarded when the ceremony deadline passed, because the wizard's Finish
+  // callback (a control living only inside the single-use ceremony page) never
+  // arrived. A claimed enrollment must complete without that control.
+  it("completes a claimed enrollment with no browser Finish signal at all", async () => {
+    vi.mocked(openInstallConfirmInBotChrome).mockImplementationOnce(async (options) => {
+      // Mirror the real ceremony: the poll gate decides, and only its
+      // completion result lets the run claim. `false` is "the wizard's Finish
+      // callback has not fired" — exactly the captain's case.
+      const polled = await options.pollUntilClaimed(false);
+      if (polled === "pending") return { status: "timeout" as const };
+      if (polled === "expired") return { status: "error" as const, detail: "install expired" };
+      return { status: "claimed" as const };
+    });
+
+    await connect({
+      command: "connect",
+      target: "hermes",
+      apiBase: "https://test.invalid",
+      skipBrowser: false,
+      forceRelogin: false,
+      noRegistry: false,
+      noInteractive: true,
+    });
+
+    expectSquireConfig(await readSquireConfig("hermes"), "hermes", true);
+    const session = await (await openSessionStorage()).read();
+    expect(session?.account_id).toBe("acct_test");
+    expect(session?.agent_session_token).toBe("ts_agent_test_token");
+  });
+
   it("--no-registry omits TRUSTY_SQUIRE_REGISTRY_URL from the config", async () => {
     await connect({
       command: "connect",

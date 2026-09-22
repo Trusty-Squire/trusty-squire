@@ -15,7 +15,10 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { hostname, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { exposeSharedBrokerCeremonyDisplay } from "../google-login.js";
+import {
+  exposeSharedBrokerCeremonyDisplay,
+  sharedBrowserDisclosureWarning,
+} from "../google-login.js";
 import { registerLocalBrowserLaunch } from "../browser-process-runtime.js";
 import {
   bindOwnerBrowserLaunch,
@@ -157,6 +160,38 @@ beforeEach(() => {
   headlessHost();
 });
 
+describe("sharedBrowserDisclosureWarning", () => {
+  // The warning earns a line in exactly one case: a real human-facing display
+  // where the login tab is in the browser the person is using, the one later
+  // Trusty Squire sessions keep opening tabs in. On a headless display every
+  // other tab belongs to the same owner acting for the same account on a link
+  // handed to themselves, so there is nothing to disclose and nothing prints.
+  it("prints one short sentence when the tab is in the browser the person uses", () => {
+    const warning = sharedBrowserDisclosureWarning({
+      kind: "already_visible",
+      reason: "it runs on this machine's own screen, which you are signed in at",
+    });
+    expect(warning).toMatch(/keep opening tabs in this browser/i);
+    expect(
+      warning!
+        .trim()
+        .split(/[.!?]+/)
+        .filter((part) => part.trim() !== ""),
+    ).toHaveLength(1);
+  });
+
+  it("prints nothing at all on a headless display", () => {
+    expect(
+      sharedBrowserDisclosureWarning({
+        kind: "exposed",
+        url: "https://vnc.test/#p=secret",
+        stop: async () => undefined,
+      }),
+    ).toBeNull();
+    expect(sharedBrowserDisclosureWarning({ kind: "unshowable", reason: "no display" })).toBeNull();
+  });
+});
+
 describe("exposeSharedBrokerCeremonyDisplay", () => {
   it("prefers the tracked rig for the holder profile over the process environment", async () => {
     const profile = await tempProfile();
@@ -170,13 +205,13 @@ describe("exposeSharedBrokerCeremonyDisplay", () => {
     ).toBe(true);
     mockState.attachSucceeds = true;
     try {
-      const exposure = await exposeSharedBrokerCeremonyDisplay(profile, "test");
+      const exposure = await exposeSharedBrokerCeremonyDisplay(profile);
       expect(exposure.kind).toBe("exposed");
       expect(mockState.rigs[0]).toMatchObject({ display: ":72", authFile });
       if (exposure.kind === "exposed") await exposure.stop();
       expect(mockState.privateDirs.every((path) => !existsSync(path))).toBe(true);
       untrackOwnerBrowserLaunch(launch.marker);
-      const fallback = await exposeSharedBrokerCeremonyDisplay(profile, "test");
+      const fallback = await exposeSharedBrokerCeremonyDisplay(profile);
       expect(fallback.kind).toBe("exposed");
       expect(mockState.rigs[1]).toMatchObject({
         display: ":0",
@@ -209,7 +244,7 @@ describe("exposeSharedBrokerCeremonyDisplay", () => {
     ).toBe(true);
     mockState.attachSucceeds = true;
     try {
-      const exposure = await exposeSharedBrokerCeremonyDisplay(profile, "test");
+      const exposure = await exposeSharedBrokerCeremonyDisplay(profile);
       expect(exposure.kind).toBe("exposed");
       expect(mockState.rigs[0]).toMatchObject({ display: ":73", authFile });
       if (exposure.kind === "exposed") await exposure.stop();
@@ -240,7 +275,7 @@ describe("exposeSharedBrokerCeremonyDisplay", () => {
     try {
       await holderOwnsProfile(profile, holder);
       mockState.attachSucceeds = true;
-      const exposure = await exposeSharedBrokerCeremonyDisplay(profile, "test");
+      const exposure = await exposeSharedBrokerCeremonyDisplay(profile);
       expect(exposure.kind).toBe("exposed");
       expect(mockState.rigs[0]).toMatchObject({ display: ":71", authFile });
       if (exposure.kind === "exposed") await exposure.stop();
@@ -262,7 +297,7 @@ describe("exposeSharedBrokerCeremonyDisplay", () => {
     await holderOwnsProfile(profile, child);
     vi.stubEnv("TRUSTY_SQUIRE_REAPER_DIR", join(profile, "reaper"));
     mockState.secretSetupFails = true;
-    const exposure = await exposeSharedBrokerCeremonyDisplay(profile, "test");
+    const exposure = await exposeSharedBrokerCeremonyDisplay(profile);
     expect(exposure).toMatchObject({
       kind: "unshowable",
       reason: expect.stringContaining("secret setup failed"),
@@ -278,7 +313,7 @@ describe("exposeSharedBrokerCeremonyDisplay", () => {
 
   it("reports unshowable when no process holds the profile", async () => {
     const profile = await tempProfile();
-    await expect(exposeSharedBrokerCeremonyDisplay(profile, "test")).resolves.toEqual({
+    await expect(exposeSharedBrokerCeremonyDisplay(profile)).resolves.toEqual({
       kind: "unshowable",
       reason: expect.stringMatching(/could not be discovered/),
     });
@@ -292,7 +327,7 @@ describe("exposeSharedBrokerCeremonyDisplay", () => {
     // helpers.
     const child = await spawnHolder({ PATH: process.env.PATH ?? "" });
     await holderOwnsProfile(profile, child);
-    await expect(exposeSharedBrokerCeremonyDisplay(profile, "test")).resolves.toEqual({
+    await expect(exposeSharedBrokerCeremonyDisplay(profile)).resolves.toEqual({
       kind: "unshowable",
       reason: expect.stringMatching(/without a DISPLAY in its launch record/),
     });
@@ -314,7 +349,7 @@ describe("exposeSharedBrokerCeremonyDisplay", () => {
       XAUTHORITY: "/home/someone/.Xauthority",
     });
     await holderOwnsProfile(profile, child);
-    await expect(exposeSharedBrokerCeremonyDisplay(profile, "test")).resolves.toEqual({
+    await expect(exposeSharedBrokerCeremonyDisplay(profile)).resolves.toEqual({
       kind: "already_visible",
       reason: expect.stringMatching(/this machine's own screen/),
     });
@@ -331,7 +366,7 @@ describe("exposeSharedBrokerCeremonyDisplay", () => {
     });
     await holderOwnsProfile(profile, child);
     mockState.rigSetupFails = true;
-    await expect(exposeSharedBrokerCeremonyDisplay(profile, "test")).resolves.toEqual({
+    await expect(exposeSharedBrokerCeremonyDisplay(profile)).resolves.toEqual({
       kind: "unshowable",
       reason: expect.stringMatching(/no x11vnc on PATH/),
     });
@@ -349,7 +384,7 @@ describe("exposeSharedBrokerCeremonyDisplay", () => {
       XAUTHORITY: join(tmpdir(), "tsq-login-ceremonytest", "Xauthority"),
     });
     await holderOwnsProfile(profile, child);
-    await expect(exposeSharedBrokerCeremonyDisplay(profile, "test")).resolves.toEqual({
+    await expect(exposeSharedBrokerCeremonyDisplay(profile)).resolves.toEqual({
       kind: "unshowable",
       reason: expect.stringMatching(/noVNC attach failed.*vnc attach down/),
     });
@@ -374,7 +409,7 @@ describe("exposeSharedBrokerCeremonyDisplay", () => {
       bindOwnerBrowserLaunch(launch.marker, profileProcessIdentity(child.pid!, profile)!),
     ).toBe(true);
     try {
-      await expect(exposeSharedBrokerCeremonyDisplay(profile, "test")).resolves.toMatchObject({
+      await expect(exposeSharedBrokerCeremonyDisplay(profile)).resolves.toMatchObject({
         kind: "already_visible",
         reason: expect.stringMatching(/this machine's own screen/),
       });
@@ -398,7 +433,7 @@ describe("exposeSharedBrokerCeremonyDisplay", () => {
     });
     await holderOwnsProfile(profile, child);
     mockState.attachSucceeds = true;
-    const exposure = await exposeSharedBrokerCeremonyDisplay(profile, "test");
+    const exposure = await exposeSharedBrokerCeremonyDisplay(profile);
     expect(exposure.kind).toBe("exposed");
     expect(mockState.rigs[0]).toMatchObject({
       display: ":0",
@@ -415,7 +450,7 @@ describe("exposeSharedBrokerCeremonyDisplay", () => {
     screenedHost();
     const child = await spawnHolder({ PATH: process.env.PATH ?? "", DISPLAY: ":0" });
     await holderOwnsProfile(profile, child);
-    await expect(exposeSharedBrokerCeremonyDisplay(profile, "test")).resolves.toMatchObject({
+    await expect(exposeSharedBrokerCeremonyDisplay(profile)).resolves.toMatchObject({
       kind: "already_visible",
       reason: expect.stringMatching(/this machine's own screen/),
     });
@@ -431,7 +466,7 @@ describe("exposeSharedBrokerCeremonyDisplay", () => {
     screenedHost();
     const child = await spawnHolder({ PATH: process.env.PATH ?? "" });
     await holderOwnsProfile(profile, child);
-    await expect(exposeSharedBrokerCeremonyDisplay(profile, "test")).resolves.toEqual({
+    await expect(exposeSharedBrokerCeremonyDisplay(profile)).resolves.toEqual({
       kind: "unshowable",
       reason: expect.stringMatching(/without a DISPLAY in its launch record/),
     });
