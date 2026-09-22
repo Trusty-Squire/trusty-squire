@@ -792,6 +792,22 @@ export function isLayerControlRow(row: WireRow, layer: "dialog" | "overlay"): bo
   return layer === "dialog" && isRevealOrCopyRow(row);
 }
 
+/** Some overlays expose only their own buttons, so no covered row carries an
+ * occlusion marker. In that narrow snapshot, prefer a refusal/dismissal over
+ * an offer, payment, or enrollment action. */
+function isolatedLayerDismissRow(rows: readonly WireRow[]): WireRow | undefined {
+  if (rows.length < 2 || !rows.every((row) => row[1] === "b" || row[1] === "button")) {
+    return undefined;
+  }
+  return rows.find(
+    (row) =>
+      !isDisabledRow(row) &&
+      /^(?:close|dismiss|skip(?:\s+for\s+now)?|not now|maybe later|no thanks|reject(?:\s+all)?|decline|necessary only)(?:[.…])?$/.test(
+        readableLabel(row).toLowerCase().trim(),
+      ),
+  );
+}
+
 export function isLayerCandidateRow(
   row: WireRow,
   rows: readonly WireRow[],
@@ -3311,10 +3327,12 @@ export function requiredFactSelectAction(
   facts: Record<string, string>,
   filledRefs: readonly string[] = [],
   pageUrl: string = "",
+  goal?: string,
 ): { target: string; text: string } | undefined {
   const includePayment = facts.card_ref !== undefined;
   for (const candidate of fillableCandidates(rows, facts, includePayment, filledRefs, pageUrl)) {
     if (!isSelectRow(candidate.row)) continue;
+    if (narrowsListedContent(candidate.row, rows, pageUrl) && !goalWantsSearch(goal)) continue;
     const fact = firstFactValue(facts, matchingFactKeys(facts, candidate.row));
     if (fact === undefined) continue;
     return { target: candidate.ref, text: fact };
@@ -3332,10 +3350,12 @@ export function requiredFactTypeAction(
   facts: Record<string, string>,
   filledRefs: readonly string[] = [],
   pageUrl: string = "",
+  goal?: string,
 ): { target: string; text: string } | undefined {
   const includePayment = facts.card_ref !== undefined;
   for (const candidate of fillableCandidates(rows, facts, includePayment, filledRefs, pageUrl)) {
     if (isSelectRow(candidate.row)) continue;
+    if (narrowsListedContent(candidate.row, rows, pageUrl) && !goalWantsSearch(goal)) continue;
     const fact = firstFactValue(facts, matchingFactKeys(facts, candidate.row));
     if (fact === undefined) continue;
     return { target: candidate.ref, text: fact };
@@ -3347,12 +3367,15 @@ export function requiredFactComboboxAction(
   rows: readonly WireRow[],
   facts: Record<string, string>,
   filledRefs: readonly string[] = [],
+  pageUrl: string = "",
+  goal?: string,
 ): { target: string } | undefined {
   const filled = new Set(filledRefs);
   for (const row of rows) {
     if (row[1] !== "combobox" || isDisabledRow(row) || isActedRow(row) || filled.has(row[0])) {
       continue;
     }
+    if (narrowsListedContent(row, rows, pageUrl) && !goalWantsSearch(goal)) continue;
     const key = matchingFactKeys(facts, row)[0];
     if (key === undefined) continue;
     const fact = facts[key];
@@ -4383,6 +4406,18 @@ export function decideAfterJev(input: {
   };
   const decideChosen = (choice: string, confidence: number): DriveDecision => {
     if (choice === DRIVE_FIXED_NONE_OF_THESE) {
+      const dismiss = isolatedLayerDismissRow(input.rows);
+      if (
+        dismiss !== undefined &&
+        !(input.lastActionKey === dismiss[0] && input.lastFingerprint === input.fingerprint)
+      ) {
+        return {
+          kind: "act",
+          action: { kind: "click", target: dismiss[0] },
+          actionKey: dismiss[0],
+          confidence,
+        };
+      }
       return { kind: "none_of_these", confidence, reason: noticeReason() };
     }
     if (choice === DRIVE_FIXED_GO_BACK) return { kind: "go_back", confidence };
@@ -6791,7 +6826,7 @@ async function driveLoop(input: {
     const comboboxFill =
       comboboxMustYield || comboboxAttempts.has(comboboxObservation)
         ? undefined
-        : requiredFactComboboxAction(rows, drive.facts, drive.filledRefs);
+        : requiredFactComboboxAction(rows, drive.facts, drive.filledRefs, pageUrl, drive.goal);
     comboboxMustYield = false;
     if (comboboxFill !== undefined) {
       comboboxAttempts.add(comboboxObservation);
@@ -6812,7 +6847,7 @@ async function driveLoop(input: {
     // would pick the same target every iteration until the budget runs out.
     const selectFill = selectMustYield
       ? undefined
-      : requiredFactSelectAction(rows, drive.facts, drive.filledRefs, pageUrl);
+      : requiredFactSelectAction(rows, drive.facts, drive.filledRefs, pageUrl, drive.goal);
     selectMustYield = false;
     const selectAttemptKey =
       selectFill === undefined ? undefined : `${comboboxObservation}\t${selectFill.target}`;
@@ -6839,7 +6874,7 @@ async function driveLoop(input: {
       : requiredExpiryLongRewriteAction(rows, drive.facts, drive.expiryShortWrittenRefs);
     const typeFill = typeMustYield
       ? undefined
-      : requiredFactTypeAction(rows, drive.facts, drive.filledRefs, pageUrl);
+      : requiredFactTypeAction(rows, drive.facts, drive.filledRefs, pageUrl, drive.goal);
     typeMustYield = false;
     const rewriteTarget = expiryRewrite?.target;
     const rewriteAttemptKey =
