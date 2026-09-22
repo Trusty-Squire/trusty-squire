@@ -236,6 +236,14 @@ export interface SessionDriveState {
   preexistingRestarted?: boolean;
   /** Next snapshot should look for an unmasked secret after reveal/show/copy. */
   pendingRevealScan?: boolean;
+  /** A chosen control left the page at act time while an input the drive
+   *  itself typed still narrows the page. The input is cleared once, then the
+   *  same control (by snapshot binding) is re-offered. */
+  pendingAbsentBinding?: string | null;
+  /** Consecutive refusals of the same control because a layer covered it.
+   *  A covered press never retires the control; this only bounds the retries
+   *  so a page that never stops covering it ends on the refusal, not a spin. */
+  occludedRefusals?: { key: string; count: number } | null;
   /** OAuth hand-offs that returned to the same login page this drive. */
   oauthReturnAttempts?: number;
   /** Why the last attempted action never reached the page, if it did not.

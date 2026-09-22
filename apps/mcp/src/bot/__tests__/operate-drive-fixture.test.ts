@@ -1476,7 +1476,7 @@ describe("operate_drive real-browser fixture", () => {
     const page = await context.newPage();
     await page.route("**/*", (route) => {
       const url = route.request().url();
-      route.fulfill({
+      return route.fulfill({
         contentType: "text/html",
         body: url.includes("/settings/apps/") ? entryHtml : settingsHtml,
       });
@@ -1565,7 +1565,7 @@ describe("operate_drive real-browser fixture", () => {
     const page = await context.newPage();
     await page.route("**/*", (route) => {
       const url = route.request().url();
-      route.fulfill({
+      return route.fulfill({
         contentType: "text/html",
         body: url.includes("/settings/apps/") ? entryHtml : settingsHtml,
       });
@@ -4737,7 +4737,7 @@ describe("operate_drive feedback loop", () => {
     return row[0];
   }
 
-  it("records a never-executed click as not_executed, marks it tried, and never offers it again", async () => {
+  it("records a never-executed click as not_executed and keeps it offered", async () => {
     const html = `<!doctype html><meta charset="utf-8"><title>Workspace</title>
 <main>
   <h1>Workspace</h1>
@@ -4777,13 +4777,15 @@ describe("operate_drive feedback loop", () => {
       const trail = seen[1]!.state.trail as Array<{ outcome: string }>;
       expect(trail.at(-1)?.outcome).toMatch(/^not_executed:/);
       const elements = seen[1]!.state.elements as Array<{ description: string; tried?: boolean }>;
+      // A press refused for occlusion is not evidence about the control, so
+      // it is never marked tried.
       expect(
         elements.some((element) => element.description === "Broken" && element.tried === true),
-      ).toBe(true);
-      // Withheld from the question criteria, so Jev cannot choose it again.
+      ).toBe(false);
+      // Still offered, so Jev may choose it again after the layer is gone.
       const click = seen[1]!.questions.CLICK_target;
       const labels = click?.type === "choice" ? Object.values(click.criteria) : [];
-      expect(labels).not.toContain("Broken");
+      expect(labels).toContain("Broken");
       expect(handoff.status).toBe("complete");
     } finally {
       await finishProvisionSession(started.session_id);
@@ -5423,4 +5425,154 @@ describe("capture flow key evidence", () => {
       await context.close();
     }
   }, 60_000);
+
+  it("dismisses the layer covering a chosen control, then presses it", async () => {
+    const overviewHtml = `<!doctype html><meta charset="utf-8"><title>Overview</title>
+<main>
+  <h1>Overview</h1>
+  <a id="keys" href="/settings/keys">Create API Key</a>
+</main>
+<div id="modal" style="position:fixed;inset:0;background:rgba(0,0,0,0.4);z-index:10">
+  <button type="button" id="dismiss">Dismiss</button>
+</div>
+<script>
+  document.getElementById("dismiss").onclick = () => document.getElementById("modal").remove();
+</script>`;
+    const keysHtml = `<!doctype html><meta charset="utf-8"><title>API keys</title>
+<main>
+  <h1>API keys</h1>
+  <p id="secret">••••••••••••</p>
+  <button type="button" id="reveal">Reveal</button>
+</main>
+<script>
+  document.getElementById("reveal").onclick = () => {
+    document.getElementById("secret").textContent = "${DRIVE_FIXTURE_KEY}";
+    document.getElementById("reveal").remove();
+  };
+</script>`;
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await page.route("**/*", (route) => {
+      const url = route.request().url();
+      return route.fulfill({
+        contentType: "text/html",
+        body: url.includes("/settings/keys") ? keysHtml : overviewHtml,
+      });
+    });
+    const startUrl = "https://covered-control.test/overview";
+    await page.goto(startUrl);
+    const started = await startHarnessProvisionSession({
+      browser: BrowserController.fromHarnessPage(page),
+      serviceUrl: startUrl,
+      format: "compact",
+      initialObservation: "standard",
+    });
+    try {
+      const dependencies = deps(async (_api, _state, questions) => jevFromQuestions(questions));
+      const result = await runOperateDrive(
+        { session_id: started.session_id, goal: "extract an API key", max_steps: 12 },
+        api(),
+        undefined,
+        dependencies,
+      );
+      // The covering layer was dismissed and the same control was offered
+      // again, so the drive reached the key surface it had chosen.
+      expect(await page.locator("#modal").count()).toBe(0);
+      expect(page.url()).toMatch(/\/settings\/keys/);
+      expect(await page.locator("#secret").innerText()).toBe(DRIVE_FIXTURE_KEY);
+      expect(result.status).toBe("complete");
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
+  it("never types a fact into a search box that filters the listed destination", async () => {
+    const settingsHtml = `<!doctype html><meta charset="utf-8"><title>Settings</title>
+<main>
+  <h1>Settings</h1>
+  <label>Search apps <input id="search" type="search"></label>
+  <a id="archive" href="/settings/archive">archive</a>
+  <section id="apps">
+    <button type="button" data-item id="one" onclick="location.href='/settings/apps/one'">Open payments-api</button>
+    <button type="button" data-item id="two" onclick="location.href='/settings/apps/two'">Open billing-api</button>
+  </section>
+</main>
+<script>
+  const search = document.getElementById("search");
+  const apps = document.getElementById("apps");
+  const all = apps.innerHTML;
+  search.addEventListener("input", () => {
+    sessionStorage.setItem("searched", "1");
+    apps.innerHTML = all;
+    const q = search.value.trim().toLowerCase();
+    if (q.length === 0) return;
+    for (const item of Array.from(apps.querySelectorAll("[data-item]"))) {
+      if (!item.textContent.toLowerCase().includes(q)) item.remove();
+    }
+  });
+</script>`;
+    const entryHtml = `<!doctype html><meta charset="utf-8"><title>payments-api</title>
+<main>
+  <h1>payments-api</h1>
+  <p id="secret">••••••••••••</p>
+  <button type="button" id="reveal">Reveal</button>
+</main>
+<script>
+  document.getElementById("reveal").onclick = () => {
+    document.getElementById("secret").textContent = "${DRIVE_FIXTURE_KEY}";
+    document.getElementById("reveal").remove();
+  };
+</script>`;
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await page.route("**/*", (route) => {
+      const url = route.request().url();
+      return route.fulfill({
+        contentType: "text/html",
+        body: url.includes("/settings/apps/") ? entryHtml : settingsHtml,
+      });
+    });
+    const startUrl = "https://search-narrowing.test/settings";
+    await page.goto(startUrl);
+    const started = await startHarnessProvisionSession({
+      browser: BrowserController.fromHarnessPage(page),
+      serviceUrl: startUrl,
+      format: "compact",
+      initialObservation: "standard",
+    });
+    // The page lists an entry the drive has already opened, so the explorer
+    // has nothing of its own to click: the model must choose. This is the
+    // state that let a fact reach the search field.
+    const seeded = sessionForCall(started.session_id);
+    if (seeded !== undefined) {
+      seeded.drive ??= emptyDriveState("extract an API key", { company: "Squire" });
+      seeded.drive.visitedSectionKeys = [
+        "https://search-narrowing.test/settings/archive\tarchive",
+      ];
+    }
+    try {
+      const dependencies = deps(async (_api, _state, questions) => jevFromQuestions(questions));
+      const result = await runOperateDrive(
+        {
+          session_id: started.session_id,
+          goal: "extract an API key",
+          facts: { company: "Squire" },
+          max_steps: 12,
+        },
+        api(),
+        undefined,
+        dependencies,
+      );
+      // The fact was never typed into the narrowing field, so the listed
+      // destination survived and the drive opened it.
+      expect(await page.evaluate(() => sessionStorage.getItem("searched"))).toBeNull();
+      expect(page.url()).toMatch(/\/settings\/apps\//);
+      expect(await page.locator("#secret").innerText()).toBe(DRIVE_FIXTURE_KEY);
+      expect(result.status).toBe("complete");
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
 });
