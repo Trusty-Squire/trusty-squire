@@ -28,6 +28,7 @@ export const SLOW_POST_MERGE_FILES = [
 // plus broker tests driving real Chrome via UNIVERSAL_BOT_CHROME_BINARY).
 export const REAL_BROWSER_FILES = [
   "src/__tests__/broker-default-start.test.ts",
+  "src/__tests__/broker-only-path-acceptance.test.ts",
   "src/__tests__/capture-postaction-e2e.test.ts",
   "src/bot/__tests__/action-compact-browser.test.ts",
   "src/bot/__tests__/browser-ax-faithful-controls.test.ts",
