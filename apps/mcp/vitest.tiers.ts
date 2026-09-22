@@ -53,6 +53,7 @@ export const REAL_BROWSER_FILES = [
   "src/bot/capture/__tests__/credential-capture-browser.test.ts",
   "src/bot/__tests__/drive-control-digest.test.ts",
   "src/bot/__tests__/drive-oauth-handoff-dispatch.test.ts",
+  "src/bot/__tests__/drive-oauth-trace.test.ts",
   "src/bot/__tests__/drive-stop-reason-prose.test.ts",
   "src/bot/__tests__/hcaptcha-inject-coresident.test.ts",
   "src/bot/__tests__/recaptcha-checkbox-frame-click.test.ts",
