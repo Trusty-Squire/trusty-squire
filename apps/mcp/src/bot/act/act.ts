@@ -118,7 +118,12 @@ export type ActExecutorOptions = {
 const DRIVE_DISPATCH: ActExecutorOptions = { drive: true };
 
 export type DriveActResult =
-  | { kind: "ok"; combobox: boolean; needsUser?: NonNullable<Observation["needs_user"]> }
+  | {
+      kind: "ok";
+      combobox: boolean;
+      needsUser?: NonNullable<Observation["needs_user"]>;
+      oauth?: Observation["oauth"];
+    }
   | { kind: "stale"; reason: string }
   | { kind: "unsupported" };
 
@@ -1418,6 +1423,7 @@ export async function dispatchDriveAct(
     return {
       kind: "ok",
       combobox: result.combobox === true,
+      ...(result.observation.oauth === undefined ? {} : { oauth: result.observation.oauth }),
       ...(result.observation.needs_user === undefined
         ? {}
         : { needsUser: result.observation.needs_user }),
