@@ -317,6 +317,7 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
     next: number;
     describe?: (element: Element) => ControlDescription | null;
     rowDigest?: () => string;
+    resolveSelector?: (selector: string) => Element[];
   };
   const root = window as Window & { __tsDriveRegistry?: DriveCache };
   const cache: DriveCache = root.__tsDriveRegistry ?? {
@@ -348,8 +349,38 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
     // never emitted. file/hidden inputs are not drive targets at all.
     return !["file", "hidden"].includes(element.type);
   };
+  // querySelectorAll and TreeWalker do not cross a shadow boundary. Keep the
+  // roots in document order so a portaled cover in an open shadow tree is
+  // inventoried alongside the controls it covers.
+  const queryRoots: Array<Document | ShadowRoot> = [document];
+  for (let index = 0; index < queryRoots.length && !expired(); index += 1) {
+    for (const element of Array.from(queryRoots[index]!.querySelectorAll("*"))) {
+      if (element.shadowRoot !== null) queryRoots.push(element.shadowRoot);
+    }
+  }
+  const queryAll = (selector: string): Element[] =>
+    queryRoots.flatMap((queryRoot) => Array.from(queryRoot.querySelectorAll(selector)));
+  const composedParent = (element: Element): Element | null => {
+    if (element.parentElement !== null) return element.parentElement;
+    const root = element.getRootNode();
+    return root instanceof ShadowRoot ? root.host : null;
+  };
+  const composedContains = (ancestor: Element, descendant: Element): boolean => {
+    let current: Element | null = descendant;
+    while (current !== null) {
+      if (current === ancestor) return true;
+      current = composedParent(current);
+    }
+    return false;
+  };
   const visible = (element: Element): boolean => {
-    if (element.closest('[aria-hidden="true"],[inert]') !== null) return false;
+    for (
+      let current: Element | null = element;
+      current !== null;
+      current = composedParent(current)
+    ) {
+      if (current.matches('[aria-hidden="true"],[inert]')) return false;
+    }
     if (typeof element.checkVisibility === "function") {
       return element.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true });
     }
@@ -369,9 +400,17 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
     }
     nameVisits += 1;
     seen.add(element);
+    const ownerRoot = element.getRootNode();
     const labelledBy = (element.getAttribute("aria-labelledby") ?? "")
       .split(/\s+/)
-      .map((id) => name(document.getElementById(id), seen))
+      .map((id) =>
+        name(
+          ownerRoot instanceof Document || ownerRoot instanceof ShadowRoot
+            ? ownerRoot.getElementById(id)
+            : null,
+          seen,
+        ),
+      )
       .filter((part) => part.length > 0)
       .join(" ");
     if (labelledBy.length > 0) return labelledBy;
@@ -541,9 +580,11 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
     };
   };
   const selectorFor = (node: Element): string => {
+    const ownerRoot = node.getRootNode();
+    const queryRoot = ownerRoot instanceof ShadowRoot ? ownerRoot : document;
     const namesOnlyThisNode = (candidate: string): boolean => {
       try {
-        const found = document.querySelectorAll(candidate);
+        const found = queryRoot.querySelectorAll(candidate);
         return found.length === 1 && found[0] === node;
       } catch {
         return false;
@@ -551,18 +592,21 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
     };
     const quoted = (value: string): string => value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
     const tag = node.tagName.toLowerCase();
+    const inRoot = (local: string): string =>
+      ownerRoot instanceof ShadowRoot ? `${selectorFor(ownerRoot.host)} >> ${local}` : local;
     for (const attr of ["data-testid", "data-test-id", "data-test", "data-cy", "data-qa"]) {
       const value = node.getAttribute(attr);
       if (value === null || value.length === 0) continue;
       const candidate = `[${attr}="${quoted(value)}"]`;
-      if (namesOnlyThisNode(candidate)) return candidate;
+      if (namesOnlyThisNode(candidate)) return inRoot(candidate);
     }
     const id = node.getAttribute("id");
-    if (id !== null && /^[A-Za-z][\w-]*$/.test(id) && namesOnlyThisNode(`#${id}`)) return `#${id}`;
+    if (id !== null && /^[A-Za-z][\w-]*$/.test(id) && namesOnlyThisNode(`#${id}`))
+      return inRoot(`#${id}`);
     const name = node.getAttribute("name");
     if (name !== null && name.length > 0) {
       const candidate = `${tag}[name="${quoted(name)}"]`;
-      if (namesOnlyThisNode(candidate)) return candidate;
+      if (namesOnlyThisNode(candidate)) return inRoot(candidate);
     }
     const parts: string[] = [];
     let walk: Element | null = node;
@@ -580,7 +624,21 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
       parts.unshift(sibs.length > 1 ? `${t}:nth-of-type(${sibs.indexOf(cur) + 1})` : t);
       walk = parent;
     }
-    return parts.join(" > ");
+    return inRoot(parts.join(" > "));
+  };
+  cache.resolveSelector = (selector: string): Element[] => {
+    const parts = selector.split(" >> ");
+    let roots: Array<Document | ShadowRoot> = [document];
+    let found: Element[] = [];
+    for (let index = 0; index < parts.length; index += 1) {
+      found = roots.flatMap((queryRoot) => Array.from(queryRoot.querySelectorAll(parts[index]!)));
+      if (index < parts.length - 1) {
+        roots = found.flatMap((element) =>
+          element.shadowRoot === null ? [] : [element.shadowRoot],
+        );
+      }
+    }
+    return found;
   };
   const formIds = new WeakMap<Element, number>();
   let nextForm = 1;
@@ -604,7 +662,7 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
   const inView: DriveSnapshotElement[] = [];
   const offscreenControls: DriveSnapshotElement[] = [];
   let omittedValues = 0;
-  for (const element of Array.from(document.querySelectorAll(selector))) {
+  for (const element of queryAll(selector)) {
     if (expired()) break;
     if (!safe(element) || !visible(element)) continue;
     const role = roleOf(element);
@@ -768,21 +826,22 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
     const x = Math.min(innerWidth - 1, Math.max(0, rect.x + rect.width / 2));
     const y = Math.min(innerHeight - 1, Math.max(0, rect.y + rect.height / 2));
     const hit = document.elementFromPoint(x, y);
-    if (hit === null || hit === element || element.contains(hit) || hit.contains(element)) {
+    if (hit === null || composedContains(element, hit) || composedContains(hit, element)) {
       return undefined;
     }
     let cur: Element | null = hit;
     while (cur !== null) {
       const cover = refOf.get(cur);
       if (cover !== undefined && cover !== selfRef) return cover;
-      cur = cur.parentElement;
+      cur = composedParent(cur);
     }
     const named = hit.closest(
       "dialog,[role='dialog'],[role='alertdialog'],[role='banner'],[role='complementary'],aside,header",
     );
     if (named !== null) {
       const role = (named.getAttribute("role") ?? named.tagName).toLowerCase();
-      if (role === "dialog" || role === "alertdialog" || named.tagName === "DIALOG") return "dialog";
+      if (role === "dialog" || role === "alertdialog" || named.tagName === "DIALOG")
+        return "dialog";
       if (role === "banner" || named.tagName === "HEADER") return "banner";
       if (role === "complementary" || named.tagName === "ASIDE") return "aside";
     }
@@ -808,42 +867,56 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
     arg.maxElements,
   );
   const headings: string[] = [];
-  for (const heading of Array.from(document.querySelectorAll("h1,h2,h3,h4,h5,h6"))) {
+  for (const heading of queryAll("h1,h2,h3,h4,h5,h6")) {
     if (!visible(heading)) continue;
     const text = (heading.textContent ?? "").replace(/\s+/g, " ").trim();
     if (text.length > 0) headings.push(text);
   }
   const words: string[] = [];
-  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
   const range = document.createRange();
   let length = 0;
   let walkNodes = 0;
-  let node = walker.nextNode();
-  while (node !== null && length < 6000 && walkNodes < arg.maxWalkNodes && !expired()) {
-    walkNodes += 1;
-    const value = (node.textContent ?? "").trim();
-    const parent = node.parentElement;
-    if (
-      value.length > 0 &&
-      parent !== null &&
-      parent.closest("script,style,noscript,template") === null &&
-      visible(parent)
-    ) {
-      range.selectNodeContents(node);
-      const rect = range.getBoundingClientRect();
+  // A covering shadow tree gets first claim on the bounded text budget. Its
+  // content may include a one-time value that the underlying page obscures.
+  const topHit = document.elementFromPoint(innerWidth / 2, innerHeight / 2);
+  const priorityRoot = topHit?.shadowRoot ?? null;
+  const textRoots =
+    priorityRoot === null
+      ? queryRoots
+      : [priorityRoot, ...queryRoots.filter((queryRoot) => queryRoot !== priorityRoot)];
+  for (const textRoot of textRoots) {
+    const walker = document.createTreeWalker(
+      textRoot === document ? document.body : textRoot,
+      NodeFilter.SHOW_TEXT,
+    );
+    let node = walker.nextNode();
+    while (node !== null && length < 6000 && walkNodes < arg.maxWalkNodes && !expired()) {
+      walkNodes += 1;
+      const value = (node.textContent ?? "").trim();
+      const parent = node.parentElement;
       if (
-        rect.width > 0 &&
-        rect.height > 0 &&
-        rect.bottom > 0 &&
-        rect.top < innerHeight &&
-        rect.right > 0 &&
-        rect.left < innerWidth
+        value.length > 0 &&
+        parent !== null &&
+        parent.closest("script,style,noscript,template") === null &&
+        visible(parent)
       ) {
-        words.push(value);
-        length += value.length;
+        range.selectNodeContents(node);
+        const rect = range.getBoundingClientRect();
+        if (
+          rect.width > 0 &&
+          rect.height > 0 &&
+          rect.bottom > 0 &&
+          rect.top < innerHeight &&
+          rect.right > 0 &&
+          rect.left < innerWidth
+        ) {
+          words.push(value);
+          length += value.length;
+        }
       }
+      node = walker.nextNode();
     }
-    node = walker.nextNode();
+    if (length >= 6000 || walkNodes >= arg.maxWalkNodes || expired()) break;
   }
   const notices: string[] = [];
   const seenNotice = new Set<string>();
@@ -855,11 +928,7 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
     seenNotice.add(key);
     notices.push(value);
   };
-  for (const el of Array.from(
-    document.querySelectorAll(
-      '[role="alert"],[role="status"],[aria-live]:not([aria-live="off"])',
-    ),
-  )) {
+  for (const el of queryAll('[role="alert"],[role="status"],[aria-live]:not([aria-live="off"])')) {
     if (!visible(el)) continue;
     addNotice(el.textContent ?? "");
   }
@@ -867,9 +936,13 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
     `${el.getAttribute("aria-describedby") ?? ""} ${el.getAttribute("aria-errormessage") ?? ""}`
       .split(/\s+/)
       .filter((id) => id.length > 0);
-  for (const el of Array.from(document.querySelectorAll("[aria-invalid='true']"))) {
+  for (const el of queryAll("[aria-invalid='true']")) {
+    const ownerRoot = el.getRootNode();
     for (const id of describedIds(el)) {
-      const desc = document.getElementById(id);
+      const desc =
+        ownerRoot instanceof Document || ownerRoot instanceof ShadowRoot
+          ? ownerRoot.getElementById(id)
+          : null;
       if (desc === null) continue;
       addNotice(desc.textContent ?? "");
     }
@@ -892,7 +965,7 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
       if (/error/i.test(key)) collectJsonErrors(entry, depth + 1);
     }
   };
-  for (const script of Array.from(document.querySelectorAll("script"))) {
+  for (const script of queryAll("script")) {
     const raw = (script.textContent ?? "").trim();
     if (raw.length < 8 || (raw[0] !== "{" && raw[0] !== "[")) continue;
     try {

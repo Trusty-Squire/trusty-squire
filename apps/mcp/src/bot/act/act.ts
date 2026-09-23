@@ -641,7 +641,12 @@ async function clickTargetOccluded(scope: Page | Frame, selector: string): Promi
   return await evaluateBound(
     scope,
     (sel: string) => {
-      const element = document.querySelector(sel);
+      const registry = (
+        window as Window & {
+          __tsDriveRegistry?: { resolveSelector?: (selector: string) => Element[] };
+        }
+      ).__tsDriveRegistry;
+      const element = registry?.resolveSelector?.(sel)[0] ?? document.querySelector(sel);
       if (element === null) return false;
       // The snapshot keeps offscreen fillables so the model can name them, and
       // the dispatch scrolls before clicking — so measure where the click will
@@ -662,7 +667,16 @@ async function clickTargetOccluded(scope: Page | Frame, selector: string): Promi
       const rect = element.getBoundingClientRect();
       if (rect.width <= 0 || rect.height <= 0) return false;
       const hit = document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2);
-      return hit !== null && hit !== element && !element.contains(hit) && !hit.contains(element);
+      const composedContains = (ancestor: Element, descendant: Element): boolean => {
+        let current: Element | null = descendant;
+        while (current !== null) {
+          if (current === ancestor) return true;
+          const root = current.getRootNode();
+          current = current.parentElement ?? (root instanceof ShadowRoot ? root.host : null);
+        }
+        return false;
+      };
+      return hit !== null && !composedContains(element, hit) && !composedContains(hit, element);
     },
     selector,
   ).catch(() => false);
