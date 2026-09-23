@@ -1,4 +1,5 @@
 import type { CheckoutCard } from "./checkout.js";
+import type { DriveRefAnchor } from "./drive-ref-bridge.js";
 import { isCaptchaFrameUrl, isRecaptchaCheckboxFrameUrl } from "./captcha.js";
 import { captureBoundScreenshot, type ScreenshotBinding } from "./screenshot-click.js";
 import {
@@ -99,6 +100,7 @@ export interface InjectCardResolvedTarget {
   element?: InteractiveElement;
   missing?: "not_found" | "detached";
   format?: string | undefined;
+  driveAnchor?: DriveRefAnchor;
 }
 
 // inject_card resolves each hosted card field at its OWN write step, never once
@@ -6787,6 +6789,27 @@ export class BrowserController implements BrowserDriver {
             0,
             page,
           );
+    const matchesDriveAnchor = async (
+      handle: ElementHandle<Element>,
+      anchor: DriveRefAnchor,
+    ): Promise<boolean> => {
+      if ((await handle.ownerFrame().catch(() => null)) !== anchor.frame) return false;
+      return await handle
+        .evaluate(
+          (node, expected) => {
+            const registry = (
+              window as Window & { __tsDriveRegistry?: { nodes: Map<string, Element> } }
+            ).__tsDriveRegistry;
+            return (
+              String(performance.timeOrigin) === expected.documentTimeOrigin &&
+              node.isConnected &&
+              registry?.nodes.get(expected.privateRef) === node
+            );
+          },
+          { documentTimeOrigin: anchor.documentTimeOrigin, privateRef: anchor.privateRef },
+        )
+        .catch(() => false);
+    };
     const fillField = async (field: InjectCardField): Promise<InjectCardFieldResult> => {
       // Resolve at write time. A miss is retried on a bounded window rather
       // than reported on first glance; `detached` (the ref was live in the
@@ -6821,6 +6844,10 @@ export class BrowserController implements BrowserDriver {
         if (handle === null) {
           return { status: "detached" };
         }
+        if (target.driveAnchor !== undefined) {
+          if (!(await matchesDriveAnchor(handle, target.driveAnchor)))
+            return { status: "detached" };
+        }
         await markOperatorMutationDispatchAttempted();
         if (field === "pan" || field === "cvv") {
           await handle.evaluate(
@@ -6831,10 +6858,11 @@ export class BrowserController implements BrowserDriver {
         const value = valueFor(field, target.format);
         const tag = await handle.evaluate((node) => node.tagName.toLowerCase());
         if (tag === "select") {
-          const owner = await handle.ownerFrame();
-          if (owner === null) throw new Error("target has no owning frame");
-          const selector = element.selector;
-          const select = owner.locator(selector);
+          const select =
+            target.driveAnchor === undefined
+              ? (await handle.ownerFrame())?.locator(element.selector)
+              : handle;
+          if (select === undefined) throw new Error("target has no owning frame");
           try {
             await select.selectOption({ value }, { timeout: 3_000 });
           } catch {
@@ -6849,14 +6877,31 @@ export class BrowserController implements BrowserDriver {
           // through the same real-key path ordinary field typing uses, so
           // the page sees normal key events. The value still goes straight
           // from the vault into the page — never into a tool result or log.
-          const owner = await handle.ownerFrame();
-          if (owner === null) throw new Error("target has no owning frame");
-          await this.typeWithRealKeys(owner.locator(element.selector).first(), value, {
-            timeoutMs: CARD_FIELD_WRITE_TIMEOUT_MS,
-          });
+          if (target.driveAnchor === undefined) {
+            const owner = await handle.ownerFrame();
+            if (owner === null) throw new Error("target has no owning frame");
+            await this.typeWithRealKeys(owner.locator(element.selector).first(), value, {
+              timeoutMs: CARD_FIELD_WRITE_TIMEOUT_MS,
+            });
+          } else {
+            // ElementHandle.type emits the same keyboard events while retaining
+            // this exact node. A locator would re-query a replacement field.
+            await handle.fill("", { timeout: CARD_FIELD_WRITE_TIMEOUT_MS }).catch(() => undefined);
+            const [keyMin, keyMax] = this.dispatchPacing.keyDelayMs;
+            await handle.type(value, {
+              delay: rand(keyMin, keyMax),
+              timeout: CARD_FIELD_WRITE_TIMEOUT_MS,
+            });
+          }
         }
         return { status: "filled" };
       } catch (error) {
+        if (
+          target.driveAnchor !== undefined &&
+          handle !== null &&
+          !(await matchesDriveAnchor(handle, target.driveAnchor))
+        )
+          return { status: "detached" };
         return {
           status: "native_error",
           error: this.cardValueOutputMask.maskText(
@@ -6919,6 +6964,11 @@ export class BrowserController implements BrowserDriver {
         const handle = await resolveInjectTarget(target.element);
         if (handle === null) return false;
         try {
+          if (
+            target.driveAnchor !== undefined &&
+            !(await matchesDriveAnchor(handle, target.driveAnchor))
+          )
+            return false;
           const expected = valueFor(field, target.format);
           return await handle.evaluate((node, expected) => {
             const control = node as HTMLInputElement | HTMLSelectElement;

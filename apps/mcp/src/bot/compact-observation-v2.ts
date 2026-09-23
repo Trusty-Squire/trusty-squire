@@ -262,6 +262,8 @@ export interface SafeObservationIndexV2 {
   semantics: SafePageSemanticsV2;
   rows: SafeControlV2[];
   byRef: Map<string, string>;
+  /** Physical nodes at publication time; card writes never adopt replacements. */
+  physicalByRef?: Map<string, string>;
   expiresAt: number;
 }
 

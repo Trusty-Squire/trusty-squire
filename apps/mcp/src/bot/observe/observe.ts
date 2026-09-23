@@ -610,6 +610,11 @@ function compactV2Observation(
     semantics,
     rows: safe.rows,
     byRef: safe.byRef,
+    physicalByRef: new Map(
+      [...handles]
+        .filter(([element, ref]) => element.observationIdentity && targetableRefs.has(ref))
+        .map(([element, ref]) => [ref, element.observationIdentity!] as const),
+    ),
     expiresAt: Date.now() + 5 * 60_000,
   };
   const canCompactActionDelta =
