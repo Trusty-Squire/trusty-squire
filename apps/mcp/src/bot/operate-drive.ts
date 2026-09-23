@@ -5382,7 +5382,13 @@ async function captureDriveSession(
     return await fellBack(finalized.observation, finalized.rows, 0, main.wallMs, true);
   }
   const parts: DriveSnapshot[] = [main];
-  if (needFrames) {
+  // An iframe can itself be the covering layer. The main-frame hit test sees
+  // the cover, but its controls and text live in the child document. Inspect
+  // frames on that evidence even outside the usual hosted-field path.
+  const coveredByLayer = main.elements.some(
+    (element) => element.occludedBy === "overlay" || element.occludedBy === "dialog",
+  );
+  if (needFrames || coveredByLayer) {
     const cache = driveFrameCache.get(session) ?? new Map();
     const frames = page.frames();
     for (let index = 1; index < frames.length; index += 1) {
@@ -5390,7 +5396,9 @@ async function captureDriveSession(
       const signature = await frameDynamicsSignature(frame);
       const key = `${index}:${frame.url()}:${keepOffscreenButtons}`;
       const cached = cache.get(key);
-      if (cached !== undefined && cached.signature === signature) {
+      // A layer can reveal a one-time value without changing any input. Do
+      // not reuse a frame snapshot while the main page is covered.
+      if (!coveredByLayer && cached !== undefined && cached.signature === signature) {
         parts.push(cached.snapshot);
         continue;
       }

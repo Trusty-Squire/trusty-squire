@@ -172,12 +172,14 @@ function inPageSameControl(arg: {
   type DriveCache = {
     nodes: Map<string, Element>;
     describe?: (element: Element) => ControlDescription | null;
+    resolveSelector?: (selector: string) => Element[];
   };
   const registry = (window as Window & { __tsDriveRegistry?: DriveCache }).__tsDriveRegistry;
   const node = registry?.nodes.get(arg.ref);
   if (node === undefined || !node.isConnected) return false;
   try {
-    const found = document.querySelectorAll(arg.selector);
+    const found =
+      registry?.resolveSelector?.(arg.selector) ?? document.querySelectorAll(arg.selector);
     if (found.length !== 1 || found[0] !== node) return false;
   } catch {
     return false;
@@ -250,13 +252,21 @@ export function canonicalIndexForDriveRef(arg: {
   ref: string;
   candidates: Array<{ index: number; selector: string }>;
 }): number {
-  type DriveCache = { nodes: Map<string, Element> };
+  type DriveCache = {
+    nodes: Map<string, Element>;
+    resolveSelector?: (selector: string) => Element[];
+  };
   const registry = (window as Window & { __tsDriveRegistry?: DriveCache }).__tsDriveRegistry;
   const node = registry?.nodes.get(arg.ref);
   if (node === undefined || !node.isConnected) return -1;
   for (const candidate of arg.candidates) {
     try {
-      if (document.querySelector(candidate.selector) === node) return candidate.index;
+      if (
+        (registry?.resolveSelector === undefined
+          ? document.querySelector(candidate.selector)
+          : registry.resolveSelector(candidate.selector)[0]) === node
+      )
+        return candidate.index;
     } catch {
       continue;
     }
