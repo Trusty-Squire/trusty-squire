@@ -57,7 +57,7 @@ export function feedbackPagePath(url: string): string {
   }
 }
 
-export type DriveGoalPhase = "sign_in" | "verify" | "find_keys" | "create_or_reveal" | "done";
+export type DriveGoalPhase = "sign_in" | "verify" | "find_keys" | "create_or_reveal";
 
 const VERIFY_GOAL_RE =
   /\bverif(?:y|ication)|confirm(?:ation)?(?:\s+your)?\s+e-?mail|check your e-?mail|otp|one[- ]time code|verification code|email code/;
@@ -69,13 +69,13 @@ const CREATE_OR_REVEAL_GOAL_RE =
   /\bsign[\s-]*up|signup|create\s+(?:an?\s+)?account|register|create\s+(?:an?\s+)?(?:api\s+)?key|generate\s+(?:an?\s+)?(?:api\s+)?key|reveal|new key|add key/;
 
 /** The phase the goal's own words put the drive in. Deterministic. */
-export function goalPhase(goal: string): DriveGoalPhase {
+export function goalPhase(goal: string): DriveGoalPhase | undefined {
   const text = goal.toLowerCase();
   if (VERIFY_GOAL_RE.test(text)) return "verify";
   if (FIND_KEYS_GOAL_RE.test(text)) return "find_keys";
   if (SIGN_IN_GOAL_RE.test(text)) return "sign_in";
   if (CREATE_OR_REVEAL_GOAL_RE.test(text)) return "create_or_reveal";
-  return "done";
+  return undefined;
 }
 
 /** The exact page condition that satisfies the goal, in literal terms. */
@@ -95,10 +95,11 @@ export function goalDoneWhen(goal: string): string {
 }
 
 export function goalPhaseAndDoneWhen(goal: string): {
-  phase: DriveGoalPhase;
+  phase?: DriveGoalPhase;
   done_when: string;
 } {
-  return { phase: goalPhase(goal), done_when: goalDoneWhen(goal) };
+  const phase = goalPhase(goal);
+  return { ...(phase === undefined ? {} : { phase }), done_when: goalDoneWhen(goal) };
 }
 
 /** True when the goal's finish line is a secret-shaped value on the page. */

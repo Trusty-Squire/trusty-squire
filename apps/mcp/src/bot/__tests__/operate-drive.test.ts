@@ -172,6 +172,7 @@ import {
 import { operateDriveTool } from "../../tools/provision-drive.js";
 import type { JevAnswer } from "../jev-client.js";
 import { captchaInjectSettled } from "../captcha-solve.js";
+import { goalPhaseAndDoneWhen } from "../drive-feedback.js";
 import type { Page } from "playwright";
 import type { Session } from "../provision-session.js";
 
@@ -536,6 +537,21 @@ describe("page text from observation", () => {
 });
 
 describe("history threading", () => {
+  it("does not present an unrecognized purchase goal as already done", () => {
+    const goal = "Buy one The Glow Serum from White Jade";
+    const instructions = nextActionInstructions(goal);
+    expect(instructions).not.toContain("Current phase: done");
+    expect(instructions).not.toContain("Current phase:");
+    expect(instructions).toContain("The goal is complete only when the page shows the requested result.");
+    expect(goalPhaseAndDoneWhen(goal)).toEqual({
+      done_when: "the page shows the requested result",
+    });
+    expect(buildJevState(goal, [], [], "https://whitejade.test/", "", [])?.goal).toEqual({
+      text: goal,
+      done_when: "the page shows the requested result",
+    });
+  });
+
   it("puts goal, facts, recent actions, and element operations in structured state", () => {
     const history = Array.from({ length: 22 }, (_, i) => `click step ${i}`);
     const state = buildJevState(
