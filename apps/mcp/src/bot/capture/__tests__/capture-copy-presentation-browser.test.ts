@@ -16,7 +16,7 @@ beforeAll(async () => {
   profile = await mkdtemp(join(process.cwd(), ".capture-presentation-profile-"));
   context = await chromium.launchPersistentContext(profile, {
     channel: "chrome",
-    headless: false,
+    headless: true,
     args: ["--no-sandbox"],
   });
   page = context.pages()[0] ?? (await context.newPage());
@@ -59,10 +59,18 @@ it("copies from an unmarked presentation layer with masked code and unlabeled ic
   </script>`;
   await page.route("**/*", (route) => route.fulfill({ contentType: "text/html", body: html }));
   await page.goto("http://127.0.0.1/");
-  expect(await page.locator('dialog[open], [role="dialog"], [role="alertdialog"], [aria-modal="true"]').count()).toBe(0);
+  expect(
+    await page
+      .locator('dialog[open], [role="dialog"], [role="alertdialog"], [aria-modal="true"]')
+      .count(),
+  ).toBe(0);
   const snapshot = await captureFrameSnapshot(page, [], 0);
   expect(snapshot?.text).toContain("API key generated");
-  expect(snapshot?.elements.some((element) => element.occludedBy === "overlay" || element.occludedBy === "dialog")).toBe(false);
+  expect(
+    snapshot?.elements.some(
+      (element) => element.occludedBy === "overlay" || element.occludedBy === "dialog",
+    ),
+  ).toBe(false);
 
   const result = await extractCredentials("fixture-session");
   expect(result.credentials.api_key).toBe(key);

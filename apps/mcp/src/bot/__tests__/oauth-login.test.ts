@@ -3718,7 +3718,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
     }
   });
 
-  it("extends a delayed same-tab facade handoff from its navigation", async () => {
+  it("keeps a delayed same-tab provider handoff within the automated deadline", async () => {
     const context = await signedInGoogleContext();
     const product = await context.newPage();
     const previousTimeout = process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS;
@@ -3737,7 +3737,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
     await context.route("https://provider.test/oauth**", async (route) => {
       await route.fulfill({
         contentType: "text/html",
-        body: '<script>setTimeout(() => location.href = "https://product.test/callback", 900)</script>',
+        body: '<script>setTimeout(() => location.href = "https://product.test/callback", 5000)</script>',
       });
     });
     await product.goto("https://product.test/login");
@@ -3754,7 +3754,10 @@ describe("BrowserController OAuth popup lifecycle", () => {
       expect(oauthRef).toBeDefined();
       await expect(
         act(sessionId, { kind: "oauth_login", target: oauthRef!, provider: "google" }),
-      ).resolves.toMatchObject({ url: "https://product.test/callback" });
+      ).resolves.toMatchObject({
+        url: "https://provider.test/oauth?redirect_uri=https%3A%2F%2Fproduct.test%2Fcallback",
+        oauth: { state: "awaiting_human" },
+      });
     } finally {
       if (previousTimeout === undefined) delete process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS;
       else process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = previousTimeout;
