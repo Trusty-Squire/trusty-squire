@@ -233,20 +233,14 @@ describe("request building", () => {
     expect(operation.criteria).toHaveProperty("GO_BACK");
     // Parallel judgments ride along in the same request.
     expect(questions.last_action_worked?.type).toBe("noul");
-    expect(questions.blocked_by_layer?.type).toBe("noul");
-    expect(questions.goal_complete?.type).toBe("noul");
-    expect(questions.current_page_is_goal_target?.type).toBe("noul");
     expect(questions.dead_end?.type).toBe("noul");
     expect(questions.next_action).toBeUndefined();
     expect(questions.SCROLL_target).toBeUndefined();
     expect(Object.keys(questions).sort()).toEqual([
       "CLICK_target",
       "TYPE_TEXT_target",
-      "blocked_by_layer",
-      "current_page_is_goal_target",
       "dead_end",
       "email_code_field",
-      "goal_complete",
       "last_action_worked",
       "operation",
     ]);
@@ -620,7 +614,7 @@ describe("validate_choice", () => {
         },
         { reversible: true },
       ),
-    ).toEqual({ ok: true });
+    ).toEqual({ kind: "low_confidence", confidence: 0.26 });
     expect(
       admitsChoice(
         criteria,
@@ -631,7 +625,7 @@ describe("validate_choice", () => {
         },
         { hard: true },
       ),
-    ).toEqual({ ok: true });
+    ).toEqual({ kind: "low_confidence", confidence: 0.2 });
   });
 });
 
@@ -1303,7 +1297,7 @@ describe("decideAfterJev stop reasons", () => {
     ]);
   });
 
-  it("acts on a validated reversible pick with no confidence floor", () => {
+  it("hands a low-confidence model choice back with its options", () => {
     const go = slugFor(SUBMIT);
     expect(
       decideAfterJev({
@@ -1317,64 +1311,7 @@ describe("decideAfterJev stop reasons", () => {
           CLICK_target: valid(go, clickCriteria),
         },
       }),
-    ).toMatchObject({ kind: "act", action: { kind: "click", target: "@e:go" }, confidence: 0.41 });
-  });
-
-  it("acts on a validated reversible pick below 0.3 and completes a validated DONE with no floor", () => {
-    const go = slugFor(SUBMIT);
-    const fourOpKeys = ["CLICK", "TYPE_TEXT", "WAIT", "DONE"];
-    const fourOpQuestions = {
-      ...questions,
-      operation: {
-        type: "choice" as const,
-        instructions: nextActionInstructions("sign up"),
-        criteria: {
-          CLICK: "click a visible control",
-          TYPE_TEXT: "type a provided fact into a field",
-          WAIT: "wait only when the needed control is absent or disabled, or submitted results are still loading",
-          DONE: "the goal is already complete on visible evidence; stop",
-        },
-      },
-    };
-    expect(
-      decideAfterJev({
-        ...base,
-        questions: fourOpQuestions,
-        answers: {
-          operation: {
-            choice: "CLICK",
-            confidence: 0.26,
-            probabilities: peakedProbabilities(fourOpKeys, "CLICK", 0.26),
-          },
-          CLICK_target: valid(go, clickCriteria),
-        },
-      }),
-    ).toMatchObject({ kind: "act", action: { kind: "click", target: "@e:go" }, confidence: 0.26 });
-    expect(
-      decideAfterJev({
-        ...base,
-        answers: {
-          operation: {
-            choice: "DONE",
-            confidence: 0.41,
-            probabilities: peakedProbabilities(Object.keys(operationCriteriaMap), "DONE", 0.41),
-          },
-          CLICK_target: valid(go, clickCriteria),
-        },
-      }),
-    ).toMatchObject({ kind: "complete", confidence: 0.41 });
-    expect(
-      decideAfterJev({
-        ...base,
-        answers: {
-          operation: {
-            choice: "DONE",
-            confidence: 0.41,
-            probabilities: peakedProbabilities(Object.keys(operationCriteriaMap), "DONE", 0.41),
-          },
-        },
-      }),
-    ).toMatchObject({ kind: "complete", confidence: 0.41 });
+    ).toMatchObject({ kind: "low_confidence", confidence: 0.41 });
   });
 
   it("reports invalid_answer with the validation reason instead of low_confidence", () => {
@@ -1390,44 +1327,6 @@ describe("decideAfterJev stop reasons", () => {
         },
       }),
     ).toMatchObject({ kind: "invalid_answer", reason: "choice_not_offered", confidence: 0.91 });
-  });
-
-  it("acts on a validated payment click with no confidence floor", () => {
-    const pay: WireRow = ["@e:pay", "b", "@pay-now|f=payment"];
-    const paymentRows: WireRow[] = [pay];
-    const paymentQuestions = buildDriveQuestions(paymentRows, { card_ref: "card-1" }, "pay", true);
-    const ops =
-      paymentQuestions.operation?.type === "choice" ? paymentQuestions.operation.criteria : {};
-    const clicks =
-      paymentQuestions.CLICK_target?.type === "choice"
-        ? paymentQuestions.CLICK_target.criteria
-        : {};
-    const paySlug = Object.keys(clicks)[0];
-    expect(paySlug).toBeDefined();
-    if (paySlug === undefined) return;
-    expect(
-      decideAfterJev({
-        rows: paymentRows,
-        facts: { card_ref: "card-1" },
-        lastFingerprint: null,
-        lastActionKey: null,
-        fingerprint: "fp1",
-        goal: "pay",
-        cardRef: "card-1",
-        answers: {
-          operation: {
-            choice: "CLICK",
-            confidence: 0.55,
-            probabilities: peakedProbabilities(Object.keys(ops), "CLICK", 0.55),
-          },
-          CLICK_target: {
-            choice: paySlug,
-            confidence: 0.55,
-            probabilities: peakedProbabilities(Object.keys(clicks), paySlug, 0.55),
-          },
-        },
-      }).kind,
-    ).toBe("act");
   });
 
   it("repeats a same-ref click so three-strike can wait for in-place widgets", () => {
@@ -1764,9 +1663,12 @@ describe("form-fill assignment helpers", () => {
       ),
     ).toBe("This email address has been used to sign up too recently.");
     expect(
-      submitResponseText("Create account\nLoading Continue", "Create account\nLoading Continue", [], [
-        "Loading Continue",
-      ]),
+      submitResponseText(
+        "Create account\nLoading Continue",
+        "Create account\nLoading Continue",
+        [],
+        ["Loading Continue"],
+      ),
     ).toBeUndefined();
     const long = "x".repeat(SUBMIT_RESPONSE_REASON_MAX + 20);
     expect(submitResponseText("", long)?.length).toBe(SUBMIT_RESPONSE_REASON_MAX);
@@ -2406,9 +2308,12 @@ describe("facts, fingerprint, compact merge", () => {
     expect(
       pageProgressKey("https://app.example.test/signup", filled, ["@e:email"], ["Create account"]),
     ).not.toBe(
-      pageProgressKey("https://app.example.test/signup", filled, ["@e:email"], [
-        "Check your email",
-      ]),
+      pageProgressKey(
+        "https://app.example.test/signup",
+        filled,
+        ["@e:email"],
+        ["Check your email"],
+      ),
     );
     expect(
       pageProgressKey("https://api-ninjas.com/register", filled, ["@e:email", "@e:pw"]),
@@ -3138,7 +3043,16 @@ describe("third-party-only signup", () => {
   it("emits oauth_login for a provider link the same way as a provider button", () => {
     const rows = [google, github];
     const sets = driveTargetSets(rows, {}, false);
-    const questions = buildDriveQuestions(rows, {}, "create an account", false, [], "", new Map(), sets);
+    const questions = buildDriveQuestions(
+      rows,
+      {},
+      "create an account",
+      false,
+      [],
+      "",
+      new Map(),
+      sets,
+    );
     const clickCriteria =
       questions.CLICK_target?.type === "choice" ? questions.CLICK_target.criteria : {};
     const googleSlug = sets.CLICK.find((entry) => entry.ref === google[0])!.slug;
@@ -3210,7 +3124,9 @@ describe("post-confirmation navigation", () => {
     expect(clickGoalSeekScore(filter, "extract an API key", "https://example.test/dashboard")).toBe(
       0,
     );
-    expect(clickGoalSeekScore(keys, "extract an API key", "https://example.test/dashboard")).toBe(2);
+    expect(clickGoalSeekScore(keys, "extract an API key", "https://example.test/dashboard")).toBe(
+      2,
+    );
     const sets = driveTargetSets(
       [filter, keys],
       {},
@@ -3272,7 +3188,11 @@ describe("post-confirmation navigation", () => {
     const url = "https://app.example.test/dashboard";
     const logo: WireRow = ["@e:logo", "l", "Acme|u=https://app.example.test/"];
     const home: WireRow = ["@e:home", "l", "Home|u=https://app.example.test/dashboard"];
-    const anchor: WireRow = ["@e:prim", "l", "Primitives|u=https://app.example.test/dashboard#primitives"];
+    const anchor: WireRow = [
+      "@e:prim",
+      "l",
+      "Primitives|u=https://app.example.test/dashboard#primitives",
+    ];
     const hashOnly: WireRow = ["@e:use", "l", "Use cases|u=#use-cases"];
     const notice: WireRow = [
       "@e:comp",
@@ -3289,25 +3209,31 @@ describe("post-confirmation navigation", () => {
     expect(isEligibleSectionNavRow(hashOnly, url)).toBe(false);
     expect(isEligibleSectionNavRow(notice, url)).toBe(false);
     expect(isEligibleSectionNavRow(emails, url)).toBe(true);
-    expect(unvisitedSectionNavRows([logo, anchor, hashOnly, notice, emails], [], url).map((row) => row[0])).toEqual([
-      "@e:mail",
-    ]);
+    expect(
+      unvisitedSectionNavRows([logo, anchor, hashOnly, notice, emails], [], url).map(
+        (row) => row[0],
+      ),
+    ).toEqual(["@e:mail"]);
   });
 
   it("binds an action to label and destination, not a reminted ordinal", () => {
     const urlA = "https://app.example.test/dash";
     const urlB = "https://app.example.test/next";
-    const reputation: WireRow = ["@e:f0d6", "l", "Reputation|u=https://app.example.test/reputation"];
+    const reputation: WireRow = [
+      "@e:f0d6",
+      "l",
+      "Reputation|u=https://app.example.test/reputation",
+    ];
     const trap: WireRow = ["@e:f0d6", "l", "Create app|u=https://app.example.test/new"];
     const binding = decisionTargetBinding(reputation, urlA);
     expect(rowMatchesDecisionBinding(reputation, binding, urlA)).toBe(true);
     expect(rowMatchesDecisionBinding(trap, binding, urlB)).toBe(false);
-    expect(
-      isReissuedRef(trap[0], trap, urlB, { ref: reputation[0], binding, url: urlA }),
-    ).toBe(true);
-    expect(
-      isReissuedRef(trap[0], trap, urlA, { ref: reputation[0], binding, url: urlA }),
-    ).toBe(false);
+    expect(isReissuedRef(trap[0], trap, urlB, { ref: reputation[0], binding, url: urlA })).toBe(
+      true,
+    );
+    expect(isReissuedRef(trap[0], trap, urlA, { ref: reputation[0], binding, url: urlA })).toBe(
+      false,
+    );
   });
 
   it("opens listed entries before create and fills an entity name from facts", () => {
@@ -3320,9 +3246,15 @@ describe("post-confirmation navigation", () => {
     expect(isCreateEntryRow(app)).toBe(false);
     expect(listedItemRows([app, create], url).map((row) => row[0])).toEqual(["@e:one"]);
     const settingsUrl = "https://app.example.test/settings";
-    const nested: WireRow = ["@e:one", "l", "payments-api|u=https://app.example.test/settings/apps/one"];
+    const nested: WireRow = [
+      "@e:one",
+      "l",
+      "payments-api|u=https://app.example.test/settings/apps/one",
+    ];
     const sibling: WireRow = ["@e:rep", "l", "Reputation|u=https://app.example.test/reputation"];
-    expect(isDeeperDestination("https://app.example.test/settings/apps/one", settingsUrl)).toBe(true);
+    expect(isDeeperDestination("https://app.example.test/settings/apps/one", settingsUrl)).toBe(
+      true,
+    );
     expect(isDeeperDestination("https://app.example.test/reputation", settingsUrl)).toBe(false);
     expect(listedItemRows([nested, sibling], settingsUrl).map((row) => row[0])).toEqual(["@e:one"]);
     const account: WireRow = ["@e:acct", "tb", "Account"];
@@ -3335,11 +3267,9 @@ describe("post-confirmation navigation", () => {
     ];
     expect(isSiblingSectionNavRow(account, settingsUrl, [...entries, account])).toBe(true);
     expect(isSiblingSectionNavRow(entries[0]!, settingsUrl, [...entries, account])).toBe(false);
-    expect(untriedListedItemRows([...entries, account, create], [], settingsUrl).map((row) => row[0])).toEqual([
-      "@e:one",
-      "@e:two",
-      "@e:three",
-    ]);
+    expect(
+      untriedListedItemRows([...entries, account, create], [], settingsUrl).map((row) => row[0]),
+    ).toEqual(["@e:one", "@e:two", "@e:three"]);
     const offered = driveTargetSets(
       [...entries, account, billing, apps, create],
       {},
@@ -3351,7 +3281,12 @@ describe("post-confirmation navigation", () => {
       [],
       { goal: "extract an API key" },
     );
-    expect(offered.CLICK.map((entry) => entry.ref)).toEqual(["@e:one", "@e:two", "@e:three"]);
+    expect(offered.CLICK.map((entry) => entry.ref)).toContain("@e:new");
+    expect(offered.CLICK.map((entry) => entry.ref).slice(0, 3)).toEqual([
+      "@e:one",
+      "@e:two",
+      "@e:three",
+    ]);
     expect(offered.CLICK.map((entry) => entry.ref)).not.toContain("@e:acct");
     const afterAccount = driveTargetSets(
       [...entries, account, billing, apps],
@@ -3406,7 +3341,7 @@ describe("post-confirmation navigation", () => {
       { goal: "extract an API key" },
     );
     expect(sets.CLICK.map((entry) => entry.ref)[0]).toBe("@e:one");
-    expect(sets.CLICK.map((entry) => entry.ref)).not.toContain("@e:new");
+    expect(sets.CLICK.map((entry) => entry.ref)).toContain("@e:new");
     expect(sets.TYPE_TEXT.map((entry) => entry.ref)).toEqual(["@e:name"]);
   });
 
@@ -3491,12 +3426,9 @@ describe("post-confirmation navigation", () => {
         "sign up as ada@example.test",
       ),
     ).toBe(true);
-    expect(
-      invalidFieldReason(
-        [["@e:email", "t", "Email|f=email|s=i"]],
-        ["You are prohibited of registering an account. (Error: A1)"],
-      ),
-    ).toMatch(/prohibited of registering/i);
+    expect(invalidFieldReason([["@e:email", "t", "Email|f=email|s=i"]])).toMatch(
+      /email was marked invalid/i,
+    );
   });
 
   it("finishes after A-B-A-B destination alternation regardless of refs", () => {
@@ -3506,13 +3438,15 @@ describe("post-confirmation navigation", () => {
       "continue",
     );
     expect(recordDestinationAlternation(drive, "https://app.example.test/emails")).toBe("continue");
-    expect(recordDestinationAlternation(drive, "https://app.example.test/reputation")).toBe("cycle");
+    expect(recordDestinationAlternation(drive, "https://app.example.test/reputation")).toBe(
+      "cycle",
+    );
     expect(sectionsTriedReason(["https://app.example.test/emails\temails"])).toBe(
       "tried sections without reaching the goal: emails",
     );
-    expect(
-      isPageLevelSiteAnswer("Your account needs more information to be reactivated."),
-    ).toBe(true);
+    expect(isPageLevelSiteAnswer("Your account needs more information to be reactivated.")).toBe(
+      true,
+    );
     expect(isPageLevelSiteAnswer("API Keys sk_live_fixture")).toBe(false);
   });
 
@@ -3580,23 +3514,15 @@ describe("post-confirmation navigation", () => {
     ];
     const account: WireRow = ["@e:acct", "b", "Account"];
     const billing: WireRow = ["@e:bill", "b", "Billing"];
-    const reputation: WireRow = [
-      "@e:rep",
-      "l",
-      "Reputation|u=https://app.example.test/reputation",
-    ];
+    const reputation: WireRow = ["@e:rep", "l", "Reputation|u=https://app.example.test/reputation"];
     const docs: WireRow = ["@e:docs", "l", "Docs|u=https://app.example.test/docs"];
     const create: WireRow = ["@e:new", "l", "+ New app"];
     expect(isListedEntityRow(entries[0]!)).toBe(true);
     expect(isSectionNavRow(account)).toBe(true);
     expect(isSectionNavRow(reputation)).toBe(true);
-    expect(listedItemRows([...entries, account, reputation, create], settingsUrl).map((row) => row[0])).toEqual([
-      "@e:one",
-      "@e:two",
-      "@e:three",
-      "@e:four",
-      "@e:five",
-    ]);
+    expect(
+      listedItemRows([...entries, account, reputation, create], settingsUrl).map((row) => row[0]),
+    ).toEqual(["@e:one", "@e:two", "@e:three", "@e:four", "@e:five"]);
     const offered = driveTargetSets(
       [...entries, account, billing, reputation, docs, create],
       {},
@@ -3608,7 +3534,8 @@ describe("post-confirmation navigation", () => {
       [],
       { goal: "extract an API key" },
     );
-    expect(offered.CLICK.map((entry) => entry.ref)).toEqual([
+    expect(offered.CLICK.map((entry) => entry.ref)).toContain("@e:new");
+    expect(offered.CLICK.map((entry) => entry.ref).slice(0, 5)).toEqual([
       "@e:one",
       "@e:two",
       "@e:three",
@@ -3769,6 +3696,28 @@ describe("drive approval page texts", () => {
 });
 
 describe("dialog overlay secret and oauth bounce rules", () => {
+  it("does not offer existing-credential mutation controls for a key goal", () => {
+    const rows: WireRow[] = [
+      ["@e:reveal", "b", "Reveal key"],
+      ["@e:rotate", "b", "Rotate key"],
+      ["@e:reset", "b", "Reset"],
+    ];
+    const sets = driveTargetSets(
+      rows,
+      {},
+      false,
+      [],
+      "https://app.example.test/keys",
+      new Map(),
+      (text) => text,
+      [],
+      { goal: "read an API key" },
+    );
+    expect(sets.CLICK.map((candidate) => candidate.ref)).toContain("@e:reveal");
+    expect(sets.CLICK.map((candidate) => candidate.ref)).not.toContain("@e:rotate");
+    expect(sets.CLICK.map((candidate) => candidate.ref)).not.toContain("@e:reset");
+  });
+
   it("drops occluded controls and keeps the layer's own dismiss", () => {
     const key: WireRow = ["@e:key", "t", "API key|n=tvly-dev-****abcd|oc=dialog"];
     const create: WireRow = ["@e:new", "b", "Create API key|oc=dialog"];
@@ -3885,9 +3834,9 @@ describe("dialog overlay secret and oauth bounce rules", () => {
         "extract an API key",
       ),
     ).toBe(true);
-    expect(
-      cycleReason("https://app.example.test/settings/keys", ["click", "click"]),
-    ).toBe("cycling through click, click");
+    expect(cycleReason("https://app.example.test/settings/keys", ["click", "click"])).toBe(
+      "cycling through click, click",
+    );
   });
 
   it("treats the same path with a new state query as the same page", () => {

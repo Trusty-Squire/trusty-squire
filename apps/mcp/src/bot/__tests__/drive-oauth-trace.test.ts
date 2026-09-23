@@ -6,7 +6,7 @@ import { chromium, type Browser } from "playwright";
 import type { ApiClient } from "../../api-client.js";
 import { BrowserController } from "../browser.js";
 import { OAUTH_PROVIDERS } from "../oauth-providers.js";
-import { runOperateDrive, type DriveDependencies } from "../operate-drive.js";
+import { peakedProbabilities, runOperateDrive, type DriveDependencies } from "../operate-drive.js";
 import {
   act,
   awaitVerification,
@@ -22,6 +22,38 @@ beforeAll(async () => {
 afterAll(async () => {
   await browser?.close();
 });
+
+function chooseOauth(label: string): DriveDependencies["askJev"] {
+  return async (_api, _state, questions) => {
+    const operation = questions.operation;
+    const click = questions.CLICK_target;
+    if (operation?.type !== "choice" || click?.type !== "choice") {
+      throw new Error("OAuth action was not offered to the model");
+    }
+    const target = Object.entries(click.criteria).find(([, description]) =>
+      description.includes(label),
+    )?.[0];
+    if (target === undefined) throw new Error("OAuth target was not offered to the model");
+    return {
+      attempts: 1,
+      elapsedMs: 1,
+      result: {
+        answers: {
+          operation: {
+            choice: "CLICK",
+            confidence: 0.95,
+            probabilities: peakedProbabilities(Object.keys(operation.criteria), "CLICK"),
+          },
+          CLICK_target: {
+            choice: target,
+            confidence: 0.95,
+            probabilities: peakedProbabilities(Object.keys(click.criteria), target),
+          },
+        },
+      },
+    };
+  };
+}
 
 describe("drive OAuth trace", () => {
   it("records dispatch and handoff when identity admission returns before a click", async () => {
@@ -42,9 +74,7 @@ describe("drive OAuth trace", () => {
     process.env.DRIVE_TRACE_PATH = tracePath;
     try {
       const deps: DriveDependencies = {
-        askJev: async () => {
-          throw new Error("the named provider should be chosen without the model");
-        },
+        askJev: chooseOauth(label),
         act,
         observe,
         startSession: async () => {
@@ -107,9 +137,7 @@ describe("drive OAuth trace", () => {
     });
     try {
       const deps: DriveDependencies = {
-        askJev: async () => {
-          throw new Error("the named provider should be chosen without the model");
-        },
+        askJev: chooseOauth(label),
         act,
         observe,
         startSession: async () => {

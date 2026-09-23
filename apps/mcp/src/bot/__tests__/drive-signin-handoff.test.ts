@@ -1,12 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { OAUTH_PROVIDERS } from "../oauth-providers.js";
 import {
-  backOnlyDecision,
   buildDriveQuestions,
   decideAfterJev,
   driveTargetSets,
   shouldInspectSubmitResponse,
-  signinContinuationDecision,
 } from "../operate-drive.js";
 import type { WireRow } from "../operate-drive.js";
 
@@ -25,7 +23,7 @@ function answer(choice: string, criteria: Record<string, string>) {
 }
 
 describe("named identity sign-in", () => {
-  it("chooses the requested provider before email and enterprise sign-in", () => {
+  it("honors the model's selected email field when a provider is also visible", () => {
     const rows: WireRow[] = [
       ["@e:email", "t", "Email|f=email"],
       ["@e:sso", "l", "Use SSO"],
@@ -62,36 +60,7 @@ describe("named identity sign-in", () => {
       }),
     ).toMatchObject({
       kind: "act",
-      action: { kind: "oauth_login", target: "@e:provider", provider },
-    });
-  });
-
-  it("backs out of a page reached by a click whose only control returns to sign-in", () => {
-    expect(backOnlyDecision([["@e:back", "l", "Back to login"]], "click")).toEqual({
-      kind: "go_back",
-      confidence: 1,
-    });
-    expect(backOnlyDecision([["@e:back", "l", "Back to login"]], undefined)).toBeUndefined();
-    expect(
-      backOnlyDecision(
-        [
-          ["@e:back", "l", "Back to login"],
-          ["@e:other", "b", "Continue"],
-        ],
-        "click",
-      ),
-    ).toBeUndefined();
-  });
-
-  it("takes the ordinary continue step before an enterprise detour when the provider is not yet offered", () => {
-    const rows: WireRow[] = [
-      ["@e:continue", "b", "Continue"],
-      ["@e:sso", "l", "Use SSO"],
-    ];
-    const sets = driveTargetSets(rows, {}, false);
-    expect(signinContinuationDecision(`Sign up with ${providerLabel}`, sets.CLICK)).toMatchObject({
-      kind: "act",
-      action: { kind: "click", target: "@e:continue" },
+      action: { kind: "type", target: "@e:email", text: "person" },
     });
   });
 

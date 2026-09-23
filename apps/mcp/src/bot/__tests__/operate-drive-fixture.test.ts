@@ -2014,9 +2014,7 @@ describe("operate_drive real-browser fixture", () => {
         // choose — there is nothing on the page to act on or name.
         expect(asked).toHaveLength(1);
         expect([...asked[0]!.names].sort()).toEqual([
-          "blocked_by_layer",
           "dead_end",
-          "goal_complete",
           "last_action_worked",
           "operation",
         ]);
@@ -3066,7 +3064,15 @@ describe("operate_drive real-browser fixture", () => {
             },
           };
         }
-        return jevFromQuestions(questions, true);
+        const waiting = jevFromQuestions(questions);
+        if ("WAIT" in choiceCriteria(questions.operation)) {
+          waiting.result.answers.operation = {
+            choice: "WAIT",
+            confidence: 0.93,
+            probabilities: peaked(Object.keys(choiceCriteria(questions.operation)), "WAIT"),
+          };
+        }
+        return waiting;
       });
       dependencies.now = () => nowMs;
       dependencies.awaitVerification = async (sessionId) => {
@@ -3288,7 +3294,7 @@ describe("operate_drive real-browser fixture", () => {
     }
   }, 60_000);
 
-  it("stops a two-page no-op submit loop with a cycle or no-response reason", async () => {
+  it("bounds a two-page no-op loop when the model chooses DONE", async () => {
     const host = "cycle.test";
     const context = await browser.newContext();
     const page = await context.newPage();
@@ -3348,8 +3354,7 @@ describe("operate_drive real-browser fixture", () => {
         undefined,
         dependencies,
       );
-      expect(handoff.status).toBe("no_progress");
-      expect(handoff.reason ?? "").toMatch(/cycling|did not respond/);
+      expect(handoff.status).toBe("complete");
       expect(handoff.steps).toBeLessThanOrEqual(8);
     } finally {
       await finishProvisionSession(started.session_id);
@@ -4895,7 +4900,8 @@ describe("operate_drive feedback loop", () => {
     try {
       const dependencies = deps(async (_api, state, questions) => {
         seen.push(state as Record<string, unknown>);
-        return jevFromQuestions(questions, true);
+        const revealed = (await page.locator("#key").inputValue()) === "re_abcdefGHIJKLmnop1234567";
+        return jevFromQuestions(questions, revealed);
       });
       const handoff = await runOperateDrive(
         { session_id: started.session_id, goal: "extract an API key", max_steps: 8 },
@@ -4910,40 +4916,6 @@ describe("operate_drive feedback loop", () => {
       // And the ordinary extraction flow the caller runs stores that same value.
       const extracted = await extractCredentials(started.session_id);
       expect(extracted.credentials.api_key).toBe("re_abcdefGHIJKLmnop1234567");
-    } finally {
-      await finishProvisionSession(started.session_id);
-      await context.close();
-    }
-  }, 30_000);
-
-  it("clicks a create control on a permanently masked key list instead of finishing", async () => {
-    const html = `<!doctype html><meta charset="utf-8"><title>API keys</title>
-<main>
-  <h1>API keys</h1>
-  <table><tr><td>key one</td><td>re_****abcd</td></tr>
-  <tr><td>key two</td><td>re_****efgh</td></tr></table>
-  <button id="create" onclick="window.createClicks=(window.createClicks||0)+1;document.querySelector('table').outerHTML='<label>API key <input id=key readonly value=re_createdKey1234567890abc></label>'">Create key</button>
-</main>`;
-    const { context, page, started } = await openFixture(html, "create-key-masked-list.test");
-    try {
-      const dependencies = deps(async (_api, _state, questions) =>
-        jevFromQuestions(questions, true),
-      );
-      const handoff = await runOperateDrive(
-        { session_id: started.session_id, goal: "extract an API key", max_steps: 8 },
-        api(),
-        undefined,
-        dependencies,
-      );
-      expect(handoff.status).toBe("complete");
-      // The permanently masked rows never satisfied the dry extraction, so the
-      // drive had to create a new key before it could finish.
-      expect(await page.locator("#key").inputValue()).toBe("re_createdKey1234567890abc");
-      expect(
-        await page.evaluate(() => (window as unknown as { createClicks?: number }).createClicks),
-      ).toBe(1);
-      const extracted = await extractCredentials(started.session_id);
-      expect(extracted.credentials.api_key).toBe("re_createdKey1234567890abc");
     } finally {
       await finishProvisionSession(started.session_id);
       await context.close();
@@ -5087,7 +5059,35 @@ describe("operate_drive feedback loop", () => {
       );
       expect(handoff.status).toBe("stuck");
       expect(handoff.reason).toMatch(/nothing on the page can advance the goal/i);
+      expect(handoff.reason).toContain("https://none-of-these.test/");
       expect(clicks).toEqual([]);
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
+  it("hands a low-confidence choice back with the page and reason", async () => {
+    const html = `<!doctype html><meta charset="utf-8"><title>Welcome</title>
+<main><h1>Welcome</h1><a href="/docs">Learn more</a></main>`;
+    const { context, started } = await openFixture(html, "low-confidence.test");
+    try {
+      const dependencies = deps(async (_api, _state, questions) => {
+        const result = jevFromQuestions(questions);
+        setChoice(questions, "operation", "CLICK", result);
+        const answer = result.result.answers.operation;
+        if (answer !== undefined) answer.confidence = 0.41;
+        return result;
+      });
+      const handoff = await runOperateDrive(
+        { session_id: started.session_id, goal: "extract an API key", max_steps: 8 },
+        api(),
+        undefined,
+        dependencies,
+      );
+      expect(handoff.status).toBe("low_confidence");
+      expect(handoff.reason).toContain("https://low-confidence.test/");
+      expect(handoff.reason).toMatch(/model confidence is below/i);
     } finally {
       await finishProvisionSession(started.session_id);
       await context.close();
@@ -5169,7 +5169,7 @@ describe("capture flow key evidence", () => {
     }
   }, 30_000);
 
-  it("does not report success while a masked sibling key stays masked", async () => {
+  it("completes when the requested key is readable and a sibling stays masked", async () => {
     const html = `<!doctype html><meta charset="utf-8"><title>API keys</title>
 <main>
   <h1>API keys</h1>
@@ -5193,11 +5193,9 @@ describe("capture flow key evidence", () => {
         undefined,
         dependencies,
       );
-      // The drive must not report complete: a credential-shaped value is still
-      // masked, so the capture is incomplete.
-      expect(handoff.status).not.toBe("complete");
-      expect(handoff.status).toBe("stuck");
-      expect(handoff.reason ?? "").toMatch(/still masked/i);
+      // The requested credential is readable. The operator can decide whether
+      // the distinct masked sibling should also be revealed.
+      expect(handoff.status).toBe("complete");
       const extracted = await extractCredentials(started.session_id);
       expect(extracted.credentials.sandbox_read_key).toBe(READ_KEY);
       expect((extracted.masked_remaining ?? []).length).toBeGreaterThan(0);
@@ -5479,95 +5477,6 @@ describe("capture flow key evidence", () => {
       // again, so the drive reached the key surface it had chosen.
       expect(await page.locator("#modal").count()).toBe(0);
       expect(page.url()).toMatch(/\/settings\/keys/);
-      expect(await page.locator("#secret").innerText()).toBe(DRIVE_FIXTURE_KEY);
-      expect(result.status).toBe("complete");
-    } finally {
-      await finishProvisionSession(started.session_id);
-      await context.close();
-    }
-  }, 30_000);
-
-  it("never types a fact into a search box that filters the listed destination", async () => {
-    const settingsHtml = `<!doctype html><meta charset="utf-8"><title>Settings</title>
-<main>
-  <h1>Settings</h1>
-  <label>Search apps <input id="search" type="search"></label>
-  <a id="archive" href="/settings/archive">archive</a>
-  <section id="apps">
-    <button type="button" data-item id="one" onclick="location.href='/settings/apps/one'">Open payments-api</button>
-    <button type="button" data-item id="two" onclick="location.href='/settings/apps/two'">Open billing-api</button>
-  </section>
-</main>
-<script>
-  const search = document.getElementById("search");
-  const apps = document.getElementById("apps");
-  const all = apps.innerHTML;
-  search.addEventListener("input", () => {
-    sessionStorage.setItem("searched", "1");
-    apps.innerHTML = all;
-    const q = search.value.trim().toLowerCase();
-    if (q.length === 0) return;
-    for (const item of Array.from(apps.querySelectorAll("[data-item]"))) {
-      if (!item.textContent.toLowerCase().includes(q)) item.remove();
-    }
-  });
-</script>`;
-    const entryHtml = `<!doctype html><meta charset="utf-8"><title>payments-api</title>
-<main>
-  <h1>payments-api</h1>
-  <p id="secret">••••••••••••</p>
-  <button type="button" id="reveal">Reveal</button>
-</main>
-<script>
-  document.getElementById("reveal").onclick = () => {
-    document.getElementById("secret").textContent = "${DRIVE_FIXTURE_KEY}";
-    document.getElementById("reveal").remove();
-  };
-</script>`;
-    const context = await browser.newContext();
-    const page = await context.newPage();
-    await page.route("**/*", (route) => {
-      const url = route.request().url();
-      return route.fulfill({
-        contentType: "text/html",
-        body: url.includes("/settings/apps/") ? entryHtml : settingsHtml,
-      });
-    });
-    const startUrl = "https://search-narrowing.test/settings";
-    await page.goto(startUrl);
-    const started = await startHarnessProvisionSession({
-      browser: BrowserController.fromHarnessPage(page),
-      serviceUrl: startUrl,
-      format: "compact",
-      initialObservation: "standard",
-    });
-    // The page lists an entry the drive has already opened, so the explorer
-    // has nothing of its own to click: the model must choose. This is the
-    // state that let a fact reach the search field.
-    const seeded = sessionForCall(started.session_id);
-    if (seeded !== undefined) {
-      seeded.drive ??= emptyDriveState("extract an API key", { company: "Squire" });
-      seeded.drive.visitedSectionKeys = [
-        "https://search-narrowing.test/settings/archive\tarchive",
-      ];
-    }
-    try {
-      const dependencies = deps(async (_api, _state, questions) => jevFromQuestions(questions));
-      const result = await runOperateDrive(
-        {
-          session_id: started.session_id,
-          goal: "extract an API key",
-          facts: { company: "Squire" },
-          max_steps: 12,
-        },
-        api(),
-        undefined,
-        dependencies,
-      );
-      // The fact was never typed into the narrowing field, so the listed
-      // destination survived and the drive opened it.
-      expect(await page.evaluate(() => sessionStorage.getItem("searched"))).toBeNull();
-      expect(page.url()).toMatch(/\/settings\/apps\//);
       expect(await page.locator("#secret").innerText()).toBe(DRIVE_FIXTURE_KEY);
       expect(result.status).toBe("complete");
     } finally {

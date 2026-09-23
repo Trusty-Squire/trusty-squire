@@ -2,9 +2,8 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { chromium, type Browser } from "playwright";
 import type { ApiClient } from "../../api-client.js";
 import { BrowserController } from "../browser.js";
-import { JevUnavailableError } from "../jev-client.js";
 import { OAUTH_PROVIDERS } from "../oauth-providers.js";
-import { runOperateDrive, type DriveDependencies } from "../operate-drive.js";
+import { peakedProbabilities, runOperateDrive, type DriveDependencies } from "../operate-drive.js";
 import {
   act,
   awaitVerification,
@@ -45,8 +44,34 @@ describe("drive OAuth dispatch beside a required email form", () => {
       let dispatches = 0;
       try {
         const deps: DriveDependencies = {
-          askJev: async () => {
-            throw new JevUnavailableError("no model needed for this fixture", [], 0, 0);
+          askJev: async (_api, _state, questions) => {
+            const operation = questions.operation;
+            const click = questions.CLICK_target;
+            if (operation?.type !== "choice" || click?.type !== "choice") {
+              throw new Error("OAuth action was not offered");
+            }
+            const target = Object.entries(click.criteria).find(([, description]) =>
+              description.includes(label),
+            )?.[0];
+            if (target === undefined) throw new Error("OAuth target was not offered");
+            return {
+              attempts: 1,
+              elapsedMs: 1,
+              result: {
+                answers: {
+                  operation: {
+                    choice: "CLICK",
+                    confidence: 0.95,
+                    probabilities: peakedProbabilities(Object.keys(operation.criteria), "CLICK"),
+                  },
+                  CLICK_target: {
+                    choice: target,
+                    confidence: 0.95,
+                    probabilities: peakedProbabilities(Object.keys(click.criteria), target),
+                  },
+                },
+              },
+            };
           },
           act,
           observe,

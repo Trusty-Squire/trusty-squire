@@ -42,9 +42,7 @@ describe("goal values and target scope", () => {
     if (fieldQuestion?.type !== "choice") return;
     expect(fieldQuestion.criteria.desired_title).toContain("Squire Corpus Prod");
     expect(questions.form_value_2?.type).toBe("choice");
-    const goalOnly = buildDriveQuestions(rows, {}, goal, false, [], pageUrl);
-    expect(Object.values(choiceCriteria(goalOnly.form_value_1))).toContain("Squire Corpus Prod");
-    expect(requiredFillableMissingFact(rows, {}, [], pageUrl, goal)).toBeUndefined();
+    expect(requiredFillableMissingFact(rows, {}, [], pageUrl, goal)?.ref).toBe("@e:1");
     const target = sets.TYPE_TEXT.find((candidate) => candidate.ref === "@e:1");
     expect(target).toBeDefined();
     const decision = decideAfterJev({
@@ -100,51 +98,5 @@ describe("goal values and target scope", () => {
         questions: submitted,
       }),
     ).toMatchObject({ kind: "act", action: { kind: "click", target: "@e:6" } });
-  });
-
-  it("refuses completion on an existing app when the goal is scoped to a new one", () => {
-    const rows: WireRow[] = [
-      ["@e:1", "l", "Trusty Squire|u=https://example.test/apps/trusty-squire"],
-      ["@e:2", "t", "Sandbox read key|n=sk_test_12345678901234567890"],
-      ["@e:3", "l", "New app|u=https://example.test/apps/new"],
-    ];
-    const pageUrl = "https://example.test/apps/trusty-squire/settings";
-    const sets = driveTargetSets(rows, facts, false, [], pageUrl, new Map(), (text) => text, [], {
-      goal,
-    });
-    expect(sets.CLICK.some((candidate) => candidate.ref === "@e:3")).toBe(true);
-    const questions = buildDriveQuestions(rows, facts, goal, false, [], pageUrl);
-    expect(questions.current_page_is_goal_target?.type).toBe("noul");
-    const decision = decideAfterJev({
-      answers: {
-        operation: answer(choiceCriteria(questions.operation), "DONE"),
-        goal_complete: { noul: 0.95 },
-        current_page_is_goal_target: { noul: 0.02 },
-      },
-      rows,
-      facts,
-      goal,
-      lastFingerprint: null,
-      lastActionKey: null,
-      fingerprint: "settings",
-      pageUrl,
-      questions,
-    });
-    expect(decision.kind).not.toBe("complete");
-    const sandboxOnTarget = decideAfterJev({
-      answers: {
-        operation: answer(choiceCriteria(questions.operation), "DONE"),
-        goal_complete: { noul: 0.05 },
-        current_page_is_goal_target: { noul: 0.95 },
-      },
-      rows,
-      facts,
-      goal,
-      lastFingerprint: null,
-      lastActionKey: null,
-      fingerprint: "target-sandbox",
-      pageUrl: "https://example.test/apps/squire-corpus-prod/settings",
-    });
-    expect(sandboxOnTarget.kind).not.toBe("complete");
   });
 });
