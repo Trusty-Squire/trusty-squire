@@ -1272,6 +1272,9 @@ export function isSubmitLikeRow(row: WireRow): boolean {
 const PAYMENT_SUBMIT_LABEL =
   /pay[- ]?now|place[- ]?order|complete[- ]?(?:order|purchase|payment)|submit[- ]?payment|buy[- ]?now/;
 
+const DRIVE_ONBOARDING_GATE_QUESTION = "onboarding_gate";
+const DRIVE_ONBOARDING_CHOICE_QUESTION = "onboarding_choice";
+
 /** A row that can carry a checkout's submit control.
  *
  * `<input type="submit">` already reports role button. A radio or checkbox is
@@ -3127,6 +3130,28 @@ export function clickableCandidates(
     }));
 }
 
+/** Plan cards can look like context pickers and disappear from ordinary CLICK
+ * targets. Offer them separately so the model can judge a required product
+ * choice without treating a payment or purchase control as an option. */
+function onboardingChoiceCandidates(rows: readonly WireRow[], pageUrl: string): DriveCandidate[] {
+  if (isCheckoutUrl(pageUrl)) return [];
+  const choices = clickableCandidates(rows, true, [], pageUrl).filter((candidate) => {
+    const row = candidate.row;
+    if (!isButtonLikeRow(row) && row[1] !== "l" && row[1] !== "link") return false;
+    if (isOffProductNavRow(row, pageUrl) || isAppRootOrLogoRow(row, pageUrl)) return false;
+    if (isSamePageAnchorRow(row, pageUrl)) return false;
+    return true;
+  });
+  if (choices.length < 2) return [];
+  return choices
+    .filter(
+      (candidate) =>
+        !isPaymentRow(candidate.row) &&
+        !PAYMENT_SUBMIT_LABEL.test(readableLabel(candidate.row).toLowerCase()),
+    )
+    .slice(0, 8);
+}
+
 export function fillableCandidates(
   rows: readonly WireRow[],
   facts: Record<string, string>,
@@ -4136,6 +4161,23 @@ export function buildDriveQuestions(
       instructions: "Nothing on this page can advance the goal.",
     },
   };
+  const onboardingChoices = onboardingChoiceCandidates(rows, pageUrl);
+  if (onboardingChoices.length > 0) {
+    questions[DRIVE_ONBOARDING_GATE_QUESTION] = {
+      type: "noul",
+      instructions:
+        "This page requires an onboarding or plan choice before the product can be used to advance the goal.",
+    };
+    questions[DRIVE_ONBOARDING_CHOICE_QUESTION] = {
+      type: "choice",
+      instructions:
+        "If this is a required onboarding or plan choice, which option grants usable product access with the least commitment? Choose only an option with no payment, paid plan, card details, time-limited trial, or sales contact. Otherwise choose none.",
+      criteria: {
+        ...criteriaFromCandidates(onboardingChoices, "CLICK"),
+        [DRIVE_FIXED_NONE]: "No listed option clearly grants access without that commitment",
+      },
+    };
+  }
   const codeCandidates = emailCodeCandidates(rows, filledRefs);
   if (codeCandidates.length > 0) {
     questions[DRIVE_EMAIL_CODE_QUESTION] = {
@@ -4552,6 +4594,36 @@ export function decideAfterJev(input: {
       };
     }
   }
+  const onboardingGate = questions[DRIVE_ONBOARDING_GATE_QUESTION];
+  if (
+    onboardingGate?.type === "noul" &&
+    confidenceOf(input.answers[DRIVE_ONBOARDING_GATE_QUESTION]) >= threshold
+  ) {
+    const choiceQuestion = questions[DRIVE_ONBOARDING_CHOICE_QUESTION];
+    const choice = input.answers[DRIVE_ONBOARDING_CHOICE_QUESTION];
+    if (
+      choiceQuestion?.type === "choice" &&
+      choice?.choice !== undefined &&
+      choice.choice !== DRIVE_FIXED_NONE &&
+      confidenceOf(choice) >= threshold &&
+      validateChoiceReason(choiceQuestion.criteria, choice) === undefined
+    ) {
+      const candidate = onboardingChoiceCandidates(input.rows, input.pageUrl ?? "").find(
+        (entry) => entry.slug === choice.choice,
+      );
+      if (
+        candidate !== undefined &&
+        !(input.boundFingerprint === input.fingerprint && input.consumedActionKey === candidate.ref)
+      ) {
+        return {
+          kind: "act",
+          action: { kind: "click", target: candidate.ref },
+          actionKey: candidate.ref,
+          confidence: confidenceOf(choice),
+        };
+      }
+    }
+  }
   const operationQuestion = questions.operation;
   const operationCriteriaMap =
     operationQuestion?.type === "choice"
@@ -4588,7 +4660,9 @@ export function decideAfterJev(input: {
       !isPaymentRow(candidate.row) &&
       !PAYMENT_SUBMIT_LABEL.test(readableLabel(candidate.row).toLowerCase()) &&
       !(input.lastActionKey === candidate.ref && input.lastFingerprint === input.fingerprint) &&
-      !(input.boundFingerprint === input.fingerprint && input.consumedActionKey === candidate.ref) &&
+      !(
+        input.boundFingerprint === input.fingerprint && input.consumedActionKey === candidate.ref
+      ) &&
       (layer === undefined || isLayerCandidateRow(candidate.row, input.rows, layer)),
   );
   const dismissCriteria = criteriaFromCandidates(dismissCandidates, "CLICK");
