@@ -7,10 +7,12 @@
 // provision-session at runtime (the `Observation` shape is a type-only import).
 
 import { createHmac } from "node:crypto";
-import type { Page } from "playwright";
+import type { Frame, Page } from "playwright";
 import type { InteractiveElement } from "../browser.js";
 import type { BrowserUseCapture } from "../browser-use-capture.js";
 import { serializeBrowserUseDOM } from "../browser-use-serializer.js";
+import { canonicalMatchesForDriveRefs } from "../act/identity.js";
+import { DriveEvaluateTimeout, evaluateBound } from "../drive-evaluate.js";
 import {
   StableObservationRefs,
   buildSafeControlsV2,
@@ -400,9 +402,99 @@ function compactV2Handles(
   session: Session,
   elements: readonly InteractiveElement[],
   page: OAuthCompletionEvidence["page"] | undefined = compactV2SourcePage(session),
+  exactDriveMatches: ReadonlyMap<string, string> = new Map(),
 ): Map<InteractiveElement, string> {
   const doc = compactV2EpochDoc(session, page);
-  return compactV2RefAllocator(session).actions(doc, elements);
+  return compactV2RefAllocator(session).actions(doc, elements, exactDriveMatches);
+}
+
+/** One exact-node comparison per frame, before a normal canonical capture publishes refs. */
+async function reconcileDriveHandles(
+  session: Session,
+  elements: readonly InteractiveElement[],
+  page: Page | undefined,
+): Promise<Map<string, string>> {
+  const matched = new Map<string, string>();
+  if (
+    page === undefined ||
+    session.compactV2DriveAnchors.size === 0 ||
+    session.compactV2Index?.epoch.doc !== compactV2EpochDoc(session, page)
+  )
+    return matched;
+  const frameCandidates = new Map<Frame, Array<{ index: number; selector: string }>>();
+  const liveFrames = new Set(page.frames());
+  for (const [index, element] of elements.entries()) {
+    if (!element.observationIdentity || !element.selector) continue;
+    let frame = page.mainFrame();
+    if (element.framePath != null) {
+      let valid = true;
+      for (const part of element.framePath.split("/")) {
+        const child = /^\d+$/.test(part) ? frame.childFrames()[Number(part)] : undefined;
+        if (child === undefined) {
+          valid = false;
+          break;
+        }
+        frame = child;
+      }
+      if (!valid) continue;
+    }
+    const candidates = frameCandidates.get(frame) ?? [];
+    candidates.push({ index, selector: element.selector });
+    frameCandidates.set(frame, candidates);
+  }
+  const frameRefs = new Map<
+    Frame,
+    Array<{ ref: string; privateRef: string; documentTimeOrigin: string }>
+  >();
+  for (const [ref, anchor] of session.compactV2DriveAnchors) {
+    if (!liveFrames.has(anchor.frame)) continue;
+    const refs = frameRefs.get(anchor.frame) ?? [];
+    refs.push({
+      ref,
+      privateRef: anchor.privateRef,
+      documentTimeOrigin: anchor.documentTimeOrigin,
+    });
+    frameRefs.set(anchor.frame, refs);
+  }
+  const matches = await Promise.all(
+    [...frameRefs].map(async ([frame, refs]) => {
+      const candidates = frameCandidates.get(frame);
+      if (candidates === undefined) return [] as Array<{ ref: string; index: number }>;
+      try {
+        const byPrivate = await evaluateBound(frame, canonicalMatchesForDriveRefs, {
+          refs: refs.map(({ privateRef, documentTimeOrigin }) => ({
+            ref: privateRef,
+            documentTimeOrigin,
+          })),
+          candidates,
+        });
+        const publicByPrivate = new Map(refs.map(({ ref, privateRef }) => [privateRef, ref]));
+        return byPrivate.flatMap(({ ref, index }) => {
+          const publicRef = publicByPrivate.get(ref);
+          return publicRef === undefined ? [] : [{ ref: publicRef, index }];
+        });
+      } catch (error) {
+        if (error instanceof DriveEvaluateTimeout) throw error;
+        return [];
+      }
+    }),
+  );
+  const identityCounts = new Map<string, number>();
+  const refCounts = new Map<string, number>();
+  for (const group of matches)
+    for (const { ref, index } of group) {
+      const identity = elements[index]?.observationIdentity;
+      if (identity === undefined) continue;
+      identityCounts.set(identity, (identityCounts.get(identity) ?? 0) + 1);
+      refCounts.set(ref, (refCounts.get(ref) ?? 0) + 1);
+    }
+  for (const group of matches)
+    for (const { ref, index } of group) {
+      const identity = elements[index]?.observationIdentity;
+      if (identity !== undefined && identityCounts.get(identity) === 1 && refCounts.get(ref) === 1)
+        matched.set(identity, ref);
+    }
+  return matched;
 }
 
 /** The live skeleton for an element inventory, under the session's epoch. */
@@ -539,7 +631,7 @@ export function compactV2PublicObservation(
   return degraded as unknown as Observation;
 }
 
-function compactV2Observation(
+async function compactV2Observation(
   session: Session,
   generation: number,
   capture: BrowserUseCapture,
@@ -551,7 +643,7 @@ function compactV2Observation(
   compactMapEmitted = true,
   forceFullDOM = false,
   actedRef?: string,
-): Observation {
+): Promise<Observation> {
   rememberCompactV2SourcePage(session, sourcePage);
   const elements = capture.elements;
   if (startMetadata?.hintPages !== undefined)
@@ -562,7 +654,8 @@ function compactV2Observation(
   const previous = session.compactV2Previous;
   const sameDocument = previous !== null && previous.epoch.doc === epochDoc;
   const sameFullDocument = sameDocument && previous.dom !== undefined;
-  const handles = compactV2Handles(session, elements, sourcePage);
+  const exactDriveMatches = await reconcileDriveHandles(session, elements, sourcePage);
+  const handles = compactV2Handles(session, elements, sourcePage, exactDriveMatches);
   const safe = compactV2LiveControls(session, elements, sourcePage, handles);
   const targetableRefs = new Set(safe.rows.map((row) => row.ref));
   const semanticBase = safePageSemanticsV2(semanticSource, previous?.semantics.headings ?? []);
@@ -832,7 +925,7 @@ async function observeQueryOwned(
   } catch {
     // Semantics are optional; action membership comes from the canonical capture.
   }
-  compactV2Observation(
+  await compactV2Observation(
     session,
     session.generation,
     capture,
@@ -1062,7 +1155,7 @@ export async function observeSession(
       // Semantic context is optional availability-wise; it is independently
       // sealed below and never changes action-map safety.
     }
-    const observation = compactV2Observation(
+    const observation = await compactV2Observation(
       session,
       generation,
       capture,

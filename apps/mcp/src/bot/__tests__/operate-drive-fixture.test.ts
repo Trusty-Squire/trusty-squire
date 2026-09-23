@@ -43,7 +43,6 @@ import { settleDriveStep } from "../drive-act.js";
 import type { DriveSnapshot } from "../drive-snapshot.js";
 import { sessionForCall } from "../session/lifecycle.js";
 import { DriveEvaluateTimeout } from "../drive-evaluate.js";
-import { attachOperatorRequestAbort, withOperatorRequestContext } from "../request-cancellation.js";
 
 const SIGNUP_HTML = `<!doctype html><meta charset="utf-8"><title>Signup fixture</title>
 <main>
@@ -2693,7 +2692,11 @@ describe("operate_drive real-browser fixture", () => {
       const value = facts[key!]!;
       expect(value).toBe("30");
 
-      const typed = await actThroughShared(started.session_id, { kind: "type", target: yearRow[0], text: value }, snap);
+      const typed = await actThroughShared(
+        started.session_id,
+        { kind: "type", target: yearRow[0], text: value },
+        snap,
+      );
       expect(typed.kind).toBe("ok");
       await settleDriveStep(page, typed.kind === "ok" && typed.combobox);
       expect(await page.locator("#y").inputValue()).toBe("30");
@@ -2718,11 +2721,15 @@ describe("operate_drive real-browser fixture", () => {
       const email = snap.elements.find((element) => element.label.includes("Email"));
       expect(email).toBeDefined();
       if (email === undefined) return;
-      const typed = await actThroughShared(started.session_id, {
-        kind: "type",
-        target: email.ref,
-        text: "ada@fixture.test",
-      }, snap);
+      const typed = await actThroughShared(
+        started.session_id,
+        {
+          kind: "type",
+          target: email.ref,
+          text: "ada@fixture.test",
+        },
+        snap,
+      );
       expect(typed.kind).toBe("ok");
       await settleDriveStep(page, typed.kind === "ok" && typed.combobox);
       expect(await page.locator("#email").inputValue()).toBe("ada@fixture.test");
@@ -3927,11 +3934,15 @@ describe("operate_drive real-browser fixture", () => {
       const from = snap?.elements.find((element) => element.label.includes("Where from?"));
       expect(from).toBeDefined();
       if (from === undefined) return;
-      const typed = await actThroughShared(started.session_id, {
-        kind: "type",
-        target: from.ref,
-        text: "Zurich",
-      }, snap);
+      const typed = await actThroughShared(
+        started.session_id,
+        {
+          kind: "type",
+          target: from.ref,
+          text: "Zurich",
+        },
+        snap,
+      );
       expect(typed.kind).toBe("ok");
       expect(await page.locator("#else").inputValue()).toBe("Zurich");
       await expect
@@ -3966,7 +3977,11 @@ describe("operate_drive real-browser fixture", () => {
       const departure = snap?.elements.find((element) => element.label.includes("Departure"));
       expect(departure).toBeDefined();
       if (departure === undefined) return;
-      const acted = await actThroughShared(started.session_id, { kind: "click", target: departure.ref }, snap);
+      const acted = await actThroughShared(
+        started.session_id,
+        { kind: "click", target: departure.ref },
+        snap,
+      );
       expect(acted.kind).toBe("ok");
       if (acted.kind !== "ok") return;
       expect(acted.combobox).toBe(true);
@@ -4367,10 +4382,16 @@ describe("drive review regressions", () => {
         const dependencies = deps(async () => {
           throw new Error("card fill should not call Jev");
         });
+        const extraction = vi.spyOn(
+          sessionForCall(started.session_id)!.browser,
+          "extractInteractiveElements",
+        );
         let injections = 0;
         dependencies.injectCard = async (_session, args) => {
           injections += 1;
           expect(args.fields.pan?.ref).not.toBe(args.fields.cvv?.ref);
+          expect(args.fields.pan?.ref).toMatch(/^@e:[A-Za-z0-9_-]{22}$/);
+          expect(args.fields.cvv?.ref).toMatch(/^@e:[A-Za-z0-9_-]{22}$/);
           const fields = await injectCardIntoSessionTargets(started.session_id, card, args.fields);
           expect(fields).toEqual({ pan: { status: "filled" }, cvv: { status: "filled" } });
           return { status: "card_injected", complete: true, fields };
@@ -4388,6 +4409,7 @@ describe("drive review regressions", () => {
         );
         expect(result.status).toBe("budget");
         expect(injections).toBe(1);
+        expect(extraction).not.toHaveBeenCalled();
         expect(await page.frameLocator("#pan").locator("#field").inputValue()).toBe(card.pan);
         expect(await page.frameLocator("#cvv").locator("#field").inputValue()).toBe(card.cvv);
         expect(await page.locator("#field").inputValue()).toBe("unchanged");
@@ -4398,52 +4420,6 @@ describe("drive review regressions", () => {
     },
     30_000,
   );
-
-  it("aborts a stalled card-ref lookup and returns evaluate_timeout without injection", async () => {
-    const { context, page, started } = await openFixture(
-      '<label>Card number <input id="pan"></label>',
-      "lookup-timeout.test",
-    );
-    const controller = new AbortController();
-    attachOperatorRequestAbort(controller.signal, (reason) => controller.abort(reason));
-    const session = sessionForCall(started.session_id)!;
-    const extract = session.browser.extractInteractiveElements.bind(session.browser);
-    const frame = page.mainFrame();
-    let evaluation: { mockRestore(): void } | undefined;
-    const extraction = vi
-      .spyOn(session.browser, "extractInteractiveElements")
-      .mockImplementation(async (...args) => {
-        const fresh = await extract(...args);
-        evaluation = vi
-          .spyOn(frame, "evaluate")
-          .mockImplementationOnce(() => new Promise(() => undefined));
-        return fresh;
-      });
-    try {
-      await page.goto("https://lookup-timeout.test/checkout");
-      const dependencies = deps(async () => {
-        throw new Error("unexpected Jev call");
-      });
-      const injection = vi.fn(async () => ({ status: "unused" }));
-      dependencies.injectCard = injection;
-      const result = await withOperatorRequestContext(controller.signal, () =>
-        runOperateDrive(
-          { session_id: started.session_id, goal: "fill card", facts: { card_ref: "card" } },
-          api(),
-          undefined,
-          dependencies,
-        ),
-      );
-      expect(result.status).toBe("evaluate_timeout");
-      expect(controller.signal.aborted).toBe(true);
-      expect(injection).not.toHaveBeenCalled();
-    } finally {
-      evaluation?.mockRestore();
-      extraction.mockRestore();
-      await finishProvisionSession(started.session_id);
-      await context.close();
-    }
-  }, 30_000);
 
   it("acts on a page whose drive snapshot fell back to the tools observation", async () => {
     // The in-page snapshot refuses a document whose body it cannot read, so the
@@ -5227,7 +5203,8 @@ describe("capture flow key evidence", () => {
       expect(reputation?.ref).toMatch(/^@e:f0d\d+$/);
       await page.evaluate(() => {
         const nav = document.getElementById("nav")!;
-        nav.innerHTML = '<a id="new" href="/new">Create app</a><a id="set" href="/settings">Settings</a>';
+        nav.innerHTML =
+          '<a id="new" href="/new">Create app</a><a id="set" href="/settings">Settings</a>';
         Array.from(nav.querySelectorAll("a")).forEach((a) => {
           a.addEventListener("click", (event: Event) => {
             event.preventDefault();
@@ -5344,8 +5321,14 @@ describe("capture flow key evidence", () => {
     // exercised for real; only its document is a deterministic mock.
     await page.route("**/*", (route) =>
       route.request().url().includes("challenges.cloudflare.com")
-        ? route.fulfill({ contentType: "text/html; charset=utf-8", body: CLOSED_SHADOW_WIDGET_HTML })
-        : route.fulfill({ contentType: "text/html; charset=utf-8", body: CLOSED_SHADOW_CHALLENGE_HTML }),
+        ? route.fulfill({
+            contentType: "text/html; charset=utf-8",
+            body: CLOSED_SHADOW_WIDGET_HTML,
+          })
+        : route.fulfill({
+            contentType: "text/html; charset=utf-8",
+            body: CLOSED_SHADOW_CHALLENGE_HTML,
+          }),
     );
     const url = "https://closed-shadow-challenge.test/";
     await page.goto(url);

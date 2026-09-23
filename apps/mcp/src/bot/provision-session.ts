@@ -484,10 +484,6 @@ export async function injectCardIntoSessionTargets(
         : undefined;
     const previouslyPresent =
       authorization !== undefined || resolveTarget(session.lastElements, legacy) !== null;
-    const fresh =
-      authorization?.anchor.kind === "canonical"
-        ? (await session.browser.extractBrowserUseObservation(page)).elements
-        : await session.browser.extractInteractiveElements(page);
     if (authorization?.anchor.kind === "drive") {
       const anchor = authorization.anchor;
       // A frame URL or current ordinal is insufficient: two hosted fields can
@@ -505,6 +501,10 @@ export async function injectCardIntoSessionTargets(
         ? { missing: "detached", format: target.format }
         : { element, format: target.format, driveAnchor: anchor };
     }
+    const fresh =
+      authorization?.anchor.kind === "canonical"
+        ? (await session.browser.extractBrowserUseObservation(page)).elements
+        : await session.browser.extractInteractiveElements(page);
     let element = resolveTarget(fresh, legacy);
     if (authorization !== undefined) {
       try {

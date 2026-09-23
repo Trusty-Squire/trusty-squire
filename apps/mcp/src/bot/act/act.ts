@@ -224,9 +224,8 @@ async function runSerializedOAuthBoundary(
   bindPreparedTargetAtDispatch = false,
   driveResolved = false,
 ): Promise<BrowserController> {
-  // A drive ref is authorized by its own in-page identity record (the caller
-  // already re-proved the node is still the observed control), not by the
-  // tools' action map. Only the tools path needs the map-membership proof.
+  // The caller already proved public map membership and the live drive node,
+  // or supplied a canonical target present in the extracted inventory.
   if (!driveResolved) {
     const authorizedRef = provisionElementRefs(authorizedElements).get(authorizedElement);
     if (authorizedRef === undefined) {
@@ -260,6 +259,27 @@ async function runSerializedOAuthBoundary(
               let handle: Awaited<ReturnType<BrowserController["bindOAuthClickTarget"]>> = null;
               try {
                 const resolveCurrentTarget = async (): Promise<InteractiveElement> => {
+                  if (compactAuthorization.anchor.kind === "drive") {
+                    const current = compactV2AuthorizationForTarget(
+                      session,
+                      compactAuthorization.row.ref,
+                    );
+                    if (current.anchor !== compactAuthorization.anchor) throwCompactV2StaleRef();
+                    const page = operationPageForSession(session);
+                    if (page === undefined) throwCompactV2StaleRef();
+                    const anchor = compactAuthorization.anchor;
+                    const live = await resolveLiveControlIdentity(
+                      page,
+                      anchor.privateRef,
+                      anchor.identity,
+                      {
+                        frame: anchor.frame,
+                        documentTimeOrigin: anchor.documentTimeOrigin,
+                      },
+                    );
+                    if (live === null) throwCompactV2StaleRef();
+                    return live;
+                  }
                   const fresh = (await browser.extractBrowserUseObservation()).elements;
                   retainSessionElements(session, fresh);
                   return resolveAuthorizedCompactV2Target(session, fresh, compactAuthorization);
@@ -1238,18 +1258,41 @@ async function executeAct(
         // identity it was OBSERVED under: a drive ref carries the drive's own
         // record, a tools ref the tools' authorization/fresh inventory. The
         // drive's internal dispatch still uses its private registry key.
+        const driveAnchor =
+          compactV2Authorization?.anchor.kind === "drive"
+            ? compactV2Authorization.anchor
+            : undefined;
         const driveResolved =
-          internalAccess && session.drive?.identities?.get(resolutionTarget!) !== undefined;
+          driveAnchor !== undefined ||
+          (internalAccess && session.drive?.identities?.get(resolutionTarget!) !== undefined);
         let fresh: InteractiveElement[];
         let el: InteractiveElement | null;
         if (driveResolved) {
           const livePage = compactV2ActionPage ?? browser.page;
-          const identity = session.drive!.identities!.get(resolutionTarget!)!;
+          if (driveAnchor !== undefined) {
+            const current = compactV2AuthorizationForTarget(
+              session,
+              compactV2Authorization!.row.ref,
+            );
+            if (current.anchor !== driveAnchor) throwCompactV2StaleRef();
+          }
+          const identity =
+            driveAnchor?.identity ?? session.drive!.identities!.get(resolutionTarget!)!;
           fresh = session.lastElements;
           el =
             livePage === null
               ? null
-              : await resolveLiveControlIdentity(livePage, resolutionTarget!, identity);
+              : await resolveLiveControlIdentity(
+                  livePage,
+                  resolutionTarget!,
+                  identity,
+                  driveAnchor === undefined
+                    ? undefined
+                    : {
+                        frame: driveAnchor.frame,
+                        documentTimeOrigin: driveAnchor.documentTimeOrigin,
+                      },
+                );
           if (el === null) {
             if (session.compactV2Active) throw new CompactV2StaleRefError("stale_ref");
             throw new Error("oauth_login: internal live target changed");

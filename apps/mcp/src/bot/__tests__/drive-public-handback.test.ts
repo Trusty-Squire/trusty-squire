@@ -136,6 +136,57 @@ async function cardFixture(remountCvvOnPanInput = false) {
 }
 
 describe("drive public action handback", () => {
+  it("keeps a drive handle and alias on the same node in the next ordinary observation", async () => {
+    const f = await fixture();
+    try {
+      const handback = await f.handback();
+      const driveRef = f.ref(handback, "@name");
+      const observed = await observe(f.started.session_id, "compact");
+      const rows = observed.safe_table as unknown as Array<[string, string, string?]>;
+      const name = rows.find((row) => row[2]?.startsWith("@name"));
+      expect(name?.[0]).toBe(driveRef);
+      expect(name?.[2]?.split("|")[0]).toBe("@name");
+      expect(sessionForCall(f.started.session_id)!.compactV2DriveAnchors.size).toBe(0);
+      await act(f.started.session_id, { kind: "type", target: driveRef, text: "Ada" });
+      expect(await f.page.locator("#name").inputValue()).toBe("Ada");
+    } finally {
+      await f.close();
+    }
+  }, 30_000);
+
+  it("gives a replacement node a new handle even when its label and selector match", async () => {
+    const f = await fixture();
+    try {
+      const oldRef = f.ref(await f.handback(), "@name");
+      await f.page.locator("#name").evaluate((node) => node.replaceWith(node.cloneNode(true)));
+      const observed = await observe(f.started.session_id, "compact");
+      const rows = observed.safe_table as unknown as Array<[string, string, string?]>;
+      const replacement = rows.find((row) => row[2]?.startsWith("@name"));
+      expect(replacement?.[0]).toMatch(/^@e:/);
+      expect(replacement?.[0]).not.toBe(oldRef);
+      await expect(
+        act(f.started.session_id, { kind: "type", target: oldRef, text: "wrong" }),
+      ).rejects.toThrow("stale_ref");
+      expect(await f.page.locator("#name").inputValue()).toBe("");
+    } finally {
+      await f.close();
+    }
+  }, 30_000);
+
+  it("reconciles equal-looking controls in separate same-URL frames by their nodes", async () => {
+    const f = await cardFixture();
+    try {
+      const observed = await observe(f.started.session_id, "compact");
+      const rows = observed.safe_table as unknown as Array<[string, string, string?]>;
+      const refs = new Set(rows.map((row) => row[0]));
+      expect(refs.has(f.refs.pan!)).toBe(true);
+      expect(refs.has(f.refs.cvv!)).toBe(true);
+      expect(f.refs.pan).not.toBe(f.refs.cvv);
+    } finally {
+      await f.close();
+    }
+  }, 30_000);
+
   it("injects PAN and CVV from drive handback into separate same-URL cross-origin frames after sibling insertion", async () => {
     const f = await cardFixture();
     try {

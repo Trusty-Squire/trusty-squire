@@ -42,9 +42,12 @@ The through-line: the layer is tuned for **payload size** and **secret-safety**,
 
 **Correction from review:** an accessible name is *presentation, not identity*. Name-based re-resolution can silently hit the wrong element (duplicate names, swapped list items, localized/changed copy, recycled nodes). So the system does NOT key on the descriptive name. Instead:
 
-- **Identity = physical CDP node identity**, scoped by a private frame namespace,
-  Chrome document loader and session document epoch. No DOM id, semantic slug,
-  sibling ordinal or selector supplies compact-v2 identity.
+- **Identity = a physical node in a document.** Ordinary operator capture uses
+  CDP backend node identity scoped by its frame namespace, document loader and
+  session document epoch. The bounded drive snapshot uses its private per-document
+  `WeakMap` node key, scoped by the actual Playwright `Frame` and document time
+  origin. No DOM id, semantic slug, sibling ordinal, URL or selector supplies
+  compact-v2 identity.
 - **Ref = 132-bit opaque capability**, generated under a session secret for that
   node and its material intent. Removal or changed intent retires it; identical
   replacement markup never inherits it — with ONE bounded exception for benign
@@ -53,6 +56,20 @@ The through-line: the layer is tuned for **payload size** and **secret-safety**,
   and reserved until document reset. It never re-resolves by semantic similarity.
 - **Every act checks the observed map and live anchor.** Document/frame guards,
   intent checks, payment gates and the state-evidence gate remain fail closed.
+
+**Shared drive and operator refs (2026-09-23).** Both capture paths publish the
+same opaque compact-v2 `@e:` handle shape and populate the same observed action
+index. A drive handback's tagged anchor keeps the private node key, its `Frame`
+object and document time origin; the common authorization gate checks membership
+and epoch before an action resolves that exact live node. A later ordinary
+`operate_observe` compares the drive registry nodes with canonical capture
+selectors in one batch per frame. Only a unique exact-node match lets the
+canonical `observationIdentity` adopt the drive handle. Other controls receive
+ordinary canonical handles. Labels, selectors, URLs and positions never transfer
+a drive handle to a different node. The canonical capture then owns the action
+index, aliases, paging and deltas as usual. Card writes and OAuth actions use
+the common authorization gate for either anchor kind; card writes keep their
+per-field physical-node check.
 
 **Benign re-render adoption (2026-09-08).** A dialog/portal mounting re-renders
 the underlying page and re-creates its nodes (new CDP backend node ids), which

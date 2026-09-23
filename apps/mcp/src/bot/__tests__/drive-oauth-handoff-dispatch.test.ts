@@ -1,6 +1,5 @@
-// Regression: a control the drive observed and decided on must be DISPATCHED by
-// the shared executor, resolved by the identity it was observed under — not by
-// the tools' compact-v2 index, which a drive session never populates.
+// Regression: a control the drive observed and decided on must be dispatched by
+// the shared executor, resolved by the identity it was observed under.
 //
 // Before the shared-executor consolidation the drive resolved its own refs
 // in-page; after it, an `oauth_login` step fell back to the tools path and threw
@@ -25,9 +24,9 @@ import {
 } from "../drive-snapshot.js";
 import { dispatchDriveAct } from "../act/act.js";
 import { rememberDriveIdentities } from "../act/identity.js";
-import { emptyDriveState } from "../operate-drive.js";
+import { emptyDriveState, runOperateDrive } from "../operate-drive.js";
 import { sessionForCall } from "../session/lifecycle.js";
-import { finishProvisionSession, startHarnessProvisionSession } from "../provision-session.js";
+import { act, finishProvisionSession, startHarnessProvisionSession } from "../provision-session.js";
 
 const PRODUCT = "https://app.handoff-fixture.test";
 const PROVIDER = "https://idp.provider-fixture.test";
@@ -102,6 +101,31 @@ document.getElementById("handoff").addEventListener("click", function(){
 }
 
 describe("drive hand-off dispatch by observed identity", () => {
+  it("accepts the public drive handle for atomic OAuth without translation", async () => {
+    const { page, close } = await openHandoffFixture();
+    const started = await startHarnessProvisionSession({
+      browser: BrowserController.fromHarnessPage(page),
+      serviceUrl: `${PRODUCT}/signin`,
+      format: "compact",
+      initialObservation: "drive",
+    });
+    try {
+      await runOperateDrive(
+        { session_id: started.session_id, goal: "inspect sign-in", max_steps: 0 },
+        null,
+      );
+      const anchor = [...sessionForCall(started.session_id)!.compactV2DriveAnchors].find(
+        ([, candidate]) => candidate.identity.label === CONTROL_LABEL,
+      );
+      expect(anchor?.[0]).toMatch(/^@e:/);
+      await act(started.session_id, { kind: "oauth_login", target: anchor![0] });
+      expect(page.url()).toContain("/dashboard");
+    } finally {
+      await finishProvisionSession(started.session_id).catch(() => undefined);
+      await close();
+    }
+  }, 120_000);
+
   it("dispatches a drive-observed external sign-in control and follows the same-tab navigation", async () => {
     const { page, close } = await openHandoffFixture();
     const started = await startHarnessProvisionSession({
