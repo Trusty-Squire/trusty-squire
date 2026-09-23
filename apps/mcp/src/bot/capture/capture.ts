@@ -31,6 +31,7 @@ import { registrableHost } from "../session/hosts.js";
 import { audit, sessionForCall } from "../session/lifecycle.js";
 import { invalidateCompactV2Snapshot, operationPageForSession } from "../observe/observe.js";
 import { settleAfterStateChange } from "../act/act.js";
+import { captureFrameSnapshot } from "../drive-snapshot.js";
 
 // ── extraction (the `extract` thick tool) ──
 
@@ -689,6 +690,45 @@ export async function captureCredentialSource(
   return await resolveCaptureSourceOnce(page, source);
 }
 
+/** A CDP-attached headed Chrome may accept only part of the launch-time
+ * context grant. Check the live origin before the first clipboard read: a
+ * missing read grant can otherwise leave Chrome's permission prompt pending. */
+async function ensureCaptureClipboardPermission(page: Page | undefined): Promise<void> {
+  if (page === undefined) return;
+  const permissions = await page
+    .evaluate(async () => {
+      try {
+        const clipboardRead = (
+          await navigator.permissions.query({ name: "clipboard-read" as PermissionName })
+        ).state;
+        const geolocation = (
+          await navigator.permissions.query({ name: "geolocation" as PermissionName })
+        ).state;
+        return { clipboardRead, geolocation };
+      } catch {
+        return { clipboardRead: "prompt", geolocation: "prompt" };
+      }
+    })
+    .catch(() => ({ clipboardRead: "prompt", geolocation: "prompt" }));
+  if (permissions.clipboardRead === "granted") return;
+  try {
+    const origin = new URL(page.url()).origin;
+    if (origin !== "null")
+      await page
+        .context()
+        .grantPermissions(
+          [
+            "clipboard-read",
+            "clipboard-write",
+            ...(permissions.geolocation === "granted" ? ["geolocation"] : []),
+          ],
+          { origin },
+        );
+  } catch {
+    // The normal DOM capture paths still have a chance when the page denies it.
+  }
+}
+
 /** A created-key dialog may render its readable value outside DOM text (for
  * example in generated content) while keeping a stale mask in the DOM. Its
  * adjacent Copy control is then the page's authoritative value source. */
@@ -697,8 +737,13 @@ async function copyCredentialFromDialog(
   browser: Session["browser"],
 ): Promise<string | null> {
   if (page === undefined) return null;
+  const modalSelector = 'dialog[open], [role="dialog"], [role="alertdialog"], [aria-modal="true"]';
   const target = await page.evaluate(() => {
-    const dialogs = Array.from(document.querySelectorAll('dialog[open], [role="dialog"]'));
+    const dialogs = Array.from(
+      document.querySelectorAll(
+        'dialog[open], [role="dialog"], [role="alertdialog"], [aria-modal="true"]',
+      ),
+    );
     for (let dialogIndex = dialogs.length - 1; dialogIndex >= 0; dialogIndex--) {
       const dialog = dialogs[dialogIndex]!;
       const context = `${dialog.getAttribute("aria-label") ?? ""} ${dialog.textContent ?? ""}`;
@@ -737,15 +782,71 @@ async function copyCredentialFromDialog(
     }
     return null;
   });
-  if (target === null) return null;
+  let copyButton =
+    target === null
+      ? null
+      : page
+          .locator(modalSelector)
+          .nth(target.dialogIndex)
+          .locator('button, [role="button"]')
+          .nth(target.buttonIndex);
+  if (copyButton === null) {
+    // The drive snapshot already hit-tests controls against covering layers.
+    // Use that same evidence for a visually modal surface with no dialog role.
+    const snapshot = await captureFrameSnapshot(page, [], 0);
+    if (
+      snapshot === null ||
+      snapshot.timedOut ||
+      !snapshot.elements.some(
+        (element) => element.occludedBy === "overlay" || element.occludedBy === "dialog",
+      ) ||
+      !/\b(?:api\s*key|secret|token|credential|key)\b/i.test(snapshot.text)
+    )
+      return null;
+    const candidates = snapshot.elements.filter(
+      (element) =>
+        element.role === "button" &&
+        element.occludedBy === undefined &&
+        !element.offscreen &&
+        element.selector !== undefined,
+    );
+    const selector = await page.evaluate(
+      (refs) => {
+        const registry = (
+          window as Window & {
+            __tsDriveRegistry?: { nodes: Map<string, Element> };
+          }
+        ).__tsDriveRegistry;
+        for (const candidate of refs) {
+          const button = registry?.nodes.get(candidate.ref);
+          if (button === undefined || !button.isConnected) continue;
+          const icon = button.querySelector("svg");
+          const cues = [button, icon]
+            .filter((element): element is Element => element !== null)
+            .map((element) =>
+              [
+                element.textContent,
+                element.getAttribute("aria-label"),
+                element.getAttribute("title"),
+                element.id,
+                element.getAttribute("class"),
+                element.getAttribute("data-testid"),
+                element.getAttribute("data-icon"),
+              ].join(" "),
+            )
+            .join(" ");
+          if (/\bcopy\b|clipboard/i.test(cues)) return candidate.selector;
+        }
+        return null;
+      },
+      candidates.map(({ ref, selector }) => ({ ref, selector: selector! })),
+    );
+    if (selector === null) return null;
+    copyButton = page.locator(selector);
+  }
   const before = await browser.readClipboard(page).catch(() => "");
   try {
-    await page
-      .locator('dialog[open], [role="dialog"]')
-      .nth(target.dialogIndex)
-      .locator('button, [role="button"]')
-      .nth(target.buttonIndex)
-      .click({ timeout: 1500 });
+    await copyButton.click({ timeout: 1500 });
   } catch {
     return null;
   }
@@ -771,7 +872,8 @@ export async function extractCredentials(sessionId: string): Promise<ExtractResu
 
   // Copy-only key surfaces (e.g. LangWatch's /settings/api-keys) never render
   // the value into the DOM — it goes to the clipboard on a "Copy" click. Read
-  // it (clipboard-read is granted at context creation).
+  // it after checking the live origin's permission.
+  await ensureCaptureClipboardPermission(page);
   const clip = await browser.readClipboard(page).catch(() => "");
 
   // Primary api_key: first FULL hit wins; a truncated/masked hit is the fallback.
