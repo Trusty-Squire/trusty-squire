@@ -5839,6 +5839,7 @@ async function driveLoop(input: {
   // deterministic key advance can immediately choose the same control again
   // and spend every remaining step in the guard without a new decision.
   let decideAfterPreActChange = false;
+  let automaticDecisionRefused = false;
   let dispatchedActs = 0;
   let countedJevCalls = drive.jevCalls;
   let countedDispatchedActs = 0;
@@ -6158,8 +6159,15 @@ async function driveLoop(input: {
       const completeSnap = await snapshotOrTimeout(framesIfNeeded());
       if (completeSnap !== "ok") return completeSnap;
       const fresh = driveProgressFingerprint(observation, rows, drive, session);
-      if (drive.boundFingerprint !== null && fresh !== drive.boundFingerprint) {
+      // Completion for a key goal is decided from fresh extraction below. A
+      // binding from the preceding page must not veto a readable credential.
+      if (
+        !isKeyGoal(drive.goal) &&
+        drive.boundFingerprint !== null &&
+        fresh !== drive.boundFingerprint
+      ) {
         drive.consumedActionKey = null;
+        automaticDecisionRefused = true;
         return "continue";
       }
       // A key goal is only complete when the capture flow operate_extract runs
@@ -6199,6 +6207,7 @@ async function driveLoop(input: {
           });
         }
         drive.stallKeys.push(stallKey);
+        automaticDecisionRefused = true;
         return "continue";
       }
       return finish("complete");
@@ -6408,6 +6417,7 @@ async function driveLoop(input: {
     if (drive.boundFingerprint !== null && fingerprint !== drive.boundFingerprint) {
       drive.consumedActionKey = null;
       traceUndispatchedOauth("snapshot_changed");
+      automaticDecisionRefused = true;
       return "continue";
     }
     if (drive.boundFingerprint === fingerprint && drive.consumedActionKey === decision.actionKey) {
@@ -6417,6 +6427,7 @@ async function driveLoop(input: {
         pageHasUntriedPendingAction(rows, drive, observation.url, drive.goal)
       ) {
         drive.consumedActionKey = null;
+        automaticDecisionRefused = true;
         return "continue";
       }
       const tried = drive.visitedSectionKeys ?? [];
@@ -6477,6 +6488,7 @@ async function driveLoop(input: {
         }
         const snap = await snapshotOrTimeout(framesIfNeeded());
         if (snap !== "ok") return snap;
+        automaticDecisionRefused = true;
         return "continue";
       }
     }
@@ -6493,6 +6505,7 @@ async function driveLoop(input: {
         observation.url,
         "decided control was no longer bound to this snapshot",
       );
+      automaticDecisionRefused = true;
       return "continue";
     }
     if (
@@ -6509,6 +6522,7 @@ async function driveLoop(input: {
         observation.url,
         "decided submit was not executed because a required field is still empty",
       );
+      automaticDecisionRefused = true;
       return "continue";
     }
 
@@ -7281,6 +7295,7 @@ async function driveLoop(input: {
   };
 
   while (steps < maxSteps && remainingMs() > 0) {
+    automaticDecisionRefused = false;
     if (api === null) {
       return finish("jev_unavailable", {
         jevRetried: "askJev requires an active Trusty Squire session (vaulted typesafe credential)",
@@ -7296,9 +7311,9 @@ async function driveLoop(input: {
       rows,
       applyReleasedCardFacts(drive.facts, session.releasedPaymentCard?.card),
     );
-    const pageUrl = observation.url;
-    const missing = requiredFillableMissingFact(rows, drive.facts, drive.filledRefs, pageUrl);
-    const pageOptions =
+    let pageUrl = observation.url;
+    let missing = requiredFillableMissingFact(rows, drive.facts, drive.filledRefs, pageUrl);
+    let pageOptions =
       lastSelectOptions.get(session) ?? selectOptionsFromElements(session.lastElements);
     const remainingFills = fillableCandidates(
       rows,
@@ -7307,7 +7322,7 @@ async function driveLoop(input: {
       drive.filledRefs,
       pageUrl,
     );
-    const hasGoalDestination = rows.some(
+    let hasGoalDestination = rows.some(
       (row) =>
         rowCarriesGoalNoun(row, args.goal) &&
         isGoalDestinationRow(row) &&
@@ -7322,6 +7337,7 @@ async function driveLoop(input: {
       if (back !== undefined) {
         const applied = await applyDecision(back);
         if (applied !== "continue") return applied;
+        if (automaticDecisionRefused) break automaticDecisions;
         spendStep("back");
         continue;
       }
@@ -7340,6 +7356,7 @@ async function driveLoop(input: {
         drive.consumedActionKey = null;
         const applied = await applyDecision(provider);
         if (applied !== "continue") return applied;
+        if (automaticDecisionRefused) break automaticDecisions;
         spendStep("named_provider");
         continue;
       }
@@ -7360,6 +7377,7 @@ async function driveLoop(input: {
           confidence: 1,
         });
         if (applied !== "continue") return applied;
+        if (automaticDecisionRefused) break automaticDecisions;
         spendStep("combobox");
         continue;
       }
@@ -7387,6 +7405,7 @@ async function driveLoop(input: {
           confidence: 1,
         });
         if (applied !== "continue") return applied;
+        if (automaticDecisionRefused) break automaticDecisions;
         spendStep("select");
         continue;
       }
@@ -7417,6 +7436,7 @@ async function driveLoop(input: {
           confidence: 1,
         });
         if (applied !== "continue") return applied;
+        if (automaticDecisionRefused) break automaticDecisions;
         spendStep("expiry_rewrite");
         continue;
       }
@@ -7437,6 +7457,7 @@ async function driveLoop(input: {
           confidence: 1,
         });
         if (applied !== "continue") return applied;
+        if (automaticDecisionRefused) break automaticDecisions;
         spendStep("type");
         continue;
       }
@@ -7445,7 +7466,7 @@ async function driveLoop(input: {
       if (
         missing !== undefined &&
         !emailCodeCandidates(rows, drive.filledRefs).some(
-          (candidate) => candidate.ref === missing.ref,
+          (candidate) => candidate.ref === missing?.ref,
         )
       ) {
         const field = fieldLabelForRow(missing.row);
@@ -7467,6 +7488,7 @@ async function driveLoop(input: {
         if (driveKeyGoalComplete(keyEvidence)) {
           const applied = await applyDecision({ kind: "complete", confidence: 1 });
           if (applied !== "continue") return applied;
+          if (automaticDecisionRefused) break automaticDecisions;
           spendStep("key_complete");
           continue;
         }
@@ -7485,6 +7507,7 @@ async function driveLoop(input: {
             confidence: 1,
           });
           if (applied !== "continue") return applied;
+          if (automaticDecisionRefused) break automaticDecisions;
           spendStep("key_advance");
           continue;
         }
@@ -7519,6 +7542,7 @@ async function driveLoop(input: {
           confidence: 1,
         });
         if (applied !== "continue") return applied;
+        if (automaticDecisionRefused) break automaticDecisions;
         const safe = await actSafely(dependencies, sessionId, {
           kind: "goto",
           url: session.startUrl,
@@ -7544,6 +7568,7 @@ async function driveLoop(input: {
         emptySnapshotWaits += 1;
         const applied = await applyDecision({ kind: "wait", confidence: 1 });
         if (applied !== "continue") return applied;
+        if (automaticDecisionRefused) break automaticDecisions;
         spendStep("empty_snapshot_wait");
         continue;
       }
@@ -7617,6 +7642,7 @@ async function driveLoop(input: {
           settleWaits += 1;
           const applied = await applyDecision({ kind: "wait", confidence: 1 });
           if (applied !== "continue") return applied;
+          if (automaticDecisionRefused) break automaticDecisions;
           spendStep("in_flight_wait");
           continue;
         }
@@ -7635,6 +7661,7 @@ async function driveLoop(input: {
           widgetWaits += 1;
           const applied = await applyDecision({ kind: "wait", confidence: 1 });
           if (applied !== "continue") return applied;
+          if (automaticDecisionRefused) break automaticDecisions;
           spendStep("widget_wait");
           continue;
         }
@@ -7663,6 +7690,7 @@ async function driveLoop(input: {
         if (!solverOutcomeBlocksSubmit(outcome)) {
           const applied = await applyDecision({ kind: "wait", confidence: 1 });
           if (applied !== "continue") return applied;
+          if (automaticDecisionRefused) break automaticDecisions;
           spendStep("captcha_wait");
           continue;
         }
@@ -7713,6 +7741,7 @@ async function driveLoop(input: {
           special: "inbox",
         });
         if (applied !== "continue") return applied;
+        if (automaticDecisionRefused) break automaticDecisions;
         spendStep("inbox");
         continue;
       }
@@ -7755,6 +7784,7 @@ async function driveLoop(input: {
           special: "card",
         });
         if (applied !== "continue") return applied;
+        if (automaticDecisionRefused) break automaticDecisions;
         spendStep("card");
         continue;
       }
@@ -7778,6 +7808,7 @@ async function driveLoop(input: {
         paySubmitWaits += 1;
         const applied = await applyDecision({ kind: "wait", confidence: 1 });
         if (applied !== "continue") return applied;
+        if (automaticDecisionRefused) break automaticDecisions;
         spendStep("pay_submit_wait");
         continue;
       } else {
@@ -7799,6 +7830,7 @@ async function driveLoop(input: {
           confidence: 1,
         });
         if (applied !== "continue") return applied;
+        if (automaticDecisionRefused) break automaticDecisions;
         spendStep("email_code_submit");
         continue;
       }
@@ -7811,6 +7843,23 @@ async function driveLoop(input: {
         const recovered = await recoverUndeliveredChoice();
         if (recovered !== "continue") return recovered;
       }
+    }
+
+    // A refused automatic choice may have refreshed the page. Give Jev the
+    // current page and its current controls without retrying another automatic
+    // branch on the same iteration.
+    if (automaticDecisionRefused) {
+      pageUrl = observation.url;
+      missing = requiredFillableMissingFact(rows, drive.facts, drive.filledRefs, pageUrl);
+      pageOptions =
+        lastSelectOptions.get(session) ?? selectOptionsFromElements(session.lastElements);
+      hasGoalDestination = rows.some(
+        (row) =>
+          rowCarriesGoalNoun(row, args.goal) &&
+          isGoalDestinationRow(row) &&
+          !isOffProductNavRow(row, pageUrl),
+      );
+      terminalOnly = false;
     }
 
     if (drive.jevCalls >= DRIVE_MAX_JEV_CALLS) {
