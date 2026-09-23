@@ -109,6 +109,7 @@ import {
   feedbackPagePath,
   goalDoneWhen,
   goalPhase,
+  goalPhaseAndDoneWhen,
   isKeyGoal,
   stripVolatileQuery,
   truncateDriveTrailText,
@@ -3467,7 +3468,8 @@ export function nextActionInstructions(goal: string): string {
   const phase = goalPhase(goal);
   const doneWhen = goalDoneWhen(goal);
   return (
-    `You are driving a browser to: ${goal}. Current phase: ${phase}. ` +
+    `You are driving a browser to: ${goal}. ` +
+    (phase === undefined ? "" : `Current phase: ${phase}. `) +
     `The goal is complete only when ${doneWhen}. ` +
     "Pick the single next operation that advances it. " +
     "Pick DONE only when that done_when condition is on the page now. " +
@@ -3516,7 +3518,7 @@ export interface DriveJevState {
     notices: string[];
     secrets_present: DriveSecretsPresent[];
   };
-  goal: { text: string; phase: DriveGoalPhase; done_when: string };
+  goal: { text: string; phase?: DriveGoalPhase; done_when: string };
   elements: DriveStateElement[];
   trail: DriveTrailEntry[];
   tried_here: string[];
@@ -3754,7 +3756,7 @@ export function buildJevState(
       notices: [...(feedback.notices ?? [])],
       secrets_present: [...(feedback.secretsPresent ?? [])],
     },
-    goal: { text: goal, phase: goalPhase(goal), done_when: goalDoneWhen(goal) },
+    goal: { text: goal, ...goalPhaseAndDoneWhen(goal) },
     elements,
     trail: [...(feedback.trail ?? [])],
     tried_here: [...(feedback.triedHereLabels ?? feedback.triedHere ?? [])],
