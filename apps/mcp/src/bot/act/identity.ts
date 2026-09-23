@@ -167,7 +167,13 @@ function inPageSameControl(arg: {
   label: string;
   href: string;
   compareLabel: boolean;
+  documentTimeOrigin?: string;
 }): boolean {
+  if (
+    arg.documentTimeOrigin !== undefined &&
+    String(performance.timeOrigin) !== arg.documentTimeOrigin
+  )
+    return false;
   type ControlDescription = { role: string; label: string; href: string };
   type DriveCache = {
     nodes: Map<string, Element>;
@@ -214,9 +220,11 @@ export async function resolveIdentityScope(
   page: Page,
   ref: string,
   identity: ActControlIdentity,
+  expected?: { frame: Frame; documentTimeOrigin: string },
 ): Promise<Frame | null> {
   if (identity.selector.length === 0) return null;
   for (const scope of identityFrameCandidates(page, identity)) {
+    if (expected !== undefined && scope !== expected.frame) continue;
     const same = await evaluateBound(scope, inPageSameControl, {
       ref,
       selector: identity.selector,
@@ -224,6 +232,7 @@ export async function resolveIdentityScope(
       label: identity.label,
       href: identity.href ?? "",
       compareLabel: identity.labelComparable === true,
+      ...(expected === undefined ? {} : { documentTimeOrigin: expected.documentTimeOrigin }),
     }).catch((error: unknown) => {
       // A stalled in-page read is the operator's abort, not a verdict that this
       // is a different control: swallowing it would let the caller carry on.
@@ -240,8 +249,9 @@ export async function resolveLiveControlIdentity(
   page: Page,
   ref: string,
   identity: ActControlIdentity,
+  expected?: { frame: Frame; documentTimeOrigin: string },
 ): Promise<InteractiveElement | null> {
-  const scope = await resolveIdentityScope(page, ref, identity);
+  const scope = await resolveIdentityScope(page, ref, identity, expected);
   if (scope === null) return null;
   const framePath = framePathOf(scope);
   return interactiveFromIdentity(identity, framePath === undefined ? undefined : { framePath });

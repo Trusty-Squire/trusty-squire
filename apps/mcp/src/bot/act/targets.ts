@@ -8,6 +8,7 @@
 // provision-session (type-only `Observation`-style imports are fine).
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { ClickDispatchStatus } from "../click-dispatch.js";
+import type { DriveRefAnchor } from "../drive-ref-bridge.js";
 import type { FrameTarget, InteractiveElement } from "../browser.js";
 import {
   compactV2LegacyRefForHandle,
@@ -267,6 +268,7 @@ export function throwCompactV2StaleRef(): never {
 export interface CompactV2TargetAuthorization {
   legacyRef: string;
   row: SafeControlV2;
+  anchor: { kind: "canonical"; legacyRef: string } | DriveRefAnchor;
 }
 
 export interface PreparedOAuthLoginTarget {
@@ -335,9 +337,11 @@ export function compactV2AuthorizationForTarget(
       throw new CompactV2UnresolvedLabelError("target_unresolved");
     throwCompactV2StaleRef();
   }
+  const drive = session.compactV2DriveAnchors.get(row.ref);
+  if (drive !== undefined) return { legacyRef: drive.privateRef, row, anchor: drive };
   const legacy = compactV2LegacyRefForHandle(session.compactV2Refs, row.ref);
   if (legacy === null) throwCompactV2StaleRef();
-  return { legacyRef: legacy, row };
+  return { legacyRef: legacy, row, anchor: { kind: "canonical", legacyRef: legacy } };
 }
 
 /** A label acts only when it names exactly one observed control. */
