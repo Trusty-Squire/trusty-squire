@@ -1684,8 +1684,12 @@ export function isRevealOrCopyRow(row: WireRow): boolean {
 
 export const REVEALED_SECRET_REF = "@key-value";
 
-export function revealedSecretMarkerRow(length: number): WireRow {
-  return [REVEALED_SECRET_REF, "h1", `@key-value|secret=1|len=${length}`];
+export function revealedSecretMarkerRow(length: number, count = 1): WireRow {
+  return [
+    REVEALED_SECRET_REF,
+    "h1",
+    `@key-value|secret=1|len=${length}${count > 1 ? `|count=${count}` : ""}`,
+  ];
 }
 
 const MASKED_SECRET_DISPLAY = /(?:^|[\s=|"'])[A-Za-z][A-Za-z0-9]{1,12}[_-][A-Za-z0-9_-]*[•●⬤*]{3,}/;
@@ -1875,10 +1879,11 @@ export function attachRevealedSecretMarker(
     ...(observation.semantic?.blockers ?? []).map((blocker) => blocker.text),
     ...rows.map((row) => row[2] ?? ""),
   ];
-  const lengths: number[] = [];
+  const tokens = new Set<string>();
   for (const blob of blobs) {
-    for (const token of findCredentialTokens(blob)) lengths.push(token.length);
+    for (const token of findCredentialTokens(blob)) tokens.add(token);
   }
+  const lengths = [...tokens].map((token) => token.length);
   const maskedEvidence = rows.some((row) => rowShowsSecretEvidence(row));
   if (lengths.length === 0 && !maskedEvidence) {
     return { observation, rows: [...rows], attached: false };
@@ -1892,11 +1897,11 @@ export function attachRevealedSecretMarker(
     return (facts === undefined ? [row[0], role] : [row[0], role, facts]) as WireRow;
   });
   if (!nextRows.some((row) => row[0] === REVEALED_SECRET_REF)) {
-    nextRows.push(revealedSecretMarkerRow(length));
+    nextRows.push(revealedSecretMarkerRow(length, tokens.size));
   }
   const headings = [
     ...(observation.semantic?.headings ?? []).map(redact),
-    `@key-value|secret=1|len=${length}`,
+    revealedSecretMarkerRow(length, tokens.size)[2]!,
   ];
   return {
     observation: {

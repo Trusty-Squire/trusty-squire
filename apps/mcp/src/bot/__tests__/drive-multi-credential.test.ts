@@ -69,6 +69,9 @@ it("reveals every sibling and leaves regenerate untouched", async () => {
   });
   const dependencies: DriveDependencies = {
     askJev: async (_api, _state, questions) => {
+      const writeReadable = (await page.locator("#write").textContent()) === writeKey;
+      const readReadable = (await page.locator("#read").textContent()) === readKey;
+      const allReadable = writeReadable && readReadable;
       const answers: Record<
         string,
         { choice: string; confidence: number; probabilities: Record<string, number> }
@@ -76,7 +79,21 @@ it("reveals every sibling and leaves regenerate untouched", async () => {
       for (const [name, question] of Object.entries(questions)) {
         if (question.type !== "choice") continue;
         const keys = Object.keys(question.criteria);
-        const choice = name === "operation" && keys.includes("CLICK") ? "CLICK" : keys[0]!;
+        const revealChoices = Object.entries(question.criteria)
+          .filter(([, label]) => label === "Reveal")
+          .map(([key]) => key);
+        const choice =
+          name === "CLICK_target" && revealChoices.length > 0
+            ? writeReadable
+              ? revealChoices.at(-1)!
+              : revealChoices[0]!
+            : name === "operation"
+              ? allReadable && keys.includes("DONE")
+                ? "DONE"
+                : keys.includes("CLICK")
+                  ? "CLICK"
+                  : keys[0]!
+              : keys[0]!;
         answers[name] = {
           choice,
           confidence: 0.95,
