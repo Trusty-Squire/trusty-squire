@@ -64,13 +64,4 @@ describe("drive key-goal evidence", () => {
       }),
     ).toBe(true);
   });
-
-  it("does not force completion against a low goal_complete answer", () => {
-    const evidence = {
-      credentials: { api_key: "re_abcdefGHIJKLmnop1234567" },
-      maskedRemaining: [],
-    };
-    expect(driveKeyGoalComplete(evidence, 0.09)).toBe(false);
-    expect(driveKeyGoalComplete(evidence, 0.9)).toBe(true);
-  });
 });

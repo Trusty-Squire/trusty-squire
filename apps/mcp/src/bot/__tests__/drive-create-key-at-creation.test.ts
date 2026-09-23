@@ -72,13 +72,12 @@ it("creates a named key when existing keys are masked, then captures its one-tim
   const askJev: DriveDependencies["askJev"] = async (_api, _state, questions) => {
     const form = await page.locator("#create-form").count();
     const name = form ? await page.locator('[name="key_name"]').inputValue() : "";
-    const operation = !form ? "DONE" : name ? "CLICK" : "TYPE_TEXT";
+    const revealed = await page.locator(`input[value="${key}"]`).count();
+    const operation = revealed ? "DONE" : !form ? "CLICK" : name ? "CLICK" : "TYPE_TEXT";
     const answers: Record<string, JevAnswer> = {};
     for (const [questionName, question] of Object.entries(questions)) {
       if (question.type === "noul") {
-        answers[questionName] = {
-          noul: questionName === "current_page_is_goal_target" ? 0.98 : 0.05,
-        };
+        answers[questionName] = { noul: 0.05 };
         continue;
       }
       if (question.type !== "choice") continue;
@@ -93,7 +92,9 @@ it("creates a named key when existing keys are masked, then captures its one-tim
               : questionName === "TYPE_TEXT_target"
                 ? entries.find(([, label]) => label.includes("API Key Name"))?.[0]
                 : questionName === "CLICK_target"
-                  ? entries.find(([, label]) => label.includes("Create Key"))?.[0]
+                  ? entries.find(([, label]) =>
+                      label.includes(form ? "Create Key" : "Create API Key"),
+                    )?.[0]
                   : entries[0]?.[0];
       if (choice === undefined || !(choice in question.criteria)) continue;
       answers[questionName] = {
