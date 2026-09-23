@@ -12,12 +12,12 @@ let context: BrowserContext;
 let page: Page;
 
 beforeAll(async () => {
-  // The operator uses headed Chrome with a persistent profile. This profile
-  // belongs only to this fixture; it never touches the broker's live profile.
+  // This fixture uses an isolated persistent profile and never touches the
+  // broker's live profile.
   profile = await mkdtemp(join(process.cwd(), ".capture-copy-profile-"));
   context = await chromium.launchPersistentContext(profile, {
     channel: "chrome",
-    headless: false,
+    headless: true,
     args: ["--no-sandbox"],
   });
   page = context.pages()[0] ?? (await context.newPage());
@@ -34,7 +34,7 @@ afterAll(async () => {
 it.each([
   ["presentation with aria-modal", 'role="presentation" aria-modal="true"'],
   ["unmarked covering layer", ""],
-])("copies a generated key from a %s in headed Chrome", async (_name, attributes) => {
+])("copies a generated key from a %s in Chrome", async (_name, attributes) => {
   const key =
     "fixture_Ab9Cd8Ef7Gh6Jk5Lm4Np3Qr2St1Uv0Wx9Yz8Ab7Cd6Ef5Gh4Jk3Lm2Np" +
     (attributes.length > 0 ? "1" : "2");

@@ -440,8 +440,13 @@ vi.mock("../browser.js", async (importOriginal) => ({
           waitForLoadState: async () => {},
           bringToFront: async () => {},
           close: async () => {},
-          // relyingPartyOnboarding() runs an onboarding-form probe in the page.
-          evaluate: async () => false,
+          // This fixture has no DOM controls. A missing dialog/copy target is
+          // represented by null, as it is on a real Playwright page.
+          evaluate: async (callback: unknown) =>
+            typeof callback === "function" &&
+            String(callback).includes("navigator.permissions.query")
+              ? { clipboardRead: "granted", geolocation: "prompt" }
+              : null,
           // classifyGoogleAuthState reads body text off the provider page.
           locator: () => ({ innerText: async () => "", evaluateAll: async () => [] }),
         };
@@ -1710,7 +1715,7 @@ describe("operate session — OAuth lifecycle", () => {
     await finishProvisionSession(started.session_id);
   });
 
-  it("allows a configured human OAuth handoff to continue beyond the old 30-second cap", async () => {
+  it("bounds an ordinary provider redirect to the automated OAuth deadline", async () => {
     vi.useFakeTimers();
     process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "60000";
     h.visibleText = "Continue with Google";
@@ -1722,8 +1727,8 @@ describe("operate session — OAuth lifecycle", () => {
         selector: "#google-oauth",
       }),
     ];
-    // Same-tab redirect that stays on the provider (no return URL): the
-    // handshake parks on Google and the human handoff deadline takes over.
+    // A provider redirect without an observed human challenge retains the
+    // short machine deadline, even when a longer handoff is configured.
     h.oauthClickSimulate = "provider";
     h.oauthResultUrl = "https://accounts.google.com/o/oauth2/auth?client_id=test";
     const started = await startProvisionSession({ serviceUrl: "https://app.example.com/login" });
@@ -1742,8 +1747,7 @@ describe("operate session — OAuth lifecycle", () => {
       },
     );
     await vi.advanceTimersByTimeAsync(31_000);
-    expect(settledEarly).toBe(false);
-    await vi.advanceTimersByTimeAsync(29_000);
+    expect(settledEarly).toBe(true);
 
     await expect(login).resolves.toMatchObject({
       oauth: { state: "awaiting_human", next_action: "operate_observe" },
