@@ -689,6 +689,71 @@ export async function captureCredentialSource(
   return await resolveCaptureSourceOnce(page, source);
 }
 
+/** A created-key dialog may render its readable value outside DOM text (for
+ * example in generated content) while keeping a stale mask in the DOM. Its
+ * adjacent Copy control is then the page's authoritative value source. */
+async function copyCredentialFromDialog(
+  page: Page | undefined,
+  browser: Session["browser"],
+): Promise<string | null> {
+  if (page === undefined) return null;
+  const target = await page.evaluate(() => {
+    const dialogs = Array.from(document.querySelectorAll('dialog[open], [role="dialog"]'));
+    for (let dialogIndex = dialogs.length - 1; dialogIndex >= 0; dialogIndex--) {
+      const dialog = dialogs[dialogIndex]!;
+      const context = `${dialog.getAttribute("aria-label") ?? ""} ${dialog.textContent ?? ""}`;
+      if (!/\b(?:api\s*key|secret|token|credential|key)\b/i.test(context)) continue;
+      const buttons = Array.from(dialog.querySelectorAll('button, [role="button"]'));
+      for (let buttonIndex = 0; buttonIndex < buttons.length; buttonIndex++) {
+        const button = buttons[buttonIndex]!;
+        const rect = button.getBoundingClientRect();
+        const style = getComputedStyle(button);
+        if (
+          rect.width <= 2 ||
+          rect.height <= 2 ||
+          style.display === "none" ||
+          style.visibility === "hidden" ||
+          Number(style.opacity) <= 0.01 ||
+          (button instanceof HTMLButtonElement && button.disabled)
+        )
+          continue;
+        const icon = button.querySelector("svg");
+        const cues = [button, icon]
+          .filter((element): element is Element => element !== null)
+          .map((element) =>
+            [
+              element.textContent,
+              element.getAttribute("aria-label"),
+              element.getAttribute("title"),
+              element.id,
+              element.getAttribute("class"),
+              element.getAttribute("data-testid"),
+              element.getAttribute("data-icon"),
+            ].join(" "),
+          )
+          .join(" ");
+        if (/\bcopy\b|clipboard/i.test(cues)) return { dialogIndex, buttonIndex };
+      }
+    }
+    return null;
+  });
+  if (target === null) return null;
+  const before = await browser.readClipboard(page).catch(() => "");
+  try {
+    await page
+      .locator('dialog[open], [role="dialog"]')
+      .nth(target.dialogIndex)
+      .locator('button, [role="button"]')
+      .nth(target.buttonIndex)
+      .click({ timeout: 1500 });
+  } catch {
+    return null;
+  }
+  const copied = (await browser.readClipboard(page).catch(() => "")).trim();
+  // A stale clipboard is not evidence that this control yielded a credential.
+  return copied.length > 0 && copied !== before.trim() ? copied : null;
+}
+
 export async function extractCredentials(sessionId: string): Promise<ExtractResult> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
@@ -712,7 +777,6 @@ export async function extractCredentials(sessionId: string): Promise<ExtractResu
   // Primary api_key: first FULL hit wins; a truncated/masked hit is the fallback.
   let state = initialExtractionState();
   const sources: string[] = [...labeled.map((c) => c.value), ...inputs, ...nearCopy, clip, text];
-  const haystack = sources.join("\n");
   for (const src of sources) {
     if (hasFullHit(state)) break;
     const key = extractApiKeyFromText(src);
@@ -733,6 +797,20 @@ export async function extractCredentials(sessionId: string): Promise<ExtractResu
       : { kind: "full", value: key };
     state = accumulateCandidate(state, cls);
   }
+
+  const copied = !hasFullHit(state) ? await copyCredentialFromDialog(page, browser) : null;
+  const acceptedCopy =
+    copied !== null &&
+    !isCredentialNoise(copied) &&
+    (looksLikeCredentialValue(copied) || pickRelaxedNearCopyCredential([copied]) !== null)
+      ? copied
+      : null;
+  if (acceptedCopy !== null) {
+    nearCopy.push(acceptedCopy);
+    sources.push(acceptedCopy);
+    state = accumulateCandidate(state, { kind: "full", value: acceptedCopy });
+  }
+  const haystack = sources.join("\n");
 
   // Named credentials for multi-cred services (skip still-masked values and
   // env-var NAME displays — "LANGWATCH_API_KEY=" is the SDK-snippet prefix, not
@@ -799,7 +877,16 @@ export async function extractCredentials(sessionId: string): Promise<ExtractResu
   // UNREAD key, not success. Name it so a caller never believes every key is
   // vaulted when a sibling is still hidden; a masked value covered by a
   // readable capture under the same label is not remaining (see the helper).
-  const maskedRemaining = maskedCredentialLabels(labeled, Object.keys(sanitized));
+  // A successful copy from this credential dialog resolves its lone masked
+  // display even if the page leaves that stale mask node in the DOM.
+  const maskedCandidates = labeled.filter((candidate) => candidate.isMasked);
+  const remainingCandidates =
+    acceptedCopy !== null &&
+    Object.values(sanitized).includes(acceptedCopy) &&
+    maskedCandidates.length === 1
+      ? labeled.filter((candidate) => candidate !== maskedCandidates[0])
+      : labeled;
+  const maskedRemaining = maskedCredentialLabels(remainingCandidates, Object.keys(sanitized));
   audit(sessionId, "extract", { found, candidate_count: labeled.length });
   return {
     session_id: sessionId,
