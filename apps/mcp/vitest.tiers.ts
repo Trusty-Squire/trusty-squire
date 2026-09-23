@@ -53,6 +53,7 @@ export const REAL_BROWSER_FILES = [
   "src/bot/capture/__tests__/credential-capture-browser.test.ts",
   "src/bot/__tests__/drive-control-digest.test.ts",
   "src/bot/__tests__/drive-key-complete-refusal.test.ts",
+  "src/bot/__tests__/drive-multi-credential.test.ts",
   "src/bot/__tests__/drive-changing-controls-steps.test.ts",
   "src/bot/__tests__/drive-redirect-redecide.test.ts",
   "src/bot/__tests__/drive-shadow-overlay.test.ts",

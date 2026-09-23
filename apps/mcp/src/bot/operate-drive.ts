@@ -3879,7 +3879,7 @@ export function operationCriteria(operations: readonly DriveOperation[]): Record
         "wait only when the needed control is absent or disabled, or submitted results are still loading";
     else if (operation === "DONE")
       criteria.DONE =
-        "done_when is satisfied by what is on this page now; for a key goal that means an unmasked secret-shaped value";
+        "done_when is satisfied by what is on this page now; for a key goal every offered credential must be readable";
     else criteria.BLOCKED = "no listed element advances the goal; stop";
   }
   // A page that cannot help must be a legal answer instead of a forced

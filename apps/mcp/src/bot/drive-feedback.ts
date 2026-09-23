@@ -82,7 +82,7 @@ export function goalPhase(goal: string): DriveGoalPhase {
 export function goalDoneWhen(goal: string): string {
   switch (goalPhase(goal)) {
     case "find_keys":
-      return "an unmasked secret-shaped value is on the page";
+      return "every credential offered on the page is readable, with no masked sibling remaining";
     case "create_or_reveal":
       return "the page confirms the account or resource was created";
     case "verify":
