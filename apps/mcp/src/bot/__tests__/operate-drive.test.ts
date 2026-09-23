@@ -231,10 +231,11 @@ describe("request building", () => {
     expect(operation.criteria).not.toHaveProperty("SELECT");
     expect(operation.criteria).toHaveProperty("NONE_OF_THESE");
     expect(operation.criteria).toHaveProperty("GO_BACK");
-    // The four parallel Nouls ride along in the same request.
+    // Parallel judgments ride along in the same request.
     expect(questions.last_action_worked?.type).toBe("noul");
     expect(questions.blocked_by_layer?.type).toBe("noul");
     expect(questions.goal_complete?.type).toBe("noul");
+    expect(questions.current_page_is_goal_target?.type).toBe("noul");
     expect(questions.dead_end?.type).toBe("noul");
     expect(questions.next_action).toBeUndefined();
     expect(questions.SCROLL_target).toBeUndefined();
@@ -242,6 +243,7 @@ describe("request building", () => {
       "CLICK_target",
       "TYPE_TEXT_target",
       "blocked_by_layer",
+      "current_page_is_goal_target",
       "dead_end",
       "email_code_field",
       "goal_complete",

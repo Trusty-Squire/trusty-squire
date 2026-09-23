@@ -201,6 +201,7 @@ export const DRIVE_FIXED_DONE = "DONE";
 export const DRIVE_FIXED_STUCK = "BLOCKED";
 export const DRIVE_FIXED_NONE = "none";
 export const DRIVE_VALUE_QUESTION = "TYPE_TEXT_value";
+export const DRIVE_TARGET_SCOPE_QUESTION = "current_page_is_goal_target";
 export const DRIVE_EMAIL_CODE_QUESTION = "email_code_field";
 export const DRIVE_CHECK_EMAIL = "check_email";
 export const DRIVE_INJECT_CARD_HISTORY = "inject card";
@@ -250,6 +251,7 @@ export const DRIVE_RULES: readonly string[] = [
   "The trail records what each earlier action actually did. Do not repeat an action whose trail outcome is no_change, not_executed, or bounced_back.",
   "Pick NONE_OF_THESE instead of a low-confidence click when nothing on this page advances the goal.",
   "Pick GO_BACK when the trail shows this page was reached by mistake.",
+  "When the goal confines work to a newly created resource, choose its creation path and do not open a different existing resource.",
 ];
 // Drive rules above adapt browser-use/jev-ultrafast (MIT) NEXT_ACTION / TARGET prose.
 
@@ -2632,6 +2634,34 @@ export function allowsGoalValueAssignment(row: WireRow): boolean {
   return isSearchRow(row) && !isIdentityOrPaymentRow(row);
 }
 
+/** A field in a submitted form may need a fact whose key does not resemble its label. */
+function goalHasNamedValue(goal: string): boolean {
+  return /\bnamed\s+[^.!?;]+|["“][^"”]+["”]/i.test(goal);
+}
+
+function isFormValueField(row: WireRow, rows: readonly WireRow[], goal = ""): boolean {
+  const formId = rowFormId(row);
+  const submitRows = rows.filter(
+    (other) => (other[1] === "b" || other[1] === "button") && isSubmitLikeRow(other),
+  );
+  const generalFields = rows.filter(
+    (other) => isFillableRow(other) && !isIdentityOrPaymentRow(other) && !isSearchRow(other),
+  );
+  return (
+    isFillableRow(row) &&
+    !isSelectRow(row) &&
+    !isSearchRow(row) &&
+    !isPaymentRow(row) &&
+    !isCvvRow(row) &&
+    !isPasswordRow(row) &&
+    !isOtpRow(row) &&
+    (generalFields.length >= 2 || goalHasNamedValue(goal)) &&
+    (formId !== undefined
+      ? submitRows.some((other) => rowFormId(other) === formId)
+      : submitRows.length === 1 && rows.indexOf(row) < rows.indexOf(submitRows[0]!))
+  );
+}
+
 /** A control that narrows the page's own listed content: a search or filter
  *  field beside a list of entries can only remove options, never add them.
  *  A site-search box that navigates to a results page (no list on this page)
@@ -3015,6 +3045,39 @@ export function goalValueCriteria(
   return criteria;
 }
 
+/** Values are candidates; the model decides their meaning from the whole form. */
+function formValueCriteria(goal: string, facts: Record<string, string>): Record<string, string> {
+  const criteria: Record<string, string> = {};
+  for (const [key, value] of Object.entries(facts)) {
+    if (key === "card_ref" || CARD_DERIVED_FACTS.has(key) || value.trim().length === 0) continue;
+    criteria[key] = value;
+  }
+  const named = [...goal.matchAll(/\bnamed\s+([^.!?;]+)/gi), ...goal.matchAll(/["“]([^"”]+)["”]/g)];
+  const used = new Set(Object.keys(criteria));
+  for (const match of named) {
+    const value = match[1]?.trim();
+    if (value === undefined || value.length === 0 || Object.values(criteria).includes(value))
+      continue;
+    const key = uniqueCriteriaSlug(value, used);
+    used.add(key);
+    criteria[key] = value;
+  }
+  criteria[DRIVE_FIXED_NONE] = "no supplied value belongs in this field";
+  return criteria;
+}
+
+function formValueQuestionName(
+  candidate: DriveCandidate,
+  sets: DriveTargetSets,
+  rows: readonly WireRow[],
+  goal = "",
+): string | undefined {
+  const index = sets.TYPE_TEXT.filter((entry) => isFormValueField(entry.row, rows, goal)).findIndex(
+    (entry) => entry.ref === candidate.ref,
+  );
+  return index < 0 ? undefined : `form_value_${index + 1}`;
+}
+
 export function peakedProbabilities(
   ids: readonly string[],
   pick: string,
@@ -3226,7 +3289,7 @@ export function typeableCandidates(
     if (filled.has(row[0]) || seen.has(row[0])) continue;
     if (isOffscreenRow(row) && !allowOffscreen) continue;
     if (isPaymentRow(row) || isCvvRow(row)) continue;
-    if (!isOtpRow(row) && !isSearchRow(row)) continue;
+    if (!isOtpRow(row) && !isSearchRow(row) && !isFormValueField(row, rows, goal ?? "")) continue;
     // A search/filter field beside a list can only remove options from the
     // page. It is not offered for a typed value unless the goal asks for a
     // search; the loop must prefer the listed destinations instead.
@@ -3517,6 +3580,7 @@ export function requiredFillableMissingFact(
   facts: Record<string, string>,
   filledRefs: readonly string[] = [],
   pageUrl: string = "",
+  goal: string = "",
 ): DriveCandidate | undefined {
   const filled = new Set(filledRefs);
   const allowOffscreen = pageUrl.length === 0 || isCheckoutUrl(pageUrl);
@@ -3525,6 +3589,11 @@ export function requiredFillableMissingFact(
       continue;
     if (isOffscreenRow(row) && !allowOffscreen) continue;
     if (isPaymentRow(row) || isCvvRow(row) || isOtpRow(row) || allowsGoalValueAssignment(row))
+      continue;
+    if (
+      isFormValueField(row, rows, goal) &&
+      Object.keys(formValueCriteria(goal, facts)).some((key) => key !== DRIVE_FIXED_NONE)
+    )
       continue;
     if (facts.card_ref !== undefined && (isExpiryRow(row) || isCardholderNameRow(row))) continue;
     if (!isRequiredRow(row)) continue;
@@ -3879,7 +3948,7 @@ export function operationCriteria(operations: readonly DriveOperation[]): Record
         "wait only when the needed control is absent or disabled, or submitted results are still loading";
     else if (operation === "DONE")
       criteria.DONE =
-        "done_when is satisfied by what is on this page now; for a key goal every offered credential must be readable";
+        "done_when and every stated goal requirement are satisfied on the target page; for a key goal every offered credential must be readable";
     else criteria.BLOCKED = "no listed element advances the goal; stop";
   }
   // A page that cannot help must be a legal answer instead of a forced
@@ -3968,7 +4037,7 @@ export function driveTargetSets(
     if (hasInAppWork && isOffProductNavRow(row, pageUrl)) return false;
     if (isAppRootOrLogoRow(row, pageUrl) || isSamePageAnchorRow(row, pageUrl)) return false;
     if (visited.includes(sectionIdentity(row, pageUrl))) return false;
-    if (isCreateEntryRow(row) && listedItemRows(rows, pageUrl).length > 0) return false;
+    if (isCreateEntryRow(row) && listedItemRows(rows, pageUrl).length > 0 && !goalHasNamedValue(aim.goal ?? "")) return false;
     if (hideFilters && untriedEntries.length > 0 && isSiblingSectionNavRow(row, pageUrl, rows)) {
       return false;
     }
@@ -4170,6 +4239,11 @@ export function buildDriveQuestions(
       type: "noul",
       instructions: `done_when is satisfied by what is on this page: ${goalDoneWhen(goal)}.`,
     },
+    [DRIVE_TARGET_SCOPE_QUESTION]: {
+      type: "noul",
+      instructions:
+        "Does the current page belong to the exact resource the goal asks to work inside? Judge the goal's creation and scope requirements against the page URL, title, text, and action trail. An existing different resource is not the target even when it shows the requested kind of result.",
+    },
     dead_end: {
       type: "noul",
       instructions: "Nothing on this page can advance the goal.",
@@ -4209,7 +4283,8 @@ export function buildDriveQuestions(
   if (sets.CLICK.length > 0) {
     questions.CLICK_target = {
       type: "choice",
-      instructions: "Which control should be clicked?",
+      instructions:
+        "Which control advances the exact goal? If the goal requires a new resource, do not choose a different existing resource.",
       criteria: criteriaFromCandidates(sets.CLICK, "CLICK"),
     };
   }
@@ -4218,6 +4293,17 @@ export function buildDriveQuestions(
       type: "choice",
       instructions: "Which field should receive a provided fact or an assigned goal phrase?",
       criteria: criteriaFromCandidates(sets.TYPE_TEXT),
+    };
+  }
+  for (const candidate of sets.TYPE_TEXT) {
+    if (!isFormValueField(candidate.row, rows, goal)) continue;
+    if (matchingFactKeys(facts, candidate.row).length > 0) continue;
+    const name = formValueQuestionName(candidate, sets, rows, goal);
+    if (name === undefined) continue;
+    questions[name] = {
+      type: "choice",
+      instructions: `Which supplied value belongs in the ${candidate.description} field of this form for the goal? Judge the field in the context of the whole form. Choose none when no supplied value belongs there.`,
+      criteria: formValueCriteria(goal, facts),
     };
   }
   if (
@@ -4561,6 +4647,9 @@ export function decideAfterJev(input: {
       input.pageOptions ?? new Map(),
       sets,
     );
+  const targetAnswer = input.answers[DRIVE_TARGET_SCOPE_QUESTION];
+  const currentPageMatchesGoal =
+    targetAnswer === undefined || confidenceOf(targetAnswer) >= threshold;
   const preferredProvider = namedProviderDecision(input.goal, sets.CLICK);
   if (
     preferredProvider !== undefined &&
@@ -4713,7 +4802,14 @@ export function decideAfterJev(input: {
       return { kind: "none_of_these", confidence, reason: noticeReason() };
     }
     if (choice === DRIVE_FIXED_GO_BACK) return { kind: "go_back", confidence };
-    if (choice === "DONE") return { kind: "complete", confidence };
+    if (choice === "DONE") {
+      if (!currentPageMatchesGoal)
+        return { kind: "replan", confidence, reason: "current page is outside the goal's target" };
+      const complete = input.answers.goal_complete;
+      if (isKeyGoal(input.goal) && complete !== undefined && confidenceOf(complete) < threshold)
+        return { kind: "replan", confidence, reason: "the goal's key requirements are not yet met" };
+      return { kind: "complete", confidence };
+    }
     if (choice === "BLOCKED") return { kind: "stuck", confidence };
     if (choice === "WAIT") return { kind: "wait", confidence };
     if (choice === "INBOX") {
@@ -4853,6 +4949,35 @@ export function decideAfterJev(input: {
       if (matched.length > 0) {
         const filled = fillActionForCandidate(candidate, input.facts, matched[0]!, confidence);
         return filled ?? { kind: "needs_value", field: fieldLabelForRow(row) };
+      }
+      const formQuestionName = formValueQuestionName(candidate, sets, input.rows, input.goal);
+      if (formQuestionName !== undefined) {
+        const question = questions[formQuestionName];
+        const criteria = question?.type === "choice" ? question.criteria : {};
+        const answer = input.answers[formQuestionName];
+        const admission = admitsChoice(criteria, answer, { reversible: true }, threshold);
+        if (!("ok" in admission)) {
+          return refuseAdmission(
+            admission,
+            question?.instructions ?? "Which value belongs in this field?",
+            criteria,
+            answer,
+          );
+        }
+        const chosen = answer?.choice;
+        if (chosen === undefined || chosen === DRIVE_FIXED_NONE) {
+          return isRequiredRow(row)
+            ? { kind: "needs_value", field: fieldLabelForRow(row) }
+            : { kind: "replan", confidence, reason: "no supplied value belongs in this field" };
+        }
+        const text = criteria[chosen];
+        if (text === undefined) return { kind: "needs_value", field: fieldLabelForRow(row) };
+        return {
+          kind: "act",
+          action: { kind: "type", target: ref, text },
+          actionKey: ref,
+          confidence,
+        };
       }
       if (isOtpRow(row)) {
         return {
@@ -5862,10 +5987,12 @@ async function driveLoop(input: {
   // and spend every remaining step in the guard without a new decision.
   let decideAfterPreActChange = false;
   let automaticDecisionRefused = false;
-  let lastKeyGoalAnswer: { fingerprint: string; confidence: number } | undefined;
+  let lastKeyGoalAnswer:
+    | { fingerprint: string; confidence: number; targetConfidence: number }
+    | undefined;
   const keyGoalModelConfidence = (): number | undefined =>
     lastKeyGoalAnswer?.fingerprint === observationFingerprint(observation.url, rows)
-      ? lastKeyGoalAnswer.confidence
+      ? Math.min(lastKeyGoalAnswer.confidence, lastKeyGoalAnswer.targetConfidence)
       : undefined;
   let dispatchedActs = 0;
   let countedJevCalls = drive.jevCalls;
@@ -7349,7 +7476,7 @@ async function driveLoop(input: {
       applyReleasedCardFacts(drive.facts, session.releasedPaymentCard?.card),
     );
     let pageUrl = observation.url;
-    let missing = requiredFillableMissingFact(rows, drive.facts, drive.filledRefs, pageUrl);
+    let missing = requiredFillableMissingFact(rows, drive.facts, drive.filledRefs, pageUrl, drive.goal);
     let pageOptions =
       lastSelectOptions.get(session) ?? selectOptionsFromElements(session.lastElements);
     const remainingFills = fillableCandidates(
@@ -7519,7 +7646,7 @@ async function driveLoop(input: {
       }
 
       // A key page can have an unrelated disabled form while the key control is
-      // ready. Advance the key goal before the generic in-flight settle gate.
+      // ready. Completion uses the model's goal and target judgment for this page.
       if (isKeyGoal(drive.goal)) {
         const keyEvidence = await driveKeyEvidence(sessionId);
         if (driveKeyGoalComplete(keyEvidence, keyGoalModelConfidence())) {
@@ -7527,25 +7654,6 @@ async function driveLoop(input: {
           if (applied !== "continue") return applied;
           if (automaticDecisionRefused) break automaticDecisions;
           spendStep("key_complete");
-          continue;
-        }
-        const advance = keyGoalSecretAdvance(
-          rows,
-          [...new Set([...(drive.exhaustedActionKeys ?? []), ...(drive.staleClickRefs ?? [])])],
-          { pageUrl, triedStableKeys: drive.triedHere ?? [] },
-        );
-        if (advance !== undefined && !decideAfterPreActChange) {
-          drive.boundFingerprint = driveProgressFingerprint(observation, rows, drive, session);
-          drive.consumedActionKey = null;
-          const applied = await applyDecision({
-            kind: "act",
-            action: { kind: "click", target: advance[0] },
-            actionKey: advance[0],
-            confidence: 1,
-          });
-          if (applied !== "continue") return applied;
-          if (automaticDecisionRefused) break automaticDecisions;
-          spendStep("key_advance");
           continue;
         }
       }
@@ -7887,7 +7995,7 @@ async function driveLoop(input: {
     // branch on the same iteration.
     if (automaticDecisionRefused) {
       pageUrl = observation.url;
-      missing = requiredFillableMissingFact(rows, drive.facts, drive.filledRefs, pageUrl);
+      missing = requiredFillableMissingFact(rows, drive.facts, drive.filledRefs, pageUrl, drive.goal);
       pageOptions =
         lastSelectOptions.get(session) ?? selectOptionsFromElements(session.lastElements);
       hasGoalDestination = rows.some(
@@ -8066,6 +8174,10 @@ async function driveLoop(input: {
       lastKeyGoalAnswer = {
         fingerprint: observationFingerprint(observation.url, rows),
         confidence: confidenceOf(answers.goal_complete),
+        targetConfidence:
+          answers[DRIVE_TARGET_SCOPE_QUESTION] === undefined
+            ? 1
+            : confidenceOf(answers[DRIVE_TARGET_SCOPE_QUESTION]),
       };
     }
     if (missing !== undefined && answers[DRIVE_EMAIL_CODE_QUESTION]?.choice === DRIVE_FIXED_NONE) {
@@ -8087,6 +8199,7 @@ async function driveLoop(input: {
       decision.kind !== "complete" &&
       isKeyGoal(drive.goal) &&
       confidenceOf(answers.goal_complete) >= DRIVE_CONFIDENCE_THRESHOLD &&
+      confidenceOf(answers[DRIVE_TARGET_SCOPE_QUESTION]) >= DRIVE_CONFIDENCE_THRESHOLD &&
       driveKeyGoalComplete(await driveKeyEvidence(sessionId), keyGoalModelConfidence())
     ) {
       const applied = await applyDecision(

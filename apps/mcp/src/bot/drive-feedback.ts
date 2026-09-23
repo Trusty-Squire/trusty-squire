@@ -82,7 +82,7 @@ export function goalPhase(goal: string): DriveGoalPhase {
 export function goalDoneWhen(goal: string): string {
   switch (goalPhase(goal)) {
     case "find_keys":
-      return "every credential offered on the page is readable, with no masked sibling remaining";
+      return "every credential offered on the goal's target page is readable, with no masked sibling remaining, and every key requirement in the goal is satisfied";
     case "create_or_reveal":
       return "the page confirms the account or resource was created";
     case "verify":
