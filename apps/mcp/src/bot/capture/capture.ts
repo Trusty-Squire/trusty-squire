@@ -962,6 +962,25 @@ export async function extractCredentials(sessionId: string): Promise<ExtractResu
     state = accumulateCandidate(state, cls);
   }
 
+  // A newly created key can be rendered as bare text in a table row: its
+  // one-time copy notice is prose, not a short field label, so the labeled
+  // regex and DOM label matcher both miss it. Accept one unambiguous visible
+  // token in that context. The masked siblings remain candidates for the
+  // remainder report, but can never enter this full-value path.
+  if (!hasFullHit(state) && /\bcopy\b[^\n]{0,120}\b(?:now|once|again)\b/i.test(text)) {
+    const readable = [
+      ...new Set(
+        labeled
+          .filter((candidate) => !candidate.isMasked && candidate.label === null)
+          .map((candidate) => candidate.value)
+          .filter(looksLikeCredentialValue),
+      ),
+    ];
+    if (readable.length === 1) {
+      state = accumulateCandidate(state, { kind: "full", value: readable[0]! });
+    }
+  }
+
   const copied = !hasFullHit(state) ? await copyCredentialFromDialog(page, browser) : null;
   const acceptedCopy =
     copied !== null &&
