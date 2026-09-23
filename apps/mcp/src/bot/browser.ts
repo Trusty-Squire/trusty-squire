@@ -5066,12 +5066,12 @@ export class BrowserController implements BrowserDriver {
       // verb with a credential noun, excluding destructive verbs (reset/
       // regenerate/delete/revoke/rotate would mint or destroy a key, not
       // reveal the existing one).
+      const DESTRUCTIVE =
+        /\b(?:reset|regenerat\w*|delete|revoke|rotate|create|new|remove|add|download)\b/i;
       if (masked.length === 0) {
         const KEY_NOUN =
           /\b(?:api\s*key|secret|token|credential|personal\s+key|access\s+key|key)\b/i;
         const SAFE_REVEAL = /\b(?:view|show|reveal|display|see)\b/i;
-        const DESTRUCTIVE =
-          /\b(?:reset|regenerat\w*|delete|revoke|rotate|create|new|remove|add|download)\b/i;
         const out: string[] = [];
         const diag: string[] = [];
         document
@@ -5114,6 +5114,7 @@ export class BrowserController implements BrowserDriver {
           .forEach((el) => {
             if (!isVisible(el)) return;
             const hay = `${el.textContent ?? ""} ${el.getAttribute("aria-label") ?? ""} ${el.getAttribute("title") ?? ""} ${el.className ?? ""}`;
+            if (DESTRUCTIVE.test(hay)) return;
             if (SHOW_PATTERN.test(hay)) showBtns.push(el);
             else if (COPY_PATTERN.test(hay)) copyBtns.push(el);
           });

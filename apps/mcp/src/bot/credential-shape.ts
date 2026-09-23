@@ -82,6 +82,10 @@ export function findCredentialTokens(text: string): string[] {
   const seen = new Set<string>();
   for (const m of text.matchAll(CRED_TOKEN_RE)) {
     const t = m[0];
+    // A scanner can match the visible prefix of a masked display and stop
+    // immediately before its ellipsis. That prefix is not a readable key.
+    if (isMaskedDisplay(text.slice((m.index ?? 0) + t.length, (m.index ?? 0) + t.length + 4)))
+      continue;
     if (seen.has(t)) continue;
     if (t.length < 16) continue;
     if (!/[0-9]/.test(t)) continue; // real keys carry digits; dictionary words don't

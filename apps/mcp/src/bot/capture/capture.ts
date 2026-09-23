@@ -64,22 +64,30 @@ const normLabelKey = (label: string): string =>
  * the readable value is what decides completion. A genuinely unread sibling has
  * its own label (or none), so it stays. */
 export function maskedCredentialLabels(
-  candidates: readonly { label: string | null; isMasked: boolean }[],
+  candidates: readonly { label: string | null; isMasked: boolean; value?: string }[],
   readableKeys: readonly string[] = [],
 ): string[] {
   const readable = new Set<string>(readableKeys.map((key) => normLabelKey(key)));
-  for (const candidate of candidates) {
-    if (candidate.isMasked || candidate.label === null) continue;
-    readable.add(normLabelKey(candidate.label));
-  }
   return [
     ...new Set(
       candidates
         .filter((candidate) => candidate.isMasked)
-        .filter(
-          (candidate) =>
-            candidate.label === null || !readable.has(normLabelKey(candidate.label)),
-        )
+        .filter((candidate) => {
+          if (candidate.label === null) return true;
+          const sameLabel = candidates.filter(
+            (other) =>
+              !other.isMasked &&
+              other.label !== null &&
+              normLabelKey(other.label) === normLabelKey(candidate.label!),
+          );
+          if (candidate.value === undefined) {
+            return sameLabel.length === 0 && !readable.has(normLabelKey(candidate.label));
+          }
+          if (sameLabel.length === 0) return true;
+          const prefix = candidate.value?.split(/[•●⬤*…]/, 1)[0]?.replace(/\.+$/, "");
+          if (prefix === undefined || prefix.length === 0) return false;
+          return !sameLabel.some((other) => other.value?.startsWith(prefix));
+        })
         .map((candidate) => candidate.label ?? "masked credential"),
     ),
   ];
@@ -791,7 +799,7 @@ export async function extractCredentials(sessionId: string): Promise<ExtractResu
   // UNREAD key, not success. Name it so a caller never believes every key is
   // vaulted when a sibling is still hidden; a masked value covered by a
   // readable capture under the same label is not remaining (see the helper).
-  const maskedRemaining = maskedCredentialLabels(labeled, Object.keys(credentials));
+  const maskedRemaining = maskedCredentialLabels(labeled, Object.keys(sanitized));
   audit(sessionId, "extract", { found, candidate_count: labeled.length });
   return {
     session_id: sessionId,
@@ -801,4 +809,3 @@ export async function extractCredentials(sessionId: string): Promise<ExtractResu
     ...(maskedRemaining.length > 0 ? { masked_remaining: maskedRemaining } : {}),
   };
 }
-
