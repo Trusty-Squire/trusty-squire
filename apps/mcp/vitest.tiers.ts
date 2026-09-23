@@ -52,6 +52,7 @@ export const REAL_BROWSER_FILES = [
   "src/bot/__tests__/click-actionability-bound.test.ts",
   "src/bot/capture/__tests__/credential-capture-browser.test.ts",
   "src/bot/capture/__tests__/capture-copy-dialog-browser.test.ts",
+  "src/bot/capture/__tests__/capture-copy-presentation-browser.test.ts",
   "src/bot/capture/__tests__/revealed-key-browser.test.ts",
   "src/bot/__tests__/drive-control-digest.test.ts",
   "src/bot/__tests__/drive-create-key-at-creation.test.ts",
