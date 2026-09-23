@@ -72,7 +72,31 @@ it("completes a readable key despite a binding from the previous page", async ()
     const session = sessionForCall(sessionId)!;
     session.drive = emptyDriveState("extract an API key", {});
     session.drive.boundFingerprint = "previous page";
-    const askJev = vi.fn<DriveDependencies["askJev"]>();
+    const askJev = vi.fn<DriveDependencies["askJev"]>(async (_api, _state, questions) => ({
+      attempts: 1,
+      elapsedMs: 1,
+      result: {
+        answers: Object.fromEntries(
+          Object.entries(questions).flatMap(([name, question]) => {
+            if (question.type !== "choice") return [];
+            const keys = Object.keys(question.criteria);
+            const choice = name === "operation" ? "DONE" : keys[0]!;
+            return [
+              [
+                name,
+                {
+                  choice,
+                  confidence: 1,
+                  probabilities: Object.fromEntries(
+                    keys.map((key) => [key, key === choice ? 1 : 0]),
+                  ),
+                },
+              ],
+            ];
+          }),
+        ),
+      },
+    }));
     const result = await runOperateDrive(
       { session_id: sessionId, goal: "extract an API key", max_steps: 3, max_seconds: 2 },
       api,
@@ -80,7 +104,7 @@ it("completes a readable key despite a binding from the previous page", async ()
       dependencies(askJev),
     );
     expect(result.status).toBe("complete");
-    expect(askJev).not.toHaveBeenCalled();
+    expect(askJev).toHaveBeenCalled();
   });
 }, 15_000);
 

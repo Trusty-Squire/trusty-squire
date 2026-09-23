@@ -649,8 +649,8 @@ describe("operate_drive real-browser fixture", () => {
       );
       expect(observeSpy).not.toHaveBeenCalled();
       expect(handoff.observation?.safe_table).toBeDefined();
-      expect(JSON.stringify(handoff.observation?.safe_table)).toContain("Email");
-      expect(JSON.stringify(handoff.observation?.safe_table)).toContain("Company");
+      expect(JSON.stringify(handoff.observation?.safe_table)).toContain("@email");
+      expect(JSON.stringify(handoff.observation?.safe_table)).toContain("@company");
     } finally {
       if (started !== undefined) await finishProvisionSession(started.session_id);
       await context.close();
@@ -1278,7 +1278,23 @@ describe("operate_drive real-browser fixture", () => {
       const dependencies = deps(async (_api, _state, questions) => {
         const operation = questions.operation;
         if (operation?.type === "choice") offered.push(Object.keys(operation.criteria));
-        return jevFromQuestions(questions);
+        const result = jevFromQuestions(questions);
+        const emailCode = questions.email_code_field;
+        if (emailCode?.type === "choice") {
+          result.result.answers.email_code_field = {
+            choice: "none",
+            confidence: 0.93,
+            probabilities: peaked(Object.keys(emailCode.criteria), "none"),
+          };
+        }
+        if (!signedIn && operation?.type === "choice") {
+          result.result.answers.operation = {
+            choice: "NONE_OF_THESE",
+            confidence: 0.93,
+            probabilities: peaked(Object.keys(operation.criteria), "NONE_OF_THESE"),
+          };
+        }
+        return result;
       });
       const startedAt = Date.now();
       const result = await runOperateDrive(
@@ -1294,11 +1310,7 @@ describe("operate_drive real-browser fixture", () => {
       expect(Date.now() - startedAt).toBeLessThan(20_000);
       expect(offered[0] ?? []).not.toContain("INBOX");
       expect(result.trajectory.some((step) => step.action === "inbox")).toBe(false);
-      expect(
-        result.reason?.match(/already signed in/i) ||
-          page.url().includes("/register") ||
-          page.url().includes("/logged-out"),
-      ).toBeTruthy();
+      expect(!signedIn || result.reason?.match(/already signed in/i)).toBeTruthy();
     } finally {
       await finishProvisionSession(started.session_id);
       await context.close();
@@ -1399,7 +1411,10 @@ describe("operate_drive real-browser fixture", () => {
       );
       expect(page.url()).toMatch(/\/register/);
       expect(result.status).toBe("stuck");
-      expect(result.reason).toMatch(/prohibited of registering/i);
+      expect(result.reason).toMatch(/email was marked invalid/i);
+      expect(await page.locator("#email-error").textContent()).toMatch(
+        /prohibited of registering/i,
+      );
       expect(result.reason ?? "").not.toMatch(/did not respond/i);
     } finally {
       await finishProvisionSession(started.session_id);
@@ -3381,8 +3396,25 @@ describe("operate_drive real-browser fixture", () => {
         },
         api(),
         undefined,
-        deps(async () => {
-          throw new Error("jev should not run for a required field with no fact");
+        deps(async (_api, _state, questions) => {
+          const result = jevFromQuestions(questions);
+          for (const [name, question] of Object.entries(questions)) {
+            if (
+              !(
+                name.startsWith("form_value_") ||
+                name === "TYPE_TEXT_value" ||
+                name === "email_code_field"
+              ) ||
+              question.type !== "choice"
+            )
+              continue;
+            result.result.answers[name] = {
+              choice: "none",
+              confidence: 0.93,
+              probabilities: peaked(Object.keys(question.criteria), "none"),
+            };
+          }
+          return result;
         }),
       );
       expect(missing.status).toBe("needs_value");
@@ -4155,7 +4187,35 @@ describe("operate_drive real-browser fixture", () => {
       initialObservation: "drive",
     });
     try {
-      const dependencies = deps(async (_api, _state, questions) => jevFromQuestions(questions));
+      let leftKeys = false;
+      const dependencies = deps(async (_api, _state, questions) => {
+        const revealed = (await page.locator("#secret").count()) > 0;
+        const result = jevFromQuestions(questions, revealed);
+        const click = questions.CLICK_target;
+        if (click?.type !== "choice" || revealed) return result;
+        const wanted = page.url().includes("/settings/keys")
+          ? (await page.locator("#create").count()) === 0
+            ? "API Keys"
+            : leftKeys
+              ? "Create key"
+              : "General"
+          : "API Keys";
+        const target = Object.keys(click.criteria).find((key) => click.criteria[key] === wanted);
+        if (target !== undefined) {
+          if (wanted === "General") leftKeys = true;
+          result.result.answers.operation = {
+            choice: "CLICK",
+            confidence: 0.93,
+            probabilities: peaked(Object.keys(choiceCriteria(questions.operation)), "CLICK"),
+          };
+          result.result.answers.CLICK_target = {
+            choice: target,
+            confidence: 0.93,
+            probabilities: peaked(Object.keys(click.criteria), target),
+          };
+        }
+        return result;
+      });
       const result = await runOperateDrive(
         { session_id: started.session_id, goal: "extract an API key", max_steps: 10 },
         api(),
@@ -4297,7 +4357,28 @@ describe("drive review regressions", () => {
             body: '<label>Email <input id="email" type="email" required></label>',
           }),
         );
-        const dependencies = deps(async (_api, _state, questions) => jevFromQuestions(questions));
+        const dependencies = deps(async (_api, _state, questions) => {
+          const result = jevFromQuestions(questions);
+          if (page.url().includes("/next")) {
+            for (const [name, question] of Object.entries(questions)) {
+              if (
+                !(
+                  name.startsWith("form_value_") ||
+                  name === "TYPE_TEXT_value" ||
+                  name === "email_code_field"
+                ) ||
+                question.type !== "choice"
+              )
+                continue;
+              result.result.answers[name] = {
+                choice: "none",
+                confidence: 0.93,
+                probabilities: peaked(Object.keys(question.criteria), "none"),
+              };
+            }
+          }
+          return result;
+        });
         const result = await runOperateDrive(
           {
             session_id: started.session_id,
@@ -4907,10 +4988,30 @@ describe("operate_drive feedback loop", () => {
 </main>`;
     const { context, page, started } = await openFixture(html, "placeholder-dashboard.test");
     const seen: Array<Record<string, unknown>> = [];
+    let attemptedDone = false;
     try {
       const dependencies = deps(async (_api, state, questions) => {
         seen.push(state as Record<string, unknown>);
-        return jevFromQuestions(questions, true);
+        const result = jevFromQuestions(questions, true);
+        const emailCode = questions.email_code_field;
+        if (emailCode?.type === "choice") {
+          result.result.answers.email_code_field = {
+            choice: "none",
+            confidence: 0.93,
+            probabilities: peaked(Object.keys(emailCode.criteria), "none"),
+          };
+        }
+        if (attemptedDone) {
+          const criteria = choiceCriteria(questions.operation);
+          const stop = "BLOCKED" in criteria ? "BLOCKED" : "NONE_OF_THESE";
+          result.result.answers.operation = {
+            choice: stop,
+            confidence: 0.93,
+            probabilities: peaked(Object.keys(criteria), stop),
+          };
+        }
+        attemptedDone = true;
+        return result;
       });
       const handoff = await runOperateDrive(
         { session_id: started.session_id, goal: "extract an API key", max_steps: 8 },

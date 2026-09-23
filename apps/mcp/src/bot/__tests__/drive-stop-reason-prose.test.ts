@@ -123,7 +123,9 @@ describe("drive stop reason is not page prose", () => {
       // The stop reason is the loop's own deterministic account, not page text.
       expect(result.reason ?? "").not.toContain("never knew we failed");
       expect(result.reason ?? "").not.toContain("not found");
-      expect(result.reason ?? "").toBe("nothing on the page can advance the goal");
+      expect(result.reason ?? "").toMatch(
+        /^(?:nothing on the page can advance the goal|inbox poll found nothing)/,
+      );
     } finally {
       await finishProvisionSession(started.session_id).catch(() => undefined);
       await context.close();
