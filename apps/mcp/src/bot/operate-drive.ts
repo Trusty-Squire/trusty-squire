@@ -252,6 +252,7 @@ export const DRIVE_RULES: readonly string[] = [
   "Pick NONE_OF_THESE instead of a low-confidence click when nothing on this page advances the goal.",
   "Pick GO_BACK when the trail shows this page was reached by mistake.",
   "When the goal confines work to a newly created resource, choose its creation path and do not open a different existing resource.",
+  "When creating a credential, choose the lowest access and no-cost options that satisfy the goal; honor an explicit production requirement.",
 ];
 // Drive rules above adapt browser-use/jev-ultrafast (MIT) NEXT_ACTION / TARGET prose.
 
@@ -1703,8 +1704,11 @@ export function driveKeyGoalComplete(
   evidence: DriveKeyEvidence,
   modelGoalComplete?: number,
 ): boolean {
-  if (modelGoalComplete !== undefined && modelGoalComplete < DRIVE_CONFIDENCE_THRESHOLD) return false;
-  if (evidence.maskedRemaining.length > 0) return false;
+  if (modelGoalComplete !== undefined && modelGoalComplete < DRIVE_CONFIDENCE_THRESHOLD)
+    return false;
+  // Existing keys may stay masked on a list after a newly created key is
+  // shown once. A full captured secret satisfies this goal independently of
+  // those unread older entries.
   return Object.entries(evidence.credentials).some(
     ([field, value]) =>
       looksLikeCredentialValue(value) ||
@@ -1765,6 +1769,10 @@ export function isKeyCreateRow(row: WireRow): boolean {
     label,
   );
   return (create && thing) || (isCreateEntryRow(row) && thing);
+}
+
+function isKeyCreateOpener(row: WireRow, goal: string): boolean {
+  return isKeyGoal(goal) && isKeyCreateRow(row) && rowFormId(row) === undefined;
 }
 
 /** Map the act layer's own refusal reason to the trail's short vocabulary:
@@ -7165,7 +7173,13 @@ async function driveLoop(input: {
       }
       if (decision.action.kind === "click") {
         const clicked = findRow(rows, decision.actionKey, observation.url);
-        if (clicked !== undefined && isSubmitLikeRow(clicked)) {
+        // A key-list creation control can open a form. Its new fields are
+        // progress to fill, not a failed response to a submitted form.
+        if (
+          clicked !== undefined &&
+          isSubmitLikeRow(clicked) &&
+          !isKeyCreateOpener(clicked, drive.goal)
+        ) {
           captchaAfterSubmit = true;
           drive.submitBeforeText = textBeforeClick;
           drive.submitExcludeLabels = excludeBeforeClick;
@@ -7217,7 +7231,10 @@ async function driveLoop(input: {
           return finish("stuck", { reason: fresh });
         }
       }
-      if (shouldInspectSubmitResponse(decision.action, clickedBefore)) {
+      if (
+        shouldInspectSubmitResponse(decision.action, clickedBefore) &&
+        !isKeyCreateOpener(clickedBefore, drive.goal)
+      ) {
         const navigated = pagePathKey(observation.url) !== pagePathKey(urlBeforeClick);
         const fieldError = invalidFieldReason(rows, observationNoticeTexts(observation));
         if (fieldError !== undefined) {
@@ -7318,7 +7335,9 @@ async function driveLoop(input: {
           binding: decisionTargetBinding(clicked, urlBeforeClick),
           url: urlBeforeClick,
         };
-        if (isSubmitLikeRow(clicked)) drive.submittedThisDrive = true;
+        if (isSubmitLikeRow(clicked) && !isKeyCreateOpener(clicked, drive.goal)) {
+          drive.submittedThisDrive = true;
+        }
       }
     }
     drive.trajectory.push({
@@ -7654,6 +7673,37 @@ async function driveLoop(input: {
           if (applied !== "continue") return applied;
           if (automaticDecisionRefused) break automaticDecisions;
           spendStep("key_complete");
+          continue;
+        }
+        // Capture has already tried safe reveal controls. If no full value is
+        // readable on a key list, enter the creation path before accepting a
+        // model DONE. Once a form is open, its fields and options stay with
+        // the model's value-to-field and choice judgments.
+        const create = keyGoalSecretAdvance(
+          rows,
+          rows.filter(isRevealOrCopyRow).map((row) => row[0]),
+          {
+            pageUrl,
+            triedStableKeys: drive.triedHere ?? [],
+          },
+        );
+        if (
+          create !== undefined &&
+          isKeyCreateOpener(create, drive.goal) &&
+          outstandingEmptyFill(rows, drive.filledRefs) === undefined &&
+          !rows.some((row) => isSelectRow(row) || row[1] === "c" || row[1] === "checkbox")
+        ) {
+          drive.boundFingerprint = driveProgressFingerprint(observation, rows, drive, session);
+          drive.consumedActionKey = null;
+          const applied = await applyDecision({
+            kind: "act",
+            action: { kind: "click", target: create[0] },
+            actionKey: create[0],
+            confidence: 1,
+          });
+          if (applied !== "continue") return applied;
+          if (automaticDecisionRefused) break automaticDecisions;
+          spendStep("key_create");
           continue;
         }
       }
