@@ -87,12 +87,7 @@ import {
   waitForInPageChange,
   waitForNavigationIdle,
 } from "./drive-act.js";
-import {
-  canonicalIndexForDriveRef,
-  rememberDriveIdentities,
-  resolveIdentityScope,
-} from "./act/identity.js";
-import { provisionElementRefs } from "./observe/refs.js";
+import { rememberDriveIdentities, resolveIdentityScope } from "./act/identity.js";
 import {
   approvalItemWithNote,
   readPageCheckoutTexts,
@@ -5028,80 +5023,6 @@ export function paymentArgs(
   };
 }
 
-const DRIVE_REF_RE = /^@e:f\d+d\d+$/;
-
-/** Translate drive snapshot refs into canonical provision refs.
- *
- * The two extractors name the same control differently — the canonical one
- * prefers the `name` attribute where the drive reads an accessible name — so
- * the bridge between them is the NODE, not a recomputed label: re-extract live
- * interactive elements and ask the page which canonical selector resolves to
- * the node the drive ref registered. Refs that fail to translate are omitted
- * so the primitive reports not_found honestly.
- */
-async function canonicalDriveRefs(
-  session: Session,
-  refs: readonly (string | undefined)[],
-): Promise<Map<string, string>> {
-  const driveRefs = [
-    ...new Set(refs.filter((ref): ref is string => ref !== undefined && DRIVE_REF_RE.test(ref))),
-  ];
-  const translated = new Map<string, string>();
-  if (driveRefs.length === 0) return translated;
-  const page = session.browser.page;
-  if (page === null) return translated;
-  if (typeof session.browser.extractInteractiveElements !== "function") return translated;
-  let fresh: Awaited<ReturnType<BrowserController["extractInteractiveElements"]>>;
-  try {
-    fresh = await session.browser.extractInteractiveElements(page);
-  } catch {
-    return translated;
-  }
-  if (!Array.isArray(fresh) || fresh.length === 0) return translated;
-  const canonical = provisionElementRefs(fresh);
-  for (const ref of driveRefs) {
-    try {
-      const identity = session.drive?.identities?.get(ref);
-      if (identity === undefined) continue;
-      const scope = await resolveIdentityScope(page, ref, identity);
-      if (scope === null) continue;
-      const frameUrl = scope.url();
-      const frameOrigin = frameOriginOf(scope);
-      // Frame OBJECT identity, not just url+origin: two live instances of the
-      // same hosted-field iframe share both, and a candidate from the wrong one
-      // would mint a canonical ref that aims the PAN at the other frame.
-      const candidates = fresh.flatMap((element, index) => {
-        let candidateFrame: Frame = page.mainFrame();
-        if (element.framePath != null) {
-          for (const part of element.framePath.split("/")) {
-            if (!/^\d+$/.test(part)) return [];
-            const child = candidateFrame.childFrames()[Number(part)];
-            if (child === undefined) return [];
-            candidateFrame = child;
-          }
-        }
-        const sameFrame =
-          candidateFrame === scope &&
-          (element.frameUrl == null
-            ? scope === page.mainFrame()
-            : element.frameUrl === frameUrl && element.frameOrigin === frameOrigin);
-        return sameFrame ? [{ index, selector: element.selector }] : [];
-      });
-      if (candidates.length === 0) continue;
-      const index = await evaluateBound(scope, canonicalIndexForDriveRef, { ref, candidates });
-      const match = index >= 0 ? fresh[index] : undefined;
-      const canonicalRef = match === undefined ? undefined : canonical.get(match);
-      if (canonicalRef !== undefined) {
-        if (session.compactV2Active) session.compactV2Refs.set(canonicalRef, canonicalRef);
-        translated.set(ref, canonicalRef);
-      }
-    } catch (error) {
-      if (error instanceof DriveEvaluateTimeout) throw error;
-    }
-  }
-  return translated;
-}
-
 function cardInjected(result: Record<string, unknown>): boolean {
   return result.status === "card_injected" || result.status === "card_released";
 }
@@ -5417,15 +5338,6 @@ async function actDriveSafely(
   return await dispatchDriveAct(sessionId, action);
 }
 
-async function resolveOauthActTarget(sessionId: string, target: string): Promise<string> {
-  const session = sessionForCall(sessionId);
-  if (session === undefined) return target;
-  const translated = await canonicalDriveRefs(session, [target]);
-  const canonical = translated.get(target);
-  if (canonical !== undefined) return canonical;
-  return session.drive?.identities?.get(target)?.label ?? target;
-}
-
 /** The loop's own, page-independent account of a refused/undispatched act. */
 function dispatchFailureReason(error: unknown): string {
   return error instanceof TargetStaleError
@@ -5454,12 +5366,21 @@ async function actSafely(
   sessionId: string,
   action: ProvisionAction,
 ): Promise<SafeDriveActResult> {
-  const resolved =
-    action.kind === "oauth_login"
-      ? { ...action, target: await resolveOauthActTarget(sessionId, action.target) }
+  const session = sessionForCall(sessionId);
+  // The drive's own dispatcher uses private registry keys. A fallback into the
+  // public action surface must use the shared observed handle for every verb.
+  const publicAction: ProvisionAction =
+    "target" in action
+      ? {
+          ...action,
+          target:
+            (session === undefined
+              ? undefined
+              : driveRefBridge(session).publicRef(action.target)) ?? action.target,
+        }
       : action;
   try {
-    return { observation: await deps.act(sessionId, resolved, "compact", "compact", true) };
+    return { observation: await deps.act(sessionId, publicAction, "compact", "compact", true) };
   } catch (error) {
     if (error instanceof TargetStaleError) {
       return {
@@ -5467,12 +5388,16 @@ async function actSafely(
         dispatchFailure: dispatchFailureReason(error),
       };
     }
-    if (resolved.kind === "select" && "text" in resolved && typeof resolved.text === "string") {
+    if (
+      publicAction.kind === "select" &&
+      "text" in publicAction &&
+      typeof publicAction.text === "string"
+    ) {
       try {
         return {
           observation: await deps.act(
             sessionId,
-            { kind: "type", target: resolved.target, text: resolved.text },
+            { kind: "type", target: publicAction.target, text: publicAction.text },
             "compact",
             "compact",
             true,
@@ -6470,40 +6395,11 @@ async function driveLoop(input: {
         drive.facts,
         drive.goal,
         observation?.url ?? "",
-        rows,
+        driveRefBridge(session).publicRows(rows),
         pageTexts,
       );
       if (card === undefined) {
         return finish("needs_value", { field: "card_ref" });
-      }
-      // R3: drive refs are registry-scoped, not canonical — translate through
-      // the canonical extraction before the inject_card primitive so the fill
-      // can actually resolve. Untranslatable refs keep their drive form and
-      // are reported not_found by the resolver rather than silently skipped.
-      const preTranslate = card.fields;
-      let translations: Map<string, string>;
-      try {
-        translations = await canonicalDriveRefs(session, [
-          preTranslate.pan?.ref,
-          preTranslate.cvv?.ref,
-        ]);
-      } catch (error) {
-        if (error instanceof DriveEvaluateTimeout) {
-          return finish("evaluate_timeout", { reason: "in-page evaluate exceeded budget" });
-        }
-        throw error;
-      }
-      if (translations.size > 0) {
-        const pan = preTranslate.pan;
-        const cvv = preTranslate.cvv;
-        card.fields = {
-          ...(pan === undefined
-            ? {}
-            : { pan: { ...pan, ref: translations.get(pan.ref) ?? pan.ref } }),
-          ...(cvv === undefined
-            ? {}
-            : { cvv: { ...cvv, ref: translations.get(cvv.ref) ?? cvv.ref } }),
-        };
       }
       const payment = await dependencies.injectCard(session, card, api, {
         ...(context?.signal === undefined ? {} : { signal: context.signal }),

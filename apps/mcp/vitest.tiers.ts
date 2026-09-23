@@ -57,6 +57,7 @@ export const REAL_BROWSER_FILES = [
   "src/bot/capture/__tests__/revealed-key-browser.test.ts",
   "src/bot/__tests__/drive-control-digest.test.ts",
   "src/bot/__tests__/drive-public-handback.test.ts",
+  "src/bot/__tests__/ref-reconcile-benchmark.test.ts",
   "src/bot/__tests__/drive-create-key-at-creation.test.ts",
   "src/bot/__tests__/drive-key-complete-refusal.test.ts",
   "src/bot/__tests__/drive-multi-credential.test.ts",

@@ -283,3 +283,45 @@ export function canonicalIndexForDriveRef(arg: {
   }
   return -1;
 }
+
+/** Compare a whole frame's canonical inventory with its registered drive nodes once. */
+export function canonicalMatchesForDriveRefs(arg: {
+  refs: Array<{ ref: string; documentTimeOrigin: string }>;
+  candidates: Array<{ index: number; selector: string }>;
+}): Array<{ ref: string; index: number }> {
+  type DriveCache = {
+    nodes: Map<string, Element>;
+    resolveSelector?: (selector: string) => Element[];
+  };
+  const registry = (window as Window & { __tsDriveRegistry?: DriveCache }).__tsDriveRegistry;
+  if (registry === undefined) return [];
+  const candidatesByNode = new Map<Element, number[]>();
+  for (const candidate of arg.candidates) {
+    try {
+      const node =
+        registry.resolveSelector === undefined
+          ? document.querySelector(candidate.selector)
+          : registry.resolveSelector(candidate.selector)[0];
+      if (node !== null && node !== undefined) {
+        const indexes = candidatesByNode.get(node) ?? [];
+        indexes.push(candidate.index);
+        candidatesByNode.set(node, indexes);
+      }
+    } catch {
+      // An invalid canonical selector is never identity evidence.
+    }
+  }
+  const matches: Array<{ ref: string; index: number }> = [];
+  const owners = new Map<number, number>();
+  for (const { ref, documentTimeOrigin } of arg.refs) {
+    if (String(performance.timeOrigin) !== documentTimeOrigin) continue;
+    const node = registry.nodes.get(ref);
+    if (node === undefined || !node.isConnected) continue;
+    const indexes = candidatesByNode.get(node);
+    if (indexes?.length !== 1) continue;
+    const index = indexes[0]!;
+    owners.set(index, (owners.get(index) ?? 0) + 1);
+    matches.push({ ref, index });
+  }
+  return matches.filter(({ index }) => owners.get(index) === 1);
+}

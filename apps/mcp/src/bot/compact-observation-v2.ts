@@ -325,6 +325,7 @@ export class StableObservationRefs {
   actions(
     document: string,
     elements: readonly InteractiveElement[],
+    exactDriveMatches: ReadonlyMap<string, string> = new Map(),
   ): Map<InteractiveElement, string> {
     this.reset(document);
     const present = new Set(elements.map((el) => el.observationIdentity));
@@ -391,8 +392,10 @@ export class StableObservationRefs {
       }
       let anchor = this.anchors.get(identity);
       const key = keys.get(el);
+      const driveRef = exactDriveMatches.get(identity);
       if (
         anchor === undefined ||
+        (driveRef !== undefined && anchor.ref !== driveRef) ||
         anchor.intent !== el.observationIntent ||
         anchor.ownership !== el.observationOwnership
       ) {
@@ -407,7 +410,10 @@ export class StableObservationRefs {
         anchor = {
           intent: el.observationIntent,
           ownership: el.observationOwnership,
-          ref: recovered ?? this.get(document, `action:${randomBytes(32).toString("base64url")}`),
+          ref:
+            driveRef ??
+            recovered ??
+            this.get(document, `action:${randomBytes(32).toString("base64url")}`),
           adoptionKey: key,
           semanticKey: semanticKeys.get(el),
         };
