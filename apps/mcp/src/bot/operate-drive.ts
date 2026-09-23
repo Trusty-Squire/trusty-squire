@@ -1274,7 +1274,6 @@ const PAYMENT_SUBMIT_LABEL =
 
 const DRIVE_ONBOARDING_GATE_QUESTION = "onboarding_gate";
 const DRIVE_ONBOARDING_CHOICE_QUESTION = "onboarding_choice";
-const DRIVE_ONBOARDING_SAFE_PREFIX = "onboarding_safe_";
 
 /** A row that can carry a checkout's submit control.
  *
@@ -3153,10 +3152,6 @@ function onboardingChoiceCandidates(rows: readonly WireRow[], pageUrl: string): 
     .slice(0, 8);
 }
 
-function onboardingSafeQuestionName(candidate: DriveCandidate): string {
-  return `${DRIVE_ONBOARDING_SAFE_PREFIX}${candidate.slug}`;
-}
-
 export function fillableCandidates(
   rows: readonly WireRow[],
   facts: Record<string, string>,
@@ -4182,12 +4177,6 @@ export function buildDriveQuestions(
         [DRIVE_FIXED_NONE]: "No listed option clearly grants access without that commitment",
       },
     };
-    for (const candidate of onboardingChoices) {
-      questions[onboardingSafeQuestionName(candidate)] = {
-        type: "noul",
-        instructions: `Choosing ${readableLabel(candidate.row)} grants usable product access without payment, a paid plan, card details, a time-limited trial, or sales contact.`,
-      };
-    }
   }
   const codeCandidates = emailCodeCandidates(rows, filledRefs);
   if (codeCandidates.length > 0) {
@@ -4624,25 +4613,16 @@ export function decideAfterJev(input: {
       );
       if (
         candidate !== undefined &&
-        confidenceOf(input.answers[onboardingSafeQuestionName(candidate)]) >= threshold &&
         !(input.boundFingerprint === input.fingerprint && input.consumedActionKey === candidate.ref)
       ) {
         return {
           kind: "act",
           action: { kind: "click", target: candidate.ref },
           actionKey: candidate.ref,
-          confidence: Math.min(
-            confidenceOf(choice),
-            confidenceOf(input.answers[onboardingSafeQuestionName(candidate)]),
-          ),
+          confidence: confidenceOf(choice),
         };
       }
     }
-    return {
-      kind: "none_of_these",
-      confidence: confidenceOf(input.answers[DRIVE_ONBOARDING_GATE_QUESTION]),
-      reason: "no safe onboarding choice was identified",
-    };
   }
   const operationQuestion = questions.operation;
   const operationCriteriaMap =
@@ -4680,7 +4660,9 @@ export function decideAfterJev(input: {
       !isPaymentRow(candidate.row) &&
       !PAYMENT_SUBMIT_LABEL.test(readableLabel(candidate.row).toLowerCase()) &&
       !(input.lastActionKey === candidate.ref && input.lastFingerprint === input.fingerprint) &&
-      !(input.boundFingerprint === input.fingerprint && input.consumedActionKey === candidate.ref) &&
+      !(
+        input.boundFingerprint === input.fingerprint && input.consumedActionKey === candidate.ref
+      ) &&
       (layer === undefined || isLayerCandidateRow(candidate.row, input.rows, layer)),
   );
   const dismissCriteria = criteriaFromCandidates(dismissCandidates, "CLICK");
