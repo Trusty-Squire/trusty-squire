@@ -4570,10 +4570,20 @@ export class BrowserController implements BrowserDriver {
     await page.bringToFront().catch(() => undefined);
     await page.evaluate(() => window.focus()).catch(() => undefined);
     return await page.evaluate(async () => {
+      let timeout: number | undefined;
       try {
-        return await navigator.clipboard.readText();
+        return await Promise.race([
+          navigator.clipboard.readText(),
+          new Promise<string>((resolve) => {
+            // A headed Chrome permission prompt can leave readText pending
+            // indefinitely even though the page remains responsive.
+            timeout = window.setTimeout(() => resolve(""), 1_000);
+          }),
+        ]);
       } catch {
         return "";
+      } finally {
+        if (timeout !== undefined) window.clearTimeout(timeout);
       }
     });
   }
