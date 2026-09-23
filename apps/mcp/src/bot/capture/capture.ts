@@ -777,7 +777,7 @@ async function copyCredentialFromDialog(
             ].join(" "),
           )
           .join(" ");
-        if (/\bcopy\b|clipboard/i.test(cues)) return { dialogIndex, buttonIndex };
+        if (/copy|clipboard/i.test(cues)) return { dialogIndex, buttonIndex };
       }
     }
     return null;
@@ -790,6 +790,68 @@ async function copyCredentialFromDialog(
           .nth(target.dialogIndex)
           .locator('button, [role="button"]')
           .nth(target.buttonIndex);
+  if (copyButton === null) {
+    // A visually modal layer need not declare a dialog role. Start at the
+    // viewport's topmost hit and walk its positioned ancestors: this limits
+    // the search to the covering layer instead of any key settings behind it.
+    // Snapshot occlusion alone can be empty when no background control is rowed.
+    const buttonIndex = await page.evaluate(() => {
+      const buttons = Array.from(document.querySelectorAll('button, [role="button"]'));
+      let layer = document.elementFromPoint(innerWidth / 2, innerHeight / 2);
+      while (layer !== null) {
+        const style = getComputedStyle(layer);
+        const rect = layer.getBoundingClientRect();
+        if (
+          (style.position === "fixed" || style.position === "absolute") &&
+          rect.left <= innerWidth / 2 &&
+          rect.right >= innerWidth / 2 &&
+          rect.top <= innerHeight / 2 &&
+          rect.bottom >= innerHeight / 2 &&
+          /\b(?:api\s*key|secret|token|credential|key)\b/i.test(layer.textContent ?? "")
+        ) {
+          for (const button of buttons) {
+            if (!layer.contains(button)) continue;
+            const buttonRect = button.getBoundingClientRect();
+            const buttonStyle = getComputedStyle(button);
+            if (
+              buttonRect.width <= 2 ||
+              buttonRect.height <= 2 ||
+              buttonStyle.display === "none" ||
+              buttonStyle.visibility === "hidden" ||
+              Number(buttonStyle.opacity) <= 0.01 ||
+              (button instanceof HTMLButtonElement && button.disabled)
+            )
+              continue;
+            const hit = document.elementFromPoint(
+              buttonRect.left + buttonRect.width / 2,
+              buttonRect.top + buttonRect.height / 2,
+            );
+            if (hit === null || !button.contains(hit)) continue;
+            const icon = button.querySelector("svg");
+            const cues = [button, icon]
+              .filter((element): element is Element => element !== null)
+              .map((element) =>
+                [
+                  element.textContent,
+                  element.getAttribute("aria-label"),
+                  element.getAttribute("title"),
+                  element.id,
+                  element.getAttribute("class"),
+                  element.getAttribute("data-testid"),
+                  element.getAttribute("data-icon"),
+                ].join(" "),
+              )
+              .join(" ");
+            if (/copy|clipboard/i.test(cues)) return buttons.indexOf(button);
+          }
+        }
+        layer = layer.parentElement;
+      }
+      return null;
+    });
+    if (buttonIndex !== null)
+      copyButton = page.locator('button, [role="button"]').nth(buttonIndex);
+  }
   if (copyButton === null) {
     // The drive snapshot already hit-tests controls against covering layers.
     // Use that same evidence for a visually modal surface with no dialog role.
@@ -835,7 +897,7 @@ async function copyCredentialFromDialog(
               ].join(" "),
             )
             .join(" ");
-          if (/\bcopy\b|clipboard/i.test(cues)) return candidate.selector;
+          if (/copy|clipboard/i.test(cues)) return candidate.selector;
         }
         return null;
       },
