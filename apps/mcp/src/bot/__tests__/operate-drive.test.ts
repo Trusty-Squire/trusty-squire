@@ -144,6 +144,7 @@ import {
   revealedSecretMarkerRow,
   attachRevealedSecretMarker,
   redactSecretShapedTokens,
+  redactSecretShapedValue,
   looksLikeMaskedSecretDisplay,
   rowShowsSecretEvidence,
   pageOcclusionLayer,
@@ -169,6 +170,7 @@ import {
   resetDriveGoalMemory,
   emptyDriveState,
 } from "../operate-drive.js";
+import { findCredentialTokens } from "../credential-shape.js";
 import { operateDriveTool } from "../../tools/provision-drive.js";
 import type { JevAnswer } from "../jev-client.js";
 import { captchaInjectSettled } from "../captcha-solve.js";
@@ -200,6 +202,26 @@ function valid(choice: string, criteria: Record<string, string>, confidence = 0.
     probabilities: peakedProbabilities(Object.keys(criteria), choice, Math.min(confidence, 0.91)),
   };
 }
+
+describe("drive output redaction", () => {
+  it("keeps a credential-shaped session id intact in fields and prose", () => {
+    const sessionId = "545c8a6a-ab12-4abc-8def-123456789abc";
+    expect(findCredentialTokens(sessionId).length).toBeGreaterThan(0);
+
+    const output = redactSecretShapedValue(
+      {
+        session_id: sessionId,
+        reason: `Resume session ${sessionId} after handback; key sk_live_fixturekey01`,
+        observation: { session_id: sessionId },
+      },
+      sessionId,
+    );
+
+    expect(output.session_id).toBe(sessionId);
+    expect(output.reason).toBe(`Resume session ${sessionId} after handback; key @key-value`);
+    expect(output.observation.session_id).toBe(sessionId);
+  });
+});
 
 describe("operate_drive constants", () => {
   it("keeps the coverage-matrix gate and two-head budgets as code constants", () => {

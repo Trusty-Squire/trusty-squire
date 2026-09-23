@@ -644,20 +644,28 @@ const COMPACT_V2_HANDLE_IN_TEXT = new RegExp(
   "g",
 );
 
-function redactSecretShapedValue<T>(value: T): T {
+export function redactSecretShapedValue<T>(value: T, sessionId: string): T {
   // Opaque capabilities can look like credential tokens by chance. The card
-  // mask has already run; keep handles byte-identical to the index, including
-  // refs mentioned inside row facts or handback prose.
-  if (typeof value === "string")
-    return value
-      .split(COMPACT_V2_HANDLE_IN_TEXT)
-      .map((part) => (isCompactV2Handle(part) ? part : redactSecretShapedTokens(part).text))
-      .join("") as T;
-  if (Array.isArray(value)) return value.map((entry) => redactSecretShapedValue(entry)) as T;
+  // mask has already run; keep handles and this session's id byte-identical,
+  // including mentions inside row facts or handback prose.
+  if (typeof value === "string") {
+    const redactOtherTokens = (text: string): string =>
+      text
+        .split(COMPACT_V2_HANDLE_IN_TEXT)
+        .map((part) => (isCompactV2Handle(part) ? part : redactSecretShapedTokens(part).text))
+        .join("");
+    return (
+      sessionId.length === 0
+        ? redactOtherTokens(value)
+        : value.split(sessionId).map(redactOtherTokens).join(sessionId)
+    ) as T;
+  }
+  if (Array.isArray(value))
+    return value.map((entry) => redactSecretShapedValue(entry, sessionId)) as T;
   if (value !== null && typeof value === "object") {
     const next: Record<string, unknown> = {};
     for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
-      next[key] = redactSecretShapedValue(entry);
+      next[key] = redactSecretShapedValue(entry, sessionId);
     }
     return next as T;
   }
@@ -669,7 +677,7 @@ function maskDriveOutput<T>(session: Session, value: T): T {
     typeof session.browser.maskOperatorOutput === "function"
       ? session.browser.maskOperatorOutput(value)
       : value;
-  return redactSecretShapedValue(cardMasked);
+  return redactSecretShapedValue(cardMasked, session.id);
 }
 
 function appendDriveTrace(session: Session, entry: Record<string, unknown>): void {
