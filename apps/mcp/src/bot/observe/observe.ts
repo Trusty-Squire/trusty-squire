@@ -708,6 +708,11 @@ async function compactV2Observation(
         .filter(([element, ref]) => element.observationIdentity && targetableRefs.has(ref))
         .map(([element, ref]) => [ref, element.observationIdentity!] as const),
     ),
+    frameUrlByRef: new Map(
+      [...handles]
+        .filter(([element, ref]) => element.frameUrl && targetableRefs.has(ref))
+        .map(([element, ref]) => [ref, element.frameUrl!] as const),
+    ),
     expiresAt: Date.now() + 5 * 60_000,
   };
   const canCompactActionDelta =

@@ -505,7 +505,8 @@ export async function injectCardIntoSessionTargets(
       authorization?.anchor.kind === "canonical"
         ? (await session.browser.extractBrowserUseObservation(page)).elements
         : await session.browser.extractInteractiveElements(page);
-    let element = resolveTarget(fresh, legacy);
+    const legacyMatch = resolveTarget(fresh, legacy);
+    let element = legacyMatch;
     if (authorization !== undefined) {
       try {
         element = resolveAuthorizedCompactV2Target(session, fresh, authorization);
@@ -514,10 +515,41 @@ export async function injectCardIntoSessionTargets(
         element = null;
       }
       if (authorization.anchor.kind === "canonical") {
-        // Card fields require the observed physical node, even when ordinary
-        // actions may adopt a uniquely matching same-document replacement.
-        if (canonicalIdentity === undefined || element?.observationIdentity !== canonicalIdentity)
-          element = null;
+        // A node replacement in the same frame is stale. A hosted provider can
+        // instead replace the entire frame while this call is writing a sibling.
+        // In that case the old stable ref can identify the new field only when
+        // its URL belonged to one observed frame and still belongs to one live
+        // frame. Equal-looking controls in same-URL frames remain distinct.
+        if (canonicalIdentity === undefined || element?.observationIdentity !== canonicalIdentity) {
+          const index = session.compactV2Index;
+          const url = index?.frameUrlByRef?.get(authorization.row.ref);
+          const frameId = (identity: string | undefined): string | undefined =>
+            identity?.split(":", 1)[0];
+          const oldFrame = frameId(canonicalIdentity);
+          const newFrame = frameId(legacyMatch?.observationIdentity);
+          const observedFrames = new Set(
+            [...(index?.frameUrlByRef ?? [])]
+              .filter(([, frameUrl]) => frameUrl === url)
+              .map(([ref]) => frameId(index?.physicalByRef?.get(ref)))
+              .filter((id): id is string => id !== undefined),
+          );
+          const liveFrames = new Set(
+            fresh
+              .filter((candidate) => candidate.frameUrl === url)
+              .map((candidate) => frameId(candidate.observationIdentity))
+              .filter((id): id is string => id !== undefined),
+          );
+          element =
+            url !== undefined &&
+            oldFrame !== undefined &&
+            newFrame !== undefined &&
+            oldFrame !== newFrame &&
+            legacyMatch?.frameUrl === url &&
+            observedFrames.size === 1 &&
+            liveFrames.size === 1
+              ? legacyMatch
+              : null;
+        }
       }
     }
     return element === null
