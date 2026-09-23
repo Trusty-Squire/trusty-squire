@@ -1,6 +1,8 @@
 import type { ScreenshotBinding, ScreenshotPoint } from "./screenshot-click.js";
 import type { GoogleHumanChallenge } from "./google-auth-state.js";
 import type { BrowserUseCapture } from "./browser-use-capture.js";
+import { evaluateBound } from "./drive-evaluate.js";
+import { canonicalIndexForDriveRef, resolveIdentityScope } from "./act/identity.js";
 // Phase 1 — the session-holding "thick tools" surface a frontier host agent
 // drives. MCP tool calls are stateless, but a provision run needs ONE live
 // browser held across many calls; this module is that registry + the
@@ -490,10 +492,36 @@ export async function observeSubtree(
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
   const page = operationPageForSession(session);
+  const authorization = session.compactV2Active
+    ? compactV2AuthorizationForTarget(session, target)
+    : undefined;
   const capture = await session.browser.extractBrowserUseObservation(page);
-  const legacy = session.compactV2Active ? session.compactV2Refs.get(target) : target;
-  if (legacy === undefined) throw new Error("stale_ref");
-  const element = resolveTarget(capture.elements, legacy);
+  let element;
+  if (authorization?.anchor.kind === "drive") {
+    const anchor = authorization.anchor;
+    if (page === undefined) throw new Error("stale_ref");
+    const scope = await resolveIdentityScope(page, anchor.privateRef, anchor.identity, anchor);
+    if (scope === null) throw new Error("stale_ref");
+    const candidates = capture.elements.flatMap((candidate, index) => {
+      let frame = page.mainFrame();
+      if (candidate.framePath != null) {
+        for (const part of candidate.framePath.split("/")) {
+          if (!/^\d+$/.test(part)) return [];
+          const child = frame.childFrames()[Number(part)];
+          if (child === undefined) return [];
+          frame = child;
+        }
+      }
+      return frame === scope ? [{ index, selector: candidate.selector }] : [];
+    });
+    const index = await evaluateBound(scope, canonicalIndexForDriveRef, {
+      ref: anchor.privateRef,
+      candidates,
+    });
+    element = index < 0 ? null : (capture.elements[index] ?? null);
+  } else {
+    element = resolveTarget(capture.elements, authorization?.legacyRef ?? target);
+  }
   if (element === null) throw new Error("stale_ref");
   const entry = [...capture.nodeElements].find(
     ([, candidate]) => candidate.observationIdentity === element.observationIdentity,

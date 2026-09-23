@@ -96,4 +96,29 @@ describe("drive ref allocator bridge", () => {
       ]),
     ).toEqual([[ref, "t"]]);
   });
+
+  it("keeps a row visible when it lacks the selector needed for public admission", () => {
+    const bridge = new DriveRefBridge(new StableObservationRefs());
+    const owner = frame();
+    bridge.reserve(DOC, [
+      { frame: owner, snapshot: snapshot("100|https://example.test/", 0, [1]) },
+    ]);
+    expect(bridge.publicRows([["@e:f0d1", "t", "Field"]])).toHaveLength(1);
+    expect(
+      bridge.anchors(
+        new Map([
+          [
+            "@e:f0d1",
+            {
+              selector: "",
+              frameUrl: "https://example.test/",
+              frameOrigin: "https://example.test",
+              role: "textbox",
+              label: "Field",
+            },
+          ],
+        ]),
+      ).size,
+    ).toBe(0);
+  });
 });

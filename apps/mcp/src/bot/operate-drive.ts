@@ -41,9 +41,19 @@ import { sessionForCall } from "./session/lifecycle.js";
 import {
   compactV2EpochDoc,
   compactV2RefAllocator,
+  invalidateCompactV2Snapshot,
   observedThreeDsChallenge,
+  rememberCompactV2SourcePage,
 } from "./observe/observe.js";
-import { safeStageV2 } from "./compact-observation-v2.js";
+import {
+  COMPACT_V2_HANDLE_LENGTH,
+  controlLabelV2,
+  isCompactV2Handle,
+  safePageSemanticsV2,
+  safeStageV2,
+  wireRoleToSafeRoleV2,
+  type SafeControlV2,
+} from "./compact-observation-v2.js";
 import {
   lastSelectOptions,
   type DriveActProfile,
@@ -634,8 +644,20 @@ function driveTraceEnabled(): boolean {
   return path !== undefined && path.length > 0;
 }
 
+const COMPACT_V2_HANDLE_IN_TEXT = new RegExp(
+  `(@e:[A-Za-z0-9_-]{${COMPACT_V2_HANDLE_LENGTH}})(?![A-Za-z0-9_-])`,
+  "g",
+);
+
 function redactSecretShapedValue<T>(value: T): T {
-  if (typeof value === "string") return redactSecretShapedTokens(value).text as T;
+  // Opaque capabilities can look like credential tokens by chance. The card
+  // mask has already run; keep handles byte-identical to the index, including
+  // refs mentioned inside row facts or handback prose.
+  if (typeof value === "string")
+    return value
+      .split(COMPACT_V2_HANDLE_IN_TEXT)
+      .map((part) => (isCompactV2Handle(part) ? part : redactSecretShapedTokens(part).text))
+      .join("") as T;
   if (Array.isArray(value)) return value.map((entry) => redactSecretShapedValue(entry)) as T;
   if (value !== null && typeof value === "object") {
     const next: Record<string, unknown> = {};
@@ -4862,6 +4884,64 @@ function handoffObservation(
   };
 }
 
+/** Register only rows whose in-page node, selector and frame document can be checked at act time. */
+function installDriveActionIndex(
+  session: Session,
+  page: Page,
+  snapshot: DriveSnapshot,
+  observation: Observation,
+  rows: readonly WireRow[],
+  bridge: DriveRefBridge,
+): void {
+  const anchors = bridge.anchors(session.drive?.identities ?? new Map());
+  const allocator = compactV2RefAllocator(session);
+  const indexed: SafeControlV2[] = [];
+  for (const row of rows) {
+    const ref = bridge.publicRef(row[0]);
+    if (ref === undefined) continue;
+    const anchor = anchors.get(ref);
+    if (anchor === undefined) continue;
+    const rawLabel = rowLabel(row);
+    const preferred = rawLabel === row[0] ? undefined : controlLabelV2(rawLabel);
+    const label = allocator.label(ref, preferred);
+    indexed.push({
+      ref,
+      role: wireRoleToSafeRoleV2(row[1]),
+      visibility: (row[2] ?? "").includes("v=offscreen") ? "near" : "viewport",
+      frame:
+        anchor.frame === page.mainFrame()
+          ? "main"
+          : frameOriginOf(anchor.frame) === frameOriginOf(page.mainFrame())
+            ? "same_origin"
+            : "cross_origin",
+      ...(label === undefined ? {} : { label }),
+    });
+  }
+  const active = new Set(indexed.map((row) => row.ref));
+  bridge.setLabels(
+    new Map(indexed.flatMap((row) => (row.label === undefined ? [] : [[row.ref, row.label]]))),
+  );
+  session.compactV2DriveAnchors = new Map([...anchors].filter(([ref]) => active.has(ref)));
+  session.compactV2Refs = new Map();
+  const stage = safeStageV2(snapshot.url, []);
+  const semantics = safePageSemanticsV2({
+    title: observation.semantic?.title ?? "",
+    headings: observation.semantic?.headings ?? [],
+  });
+  session.generation += 1;
+  session.compactV2Index = {
+    epoch: { doc: compactV2EpochDoc(session, page), rev: session.generation },
+    stage,
+    semantics,
+    rows: indexed,
+    byRef: new Map(),
+    expiresAt: Date.now() + 5 * 60_000,
+  };
+  session.compactV2Previous = null;
+  session.compactV2Active = true;
+  rememberCompactV2SourcePage(session, page);
+}
+
 function findRow(
   rows: readonly WireRow[],
   refOrSlug: string,
@@ -5196,6 +5276,7 @@ async function captureDriveSession(
     return await fellBack(finalized.observation, finalized.rows);
   }
   if (main.timedOut === true) {
+    invalidateCompactV2Snapshot(session);
     const finalized = await finalizeSnapshotOutputs(
       session,
       sessionId,
@@ -5276,6 +5357,7 @@ async function captureDriveSession(
     snapshotToObservation(snapshot, sessionId, rawRows),
     rawRows,
   );
+  installDriveActionIndex(session, page, snapshot, finalized.observation, finalized.rows, bridge);
   const publicObservation = handoffObservation(finalized.observation, finalized.rows, bridge);
   session.lastCompactObservation = {
     url: publicObservation.url,

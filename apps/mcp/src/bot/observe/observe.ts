@@ -102,9 +102,13 @@ export function rememberOAuthCompletionSourcePage(
 }
 
 export function invalidateCompactV2Snapshot(
-  session: Pick<Session, "compactV2Refs" | "compactV2Index" | "compactV2Previous">,
+  session: Pick<
+    Session,
+    "compactV2Refs" | "compactV2DriveAnchors" | "compactV2Index" | "compactV2Previous"
+  >,
 ): void {
   session.compactV2Refs = new Map();
+  session.compactV2DriveAnchors = new Map();
   session.compactV2Index = null;
   session.compactV2Previous = null;
   compactV2SourcePages.delete(session);
@@ -650,6 +654,7 @@ function compactV2Observation(
         )
       : undefined;
   session.compactV2Refs = safe.byRef;
+  session.compactV2DriveAnchors = new Map();
   session.compactV2Previous = {
     epoch,
     stage,

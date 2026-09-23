@@ -701,10 +701,26 @@ async function resolveFreshActTarget(
   fresh: InteractiveElement[];
   driveIdentity: ActControlIdentity | undefined;
 }> {
-  const driveIdentity = session.drive?.identities?.get(resolutionTarget);
+  const driveAnchor =
+    compactV2Authorization?.anchor.kind === "drive" ? compactV2Authorization.anchor : undefined;
+  if (driveAnchor !== undefined) {
+    const current = compactV2AuthorizationForTarget(session, compactV2Authorization!.row.ref);
+    if (current.anchor !== driveAnchor) throwCompactV2StaleRef();
+  }
+  const driveIdentity = driveAnchor?.identity ?? session.drive?.identities?.get(resolutionTarget);
   const livePage = compactV2ActionPage ?? browser.page;
   if (driveIdentity !== undefined && livePage !== null) {
-    const live = await resolveLiveControlIdentity(livePage, resolutionTarget, driveIdentity);
+    const live = await resolveLiveControlIdentity(
+      livePage,
+      resolutionTarget,
+      driveIdentity,
+      driveAnchor === undefined
+        ? undefined
+        : {
+            frame: driveAnchor.frame,
+            documentTimeOrigin: driveAnchor.documentTimeOrigin,
+          },
+    );
     if (live !== null) {
       return { el: live, fresh: session.lastElements, driveIdentity };
     }
@@ -1220,9 +1236,8 @@ async function executeAct(
         // locator would lose the same stale-reference guarantees as every other
         // action before the provider transition begins. Resolve it by the
         // identity it was OBSERVED under: a drive ref carries the drive's own
-        // record, a tools ref the tools' authorization/fresh inventory. A
-        // drive session never populates the tools' compact-v2 index, so mixing
-        // the two namespaces is what lost the handoff target.
+        // record, a tools ref the tools' authorization/fresh inventory. The
+        // drive's internal dispatch still uses its private registry key.
         const driveResolved =
           internalAccess && session.drive?.identities?.get(resolutionTarget!) !== undefined;
         let fresh: InteractiveElement[];

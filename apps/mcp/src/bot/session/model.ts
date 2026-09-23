@@ -16,6 +16,7 @@
 import { createHmac, randomBytes } from "node:crypto";
 import type { Buffer } from "node:buffer";
 import type { ActControlIdentity } from "../act/identity.js";
+import type { DriveRefAnchor } from "../drive-ref-bridge.js";
 import type { BrowserController, CheckoutCard, InteractiveElement } from "../browser.js";
 import type { PendingApprovalWait } from "../card-release-approval.js";
 import {
@@ -76,6 +77,7 @@ export interface Session {
   /** True once this session has emitted V2; target resolution stays sealed until finish. */
   compactV2Active: boolean;
   compactV2Refs: Map<string, string>;
+  compactV2DriveAnchors: Map<string, DriveRefAnchor>;
   compactV2Index: SafeObservationIndexV2 | null;
   // Safe enum-only prior map. Repeat observes diff this representation, never
   // raw DOM output, so every delta remains inside the allowlist
@@ -358,6 +360,7 @@ export function createSession(input: CreateSessionInput): Session {
     compactV2HintPages: [],
     compactV2Active: false,
     compactV2Refs: new Map(),
+    compactV2DriveAnchors: new Map(),
     compactV2Index: null,
     compactV2Previous: null,
     committedSelectValues: new Map(),
