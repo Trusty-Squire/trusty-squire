@@ -103,7 +103,7 @@ export function sanitizeExtractedCredentials(
   credentials: Record<string, string>,
   url: string,
   haystack = Object.values(credentials).join("\n"),
-  acceptedNearCopyCredential: string | null = null,
+  acceptedVisibleCredentials: readonly string[] = [],
 ): Record<string, string> {
   const host = registrableHost(url) ?? "";
   const normalized: Record<string, string> = {};
@@ -134,7 +134,7 @@ export function sanitizeExtractedCredentials(
     if (isCredentialNoise(value)) continue;
     if (
       (k === "key" || k === "api_key" || k === "secret") &&
-      value !== acceptedNearCopyCredential &&
+      !acceptedVisibleCredentials.includes(value) &&
       !looksLikeCredentialValue(value)
     )
       continue;
@@ -142,6 +142,21 @@ export function sanitizeExtractedCredentials(
     normalized[key] = value;
   }
   return normalized;
+}
+
+function isFullVisibleCredential(value: string): boolean {
+  const token = value.trim();
+  if (isCredentialNoise(token) || looksLikeCodeIdentifier(token)) return false;
+  if (looksLikeCredentialValue(token)) return true;
+  // A long alphanumeric key with no separator is ambiguous in raw page text.
+  // A distinct, visible DOM candidate is the extra evidence used below.
+  return (
+    token.length >= 40 &&
+    token.length <= 128 &&
+    /^[A-Za-z0-9]+$/.test(token) &&
+    /[A-Za-z]/.test(token) &&
+    /[0-9]/.test(token)
+  );
 }
 
 export function classifyVouchflowCredentials(text: string): Record<string, string> {
@@ -962,23 +977,21 @@ export async function extractCredentials(sessionId: string): Promise<ExtractResu
     state = accumulateCandidate(state, cls);
   }
 
-  // A newly created key can be rendered as bare text in a table row: its
-  // one-time copy notice is prose, not a short field label, so the labeled
-  // regex and DOM label matcher both miss it. Accept one unambiguous visible
-  // token in that context. The masked siblings remain candidates for the
-  // remainder report, but can never enter this full-value path.
-  if (!hasFullHit(state) && /\bcopy\b[^\n]{0,120}\b(?:now|once|again)\b/i.test(text)) {
-    const readable = [
-      ...new Set(
-        labeled
-          .filter((candidate) => !candidate.isMasked && candidate.label === null)
-          .map((candidate) => candidate.value)
-          .filter(looksLikeCredentialValue),
-      ),
-    ];
-    if (readable.length === 1) {
-      state = accumulateCandidate(state, { kind: "full", value: readable[0]! });
-    }
+  // A full key can appear as bare text in a table cell or a text input
+  // without a known prefix or a nearby label. Require one distinct visible
+  // credential-shaped value; masked and truncated displays never qualify.
+  const readable = [
+    ...new Set(
+      labeled
+        .filter((candidate) => !candidate.isMasked)
+        .map((candidate) => candidate.value)
+        .filter(isFullVisibleCredential),
+    ),
+  ];
+  const acceptedVisibleCredential =
+    !hasFullHit(state) && readable.length === 1 ? (readable[0] ?? null) : null;
+  if (acceptedVisibleCredential !== null) {
+    state = accumulateCandidate(state, { kind: "full", value: acceptedVisibleCredential });
   }
 
   const copied = !hasFullHit(state) ? await copyCredentialFromDialog(page, browser) : null;
@@ -1053,7 +1066,9 @@ export async function extractCredentials(sessionId: string): Promise<ExtractResu
     credentials,
     page?.url() ?? browser.currentUrl(),
     haystack,
-    acceptedNearCopyCredential,
+    [acceptedVisibleCredential, acceptedNearCopyCredential].filter(
+      (value): value is string => value !== null,
+    ),
   );
   const found = Object.keys(sanitized).length > 0;
   // A masked credential-shaped value that survived the reveal pass is an
