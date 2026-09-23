@@ -7,6 +7,8 @@ import {
   act,
   finishProvisionSession,
   formSelectMany,
+  injectCardIntoSessionTargets,
+  observe,
   observeSubtree,
   startHarnessProvisionSession,
 } from "../provision-session.js";
@@ -19,6 +21,14 @@ const HTML = `<!doctype html><meta charset="utf-8"><title>Handback</title>
 <button id="send" type="button" onclick="window.hits=(window.hits||0)+1">Send</button>
 <button class="duplicate" type="button">Duplicate</button>
 <button class="duplicate" type="button">Duplicate</button>`;
+const CARD = {
+  pan: "4111111111111111",
+  cvv: "739",
+  exp_month: "12",
+  exp_year: "2030",
+  name: "Ada",
+  billing: { line1: "1 Main St", city: "Boston", postal_code: "02110", country: "US" },
+};
 
 let browser: Browser;
 beforeAll(async () => {
@@ -63,7 +73,204 @@ async function fixture() {
   return { page, controller, started, capture, handback, ref, close };
 }
 
+async function cardFixture(remountCvvOnPanInput = false) {
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  const sharedUrl = "https://provider.test/shared";
+  const url = "https://hosted-handback.test/checkout";
+  await page.route(sharedUrl, (route) =>
+    route.fulfill({
+      contentType: "text/html",
+      body: `<label>Card field <input id="field" ${remountCvvOnPanInput ? "oninput=\"parent.postMessage('remount-cvv','*')\"" : ""}></label>`,
+    }),
+  );
+  await page.route(url, (route) =>
+    route.fulfill({
+      contentType: "text/html",
+      body: `<iframe id="pan" name="pan" src="${sharedUrl}"></iframe><iframe id="cvv" name="cvv" src="${sharedUrl}"></iframe>
+        <script>let remounted=false; window.addEventListener('message', e => {
+          if (e.data === 'remount-cvv' && !remounted) {
+            remounted=true;
+            document.querySelector('#cvv').outerHTML='<iframe id="cvv" name="cvv" src="${sharedUrl}"></iframe>';
+          }
+        });</script>`,
+    }),
+  );
+  await page.goto(url);
+  await page.frameLocator("#pan").locator("#field").waitFor();
+  await page.frameLocator("#cvv").locator("#field").waitFor();
+  const controller = BrowserController.fromHarnessPage(page);
+  const started = await startHarnessProvisionSession({
+    browser: controller,
+    serviceUrl: url,
+    format: "compact",
+    initialObservation: "drive",
+  });
+  const capture = vi.spyOn(controller, "extractBrowserUseObservation");
+  const result = await runOperateDrive(
+    {
+      session_id: started.session_id,
+      goal: "inspect card fields",
+      facts: { card_ref: "card" },
+      max_steps: 0,
+    },
+    null,
+  );
+  const rows = result.observation?.safe_table;
+  if (!Array.isArray(rows)) throw new Error("missing card handback rows");
+  const anchors = sessionForCall(started.session_id)!.compactV2DriveAnchors;
+  const refs = Object.fromEntries(
+    (rows as unknown as Array<[string, string, string?]>).flatMap(([ref]) => {
+      const anchor = anchors.get(ref);
+      return anchor === undefined ? [] : [[anchor.frame.name(), ref]];
+    }),
+  ) as Record<string, string>;
+  expect(refs.pan).toMatch(/^@e:/);
+  expect(refs.cvv).toMatch(/^@e:/);
+  const close = async () => {
+    capture.mockRestore();
+    await finishProvisionSession(started.session_id);
+    await context.close();
+  };
+  return { page, controller, started, capture, refs, sharedUrl, close };
+}
+
 describe("drive public action handback", () => {
+  it("injects PAN and CVV from drive handback into separate same-URL cross-origin frames after sibling insertion", async () => {
+    const f = await cardFixture();
+    try {
+      await f.page.evaluate((url) => {
+        const decoy = document.createElement("iframe");
+        decoy.name = "decoy";
+        decoy.src = url;
+        document.body.prepend(decoy);
+      }, f.sharedUrl);
+      const fields = await injectCardIntoSessionTargets(f.started.session_id, CARD, {
+        pan: { ref: f.refs.pan! },
+        cvv: { ref: f.refs.cvv! },
+      });
+      expect(fields).toEqual({ pan: { status: "filled" }, cvv: { status: "filled" } });
+      expect(await f.page.frameLocator("#pan").locator("#field").inputValue()).toBe(CARD.pan);
+      expect(await f.page.frameLocator("#cvv").locator("#field").inputValue()).toBe(CARD.cvv);
+      expect(await f.page.frameLocator("iframe[name=decoy]").locator("#field").inputValue()).toBe(
+        "",
+      );
+      expect(f.capture).not.toHaveBeenCalled();
+    } finally {
+      await f.close();
+    }
+  }, 30_000);
+
+  it("does not follow a remounted CVV frame between PAN and CVV writes", async () => {
+    const f = await cardFixture(true);
+    try {
+      const fields = await injectCardIntoSessionTargets(f.started.session_id, CARD, {
+        pan: { ref: f.refs.pan! },
+        cvv: { ref: f.refs.cvv! },
+      });
+      expect(fields.pan).toEqual({ status: "filled" });
+      expect(fields.cvv).toEqual({ status: "detached" });
+      expect(await f.page.frameLocator("#cvv").locator("#field").inputValue()).toBe("");
+    } finally {
+      await f.close();
+    }
+  }, 30_000);
+
+  it("does not retarget old card refs when same-URL frames are reordered", async () => {
+    const f = await cardFixture();
+    try {
+      await f.page.evaluate(() => {
+        const pan = document.querySelector("#pan")!;
+        const cvv = document.querySelector("#cvv")!;
+        pan.before(cvv);
+      });
+      expect(await f.page.locator("iframe").first().getAttribute("id")).toBe("cvv");
+      const fields = await injectCardIntoSessionTargets(f.started.session_id, CARD, {
+        pan: { ref: f.refs.pan! },
+        cvv: { ref: f.refs.cvv! },
+      });
+      const panValue = await f.page.frameLocator("#pan").locator("#field").inputValue();
+      const cvvValue = await f.page.frameLocator("#cvv").locator("#field").inputValue();
+      expect(panValue).not.toBe(CARD.cvv);
+      expect(cvvValue).not.toBe(CARD.pan);
+      if (fields.pan.status === "filled") expect(panValue).toBe(CARD.pan);
+      else expect(panValue).toBe("");
+      if (fields.cvv.status === "filled") expect(cvvValue).toBe(CARD.cvv);
+      else expect(cvvValue).toBe("");
+    } finally {
+      await f.close();
+    }
+  }, 30_000);
+
+  it("rejects a stale card node before dispatch and leaves its replacement empty", async () => {
+    const f = await cardFixture();
+    try {
+      await f.page
+        .frameLocator("#pan")
+        .locator("#field")
+        .evaluate((node) => {
+          node.replaceWith(node.cloneNode(true));
+        });
+      const fields = await injectCardIntoSessionTargets(f.started.session_id, CARD, {
+        pan: { ref: f.refs.pan! },
+      });
+      expect(fields.pan).toEqual({ status: "detached" });
+      expect(await f.page.frameLocator("#pan").locator("#field").inputValue()).toBe("");
+    } finally {
+      await f.close();
+    }
+  }, 30_000);
+
+  it("rejects an expired card handback before any field write", async () => {
+    const f = await cardFixture();
+    try {
+      sessionForCall(f.started.session_id)!.compactV2Index!.expiresAt = Date.now() - 1;
+      await expect(
+        injectCardIntoSessionTargets(f.started.session_id, CARD, {
+          pan: { ref: f.refs.pan! },
+        }),
+      ).rejects.toThrow("stale_ref");
+      expect(await f.page.frameLocator("#pan").locator("#field").inputValue()).toBe("");
+    } finally {
+      await f.close();
+    }
+  }, 30_000);
+
+  it("still accepts a canonical observed card target", async () => {
+    const f = await fixture();
+    try {
+      const observation = await observe(f.started.session_id, "compact");
+      const rows = observation.safe_table as unknown as Array<[string, string, string?]>;
+      const ref = rows.find((row) => row[2]?.startsWith("@name"))?.[0];
+      expect(ref).toMatch(/^@e:/);
+      const fields = await injectCardIntoSessionTargets(f.started.session_id, CARD, {
+        pan: { ref: ref! },
+      });
+      expect(fields.pan).toEqual({ status: "filled" });
+      expect(await f.page.locator("#name").inputValue()).toBe(CARD.pan);
+    } finally {
+      await f.close();
+    }
+  }, 30_000);
+
+  it("does not adopt a replacement canonical card input during retries", async () => {
+    const f = await fixture();
+    try {
+      const observation = await observe(f.started.session_id, "compact");
+      const rows = observation.safe_table as unknown as Array<[string, string, string?]>;
+      const ref = rows.find((row) => row[2]?.startsWith("@name"))?.[0];
+      expect(ref).toMatch(/^@e:/);
+      await f.page.locator("#name").evaluate((node) => node.replaceWith(node.cloneNode(true)));
+      const fields = await injectCardIntoSessionTargets(f.started.session_id, CARD, {
+        pan: { ref: ref! },
+      });
+      expect(fields.pan).toEqual({ status: "detached" });
+      expect(await f.page.locator("#name").inputValue()).toBe("");
+    } finally {
+      await f.close();
+    }
+  }, 30_000);
+
   it("uses click, type and select refs without an intervening observe or handback CDP capture", async () => {
     const f = await fixture();
     try {

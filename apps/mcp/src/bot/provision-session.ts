@@ -2,7 +2,11 @@ import type { ScreenshotBinding, ScreenshotPoint } from "./screenshot-click.js";
 import type { GoogleHumanChallenge } from "./google-auth-state.js";
 import type { BrowserUseCapture } from "./browser-use-capture.js";
 import { evaluateBound } from "./drive-evaluate.js";
-import { canonicalIndexForDriveRef, resolveIdentityScope } from "./act/identity.js";
+import {
+  canonicalIndexForDriveRef,
+  resolveIdentityScope,
+  resolveLiveControlIdentity,
+} from "./act/identity.js";
 // Phase 1 — the session-holding "thick tools" surface a frontier host agent
 // drives. MCP tool calls are stateless, but a provision run needs ONE live
 // browser held across many calls; this module is that registry + the
@@ -289,6 +293,8 @@ export type { FinishResult, PreparedFinishResult } from "./session/lifecycle.js"
 import { actInternally, compactV2SelectionFailureReason } from "./act/act.js";
 import {
   compactV2AuthorizationForTarget,
+  CompactV2StaleRefError,
+  resolveAuthorizedCompactV2Target,
   resolveTarget,
   TargetStaleError,
   type CompactV2TargetAuthorization,
@@ -468,11 +474,52 @@ export async function injectCardIntoSessionTargets(
   const resolveField = async (field: InjectCardField): Promise<InjectCardResolvedTarget> => {
     const target = targets[field];
     if (target === undefined) return { missing: "not_found" };
-    const legacy = session.compactV2Active ? session.compactV2Refs.get(target.ref) : target.ref;
-    if (legacy === undefined) return { missing: "not_found", format: target.format };
-    const previouslyPresent = resolveTarget(session.lastElements, legacy) !== null;
-    const fresh = await session.browser.extractInteractiveElements(page);
-    const element = resolveTarget(fresh, legacy);
+    const authorization = session.compactV2Active
+      ? compactV2AuthorizationForTarget(session, target.ref)
+      : undefined;
+    const legacy = authorization?.legacyRef ?? target.ref;
+    const canonicalIdentity =
+      authorization?.anchor.kind === "canonical"
+        ? session.compactV2Index?.physicalByRef?.get(authorization.row.ref)
+        : undefined;
+    const previouslyPresent =
+      authorization !== undefined || resolveTarget(session.lastElements, legacy) !== null;
+    const fresh =
+      authorization?.anchor.kind === "canonical"
+        ? (await session.browser.extractBrowserUseObservation(page)).elements
+        : await session.browser.extractInteractiveElements(page);
+    if (authorization?.anchor.kind === "drive") {
+      const anchor = authorization.anchor;
+      // A frame URL or current ordinal is insufficient: two hosted fields can
+      // have identical URLs and markup. Resolve the registered node inside the
+      // original Frame and document, again for every retry and field write.
+      const current = compactV2AuthorizationForTarget(session, authorization.row.ref);
+      if (current.anchor !== anchor || page === undefined) {
+        return { missing: "detached", format: target.format };
+      }
+      const element = await resolveLiveControlIdentity(page, anchor.privateRef, anchor.identity, {
+        frame: anchor.frame,
+        documentTimeOrigin: anchor.documentTimeOrigin,
+      });
+      return element === null
+        ? { missing: "detached", format: target.format }
+        : { element, format: target.format, driveAnchor: anchor };
+    }
+    let element = resolveTarget(fresh, legacy);
+    if (authorization !== undefined) {
+      try {
+        element = resolveAuthorizedCompactV2Target(session, fresh, authorization);
+      } catch (error) {
+        if (!(error instanceof CompactV2StaleRefError)) throw error;
+        element = null;
+      }
+      if (authorization.anchor.kind === "canonical") {
+        // Card fields require the observed physical node, even when ordinary
+        // actions may adopt a uniquely matching same-document replacement.
+        if (canonicalIdentity === undefined || element?.observationIdentity !== canonicalIdentity)
+          element = null;
+      }
+    }
     return element === null
       ? { missing: previouslyPresent ? "detached" : "not_found", format: target.format }
       : { element, format: target.format };
