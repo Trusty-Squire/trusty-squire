@@ -92,7 +92,13 @@ import {
   solveVisibleCaptcha,
 } from "./captcha.js";
 import type { CaptchaSolveResult } from "./captcha.js";
-import { findCredentialTokens, isMaskedDisplay } from "./credential-shape.js";
+import {
+  findCredentialTokens,
+  isMaskedDisplay,
+  looksLikeCredentialValue,
+  pickRelaxedNearCopyCredential,
+} from "./credential-shape.js";
+import { extractApiKeyFromText } from "./credential-text.js";
 import { extractCredentials } from "./capture/capture.js";
 import {
   DRIVE_FIXED_GO_BACK,
@@ -1682,19 +1688,27 @@ export function pageShowsRevealedKey(rows: readonly WireRow[], _pageText: string
   return rows.some((row) => rowShowsSecretEvidence(row));
 }
 
-/** The drive's key-goal evidence and DONE condition: the capture flow
- * `operate_extract` runs, called as-is. Reveal-masked-values, near-copy tokens,
- * named fields, same-family `api_key_2..n` extras and sanitize stay in
- * capture.ts; the drive only reads what that flow reports and never keeps a
- * second policy. */
+/** The drive's key-goal evidence comes from the same capture flow as
+ * `operate_extract`. Named fields may include connection metadata, so only a
+ * secret-shaped value can satisfy DONE. */
 export interface DriveKeyEvidence {
   credentials: Record<string, string>;
   /** Credential-shaped values that were still masked after the reveal pass. */
   maskedRemaining: string[];
 }
 
-export function driveKeyGoalComplete(evidence: DriveKeyEvidence): boolean {
-  return Object.keys(evidence.credentials).length > 0 && evidence.maskedRemaining.length === 0;
+export function driveKeyGoalComplete(
+  evidence: DriveKeyEvidence,
+  modelGoalComplete?: number,
+): boolean {
+  if (modelGoalComplete !== undefined && modelGoalComplete < DRIVE_CONFIDENCE_THRESHOLD) return false;
+  if (evidence.maskedRemaining.length > 0) return false;
+  return Object.entries(evidence.credentials).some(
+    ([field, value]) =>
+      looksLikeCredentialValue(value) ||
+      extractApiKeyFromText(value) === value ||
+      (field === "api_key" && pickRelaxedNearCopyCredential([value]) === value),
+  );
 }
 
 export async function driveKeyEvidence(sessionId: string): Promise<DriveKeyEvidence> {
@@ -5840,6 +5854,11 @@ async function driveLoop(input: {
   // and spend every remaining step in the guard without a new decision.
   let decideAfterPreActChange = false;
   let automaticDecisionRefused = false;
+  let lastKeyGoalAnswer: { fingerprint: string; confidence: number } | undefined;
+  const keyGoalModelConfidence = (): number | undefined =>
+    lastKeyGoalAnswer?.fingerprint === observationFingerprint(observation.url, rows)
+      ? lastKeyGoalAnswer.confidence
+      : undefined;
   let dispatchedActs = 0;
   let countedJevCalls = drive.jevCalls;
   let countedDispatchedActs = 0;
@@ -6171,12 +6190,12 @@ async function driveLoop(input: {
         return "continue";
       }
       // A key goal is only complete when the capture flow operate_extract runs
-      // returns at least one storable credential and no credential-shaped
+      // returns a secret-shaped credential and no credential-shaped
       // value is left masked. A masked value means a key exists but the drive
       // has not seen it; try the reveal control, then a create/generate
       // control, then report honestly.
       const keyEvidence = isKeyGoal(drive.goal) ? await driveKeyEvidence(sessionId) : undefined;
-      if (keyEvidence !== undefined && !driveKeyGoalComplete(keyEvidence)) {
+      if (keyEvidence !== undefined && !driveKeyGoalComplete(keyEvidence, keyGoalModelConfidence())) {
         noteOutcome({
           beforeUrl: observation.url,
           afterUrl: observation.url,
@@ -6190,7 +6209,7 @@ async function driveLoop(input: {
         const masked = maskedRemainingReason(keyEvidence);
         drive.history.push(
           masked === undefined
-            ? "DONE refused: extraction stored no credential"
+            ? "DONE refused: extraction found no secret-shaped credential"
             : `DONE refused: ${masked}`,
         );
         drive.consumedActionKey = null;
@@ -6960,7 +6979,10 @@ async function driveLoop(input: {
         observation = attached.observation;
         rows = attached.rows;
         actMs = Date.now() - actStarted;
-        if (isKeyGoal(drive.goal) && driveKeyGoalComplete(await driveKeyEvidence(sessionId))) {
+        if (
+          isKeyGoal(drive.goal) &&
+          driveKeyGoalComplete(await driveKeyEvidence(sessionId), keyGoalModelConfidence())
+        ) {
           // The capture flow reveals masked values, so re-snapshot before the
           // handoff: the returned observation must show what extraction read.
           const finalSnap = await snapshotOrTimeout(framesIfNeeded());
@@ -7038,7 +7060,10 @@ async function driveLoop(input: {
           rows,
         });
       }
-      if (isKeyGoal(drive.goal) && driveKeyGoalComplete(await driveKeyEvidence(sessionId))) {
+      if (
+        isKeyGoal(drive.goal) &&
+        driveKeyGoalComplete(await driveKeyEvidence(sessionId), keyGoalModelConfidence())
+      ) {
         // Same as the unsupported branch: extraction may have revealed a
         // masked value, so the handoff needs a snapshot of what it read.
         const finalSnap = await snapshotOrTimeout(framesIfNeeded());
@@ -7489,7 +7514,7 @@ async function driveLoop(input: {
       // ready. Advance the key goal before the generic in-flight settle gate.
       if (isKeyGoal(drive.goal)) {
         const keyEvidence = await driveKeyEvidence(sessionId);
-        if (driveKeyGoalComplete(keyEvidence)) {
+        if (driveKeyGoalComplete(keyEvidence, keyGoalModelConfidence())) {
           const applied = await applyDecision({ kind: "complete", confidence: 1 });
           if (applied !== "continue") return applied;
           if (automaticDecisionRefused) break automaticDecisions;
@@ -8029,6 +8054,12 @@ async function driveLoop(input: {
         : retried.result.answers;
       decision = decide(answers);
     }
+    if (isKeyGoal(drive.goal) && answers.goal_complete !== undefined) {
+      lastKeyGoalAnswer = {
+        fingerprint: observationFingerprint(observation.url, rows),
+        confidence: confidenceOf(answers.goal_complete),
+      };
+    }
     if (missing !== undefined && answers[DRIVE_EMAIL_CODE_QUESTION]?.choice === DRIVE_FIXED_NONE) {
       const field = fieldLabelForRow(missing.row);
       return finish("needs_value", {
@@ -8048,7 +8079,7 @@ async function driveLoop(input: {
       decision.kind !== "complete" &&
       isKeyGoal(drive.goal) &&
       confidenceOf(answers.goal_complete) >= DRIVE_CONFIDENCE_THRESHOLD &&
-      driveKeyGoalComplete(await driveKeyEvidence(sessionId))
+      driveKeyGoalComplete(await driveKeyEvidence(sessionId), keyGoalModelConfidence())
     ) {
       const applied = await applyDecision(
         { kind: "complete", confidence: confidenceOf(answers.goal_complete) },
