@@ -27,8 +27,12 @@ vi.mock("../bot/provision-session.js", async (original) => ({
   withProvisionSessionCall: async (_id: string, call: () => Promise<unknown>) => await call(),
   act: state.action,
   captureCredentialSource: state.capture,
-  extractCredentials: async () => ({ credentials: { api_key: "fixture-secret" } }),
+  extractCredentials: async () => ({
+    url: "https://app.example.test/keys",
+    credentials: { api_key: "fixture-secret" },
+  }),
   observedHostsForSession: () => ["example.test"],
+  currentProvisionUrl: () => "https://app.example.test/keys",
   finishProvisionSessionWithPreparation: async (
     _sessionId: string,
     prepare: () => Promise<unknown>,

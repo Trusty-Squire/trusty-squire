@@ -129,5 +129,9 @@ describe("flat operator workflow routing", () => {
     });
     expect(JSON.stringify(consolidated)).not.toContain(rawSecret);
     expect(storeCredential).toHaveBeenCalledTimes(1);
+    expect(storeCredential.mock.calls[0]?.[0].observed_hosts).toEqual([
+      "api.example.test",
+      "*.example.test",
+    ]);
   });
 });

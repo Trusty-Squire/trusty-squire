@@ -79,8 +79,9 @@ const storeBody = z
     login_hosts: z.array(z.string().min(1).max(253)).max(20).optional(),
     // Hosts the capture observed (signup URL host, etc.) — unioned with the
     // service-name table so a new credential never lands with an empty
-    // allowlist. Bare hosts or URLs; normalised server-side. Max 10.
-    observed_hosts: z.array(z.string().min(1).max(256)).max(10).optional(),
+    // allowlist. Bare hosts or URLs; normalised server-side. The extra slot
+    // holds the capture site's domain-wide entry.
+    observed_hosts: z.array(z.string().min(1).max(256)).max(11).optional(),
     // How the provider expects the secret — drives the egress-grant proxy's
     // auto-injection. "bearer" (default) | "header:<name>" | "query:<param>".
     // Lets a non-bearer provider (ElevenLabs xi-api-key, query-param keys) work

@@ -29,6 +29,7 @@
   "dependencies": {
     "@hpke/core": "^1.9.0",
     "@prisma/client": "^5.22.0",
+    "tldts": "^7.0.30",
     "ulid": "^2.3.0"
   },
   "devDependencies": {
