@@ -38,7 +38,11 @@ import {
 } from "./provision-session.js";
 import { resolveInboxSearch } from "./capture/verification.js";
 import { sessionForCall } from "./session/lifecycle.js";
-import { observedThreeDsChallenge } from "./observe/observe.js";
+import {
+  compactV2EpochDoc,
+  compactV2RefAllocator,
+  observedThreeDsChallenge,
+} from "./observe/observe.js";
 import { safeStageV2 } from "./compact-observation-v2.js";
 import {
   lastSelectOptions,
@@ -58,6 +62,7 @@ import {
   type DriveSnapshot,
 } from "./drive-snapshot.js";
 import { DriveEvaluateTimeout, evaluateBound } from "./drive-evaluate.js";
+import { DriveRefBridge } from "./drive-ref-bridge.js";
 import type { Frame } from "playwright";
 import type { BrowserController } from "./browser.js";
 import { dispatchDriveAct, type DriveActResult } from "./act/act.js";
@@ -4838,7 +4843,11 @@ export function buildHandoff(input: {
   };
 }
 
-function handoffObservation(observation: Observation, rows: WireRow[]): Observation {
+function handoffObservation(
+  observation: Observation,
+  rows: WireRow[],
+  bridge?: DriveRefBridge,
+): Observation {
   const rest = { ...observation };
   delete rest.delta;
   delete rest.removed;
@@ -4847,7 +4856,9 @@ function handoffObservation(observation: Observation, rows: WireRow[]): Observat
   // handoff must return that same map.
   return {
     ...rest,
-    safe_table: rows as unknown as NonNullable<Observation["safe_table"]>,
+    safe_table: (bridge?.publicRows(rows) ?? rows) as unknown as NonNullable<
+      Observation["safe_table"]
+    >,
   };
 }
 
@@ -5017,9 +5028,37 @@ function cardInjected(result: Record<string, unknown>): boolean {
 
 const driveFrameCache = new WeakMap<
   Session,
-  Map<string, { signature: string; snapshot: DriveSnapshot }>
+  Map<string, { frame: Frame; signature: string; snapshot: DriveSnapshot }>
 >();
 const driveFrameListeners = new WeakSet<Page>();
+const driveRefBridges = new WeakMap<Session, DriveRefBridge>();
+
+function driveRefBridge(session: Session): DriveRefBridge {
+  let bridge = driveRefBridges.get(session);
+  if (bridge === undefined) {
+    bridge = new DriveRefBridge(compactV2RefAllocator(session));
+    driveRefBridges.set(session, bridge);
+  }
+  return bridge;
+}
+
+/** Never expose the drive's frame-ordinal registry keys in a handback. */
+function publicDriveHandoff(session: Session, handoff: DriveHandoff): DriveHandoff {
+  const bridge = driveRefBridges.get(session);
+  const publicText = (value: string): string =>
+    value.replace(/@e:f\d+d\d+/g, (ref) => bridge?.publicRef(ref) ?? "[stale control]");
+  const visit = (value: unknown): unknown => {
+    if (typeof value === "string") return publicText(value);
+    if (Array.isArray(value)) return value.map(visit);
+    if (value !== null && typeof value === "object") {
+      return Object.fromEntries(
+        Object.entries(value).map(([key, entry]) => [publicText(key), visit(entry)]),
+      );
+    }
+    return value;
+  };
+  return maskDriveOutput(session, visit(handoff) as DriveHandoff);
+}
 
 function maskedRefsOf(drive: SessionDriveState): string[] {
   if (!Array.isArray(drive.maskedValueRefs)) drive.maskedValueRefs = [];
@@ -5166,6 +5205,9 @@ async function captureDriveSession(
     return await fellBack(finalized.observation, finalized.rows, 0, main.wallMs, true);
   }
   const parts: DriveSnapshot[] = [main];
+  const frameParts: Array<{ frame: Frame; snapshot: DriveSnapshot }> = [
+    { frame: page.mainFrame(), snapshot: main },
+  ];
   // An iframe can itself be the covering layer. The main-frame hit test sees
   // the cover, but its controls and text live in the child document. Inspect
   // frames on that evidence even outside the usual hosted-field path.
@@ -5182,18 +5224,27 @@ async function captureDriveSession(
       const cached = cache.get(key);
       // A layer can reveal a one-time value without changing any input. Do
       // not reuse a frame snapshot while the main page is covered.
-      if (!coveredByLayer && cached !== undefined && cached.signature === signature) {
+      if (
+        !coveredByLayer &&
+        cached !== undefined &&
+        cached.frame === frame &&
+        cached.signature === signature
+      ) {
         parts.push(cached.snapshot);
+        frameParts.push({ frame, snapshot: cached.snapshot });
         continue;
       }
       const child = await captureFrameSnapshot(frame, omit, index, keepOffscreenButtons);
       if (child === null) continue;
-      cache.set(key, { signature, snapshot: child });
+      cache.set(key, { frame, signature, snapshot: child });
       parts.push(child);
+      frameParts.push({ frame, snapshot: child });
     }
     driveFrameCache.set(session, cache);
   }
   const snapshot = mergeSnapshots(parts);
+  const bridge = driveRefBridge(session);
+  bridge.reserve(compactV2EpochDoc(session, page), frameParts);
   rememberDriveIdentities(drive, snapshot.elements, snapshot.url);
   drive.snapshotControlDigest = await driveControlDigest(page);
   const rawRows = driveRowsFromSnapshot(snapshot);
@@ -5225,18 +5276,17 @@ async function captureDriveSession(
     snapshotToObservation(snapshot, sessionId, rawRows),
     rawRows,
   );
+  const publicObservation = handoffObservation(finalized.observation, finalized.rows, bridge);
   session.lastCompactObservation = {
-    url: finalized.observation.url,
+    url: publicObservation.url,
     session_id: sessionId,
-    ...(finalized.observation.safe_table === undefined
+    ...(publicObservation.safe_table === undefined
       ? {}
-      : { safe_table: finalized.observation.safe_table }),
-    ...(finalized.observation.semantic === undefined
-      ? {}
-      : { semantic: finalized.observation.semantic }),
+      : { safe_table: publicObservation.safe_table }),
+    ...(publicObservation.semantic === undefined ? {} : { semantic: publicObservation.semantic }),
   };
   return timed(
-    finalized.observation,
+    publicObservation,
     finalized.rows,
     snapshot.scriptMs,
     snapshot.wallMs,
@@ -5495,16 +5545,19 @@ export async function runOperateDrive(
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
   if (session.drive?.running === true) {
-    return buildHandoff({
-      status: "busy",
-      sessionId,
-      ...(observation === undefined ? {} : { observation }),
-      trajectory: session.drive.trajectory,
-      goal: session.drive.goal,
-      steps: 0,
-      seconds: elapsed(),
-      jevCalls: session.drive.jevCalls,
-    });
+    return publicDriveHandoff(
+      session,
+      buildHandoff({
+        status: "busy",
+        sessionId,
+        ...(observation === undefined ? {} : { observation }),
+        trajectory: session.drive.trajectory,
+        goal: session.drive.goal,
+        steps: 0,
+        seconds: elapsed(),
+        jevCalls: session.drive.jevCalls,
+      }),
+    );
   }
 
   const facts = mergeFacts(session.drive?.facts ?? {}, args.facts);
@@ -5534,18 +5587,21 @@ export async function runOperateDrive(
   session.drive = drive;
 
   try {
-    return await driveLoop({
+    return publicDriveHandoff(
       session,
-      sessionId,
-      observation,
-      args,
-      api,
-      ...(context === undefined ? {} : { context }),
-      dependencies,
-      maxSteps,
-      elapsed,
-      remainingMs,
-    });
+      await driveLoop({
+        session,
+        sessionId,
+        observation,
+        args,
+        api,
+        ...(context === undefined ? {} : { context }),
+        dependencies,
+        maxSteps,
+        elapsed,
+        remainingMs,
+      }),
+    );
   } finally {
     const live = sessionForCall(sessionId);
     if (live?.drive !== undefined && live.drive !== null) live.drive.running = false;
@@ -5595,7 +5651,7 @@ async function driveLoop(input: {
     return buildHandoff({
       status: "evaluate_timeout",
       sessionId,
-      observation: handoffObservation(observation, rows),
+      observation: handoffObservation(observation, rows, driveRefBridge(session)),
       trajectory: drive.trajectory,
       goal: drive.goal,
       steps: 0,
@@ -5675,7 +5731,7 @@ async function driveLoop(input: {
     buildHandoff({
       status,
       sessionId,
-      observation: handoffObservation(observation, rows),
+      observation: handoffObservation(observation, rows, driveRefBridge(session)),
       trajectory: drive.trajectory,
       goal: drive.goal,
       steps,
