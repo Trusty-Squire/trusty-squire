@@ -101,6 +101,12 @@ describe("allowed-host derivation helpers", () => {
         "allowed",
       ),
     ).toEqual(["xn--mnich-kva.example"]);
+    expect(
+      normalizeCredentialHosts(
+        ["*.EXAMPLE.IO", "*.co.uk", "*.pages.dev", "*.site.pages.dev"],
+        "allowed",
+      ),
+    ).toEqual(["*.example.io", "*.site.pages.dev"]);
   });
 });
 
@@ -406,6 +412,74 @@ describe("delete + reveal", () => {
 });
 
 describe("proxy (write-only sink, enforced allowlist)", () => {
+  it("allows a domain-wide entry at the apex and subdomains only", async () => {
+    const { vault } = makeVault();
+    const entry = await vault.store(
+      storeInput({ service: "Example", observed_hosts: ["app.example.io", "*.example.io"] }),
+    );
+    expect(entry.allowed_hosts).toEqual(["app.example.io", "*.example.io"]);
+
+    for (const host of ["example.io", "api.example.io", "deep.api.example.io"]) {
+      await expect(
+        vault.proxy(
+          entry.reference,
+          ACCOUNT,
+          { method: "GET", url: `https://${host}/` },
+          async () => okResponse,
+        ),
+      ).resolves.toEqual(okResponse);
+    }
+    for (const host of ["example.com", "evil-example.io"]) {
+      await expect(
+        vault.proxy(
+          entry.reference,
+          ACCOUNT,
+          { method: "GET", url: `https://${host}/` },
+          async () => okResponse,
+        ),
+      ).rejects.toThrow(AllowlistViolationError);
+    }
+  });
+
+  it("keeps exact host entries exact for existing credentials", async () => {
+    const { vault } = makeVault();
+    const entry = await vault.store(
+      storeInput({ service: "Example", observed_hosts: ["app.example.io"] }),
+    );
+    await expect(
+      vault.proxy(
+        entry.reference,
+        ACCOUNT,
+        { method: "GET", url: "https://api.example.io/" },
+        async () => okResponse,
+      ),
+    ).rejects.toThrow(AllowlistViolationError);
+  });
+
+  it("scopes a private public suffix entry to one site", async () => {
+    const { vault } = makeVault();
+    const entry = await vault.store(
+      storeInput({ service: "Example", observed_hosts: ["*.site.pages.dev"] }),
+    );
+    expect(entry.allowed_hosts).toEqual(["*.site.pages.dev"]);
+    await expect(
+      vault.proxy(
+        entry.reference,
+        ACCOUNT,
+        { method: "GET", url: "https://api.site.pages.dev/" },
+        async () => okResponse,
+      ),
+    ).resolves.toEqual(okResponse);
+    await expect(
+      vault.proxy(
+        entry.reference,
+        ACCOUNT,
+        { method: "GET", url: "https://other.pages.dev/" },
+        async () => okResponse,
+      ),
+    ).rejects.toThrow(AllowlistViolationError);
+  });
+
   it("hands fields to the executor for an allowlisted host; secret never returned", async () => {
     const { vault, audit } = makeVault();
     const entry = await vault.store(storeInput());

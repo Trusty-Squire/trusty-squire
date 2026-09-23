@@ -18,6 +18,7 @@ import { createHash } from "node:crypto";
 
 import { Buffer } from "node:buffer";
 import { ulid } from "ulid";
+import { getDomain } from "tldts";
 import { aadForDek, aadForValue, decryptAesGcm, encryptAesGcm, generateKey } from "./encryption.js";
 import type { KMSClient } from "./kms-client.js";
 import { deriveAllowedHosts } from "./service-hosts.js";
@@ -76,9 +77,15 @@ export function normalizeCredentialHosts(
 ): string[] | null {
   const hosts: string[] = [];
   for (const raw of rawHosts) {
-    const wildcard = kind === "login" && raw.trim().startsWith("*.");
+    const wildcard = raw.trim().startsWith("*.");
     const normalized = normalizeObservedHost(wildcard ? raw.trim().slice(2) : raw);
-    if (normalized === null || (kind === "login" && !validLoginHost(normalized))) {
+    if (
+      normalized === null ||
+      (kind === "login" && !validLoginHost(normalized)) ||
+      (kind === "allowed" &&
+        wildcard &&
+        getDomain(normalized, { allowPrivateDomains: true }) === null)
+    ) {
       if (kind === "login") return null;
       continue;
     }
@@ -927,7 +934,18 @@ export class CredentialVault implements VaultClient {
   ): Promise<ProxyResponse> {
     const reference = record.reference;
     const targetHost = safeHost(http.url);
-    if (targetHost === null || !record.allowed_hosts.includes(targetHost)) {
+    // Only an explicit *.domain entry includes the apex and its subdomains.
+    // A bare host remains exact, including on credentials stored before this form existed.
+    if (
+      targetHost === null ||
+      !record.allowed_hosts.some(
+        (entry) =>
+          entry === targetHost ||
+          (entry.startsWith("*.") &&
+            getDomain(entry.slice(2), { allowPrivateDomains: true }) !== null &&
+            (targetHost === entry.slice(2) || targetHost.endsWith(`.${entry.slice(2)}`))),
+      )
+    ) {
       await this.recordProxyAudit(accountId, VAULT_AUDIT_TYPES.proxyRejected, {
         reference,
         requester: "agent",

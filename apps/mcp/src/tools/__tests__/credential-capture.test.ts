@@ -9,12 +9,17 @@ import {
   markOperatorMutationDispatchAttempted,
 } from "../../bot/request-cancellation.js";
 
-const state = vi.hoisted(() => ({ action: vi.fn(), capture: vi.fn() }));
+const state = vi.hoisted(() => ({
+  action: vi.fn(),
+  capture: vi.fn(),
+  currentUrl: "https://app.example.io/keys",
+}));
 vi.mock("../../bot/provision-session.js", async (original) => ({
   ...(await original<typeof ProvisionSession>()),
   act: state.action,
   captureCredentialSource: state.capture,
   observedHostsForSession: () => ["example.test"],
+  currentProvisionUrl: () => state.currentUrl,
 }));
 import { operateClickTool, provisionExtractTool } from "../provision-drive.js";
 const secret = ["fixture", "private", "credential"].join("-");
@@ -27,6 +32,7 @@ beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), "capture-review-"));
   state.action.mockReset();
   state.capture.mockReset();
+  state.currentUrl = "https://app.example.io/keys";
   state.action.mockImplementation(async () => {
     await markOperatorMutationDispatchAttempted();
     return { dom: secret };
@@ -62,6 +68,20 @@ async function click(client: ApiClient) {
   );
 }
 describe("explicit mutation capture", () => {
+  it("seeds the capture site's registrable domain alongside existing hosts", async () => {
+    const store = vi.fn().mockResolvedValue(stored);
+    await click(api(store));
+    expect(store.mock.calls[0]?.[0].observed_hosts).toEqual(["example.test", "*.example.io"]);
+
+    state.currentUrl = "https://app.site.pages.dev/keys";
+    await click(api(store));
+    expect(store.mock.calls[1]?.[0].observed_hosts).toEqual(["example.test", "*.site.pages.dev"]);
+
+    state.currentUrl = "https://app.example.co.uk/keys";
+    await click(api(store));
+    expect(store.mock.calls[2]?.[0].observed_hosts).toEqual(["example.test", "*.example.co.uk"]);
+  });
+
   it("preserves the screenshot dispatch receipt alongside successful capture metadata", async () => {
     const store = vi.fn().mockResolvedValue(stored);
     const screenshot = { screenshot_id: "12345678-1234-4234-8234-123456789abc", x: 10, y: 20 };

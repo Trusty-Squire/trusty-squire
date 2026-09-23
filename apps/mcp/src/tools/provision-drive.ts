@@ -17,6 +17,7 @@ import { createHash, randomUUID } from "node:crypto";
 // Browser egress compatibility is documented in docs/operator-tool-surface.md.
 
 import { z } from "zod";
+import { getDomain } from "tldts";
 import { constants, generateKeyPairSync, privateDecrypt } from "node:crypto";
 import type { Tool } from "./index.js";
 import type { ApiClient } from "../api-client.js";
@@ -515,6 +516,7 @@ async function captureIntoVault(
     }
     const stored = await persistExtracted(
       sessionId,
+      currentProvisionUrl(sessionId),
       { api_key: extracted.value },
       capture.store,
       api,
@@ -628,7 +630,13 @@ async function handleExtract(args: ExtractArgs, api: ApiClient | null) {
   if (api === null) {
     throw new Error("operate_extract store requires an active Trusty Squire session");
   }
-  const stored = await persistExtracted(args.session_id, extracted.credentials, args.store, api);
+  const stored = await persistExtracted(
+    args.session_id,
+    extracted.url,
+    extracted.credentials,
+    args.store,
+    api,
+  );
   return storedExtractResult(extracted, stored);
 }
 
@@ -691,6 +699,7 @@ export interface StoredCredentialMetadata {
 
 async function persistExtracted(
   sessionId: string,
+  captureUrl: string,
   credentials: Record<string, string>,
   store: StoreSpec,
   api: ApiClient,
@@ -702,8 +711,13 @@ async function persistExtracted(
   if (!Object.keys(credentials).some((key) => key !== "id" && !key.endsWith("_id"))) {
     return null;
   }
+  const captureDomain = getDomain(captureUrl, { allowPrivateDomains: true });
   const observedHosts = [
-    ...new Set([...(store.egress_hosts ?? []), ...observedHostsForSession(sessionId)]),
+    ...new Set([
+      ...(store.egress_hosts ?? []),
+      ...observedHostsForSession(sessionId),
+      ...(captureDomain === null ? [] : [`*.${captureDomain}`]),
+    ]),
   ];
   const singleValue = credentials.api_key;
   const storeInput =
@@ -794,7 +808,13 @@ async function handleFinishOutcome(
         const extracted = await extractCredentials(sessionId);
         const stored =
           Object.keys(extracted.credentials).length > 0
-            ? await persistExtracted(sessionId, extracted.credentials, outcome.store, api)
+            ? await persistExtracted(
+                sessionId,
+                extracted.url,
+                extracted.credentials,
+                outcome.store,
+                api,
+              )
             : null;
         successfulOutcome = stored !== null;
         return {
