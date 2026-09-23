@@ -1109,6 +1109,7 @@ export async function frameDynamicsSignature(frame: Frame): Promise<string> {
     return await evaluateBound(frame, () => {
       const inputs = Array.from(document.querySelectorAll("input,textarea,select"));
       return [
+        performance.timeOrigin,
         location.href,
         document.title,
         inputs.length,
