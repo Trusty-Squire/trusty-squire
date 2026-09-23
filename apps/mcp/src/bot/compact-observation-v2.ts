@@ -262,8 +262,10 @@ export interface SafeObservationIndexV2 {
   semantics: SafePageSemanticsV2;
   rows: SafeControlV2[];
   byRef: Map<string, string>;
-  /** Physical nodes at publication time; card writes never adopt replacements. */
+  /** Physical nodes at publication time; card writes never adopt same-frame replacements. */
   physicalByRef?: Map<string, string>;
+  /** Observed frame URLs retained for same-field recovery after a frame remount. */
+  frameUrlByRef?: Map<string, string>;
   expiresAt: number;
 }
 
