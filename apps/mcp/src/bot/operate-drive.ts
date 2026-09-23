@@ -6499,7 +6499,11 @@ async function driveLoop(input: {
       (decision.action.kind === "click" || decision.action.kind === "oauth_login") &&
       liveRow !== undefined &&
       isSubmitLikeRow(liveRow) &&
-      outstandingEmptyFill(rows, drive.filledRefs) !== undefined
+      rowFormId(liveRow) !== undefined &&
+      outstandingEmptyFill(
+        rows.filter((row) => rowFormId(row) === rowFormId(liveRow)),
+        drive.filledRefs,
+      ) !== undefined
     ) {
       traceUndispatchedOauth("required_field_empty");
       recordUndeliveredDecision(
