@@ -871,7 +871,7 @@ Read this file. Follow the rules. Run the verify script. Paste the output. Then 
   `docs/browser-broker.md` for discovery, election, and recovery.
 - Interactive login display custody follows
   [`docs/browser-broker.md`](docs/browser-broker.md); tunnel configuration is
-  documented in [README.md](README.md). Never tear down a broker-owned display
+  documented in [the reference](docs/reference.md). Never tear down a broker-owned display
   or an externally managed tunnel when closing a ceremony.
 - Keep self-launch + `connectOverCDP` and Patchright as the defaults. The
   2026-08-28 read-only A/B used serial, fresh-profile trials against Exa, Groq,

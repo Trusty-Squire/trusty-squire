@@ -644,7 +644,7 @@ record remains in
 
 ### Payment implementation notes
 
-The public tool contract lives in the [README payment guide](README.md#direct-payment-observation),
+The public tool contract lives in the [payment guide](docs/reference.md#direct-payment-observation),
 the data flow in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#payment-flow), and
 the cross-session authorization boundary in [`SECURITY.md`](SECURITY.md#client-encrypted-card-data).
 Keep approval timing, denial/expiry custody, same-approval resume guidance, and
