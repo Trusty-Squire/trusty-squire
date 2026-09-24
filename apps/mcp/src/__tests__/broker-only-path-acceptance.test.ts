@@ -329,6 +329,10 @@ describeReal("broker-only path acceptance", () => {
     { timeout: 180_000 },
     async () => {
       const { stack } = await fixture(true);
+      // This case exercises concurrent sessions, not broker election. Start
+      // the isolated daemon first so a loaded CI runner cannot spend the
+      // front ends' 10-second discovery window on cold broker startup.
+      await stack.startBroker();
       const first = await stack.startServer();
       const second = await stack.startServer();
 
