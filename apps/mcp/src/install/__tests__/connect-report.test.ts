@@ -37,6 +37,25 @@ function classify(
 }
 
 describe("buildConnectReport", () => {
+  it("does not report the shared ceremony browser as a competing holder", () => {
+    const browser_location = { kind: "virtual" as const, url: "https://example.test/novnc" };
+    const open = classify({
+      outcome: { kind: "sign_in_open", confirm_url: "https://example.test/install" },
+      holder: otherHolder,
+      browser_location,
+    });
+    expect(open.holder).toEqual(noneHolder);
+    const complete = classify({
+      outcome: { kind: "ceremony_complete", account_id: "acc_1", providers: ["google"] },
+      holder: otherHolder,
+      browser_location,
+    });
+    expect(complete.holder).toEqual(noneHolder);
+    expect(
+      classify({ outcome: { kind: "profile_busy" }, holder: otherHolder, browser_location }).holder,
+    ).toEqual(otherHolder);
+  });
+
   // The no-ceremony fast path opens nothing — it reads the profile's cookie
   // store — so its `connected` must not pass for a probed one. The human copy
   // on that branch already warns those cookies can outlive the real session.

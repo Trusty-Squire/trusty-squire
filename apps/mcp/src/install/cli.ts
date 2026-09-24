@@ -934,6 +934,9 @@ async function runConnectInstall(
     applyServerPrefs: !wantInteractive,
     profileDir,
     placed,
+    ...(args.forceReloginProvider === undefined
+      ? {}
+      : { requestedProvider: args.forceReloginProvider }),
     reportSignInOpen: (confirm_url, browser_location) =>
       emitConnectStatus(args, {
         outcome: { kind: "sign_in_open", confirm_url },
@@ -1325,26 +1328,36 @@ async function writeAgentConfig(
   }
 }
 
-// A claimed enrollment is COMPLETE. The claim is the authoritative fact: the
+// A claimed enrollment is complete for the account. The claim is the authoritative fact: the
 // server has bound this machine to the account and handed back its agent
-// token, and the CLI polls that same fact independently of the browser. The
-// browser's Finish control is a courtesy that closes the page early, not a
+// token, and the CLI polls that same fact independently of the browser. A
+// scoped GitHub refresh additionally keeps the ceremony visible until its
+// session reaches the profile; the account claim alone cannot prove that step.
+// The browser's Finish control is a courtesy that closes the page early, not a
 // second completion gate — on a headless machine that page exists only behind
 // a single-use pairing link, so a gate on it can expire before the human ever
 // reaches the control and throw away a claim the server already established.
 // A fact already true must never be withheld for want of a confirmation of
 // itself. `_wizardCompleted` remains part of the callback contract (the loopback
 // listener still accepts Finish) but can no longer extend the wait.
-export function shouldCompleteInstallClaim(claimed: boolean, _wizardCompleted = false): boolean {
-  return claimed;
+export function shouldCompleteInstallClaim(
+  claimed: boolean,
+  _wizardCompleted = false,
+  requestedProvider?: OAuthProviderId,
+  observedProviders: readonly OAuthProviderId[] = [],
+): boolean {
+  return (
+    claimed && (requestedProvider === undefined || observedProviders.includes(requestedProvider))
+  );
 }
 
-// Once the claim is observed the ceremony returns immediately, so the claimed
-// wording is a one-line acknowledgement only; it never makes the browser's
-// Finish control a requirement.
-export function claimHeartbeatMessage(claimed: boolean): string {
+// Once the required session is observed the ceremony returns; Finish remains
+// a courtesy rather than a requirement.
+export function claimHeartbeatMessage(claimed: boolean, waitingForGithub = false): string {
   return claimed
-    ? "Sign-in complete — the account is claimed, closing the sign-in window."
+    ? waitingForGithub
+      ? "Account connected — finish the requested GitHub sign-in in this window."
+      : "Sign-in complete — the account is claimed, closing the sign-in window."
     : "Still waiting for you to finish signing in — the URL/window above stays live until you do.";
 }
 
@@ -1385,6 +1398,7 @@ async function runInstallClaim(
     // discarded a fresh inbox-read preference.
     applyServerPrefs: boolean;
     profileDir: string;
+    requestedProvider?: OAuthProviderId;
     // Where the ceremony browser went, recorded for whoever reports the run —
     // including a handler above this frame that never sees the claim.
     placed: BrowserPlacementSlot;
@@ -1443,7 +1457,24 @@ async function runInstallClaim(
       }
     }
     const claimed = state.value !== null;
-    if (shouldCompleteInstallClaim(claimed, wizardCompleted)) {
+    let observedProviders: OAuthProviderId[] = [];
+    if (claimed && options.requestedProvider === "github") {
+      // The account claim follows Google sign-in. A scoped GitHub refresh is
+      // still in progress, so keep its shared-browser ceremony open until the
+      // GitHub session reaches the real profile. Chrome may commit the cookie
+      // after a short delay; poll again rather than closing the noVNC bridge.
+      observedProviders = await detectProviderSessionsFromProfile(options.profileDir).catch(
+        () => [],
+      );
+    }
+    if (
+      shouldCompleteInstallClaim(
+        claimed,
+        wizardCompleted,
+        options.requestedProvider === "github" ? "github" : undefined,
+        observedProviders,
+      )
+    ) {
       if (claimedThisPoll) {
         console.error(chalk.dim(`   ✓ ${claimHeartbeatMessage(true)}`));
       }
@@ -1511,7 +1542,8 @@ async function runInstallClaim(
   const result = await openInstallConfirmInBotChrome({
     confirmUrl: initiate.confirm_url,
     pollUntilClaimed: pollOnce,
-    heartbeatMessage: () => claimHeartbeatMessage(state.value !== null),
+    heartbeatMessage: () =>
+      claimHeartbeatMessage(state.value !== null, options.requestedProvider === "github"),
     profileDir: options.profileDir,
     onBrowserPlacement: (placement, ownBrowserPid) => {
       options.placed.value = placement;
@@ -1547,9 +1579,10 @@ async function runInstallClaim(
     };
   }
 
-  // Reachable only by the ceremony deadline elapsing, and that deadline IS the
-  // pairing token's life — so there is no live URL left to hand anyone.
-  if (result.status !== "claimed" || state.value === null) {
+  // A claimed account remains claimed even if the optional provider step
+  // outlives the ceremony. Preserve its token and let the post-ceremony provider
+  // gate report that GitHub is still missing.
+  if (state.value === null) {
     return { kind: "expired", browser_location };
   }
 
