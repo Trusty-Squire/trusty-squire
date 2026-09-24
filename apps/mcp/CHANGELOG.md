@@ -1,5 +1,10 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.17-rc.1 (2026-09-23)
+
+- fix(mcp): preserve stdio and broker browser availability (#963)
+- fix: keep broker front ends alive while stdio is open (#964)
+
 ## 1.1.16-rc.7 (2026-09-23)
 
 - fix: preserve drive session IDs in redacted output (#958)
