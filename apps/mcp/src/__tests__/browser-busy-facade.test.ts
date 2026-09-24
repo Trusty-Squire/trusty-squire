@@ -82,6 +82,23 @@ async function broker(answer: (call: WireCall) => unknown): Promise<WireCall[]> 
 }
 
 describe("openTab over the real broker wire", () => {
+  it("opens the profile selected after the module was imported", async () => {
+    const originalProfile = process.env.TRUSTY_SQUIRE_PROFILE_DIR;
+    const alternate = join(root, "alternate-profile");
+    process.env.TRUSTY_SQUIRE_PROFILE_DIR = alternate;
+    try {
+      await broker(({ method }) =>
+        method === "open" ? { sessionId: "sess-1" } : { closed: true },
+      );
+      const tab = await openTab({ profile: "default", purpose: "workbench" });
+      expect(tab.profile).toBe(profilePathIdentity(alternate));
+      await tab.release();
+    } finally {
+      if (originalProfile === undefined) delete process.env.TRUSTY_SQUIRE_PROFILE_DIR;
+      else process.env.TRUSTY_SQUIRE_PROFILE_DIR = originalProfile;
+    }
+  });
+
   it("opens, navigates and closes one session with the frames Contract B defines", async () => {
     const calls = await broker(({ method }) => {
       if (method === "open") return { sessionId: "sess-1", observation: { session_id: "sess-1" } };
@@ -318,6 +335,19 @@ describe("browserBusy asks the broker rather than inferring", () => {
         holder: { pid: process.pid, host: hostname() },
       },
     });
+  });
+
+  it("reads the current profile after the caller changes it in-process", async () => {
+    const originalProfile = process.env.TRUSTY_SQUIRE_PROFILE_DIR;
+    const alternate = join(root, "alternate-profile");
+    symlinkSync(`${hostname()}-${process.pid}`, join(servedProfile(), "SingletonLock"));
+    process.env.TRUSTY_SQUIRE_PROFILE_DIR = alternate;
+    try {
+      await expect(browserBusy()).resolves.toEqual({ busy: false });
+    } finally {
+      if (originalProfile === undefined) delete process.env.TRUSTY_SQUIRE_PROFILE_DIR;
+      else process.env.TRUSTY_SQUIRE_PROFILE_DIR = originalProfile;
+    }
   });
 
   it("reads free when no broker is resident and no process holds the profile", async () => {
