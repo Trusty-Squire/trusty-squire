@@ -151,6 +151,12 @@ describe("shouldCompleteInstallClaim (claim-only completion)", () => {
     expect(shouldCompleteInstallClaim(true, false)).toBe(true);
     expect(shouldCompleteInstallClaim(true, true)).toBe(true);
   });
+
+  it("keeps the explicit GitHub refresh open after Google claims the account", () => {
+    expect(shouldCompleteInstallClaim(true, false, "github", ["google"])).toBe(false);
+    expect(shouldCompleteInstallClaim(true, true, "github", ["google"])).toBe(false);
+    expect(shouldCompleteInstallClaim(true, false, "github", ["google", "github"])).toBe(true);
+  });
 });
 
 describe("claimHeartbeatMessage (ceremony phase copy)", () => {
@@ -163,5 +169,9 @@ describe("claimHeartbeatMessage (ceremony phase copy)", () => {
     expect(message).toMatch(/sign-in complete/i);
     expect(message).not.toMatch(/click Finish/i);
     expect(message).not.toMatch(/waiting.*signing in/i);
+  });
+
+  it("names the pending GitHub step after the account claim", () => {
+    expect(claimHeartbeatMessage(true, true)).toMatch(/finish the requested GitHub sign-in/i);
   });
 });

@@ -36,15 +36,14 @@ import {
 } from "./bot/profile.js";
 import { VERSION } from "./version.js";
 
-// Idle self-exit bounds. transport.onclose / stdin EOF / SIGTERM already exit
-// the process on a well-behaved disconnect; these bound the case a live box
-// surfaced instead — a host that spawns a *new* server on reconnect without
-// ever closing the old child's stdio or signaling it. They live here rather
-// than in server.ts because the startup reaper enforces the same policy from
-// the outside for an instance that failed to enforce it on itself.
-const DEFAULT_IDLE_TIMEOUT_MS = 20 * 60 * 1_000; // 20m, no open session
-const DEFAULT_IDLE_TIMEOUT_WITH_SESSION_MS = 12 * 60 * 60 * 1_000; // 12h, session open
-const DEFAULT_IDLE_CHECK_INTERVAL_MS = 5 * 60 * 1_000; // 5m — must stay well under the 20m bound
+// A quiet stdio connection is still a live client. Exiting it after an idle
+// period strands hosts that keep their MCP connection open between turns.
+// Idle self-exit is therefore opt-in for hosts that explicitly accept that
+// tradeoff; EOF, transport closure, signals and output failure still tear down
+// the process by default.
+const DEFAULT_IDLE_TIMEOUT_MS = 0;
+const DEFAULT_IDLE_TIMEOUT_WITH_SESSION_MS = 0;
+const DEFAULT_IDLE_CHECK_INTERVAL_MS = 5 * 60 * 1_000; // 5m when idle exit is configured
 // An orphan's stdio peer is gone, so a well-behaved instance exits within
 // milliseconds. Still alive and quiet this long past that means wedged.
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 30 * 1_000;

@@ -167,6 +167,17 @@ function connectedAccount(account_id: string, providers: OAuthProviderId[] | nul
  * existing success / preflight / busy / placement answers already decided.
  */
 export function buildConnectReport(input: ConnectReportInput): ConnectReport {
+  // A placed ceremony tab runs in the broker's Chrome. Its SingletonLock is
+  // the browser serving this run, not a competing holder of the profile.
+  // Keep operation-lease holders visible: they can still block other work.
+  if (
+    (input.outcome.kind === "sign_in_open" || input.outcome.kind === "ceremony_complete") &&
+    (input.browser_location.kind === "virtual" || input.browser_location.kind === "host_screen") &&
+    input.holder.kind === "other" &&
+    input.holder.code === "singleton_lock"
+  ) {
+    input = { ...input, holder: { kind: "none" } };
+  }
   const { outcome } = input;
   switch (outcome.kind) {
     case "sign_in_open":

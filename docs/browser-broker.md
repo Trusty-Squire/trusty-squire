@@ -96,9 +96,14 @@ ceremony, `probeProviderSessionsAfterCeremony` first tries the live probe. If th
 profile is still busy, it polls committed-cookie snapshots for up to 45 seconds,
 awaiting Google and any explicitly requested provider before accepting early.
 Unreadable snapshots are unknown, not proof of sign-out; no provider list is
-persisted in the account session file. Ceremony completion itself remains the
-install claim alone, never a cookie read; the browser's nonce-scoped Finish
-callback is a courtesy that closes the page early, never a completion gate.
+persisted in the account session file. For an ordinary install, the account
+claim completes the ceremony without waiting for a cookie read. A scoped GitHub
+refresh is different: Google can claim the account before GitHub sign-in is
+finished, so the ceremony keeps its tab and noVNC exposure open until the
+GitHub session appears in the profile or the ceremony deadline expires. The
+post-ceremony provider gate reports a missing GitHub session if the deadline
+expires. The browser's nonce-scoped Finish callback is a courtesy, not an
+additional completion gate.
 
 When an install does need the login ceremony, the ceremony opens the confirm
 page as a TAB in the shared broker browser — an ordinary `open` on a

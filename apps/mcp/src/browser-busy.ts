@@ -19,7 +19,7 @@ import {
 } from "./bot/broker/discovery.js";
 import { BrokerRefusal } from "./bot/broker/refusal.js";
 import { BrokerClient, brokerEndpointHasLiveListener } from "./bot/broker/transport.js";
-import { CHROME_PROFILE_DIR, profilePathIdentity, readLockHolder } from "./bot/profile.js";
+import { currentProfileDir, profilePathIdentity, readLockHolder } from "./bot/profile.js";
 
 /**
  * Wire codes that mean "not now", each mapped onto exactly one layer. Private
@@ -227,12 +227,12 @@ function mapBrokerRefusal(error: unknown): Error | undefined {
 }
 
 function resolveBrowserProfile(profile: string): string {
-  return profilePathIdentity(profile === "default" ? CHROME_PROFILE_DIR : profile);
+  return profilePathIdentity(profile === "default" ? currentProfileDir() : profile);
 }
 
 /** The single physical profile the broker is pinned to. */
 function servedBrowserProfile(): string {
-  return profilePathIdentity(CHROME_PROFILE_DIR);
+  return profilePathIdentity(currentProfileDir());
 }
 
 /**
