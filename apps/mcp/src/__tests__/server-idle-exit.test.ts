@@ -295,3 +295,73 @@ describe("shouldIdleExit", () => {
     expect(shouldIdleExit(2_000, 1_900, 0, timeoutMs, timeoutWithSessionMs)).toBe(false);
   });
 });
+
+describe("server idle exit by mode", () => {
+  async function startIdleServer(brokerSocket: string): Promise<{
+    child: ChildProcess;
+    exited: Promise<{ code: number | null; signal: NodeJS.Signals | null }>;
+    root: string;
+  }> {
+    const root = await mkdtemp(join(tmpdir(), "ts-server-idle-mode-"));
+    const child = spawn(
+      process.execPath,
+      ["--import", require.resolve("tsx"), fileURLToPath(new URL("../bin.ts", import.meta.url)), "server"],
+      {
+        env: {
+          ...process.env,
+          HOME: root,
+          XDG_CONFIG_HOME: join(root, "config"),
+          TMPDIR: root,
+          TRUSTY_SQUIRE_BROKER_SOCKET: brokerSocket,
+          TRUSTY_SQUIRE_SERVER_INSTANCE_DIR: join(root, "instances"),
+          TRUSTY_SQUIRE_SERVER_IDLE_TIMEOUT_MS: "200",
+          TRUSTY_SQUIRE_SERVER_IDLE_CHECK_INTERVAL_MS: "25",
+        },
+        stdio: ["pipe", "pipe", "pipe"],
+      },
+    );
+    const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
+      (resolve, reject) => {
+        child.once("error", reject);
+        child.once("exit", (code, signal) => resolve({ code, signal }));
+      },
+    );
+    await mcpRequest(child, {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2024-11-05",
+        capabilities: {},
+        clientInfo: { name: "idle-mode-test", version: "1" },
+      },
+    });
+    return { child, exited, root };
+  }
+
+  it("keeps an uncalled broker front end alive past the idle bound", async () => {
+    const root = await mkdtemp(join(tmpdir(), "ts-broker-idle-"));
+    const { child, exited, root: serverRoot } = await startIdleServer(join(root, "broker.sock"));
+    try {
+      expect(await Promise.race([exited.then(() => "exited"), sleep(1_000).then(() => "running")])).toBe(
+        "running",
+      );
+    } finally {
+      if (child.exitCode === null) child.kill("SIGTERM");
+      await exited.catch(() => undefined);
+      await rm(serverRoot, { recursive: true, force: true });
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 15_000);
+
+  it("still exits an uncalled direct server after the idle bound", async () => {
+    const { child, exited, root } = await startIdleServer("");
+    try {
+      await expect(exited).resolves.toEqual({ code: 0, signal: null });
+    } finally {
+      if (child.exitCode === null) child.kill("SIGKILL");
+      await exited.catch(() => undefined);
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 15_000);
+});
