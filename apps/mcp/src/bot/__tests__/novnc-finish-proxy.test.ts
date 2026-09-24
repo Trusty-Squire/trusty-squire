@@ -1,5 +1,5 @@
-import { createServer } from "node:http";
-import { createHash } from "node:crypto";
+import { createServer, request } from "node:http";
+import { createHash, randomBytes } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 import { startNoVncFinishProxy, type NoVncFinishProxy } from "../novnc-finish-proxy.js";
 
@@ -51,17 +51,49 @@ describe("noVNC Finish bridge", () => {
       (backend.address() as { port: number }).port,
       async () => {},
     );
-    const socket = new WebSocket(`ws://127.0.0.1:${proxy.port}/websockify`);
+    const key = randomBytes(16).toString("base64");
     try {
-      const message = await new Promise<string>((resolve, reject) => {
-        socket.addEventListener("message", (event) => resolve(String(event.data)), { once: true });
-        socket.addEventListener("error", () => reject(new Error("noVNC WebSocket failed")), {
-          once: true,
+      const message = await new Promise<Buffer>((resolve, reject) => {
+        const client = request({
+          hostname: "127.0.0.1",
+          port: proxy!.port,
+          path: "/websockify",
+          headers: {
+            Connection: "Upgrade",
+            Upgrade: "websocket",
+            "Sec-WebSocket-Key": key,
+            "Sec-WebSocket-Version": "13",
+          },
         });
+        client.on("upgrade", (response, socket, head) => {
+          if (response.statusCode !== 101) {
+            reject(new Error(`WebSocket upgrade returned ${response.statusCode}`));
+            socket.destroy();
+            return;
+          }
+          const expectedAccept = createHash("sha1")
+            .update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`)
+            .digest("base64");
+          if (response.headers["sec-websocket-accept"] !== expectedAccept) {
+            reject(new Error("WebSocket accept key did not survive the proxy"));
+            socket.destroy();
+            return;
+          }
+          if (head.length) {
+            resolve(head);
+            socket.destroy();
+          } else {
+            socket.once("data", (data: Buffer) => {
+              resolve(data);
+              socket.destroy();
+            });
+          }
+        });
+        client.on("error", reject);
+        client.end();
       });
-      expect(message).toBe("ok");
+      expect(message).toEqual(Buffer.from([0x81, 0x02, 0x6f, 0x6b]));
     } finally {
-      socket.close();
       backendSocket?.destroy();
     }
   });
