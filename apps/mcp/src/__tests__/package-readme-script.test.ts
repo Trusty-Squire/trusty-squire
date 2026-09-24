@@ -103,23 +103,13 @@ describe("package README lifecycle", () => {
 });
 
 describe("canonical README discovery order", () => {
-  it("puts the sub-tagline, elevator pitch, trust line, and payment guide after the tagline", async () => {
+  it("puts use cases and install directions after the tagline", async () => {
     const readme = await fs.readFile(canonicalReadme, "utf8");
-    const lines = readme
-      .split("\n")
-      .map((line) => line.trim())
-      .filter(Boolean);
-    const taglineAt = lines.findIndex((line) => line.includes(tagline));
-
-    expect(taglineAt).toBeGreaterThanOrEqual(0);
-    expect(lines[taglineAt + 1]).toContain("MCP tools to automate auth and pay");
-    expect(lines[taglineAt + 1]).toContain("keys and card stay out of agent context");
-    expect(lines[taglineAt + 2]).toContain("sign up, provision, and purchase on your behalf");
-    expect(lines[taglineAt + 3]).toContain("Provider secrets and payment cards are write-only");
-    expect(lines[taglineAt + 4]).toBe("## Direct payment observation");
-    expect(lines[taglineAt + 5]).toContain("agent drives the live checkout");
-    expect(readme).not.toContain("Sign in to Sentry");
-    expect(readme).not.toContain("Resend");
-    expect(readme).not.toContain("/provider/path");
+    expect(readme).toContain(tagline);
+    expect(readme.match(/^## .+$/gm)).toEqual(["## What you can do", "## Install"]);
+    expect(readme).toContain("**Get an API key.**");
+    expect(readme).toContain("**Buy things.**");
+    expect(readme).toContain("npx @trusty-squire/mcp connect\n");
+    expect(readme).toContain("npx @trusty-squire/mcp connect --target=codex\n");
   });
 });

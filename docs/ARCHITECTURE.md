@@ -307,7 +307,7 @@ canonical product surfaces.
 
 The public docs set is intentionally small:
 
-- `README.md`: product pitch, install, and development entry point.
+- `README.md`: use cases and install directions; `docs/reference.md`: detailed product and development reference.
 - `SECURITY.md`: canonical security and cryptographic contracts.
 - `docs/ARCHITECTURE.md`: canonical system overview and data flows.
 - `docs/VAULT-OPERATIONS.md`: vault operator runbook.

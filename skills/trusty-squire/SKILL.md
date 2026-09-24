@@ -100,12 +100,12 @@ Once connected and restarted, the `squire` MCP tools appear. The core loop:
   `operate_observe` with `query`. The query searches the whole live document,
   including below the viewport, and returns actionable refs; use
   `more_above`/`more_below` with `operate_scroll` to change the viewport.
-  Follow the [README tool guide](https://github.com/Trusty-Squire/trusty-squire#mcp-tools)
+  Follow the [tool guide](https://github.com/Trusty-Squire/trusty-squire/blob/main/docs/reference.md#mcp-tools)
   instead of reading a V1 snapshot file.
 - For shopping, add items through the observed cart UI with `operate_click` and
   re-observe the cart before continuing, or let `operate_drive` run the
   checkout goal with `facts.card_ref`. Follow the
-  [README payment guide](https://github.com/Trusty-Squire/trusty-squire#one-prompt)
+  [payment guide](https://github.com/Trusty-Squire/trusty-squire/blob/main/docs/reference.md#direct-payment-observation)
   for `inject_card`.
 - Email verification is page state: `operate_drive` reads the inbox itself when
   the goal needs a code or link. You can also call `operate_read_inbox` in a
@@ -154,7 +154,7 @@ Once connected and restarted, the `squire` MCP tools appear. The core loop:
   `tools/list`. Only `closed:true` establishes closure. Older servers may omit
   this receipt; absence is never closure proof. The authoritative
   teardown contract is in the
-  [README tool guide](https://github.com/Trusty-Squire/trusty-squire#mcp-tools).
+  [tool guide](https://github.com/Trusty-Squire/trusty-squire/blob/main/docs/reference.md#mcp-tools).
 
 **Safety rules the agent must follow:**
 
@@ -173,7 +173,7 @@ Once connected and restarted, the `squire` MCP tools appear. The core loop:
 - Compact V2 card controls carry the code-owned `f=payment` fact. Never type a
   PAN or Luhn-valid card number through `operate_type`; a refusal points back to
   `inject_card`. Follow the
-  [README payment guide](https://github.com/Trusty-Squire/trusty-squire#one-prompt)
+  [payment guide](https://github.com/Trusty-Squire/trusty-squire/blob/main/docs/reference.md#direct-payment-observation)
   for checkout-amount precedence and split-checkout handling.
 - The user connects Google/GitHub themselves in the real browser during
   `connect`. Never ask for or type the user's password in chat.
