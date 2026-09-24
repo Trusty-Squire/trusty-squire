@@ -524,6 +524,7 @@ export async function runServer(): Promise<void> {
   }
 
   const callAdmission = createServerCallAdmission();
+  const brokerFrontend = Boolean(process.env.TRUSTY_SQUIRE_BROKER_SOCKET?.trim());
   const forwarder = new OperatorForwarder(resolveBrokerSocket(), sessionGuard);
   const server = await buildServer(
     api,
@@ -636,28 +637,32 @@ export async function runServer(): Promise<void> {
     lastActivityAt = Date.now();
   };
 
-  idleTimer = setInterval(() => {
-    if (shutdown !== undefined) return;
-    if (forwarder.connected()) return;
-    const sessionCount = forwarder.sessionCount();
-    if (
-      !shouldIdleExit(
-        Date.now(),
-        lastActivityAt,
-        sessionCount,
-        idleTimeoutMs(),
-        idleTimeoutWithSessionMs(),
-      )
-    ) {
-      return;
-    }
-    process.stderr.write(
-      `[trusty-squire] server idle with ${sessionCount} open session(s) and no client ` +
-        `activity past the bound; exiting (this tears down any open session's browser)\n`,
-    );
-    requestShutdown();
-  }, idleCheckIntervalMs());
-  idleTimer.unref();
+  // A broker front end owns no browser. Keep its stdio transport available
+  // until the host closes it; the broker owns browser lifetime and cleanup.
+  if (!brokerFrontend) {
+    idleTimer = setInterval(() => {
+      if (shutdown !== undefined) return;
+      if (forwarder.connected()) return;
+      const sessionCount = forwarder.sessionCount();
+      if (
+        !shouldIdleExit(
+          Date.now(),
+          lastActivityAt,
+          sessionCount,
+          idleTimeoutMs(),
+          idleTimeoutWithSessionMs(),
+        )
+      ) {
+        return;
+      }
+      process.stderr.write(
+        `[trusty-squire] server idle with ${sessionCount} open session(s) and no client ` +
+          `activity past the bound; exiting (this tears down any open session's browser)\n`,
+      );
+      requestShutdown();
+    }, idleCheckIntervalMs());
+    idleTimer.unref();
+  }
 
   if (instance !== null) {
     heartbeatTimer = setInterval(() => {
