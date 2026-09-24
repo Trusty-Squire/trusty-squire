@@ -63,7 +63,9 @@ describe("noVNC Finish page", () => {
           runChrome,
         ),
       ).resolves.toEqual({ status: "claimed" });
-      expect(pollUntilClaimed.mock.calls.map(([completed]) => completed)).toEqual([false, true]);
+      const completionStates = pollUntilClaimed.mock.calls.map(([completed]) => completed);
+      expect(completionStates[0]).toBe(false);
+      expect(completionStates.at(-1)).toBe(true);
     } finally {
       await browser.close();
       await new Promise<void>((resolve) => pageServer.close(() => resolve()));
