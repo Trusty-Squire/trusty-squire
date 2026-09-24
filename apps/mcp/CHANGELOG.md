@@ -1,5 +1,9 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.17-rc.1 (2026-09-24)
+
+- _summarize the changes_
+
 ## 1.1.17-rc.1 (2026-09-23)
 
 - fix(mcp): preserve stdio and broker browser availability (#963)
