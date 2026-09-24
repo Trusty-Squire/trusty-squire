@@ -102,6 +102,30 @@ describe("interactive login display detection", () => {
 });
 
 describe("install completion callback", () => {
+  it("passes the noVNC Finish action into the browser ceremony", async () => {
+    const pollUntilClaimed = vi.fn(async (completed: boolean) =>
+      completed ? ({ status: "claimed", provider: "google" } as const) : ("pending" as const),
+    );
+    const runChrome = vi.fn(async (opts: RunInBotChromeOpts) => {
+      await expect(opts.pollUntilDone()).resolves.toBe(false);
+      await opts.onVncFinish?.();
+      await expect(opts.pollUntilDone()).resolves.toBe(true);
+      return { status: "satisfied" as const, closeState: "closed" as const };
+    });
+    await expect(
+      openInstallConfirmInBotChrome(
+        {
+          confirmUrl: "https://example.test/install",
+          pollUntilClaimed,
+          profileDir: "/unused/profile",
+          deadline: Date.now() + 60_000,
+        },
+        runChrome,
+      ),
+    ).resolves.toEqual({ status: "claimed" });
+    expect(pollUntilClaimed.mock.calls.map(([completed]) => completed)).toEqual([false, true]);
+  });
+
   it("reports the explicit Finish callback as wizardCompleted rather than reading profile files", async () => {
     const pollUntilClaimed = vi.fn(
       async () => ({ status: "claimed", provider: "google" }) as const,

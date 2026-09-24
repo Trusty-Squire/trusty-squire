@@ -500,6 +500,7 @@ export interface RunInBotChromeOpts {
   // takes no BrowserContext on purpose: completion is out of band (the
   // install claim `connect` polls), never a read off the live page.
   pollUntilDone: () => Promise<boolean>;
+  onVncFinish?: () => Promise<void>;
   // Short label shown after the local Chrome window opens.
   bannerLabel: string;
   // The install flow has a sign-in phase; the claim ends it and the Finish
@@ -571,6 +572,7 @@ export type SharedCeremonyExposure =
 export async function exposeSharedBrokerCeremonyDisplay(
   profileDir: string,
   onExpired?: (ownBrowserPid: number | null) => void,
+  onVncFinish?: () => Promise<void>,
 ): Promise<SharedCeremonyExposure> {
   const holder = holderCeremonyDisplay(profileDir);
   // Nothing to name. Where windows are drawn natively there is no X display to
@@ -616,7 +618,7 @@ export async function exposeSharedBrokerCeremonyDisplay(
   });
   let url: string;
   try {
-    url = await exposeRemoteLoginDisplay(rig);
+    url = await exposeRemoteLoginDisplay(rig, onVncFinish);
   } catch (err) {
     removeCleanup();
     await teardownRemoteLoginRig(rig).catch(() => undefined);
@@ -936,6 +938,7 @@ export async function runCeremonyInSharedBroker(opts: RunInBotChromeOpts): Promi
     const exposure = await exposeSharedBrokerCeremonyDisplay(
       opts.profileDir,
       opts.onCeremonyExpired,
+      opts.onVncFinish,
     );
     if (exposure.kind === "unshowable") {
       opts.onBrowserPlacement?.({ kind: "unreachable", reason: exposure.reason }, null);
@@ -1131,6 +1134,15 @@ export async function openInstallConfirmInBotChrome(
         `Sign in there to connect this machine — you only sign in once.`,
       pollUntilDone: async () =>
         installClaimPollCompleted(await opts.pollUntilClaimed(completion?.isCompleted() === true)),
+      onVncFinish: async () => {
+        const callback = completion?.callbackUrl;
+        if (!callback) throw new Error("install completion listener is unavailable");
+        const response = await fetch(callback, {
+          redirect: "manual",
+          signal: AbortSignal.timeout(5_000),
+        });
+        if (response.status !== 302) throw new Error("install completion callback was refused");
+      },
       ...(opts.heartbeatMessage !== undefined ? { heartbeatMessage: opts.heartbeatMessage } : {}),
       ...(opts.onBrowserPlacement !== undefined
         ? { onBrowserPlacement: opts.onBrowserPlacement }

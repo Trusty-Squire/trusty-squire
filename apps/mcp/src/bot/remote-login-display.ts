@@ -37,6 +37,7 @@ import {
   waitForOwnerTrackedHelperExit,
 } from "./owner-process-reaper.js";
 import { LOGIN_RIG_OWNED_LIFETIME_MS } from "../pairing-ttl.js";
+import { startNoVncFinishProxy, type NoVncFinishProxy } from "./novnc-finish-proxy.js";
 
 const LOGIN_WIDTH = Number(process.env.BOT_NOVNC_W) || 720;
 const LOGIN_HEIGHT = Number(process.env.BOT_NOVNC_H) || 1280;
@@ -53,6 +54,7 @@ export interface RemoteLoginRig {
   webDir?: string;
   passFile?: string;
   vncPassword?: string;
+  finishProxy?: NoVncFinishProxy;
 }
 
 export interface RemoteLoginBinaries {
@@ -651,7 +653,10 @@ export function generateVncPassword(): string {
   return randomBytes(6).toString("base64url");
 }
 
-export async function exposeRemoteLoginDisplay(rig: RemoteLoginRig): Promise<string> {
+export async function exposeRemoteLoginDisplay(
+  rig: RemoteLoginRig,
+  onFinish?: () => Promise<void>,
+): Promise<string> {
   if (rig.display === undefined) {
     throw new Error("remote login display has not been started");
   }
@@ -677,6 +682,7 @@ export async function exposeRemoteLoginDisplay(rig: RemoteLoginRig): Promise<str
   try {
     const vncPort = await findFreeLoginPort();
     const webPort = plan.mode === "named" ? plan.port : await findFreeLoginPort();
+    const backendPort = onFinish ? await findFreeLoginPort() : webPort;
     const x11vnc = spawnBackground(
       rig.binaries.x11vnc,
       [
@@ -701,12 +707,13 @@ export async function exposeRemoteLoginDisplay(rig: RemoteLoginRig): Promise<str
     rig.webDir = buildVncWebDir();
     const websockify = spawnBackground(rig.binaries.websockify, [
       `--web=${rig.webDir}`,
-      `127.0.0.1:${webPort}`,
+      `127.0.0.1:${backendPort}`,
       `localhost:${vncPort}`,
     ]);
     rig.procs.push(websockify);
     started.push(websockify);
-    await waitForListeningPort(websockify, webPort, "websockify", 5_000);
+    await waitForListeningPort(websockify, backendPort, "websockify", 5_000);
+    if (onFinish) rig.finishProxy = await startNoVncFinishProxy(webPort, backendPort, onFinish);
 
     let publicUrl: string;
     if (plan.mode === "named") {
@@ -718,6 +725,8 @@ export async function exposeRemoteLoginDisplay(rig: RemoteLoginRig): Promise<str
       const tunnelUrl = await waitForTunnelUrl(cloudflared, 30_000);
       publicUrl = `${tunnelUrl}/#p=${password}`;
     }
+
+    if (rig.finishProxy) publicUrl += `&f=${rig.finishProxy.token}`;
 
     printRemoteLoginBanner({ publicUrl, password });
     return publicUrl;
@@ -771,6 +780,10 @@ export function assertRemoteLoginRigLive(rig: RemoteLoginRig): void {
 }
 
 function removeRigFiles(rig: RemoteLoginRig): void {
+  if (rig.finishProxy) {
+    void rig.finishProxy.close();
+    delete rig.finishProxy;
+  }
   if (rig.webDir !== undefined) rmSync(rig.webDir, { recursive: true, force: true });
   if (rig.privateDir !== undefined) rmSync(rig.privateDir, { recursive: true, force: true });
   delete rig.webDir;
@@ -833,6 +846,10 @@ async function teardownExposedLoginHelpers(
   rig: RemoteLoginRig,
   started: readonly ChildProcess[],
 ): Promise<void> {
+  if (rig.finishProxy) {
+    await rig.finishProxy.close();
+    delete rig.finishProxy;
+  }
   await terminateLoginHelpers(started, 1_000);
   rig.procs = rig.procs.filter((child) => !started.includes(child));
   if (rig.webDir !== undefined) {
@@ -855,6 +872,10 @@ export function teardownRemoteLoginRig(rig: RemoteLoginRig, graceMs = 1_000): Pr
   const existing = rigTeardowns.get(rig);
   if (existing !== undefined) return existing;
   const teardown = (async (): Promise<void> => {
+    if (rig.finishProxy) {
+      await rig.finishProxy.close();
+      delete rig.finishProxy;
+    }
     await terminateLoginHelpers(rig.procs, graceMs);
     removeRigFiles(rig);
   })();
