@@ -219,6 +219,40 @@ describe("launched through a bin symlink", () => {
     await expect(exited).resolves.toEqual({ code: 0, signal: null });
   }, 30_000);
 
+  it("keeps a quiet stdio connection usable when idle exit is disabled", async () => {
+    const link = await linkTo("mcp-server-quiet-client-link.js");
+    const child = spawn(process.execPath, [link, "server"], {
+      env: {
+        ...process.env,
+        HOME: tmpDir,
+        XDG_CONFIG_HOME: path.join(tmpDir, "server-quiet-client-config"),
+        TRUSTY_SQUIRE_SERVER_IDLE_TIMEOUT_MS: "0",
+        TRUSTY_SQUIRE_SERVER_IDLE_TIMEOUT_WITH_SESSION_MS: "0",
+        TRUSTY_SQUIRE_SERVER_IDLE_CHECK_INTERVAL_MS: "50",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    try {
+      await mcpRequest(child, {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2024-11-05",
+          capabilities: {},
+          clientInfo: { name: "quiet-client-smoke", version: "1" },
+        },
+      });
+      await new Promise<void>((resolve) => setTimeout(resolve, 300));
+      expect(child.exitCode).toBeNull();
+      await mcpRequest(child, { jsonrpc: "2.0", id: 1, method: "tools/list" });
+    } finally {
+      const exited = waitForExit(child);
+      child.stdin?.end();
+      await exited;
+    }
+  }, 30_000);
+
   it.skipIf(process.platform !== "linux")(
     "exits when its caller dies with every stdio pipe still open",
     async () => {

@@ -713,11 +713,10 @@ extension state on launch and won't reload mid-session.
 | `TRUSTY_SQUIRE_OPERATOR_SESSION_IDLE_TIMEOUT_MS` | `600000` (10m) | Closes an operator session that has no active call and has received no operation within this bound. The lifecycle contract lives in `docs/DESIGN-warm-browser-reuse.md`. |
 | `TRUSTY_SQUIRE_OPERATOR_BROWSER_MAX_LIFETIME_MS` | `1800000` (30m) | Cross-platform maximum operator-session lifetime, checked before the active-call guard. An active payment receives only the bounded terminal-transition grace. |
 | `TRUSTY_SQUIRE_OPERATOR_BROWSER_CPU_CEILING_PERCENT` | `200` | Linux marked-Chromium aggregate CPU ceiling. The process watchdog terminates after `TRUSTY_SQUIRE_OPERATOR_BROWSER_CPU_CONSECUTIVE_SAMPLES` (default `3`) consecutive over-budget samples. |
-| `TRUSTY_SQUIRE_SERVER_IDLE_TIMEOUT_MS` | `1200000` (20m) | `mcp server`'s idle self-exit bound when it holds **no** open provision session. Backstop for a host that abandons a child process on reconnect without closing its stdio or signaling it (`server.ts`'s `transport.onclose`/EOF/SIGTERM path then never fires). |
-| `TRUSTY_SQUIRE_SERVER_IDLE_TIMEOUT_WITH_SESSION_MS` | `43200000` (12h) | Process-level idle self-exit bound while a provision session is open. The operator-session watchdog independently closes abandoned browsers after 10 minutes idle and begins bounded terminal teardown at 30 minutes; this wider server bound remains a final host-process backstop. |
-| `TRUSTY_SQUIRE_SERVER_IDLE_CHECK_INTERVAL_MS` | `300000` (5m) | Poll interval for the two idle bounds above. The server detects an expired bound on the next poll, so the default no-session exit occurs after 20–25 minutes of inactivity. Keep this interval well under the no-session timeout. |
-| `TRUSTY_SQUIRE_SERVER_HEARTBEAT_INTERVAL_MS` | `30000` (30s) | How often a running server republishes its heartbeat record (`~/.trusty-squire/server-instances/`): last inbound client message, open sessions, in-flight calls. That record is the only thing that lets the startup reaper below tell "still serving a client" from "wedged". |
-| `TRUSTY_SQUIRE_SERVER_REAP_ORPHAN_GRACE_MS` | `60000` (60s) | How long an ORPHANED prior instance of the same agent identity (PPid collapsed to init when it did not start that way — its spawning host is gone) must be quiet before startup reaps it and its child tree. A well-behaved orphan exits in milliseconds when its stdio peer dies, so still being here past this is wedged. |
+| `TRUSTY_SQUIRE_SERVER_IDLE_TIMEOUT_MS` | `0` (disabled) | Optional idle self-exit bound when `mcp server` holds no provision session. A quiet stdio connection may still have a live host, so enabling this can strand that host on its next tool call. EOF, transport closure, signals, and output failure remain the default shutdown paths. |
+| `TRUSTY_SQUIRE_SERVER_IDLE_TIMEOUT_WITH_SESSION_MS` | `0` (disabled) | Optional idle self-exit bound while a provision session is open. The operator-session watchdog independently closes abandoned browsers after 10 minutes idle and begins bounded terminal teardown at 30 minutes. |
+| `TRUSTY_SQUIRE_SERVER_IDLE_CHECK_INTERVAL_MS` | `300000` (5m) | Poll interval for configured idle bounds. Keep this interval below any enabled timeout. |
+| `TRUSTY_SQUIRE_SERVER_HEARTBEAT_INTERVAL_MS` | `30000` (30s) | How often a running server republishes its heartbeat record (`~/.trusty-squire/server-instances/`): last inbound client message, open sessions, in-flight calls. The startup reaper uses the record's identity, lineage, and draining deadline before signaling a process. |
 | `TRUSTY_SQUIRE_SERVER_REAP_GRACE_MS` | `2000` (2s) | SIGTERM→SIGKILL grace when the startup reaper terminates a stale instance's process tree. |
 
 ### Startup reap of stale prior server instances
@@ -732,10 +731,10 @@ descendant tree.
 **The gate is the whole feature — this box runs many legitimate concurrent
 servers, including several of the SAME identity (one per project/lane).** There
 is no process-name match and no blanket kill anywhere in it. A prior instance is
-a candidate only when its recorded `TRUSTY_SQUIRE_AGENT_IDENTITY` exactly equals
-ours, it is not us, its birth identity still names a live process, and it is
-either orphaned past `TRUSTY_SQUIRE_SERVER_REAP_ORPHAN_GRACE_MS` or quiet past
-the idle bound it should have self-exited on (plus one poll interval of slack).
+a candidate only when its recorded `TRUSTY_SQUIRE_AGENT_IDENTITY` and launcher
+lineage match ours, its birth identity still names a live process, and it is
+draining past its published shutdown deadline. A quiet serving instance is
+kept because its stdio client may resume after a long pause.
 Anything unreadable is kept. Killing walks the PPid chain, never the process
 group — a stdio server shares its parent's group, so `kill(-pgid)` would take
 the host agent with it. `serverInstanceReapDecision` is the pure predicate that

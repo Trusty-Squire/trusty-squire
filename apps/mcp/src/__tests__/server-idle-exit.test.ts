@@ -1,16 +1,11 @@
-// A live box surfaced 33 accumulated `mcp server` processes, some holding
-// live operator Chromes — the disconnect-triggered shutdown in server.ts
-// (transport.onclose / stdin EOF / SIGTERM, covered by bin-smoke.test.ts)
-// never fired because the host abandoned the child without closing its
-// stdio or signaling it. shouldIdleExit is the pure decision function behind
-// the time-bound backstop for that case.
+// A host can leave stdio open while quiet between turns, so idle exit is
+// disabled by default. Hosts that explicitly enable it use shouldIdleExit
+// as the pure decision function behind their time-bound backstop.
 //
 // An open provision session owns its own Chrome and profile. A session left
 // open by an abandoned server can only be freed by that server itself exiting.
-// shouldIdleExit therefore
-// uses a longer bound when a session is open rather than never exiting, but
-// still applies real teardown (closeAllProvisionSessions, which kills the
-// leased Chrome) once that longer bound is crossed.
+// An enabled idle exit can use a longer bound with an open session. The
+// operator-session watchdog separately tears down abandoned browser sessions.
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { createRequire } from "node:module";
@@ -28,7 +23,11 @@ import {
   runBoundedServerCleanup,
   shouldIdleExit,
 } from "../server.js";
-import { readServerInstanceRecord } from "../server-instance-registry.js";
+import {
+  idleTimeoutMs,
+  idleTimeoutWithSessionMs,
+  readServerInstanceRecord,
+} from "../server-instance-registry.js";
 import { SessionStore } from "../session.js";
 import { listenBroker } from "../bot/broker/transport.js";
 
@@ -274,6 +273,22 @@ describe("server shutdown call admission", () => {
 describe("shouldIdleExit", () => {
   const timeoutMs = 1_000;
   const timeoutWithSessionMs = 5_000;
+
+  it("defaults both idle shutdown bounds to disabled", () => {
+    vi.stubEnv("TRUSTY_SQUIRE_SERVER_IDLE_TIMEOUT_MS", undefined);
+    vi.stubEnv("TRUSTY_SQUIRE_SERVER_IDLE_TIMEOUT_WITH_SESSION_MS", undefined);
+    try {
+      expect(idleTimeoutMs()).toBe(0);
+      expect(idleTimeoutWithSessionMs()).toBe(0);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("keeps a quiet stdio client connected when idle exit is disabled", () => {
+    expect(shouldIdleExit(10_000, 1_000, 0, 0, 0)).toBe(false);
+    expect(shouldIdleExit(10_000, 1_000, 1, 0, 0)).toBe(false);
+  });
 
   it("stays false while activity is within the no-session timeout", () => {
     expect(shouldIdleExit(1_500, 1_000, 0, timeoutMs, timeoutWithSessionMs)).toBe(false);

@@ -52,21 +52,12 @@ const DEFAULT_REGISTRY_BASE =
 // This covers what a live box surfaced instead: a host agent spawns a *new*
 // server on reconnect without ever closing the old child's stdio or signaling
 // it — the old process just sits sleeping on an open pipe forever. No signal
-// from a host like that will ever arrive, so this is a time bound, not an
-// event.
+// from a host like that will ever arrive. A time bound can be enabled by a
+// host that accepts closing a quiet stdio connection.
 //
-// It also has to cover a server that still holds an open provision session.
-// Its browser is owned by that server, so only the owning server's bounded
-// terminal teardown can close Chrome and destroy its private profile. Hence two
-// bounds: a short one when idle with no session (routine), and a longer one
-// when a session is still open — wide enough that no real in-flight flow
-// (inject_card's approval wait is bounded to one minute) should ever cross it,
-// so crossing it is a reliable
-// abandoned-session signal, not a false kill of live work.
-//
-// The bounds themselves live in server-instance-registry.ts, because the
-// startup reaper there applies the same policy from the outside to a prior
-// instance that failed to apply it to itself.
+// A live host can stay quiet between turns for longer than either historical
+// bound. The idle backstop is opt-in; the bounds live in
+// server-instance-registry.ts.
 
 // Exported for unit testing; kept pure so the branches (recent activity,
 // no-session idle, session-open idle) don't need a live process/interval.
@@ -78,7 +69,7 @@ export function shouldIdleExit(
   timeoutWithSessionMs: number,
 ): boolean {
   const threshold = sessionCount === 0 ? timeoutMs : timeoutWithSessionMs;
-  return now - lastActivityAt >= threshold;
+  return threshold > 0 && now - lastActivityAt >= threshold;
 }
 
 // Injected into the model's system prompt every turn (≤2KB). Teaches
