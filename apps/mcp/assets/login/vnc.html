@@ -57,19 +57,6 @@
       #dot.err {
         background: #f85149;
       }
-      #finish {
-        margin-left: auto;
-        padding: 7px 12px;
-        border: 1px solid #3fb950;
-        border-radius: 4px;
-        background: #1b3a29;
-        color: #fff;
-        font: inherit;
-        cursor: pointer;
-      }
-      #finish[hidden] {
-        display: none;
-      }
       #screen {
         flex: 1;
         position: relative;
@@ -139,7 +126,6 @@
       <span id="dot"></span>
       <b>Trusty Squire</b>
       <span class="sub">— sign in to your account, then return to your terminal.</span>
-      <button id="finish" type="button" hidden>Finish</button>
     </div>
     <div id="screen"></div>
     <div id="msg">Connecting to the secure login window&hellip;</div>
@@ -162,25 +148,6 @@
 
       const params = new URLSearchParams(location.hash.replace(/^#/, ""));
       const password = params.get("p") || params.get("password") || "";
-      const finishToken = params.get("f");
-      const finishButton = document.getElementById("finish");
-      if (finishToken) {
-        finishButton.hidden = false;
-        finishButton.addEventListener("click", async () => {
-          finishButton.disabled = true;
-          try {
-            const response = await fetch(`/finish/${encodeURIComponent(finishToken)}`, {
-              method: "POST",
-            });
-            if (!response.ok) throw new Error("Finish was not accepted");
-            finishButton.textContent = "Finishing…";
-          } catch {
-            finishButton.disabled = false;
-            msg.style.display = "";
-            msg.textContent = "Could not finish the sign-in. Please try again.";
-          }
-        });
-      }
       const dot = document.getElementById("dot");
       const msg = document.getElementById("msg");
       const screen = document.getElementById("screen");

@@ -440,20 +440,9 @@ setInterval(() => undefined, 1000);
       process.env.TS_LOGIN_PUBLIC_HOSTNAME = "vnc.example.test";
       process.env.TS_LOGIN_LOCAL_PORT = String(namedPort);
 
-      let finishes = 0;
-      await expect(
-        exposeRemoteLoginDisplay(rig, async () => {
-          finishes += 1;
-        }),
-      ).resolves.toMatch(
-        /^https:\/\/fallback-proof\.trycloudflare\.com\/#p=test-password&f=[a-f0-9]{48}$/,
+      await expect(exposeRemoteLoginDisplay(rig)).resolves.toBe(
+        "https://fallback-proof.trycloudflare.com/#p=test-password",
       );
-      const finish = await fetch(
-        `http://127.0.0.1:${rig.finishProxy!.port}/finish/${rig.finishProxy!.token}`,
-        { method: "POST" },
-      );
-      expect(finish.status).toBe(204);
-      expect(finishes).toBe(1);
       expect(log.mock.calls.flat().join("\n")).toContain("one-off Cloudflare tunnel");
       expect(rig.procs).toHaveLength(3);
       const helperPids = rig.procs
@@ -462,7 +451,6 @@ setInterval(() => undefined, 1000);
 
       await teardownRemoteLoginRig(rig, 50);
       expect(rig.webDir).toBeUndefined();
-      expect(rig.finishProxy).toBeUndefined();
       await waitUntil(() => helperPids.every((pid) => !processIsLive(pid)));
       expect(helperPids.every((pid) => !processIsLive(pid))).toBe(true);
     } finally {
