@@ -74,6 +74,13 @@ export async function startNoVncFinishProxy(
       if (upstreamHead.length) socket.write(upstreamHead);
       socket.pipe(upstream).pipe(socket);
     });
+    proxied.on("response", (response) => {
+      const status = response.statusCode ?? 502;
+      socket.end(
+        `HTTP/1.1 ${status} Upstream refused upgrade\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`,
+      );
+      response.destroy();
+    });
     proxied.on("error", () => socket.destroy());
     proxied.end();
   });

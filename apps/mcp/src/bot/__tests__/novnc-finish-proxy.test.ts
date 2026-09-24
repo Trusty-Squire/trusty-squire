@@ -97,4 +97,39 @@ describe("noVNC Finish bridge", () => {
       backendSocket?.destroy();
     }
   });
+
+  it("closes a WebSocket promptly when websockify refuses the upgrade", async () => {
+    const rejectingBackend = createServer();
+    rejectingBackend.on("upgrade", (_incoming, socket) => {
+      socket.end("HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
+    });
+    await new Promise<void>((resolve) => rejectingBackend.listen(0, "127.0.0.1", resolve));
+    try {
+      proxy = await startNoVncFinishProxy(
+        0,
+        (rejectingBackend.address() as { port: number }).port,
+        async () => {},
+      );
+      const status = await new Promise<number>((resolve, reject) => {
+        const client = request({
+          hostname: "127.0.0.1",
+          port: proxy!.port,
+          path: "/websockify",
+          headers: { Connection: "Upgrade", Upgrade: "websocket" },
+        });
+        client.on("response", (response) => {
+          resolve(response.statusCode ?? 0);
+          response.resume();
+        });
+        client.on("upgrade", () => reject(new Error("unexpected WebSocket upgrade")));
+        client.on("error", reject);
+        client.end();
+      });
+      expect(status).toBe(403);
+    } finally {
+      await proxy?.close();
+      proxy = undefined;
+      await new Promise<void>((resolve) => rejectingBackend.close(() => resolve()));
+    }
+  });
 });
