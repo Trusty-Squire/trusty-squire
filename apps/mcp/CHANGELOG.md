@@ -2,9 +2,9 @@
 
 ## 1.1.18-rc.1 (2026-09-26)
 
-- feat(mcp): share one Squire service per host (#972)
-- Replace broker browser lease records with kernel ownership (#971)
-- Fix dead broker lease refusal and overrun browser termination (#970)
+- Fix dead broker lease refusal and ensure an overrun browser is terminated (#970).
+- Elect the broker with a kernel-owned profile lock, contain Chrome in a dedicated scope, use per-session idle timers, and delete lease and reaper records (#971).
+- Share one MCP service per host over a private socket while keeping sessions and vault attribution per agent. Reconnect the small relay after broker restarts, split tool schemas from browser code, and remove the broker idle exit (#972).
 
 ## 1.1.17-rc.1 (2026-09-23)
 
