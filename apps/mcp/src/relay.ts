@@ -82,7 +82,7 @@ export async function runRelay(): Promise<void> {
           flush();
           return;
         }
-        if (frame.id !== undefined) pending.delete(JSON.stringify(frame.id));
+        if (frame.id !== undefined && !frame.method) pending.delete(JSON.stringify(frame.id));
         process.stdout.write(`${line}\n`);
       });
     });

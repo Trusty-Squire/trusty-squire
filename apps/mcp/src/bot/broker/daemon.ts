@@ -32,7 +32,7 @@ export class BrokerClientRegistry {
     else this.counting.add(clientId);
   }
 
-  /** Whether this client's traffic should hold off the idle countdown. */
+  /** Whether this wire client holds a claim during explicit shutdown. */
   counts(clientId: string): boolean {
     return !this.probes.has(clientId);
   }

@@ -154,12 +154,19 @@ it("relay restores initialization after a broker restart and fails a dropped in-
               JSON.stringify({
                 jsonrpc: "2.0",
                 id: frame.id,
-                result: { protocolVersion: "2025-03-26", capabilities: {}, serverInfo: { name: "broker", version: "1" } },
+                result: {
+                  protocolVersion: "2025-03-26",
+                  capabilities: {},
+                  serverInfo: { name: "broker", version: "1" },
+                },
               }) + "\n",
             );
           } else if (frame.method === "tools/call") {
             if (current === 1) socket.destroy();
-            else socket.write(JSON.stringify({ jsonrpc: "2.0", id: frame.id, result: { ok: true } }) + "\n");
+            else
+              socket.write(
+                JSON.stringify({ jsonrpc: "2.0", id: frame.id, result: { ok: true } }) + "\n",
+              );
           }
         }
       });
@@ -208,10 +215,14 @@ it("relay restores initialization after a broker restart and fails a dropped in-
   await new Promise<void>((resolve) => broker.close(() => resolve()));
   broker = await startBroker();
   await vi.waitFor(() =>
-    expect(brokerFrames.filter((frame) => frame.method === "notifications/initialized")).toHaveLength(2),
+    expect(
+      brokerFrames.filter((frame) => frame.method === "notifications/initialized"),
+    ).toHaveLength(2),
   );
   send(3, "tools/call", { name: "tools/list", arguments: {} });
-  await vi.waitFor(() => expect(responses.find((frame) => frame.id === 3)?.result).toEqual({ ok: true }));
+  await vi.waitFor(() =>
+    expect(responses.find((frame) => frame.id === 3)?.result).toEqual({ ok: true }),
+  );
   expect(relay.exitCode).toBeNull();
   expect(responses.filter((frame) => frame.id === 1)).toHaveLength(1);
   expect(brokerFrames.filter((frame) => frame.method === "initialize")).toHaveLength(2);

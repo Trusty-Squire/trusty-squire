@@ -21,13 +21,16 @@ Start one resident `mcp broker` per host. It listens for MCP at
 mounted into its sandbox. There is no HTTP endpoint or token. Reaching the
 socket has the same local-user boundary as the existing broker connection.
 The MCP socket has no server-instance record, heartbeat, stale-server sweep,
-or idle exit. Its listener starts and stops with the elected broker; after a
-broker restart, clients start a fresh relay connection.
+or idle exit. Its listener starts and stops with the elected broker.
 
 For each agent MCP connection, `mcp relay` sends one line from
-`TRUSTY_SQUIRE_AGENT_IDENTITY`, then copies MCP stdio bytes in both directions.
-The relay owns no sessions or browser state and exits with its pipe. The broker
-creates a separate MCP Server, API client, and broker principal for that
+`TRUSTY_SQUIRE_AGENT_IDENTITY`, then relays MCP stdio messages in both directions.
+If the broker restarts, the relay reconnects while the agent's pipe remains open,
+replays initialization, and returns an error for calls lost in flight. Broker
+sessions and tabs end with the old connection. The relay exits when its pipe
+closes.
+
+The broker creates a separate MCP Server, API client, and broker principal for that
 connection. Session IDs and tabs belong to that principal; closing one agent's
 connection closes its sessions without closing another agent's sessions.
 Vault requests use that connection's agent identity in
