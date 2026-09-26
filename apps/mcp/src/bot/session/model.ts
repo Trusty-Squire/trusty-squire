@@ -26,7 +26,6 @@ import {
 } from "../compact-observation-v2.js";
 import type { ApiClient } from "../../api-client.js";
 import type { DriveTrailEntry } from "../drive-feedback.js";
-import type { OperatorBrowserWatchdog } from "../operator-browser-watchdog.js";
 
 // Credential-egress seed provenance: start is the service host, auto_widen
 // is an observed same-base-domain redirect. mid_session is retained for legacy
@@ -134,7 +133,7 @@ export interface Session {
   // Session ownership must be a resource boundary, not merely a convention for
   // cooperative hosts. The watchdog observes the browser but teardown may only
   // begin between complete action leases.
-  watchdog: OperatorBrowserWatchdog | null;
+  watchdog: NodeJS.Timeout | null;
   terminalTeardownOwner: SessionTerminalTeardownOwner | null;
   // Jev-driven operate_drive loop. Null until the first drive call; finish
   // clears it. `running` is the busy lock so a second in-flight drive refuses

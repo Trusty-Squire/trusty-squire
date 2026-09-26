@@ -36,22 +36,19 @@ broker always self-launches when it can, and the persistent-context branch
 remains only for the two cases the spawn cannot serve (no on-disk binary for
 the channel, a credentialed proxy the spawned Chrome cannot authenticate).
 
-Close first disposes page ownership and document subscriptions. Harness teardown
-only drops its references. Normal teardown marks the launch terminal, captures
-identity and page/context/transport references, clears active references, and
-runs `closeProfileWithProof`: bounded page and context close first (1s each),
-then, if the identity-proven local browser survives, `quitBrowserGracefully`
-sends SIGINT and waits up to 10s for exit. CDP transport close has its own 2s
-bound; the existing 15s overall close cap and SIGKILL/proof fallback remain.
-No SIGTERM or reaper escalation precedes that graceful window. It then
-releases stale process proof, checks marked orphans, untracks only proven closure,
-and tears down the owned display. Cancellation and late-start reaping use the
-same state machine and retain the late-context cleanup path.
+Each session closes only its own page family. A failed bounded tab close drains
+the whole Chrome process tree before a new session launches. With a usable
+systemd user manager, normal whole-browser teardown sends SIGINT to Chrome's
+scope, waits briefly, and SIGKILLs any remaining scope members. Empty scope
+population proves closure. Linux without a user scope uses the bounded
+process-group fallback, with weaker crash-orphan proof. Cancellation and
+late-start cleanup use the selected containment mode.
 
-`profile.ts` remains authoritative for canonical path resolution, operation leases,
-birth identity, and argv checks. `owner-process-reaper.ts` and
-`operator-browser-watchdog.ts` retain manifests, orphan reconciliation, and
-containment. Connect ceremony custody is defined in the
+`profile.ts` owns canonical path resolution and the broker's kernel-released
+SQLite lock.
+`browser-scope.ts` owns Linux Chrome containment and SIGINT → bounded wait →
+SIGKILL teardown; `session/lifecycle.ts` owns per-session timers. There are no
+owner manifests or process-marker watchdog. Connect ceremony custody is defined in the
 [broker guide](browser-broker.md); the shared graceful-quit helper lives in
 `browser-process-runtime.ts` and is re-exported by `browser.ts`.
 
@@ -90,12 +87,13 @@ test (`identity-runtime.test.ts` exercises it against a fake handle).
   that sanctioned path into an automatic one for a settings change (notably a
   new `proxy` from `operate_start`): when no other session is active on the
   shared profile, it closes the live Chrome through the ordinary owner-close
-  path, releases the profile lease, calls `forgetAfterShutdown()`, and
+  path, calls `forgetAfterShutdown()`, and
   relaunches with the requested settings — no broker-process kill. With other
   active sessions it refuses instead of yanking the shared Chrome; the
   persistent profile, enrollment, and Google login all survive the recycle.
 
-`broker/runtime.ts` owns the identity runtime and physical profile lease.
+`broker/runtime.ts` owns the identity runtime; `broker/daemon.ts` holds the
+physical profile SQLite lock.
 `session/lifecycle.ts` acquires and releases session pages through broker custody;
 it cannot launch Chrome. Explicit harness starts accept caller-owned pages.
 `browser-close-cookie.test.ts` covers cookie persistence through physical shutdown,

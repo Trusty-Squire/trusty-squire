@@ -1,11 +1,9 @@
 import { resolveBrokerSocket } from "./discovery.js";
-import { brokerElectionRoot } from "./discovery.js";
-import { lstat, mkdir } from "node:fs/promises";
-import { dirname } from "node:path";
+import { lstat, rm, unlink } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { createHash } from "node:crypto";
 import { createSessionGuard, setServingAccountId } from "../../session-guard.js";
 import { setSelfManagedChromeTerminationSignalExitEnabled } from "../browser.js";
-import { startOwnerProcessReaper } from "../owner-process-reaper.js";
 import {
   acquireProfileOperationGuard,
   profilePathIdentity,
@@ -15,6 +13,7 @@ import {
 import { brokerBusyStatus } from "./status.js";
 import { installBrokerBrowserCustody } from "./custody.js";
 import { BrokerRuntime } from "./runtime.js";
+import { stopBrowserScope } from "../browser-scope.js";
 import { OperatorBroker } from "./operator.js";
 import { BrokerRefusal } from "./refusal.js";
 import { listenBroker } from "./transport.js";
@@ -86,15 +85,17 @@ export async function runBrokerDaemon(): Promise<void> {
   const cellId = createHash("sha256")
     .update(JSON.stringify([session?.account_id ?? null, profilePathIdentity(CHROME_PROFILE_DIR)]))
     .digest("hex");
-  const electionRoot = brokerElectionRoot(CHROME_PROFILE_DIR);
-  await mkdir(electionRoot, { recursive: true, mode: 0o700 });
+  // The fd is the broker's sole profile authority. A crash releases it in the
+  // kernel; the remaining inode carries no owner record.
+  const profileElection = acquireProfileOperationGuard(CHROME_PROFILE_DIR);
+  await stopBrowserScope(CHROME_PROFILE_DIR);
+  // One-time upgrade cleanup. Old file leases are not consulted by this broker.
+  await rm(join(dirname(profilePathIdentity(CHROME_PROFILE_DIR)), ".trusty-squire-broker-leases"), {
+    recursive: true, force: true,
+  });
   const runtime = new BrokerRuntime();
   installBrokerBrowserCustody(runtime);
   setSelfManagedChromeTerminationSignalExitEnabled(false);
-  startOwnerProcessReaper();
-  // Broker election is anchored beside the canonical profile, independent of
-  // each client's socket path or TMPDIR.
-  const profileElection = acquireProfileOperationGuard(CHROME_PROFILE_DIR, electionRoot);
   runtime.claimProfile();
   const operator = new OperatorBroker({
     registryBaseUrl: process.env.ADAPTER_REGISTRY_URL ?? "https://registry.trustysquire.ai",
@@ -108,6 +109,11 @@ export async function runBrokerDaemon(): Promise<void> {
     const inventory = operator.authority.inventory();
     return inventory.sessions === 0 && inventory.admitting === 0 && inventory.closing === 0;
   };
+  // Only the elected SQLite lock holder may remove a dead predecessor's socket.
+  // The transport itself simply binds and therefore respects live listeners.
+  await unlink(path).catch((error: NodeJS.ErrnoException) => {
+    if (error.code !== "ENOENT") throw error;
+  });
   const listener = await listenBroker(path, {
     connected: async (principal, params) => {
       const probe = params.probe === true;

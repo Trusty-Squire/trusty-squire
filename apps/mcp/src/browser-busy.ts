@@ -18,7 +18,7 @@ import {
   resolveBrokerSocket,
 } from "./bot/broker/discovery.js";
 import { BrokerRefusal } from "./bot/broker/refusal.js";
-import { BrokerClient, brokerEndpointHasLiveListener } from "./bot/broker/transport.js";
+import { BrokerClient } from "./bot/broker/transport.js";
 import { currentProfileDir, profilePathIdentity, readLockHolder } from "./bot/profile.js";
 
 /**
@@ -303,8 +303,14 @@ async function callWithWireAbort(
  */
 export async function browserBusy(): Promise<BrowserStatus> {
   const socket = brokerSocketPath();
-  if (!(await brokerEndpointHasLiveListener(socket))) return unbrokeredBrowserStatus();
-  const client = await BrokerClient.connect(socket, { probe: true });
+  let client: BrokerClient;
+  try {
+    client = await BrokerClient.connect(socket, { probe: true });
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "ECONNREFUSED") return unbrokeredBrowserStatus();
+    throw error;
+  }
   try {
     return statusFromWire(await client.call("status", {}));
   } finally {

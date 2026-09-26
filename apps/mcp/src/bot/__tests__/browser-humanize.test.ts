@@ -11,7 +11,6 @@ import {
   ownedChromeProcessTreeState,
   signalOwnedChromeProcessTree,
 } from "../browser.js";
-import { operatorBrowserMarkerStartedAt } from "../operator-browser-watchdog.js";
 import { closeProfileWithProof } from "../profile.js";
 import type { BrowserDriver } from "../driver/types.js";
 
@@ -66,7 +65,7 @@ describe("BrowserController humanize option", () => {
 
       const marker = browser.operatorBrowserMarker();
 
-      expect(operatorBrowserMarkerStartedAt(marker)).toBe(2_000);
+      expect(marker).toMatch(/^[0-9a-f-]{36}$/);
       expect(browser.operatorBrowserMarker()).toBe(marker);
     } finally {
       now.mockRestore();

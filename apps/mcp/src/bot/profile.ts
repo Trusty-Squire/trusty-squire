@@ -8,19 +8,17 @@
 
 import { AsyncLocalStorage } from "node:async_hooks";
 import { execFileSync } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
+import { createRequire } from "node:module";
 import {
   lstatSync,
-  linkSync,
+  mkdirSync,
   readFileSync,
   readlinkSync,
   realpathSync,
   readdirSync,
-  renameSync,
-  rmSync,
-  writeFileSync,
 } from "node:fs";
-import { homedir, hostname, tmpdir } from "node:os";
+import { homedir, hostname } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 
 export const CHROME_PROFILE_DIR =
@@ -33,7 +31,7 @@ export const CHROME_PROFILE_DIR =
  * deliberately re-points `TRUSTY_SQUIRE_PROFILE_DIR` at the target agent's
  * recorded profile (`withConnectTargetEnvironment`) before it does any broker
  * or browser work. Every runtime resolution of "the profile" — a broker
- * endpoint, an election root, a profile lock — must therefore read the
+ * endpoint or profile lock — must therefore read the
  * environment live. Reading the frozen constant instead addresses a
  * DIFFERENT profile's broker than the one about to be guarded, which skips
  * the shared browser and collides with the live broker that owns the real profile.
@@ -59,9 +57,8 @@ export function profilePathIdentity(profileDir: string): string {
   }
 }
 
-// Chrome's single-instance trio. SingletonLock is a symlink whose target
-// is "<hostname>-<pid>"; the other two are sockets/cookies beside it.
-const SINGLETON_FILES = ["SingletonLock", "SingletonSocket", "SingletonCookie"] as const;
+// Chrome's SingletonLock is a symlink whose target is "<hostname>-<pid>".
+// It belongs to Chrome; Squire reads it for diagnostics and never unlinks it.
 
 // Thrown when the operation guard or Chrome's SingletonLock proves that a
 // live process already owns the profile. Interactive CLI/MCP entry points
@@ -87,9 +84,7 @@ export interface ProfileProcessIdentity {
   start_time: string;
   user_data_dir: string;
   process_group_id?: number | "unknown";
-  // Exact per-launch marker inherited by every browser process. It lets the
-  // owner reaper prove a detached process group still belongs to this launch
-  // after the group's original leader has exited.
+  // Diagnostic marker retained for the portable process-group fallback.
   process_marker?: string;
 }
 
@@ -449,7 +444,6 @@ export async function closeProfileWithProof(opts: {
     state = identityState();
   }
   if (state === "stale") {
-    clearStaleSingletonLock(opts.profileDir);
     return "closed";
   }
   if (state === "unknown") return "unknown";
@@ -461,242 +455,64 @@ export async function closeProfileWithProof(opts: {
   return "force_closed_unproven";
 }
 
-interface ProfileOperationOwner {
-  host: string;
-  pid: number;
-  start_time: string | null;
-  token: string;
-}
-
+const require = createRequire(import.meta.url);
+const Database = require("better-sqlite3") as typeof import("better-sqlite3");
 const profileOperationContext = new AsyncLocalStorage<ReadonlySet<string>>();
-const PROFILE_OPERATION_ORPHAN_GRACE_MS = 30_000;
 
-function profileOperationLockDir(profileDir: string, lockRoot: string): string {
-  const digest = createHash("sha256")
-    .update(profilePathIdentity(profileDir))
-    .digest("hex")
-    .slice(0, 24);
-  return join(lockRoot, `trusty-squire-profile-${digest}.lock`);
+/** A stable SQLite file is only the lock's inode; it contains no owner record. It
+ * must stay outside the profile directory because --force-relogin may replace
+ * that directory while custody is held. */
+export function profileOperationLockPath(profileDir: string): string {
+  const identity = profilePathIdentity(profileDir);
+  const digest = createHash("sha256").update(identity).digest("hex").slice(0, 24);
+  return join(dirname(identity), `.trusty-squire-profile-${digest}.lock.sqlite`);
 }
 
-export interface ProfileOperationLockOwnerRead {
-  host: string;
-  pid: number;
-  start_time: string | null;
-}
-
-/** Reads the recorded owner of a profile operation lease without acquiring
- * it. Returns null when no lease (or an unreadable artifact) sits at the
- * lock path. */
-export function profileOperationLockOwner(
-  profileDir: string,
-  lockRoot: string,
-): ProfileOperationLockOwnerRead | null {
-  const owner = readProfileOperationOwner(profileOperationLockDir(profileDir, lockRoot));
-  if (owner === null) return null;
-  return { host: owner.host, pid: owner.pid, start_time: owner.start_time };
-}
-
-function readProfileOperationOwner(lockDir: string): ProfileOperationOwner | null {
-  try {
-    const ownerPath = lstatSync(lockDir).isDirectory() ? join(lockDir, "owner.json") : lockDir;
-    const parsed: unknown = JSON.parse(readFileSync(ownerPath, "utf8"));
-    if (parsed === null || typeof parsed !== "object") return null;
-    const owner = parsed as Partial<ProfileOperationOwner>;
-    if (
-      typeof owner.host !== "string" ||
-      typeof owner.pid !== "number" ||
-      (owner.start_time !== undefined && typeof owner.start_time !== "string") ||
-      typeof owner.token !== "string"
-    ) {
-      return null;
-    }
-    return {
-      host: owner.host,
-      pid: owner.pid,
-      start_time: owner.start_time ?? null,
-      token: owner.token,
-    };
-  } catch {
-    return null;
-  }
-}
-
-function profileOperationArtifactState(path: string): ProcessIdentityState {
-  const owner = readProfileOperationOwner(path);
-  if (owner !== null) {
-    if (owner.host !== hostname()) return "unknown";
-    if (owner.start_time === null) {
-      return processExistenceState(owner.pid).state === "missing" ? "stale" : "unknown";
-    }
-    return processBirthIdentityState({ pid: owner.pid, start_time: owner.start_time });
-  }
-  try {
-    return Date.now() - lstatSync(path).mtimeMs >= PROFILE_OPERATION_ORPHAN_GRACE_MS
-      ? "stale"
-      : "unknown";
-  } catch (err) {
-    return (err as NodeJS.ErrnoException).code === "ENOENT" ? "stale" : "unknown";
-  }
-}
-
-function quarantineReclaimableProfileOperationLock(lockDir: string): boolean {
-  if (profileOperationArtifactState(lockDir) !== "stale") return false;
-  const tombstone = `${lockDir}.stale-${randomUUID()}`;
-  try {
-    renameSync(lockDir, tombstone);
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return true;
-    return false;
-  }
-  if (profileOperationArtifactState(tombstone) === "stale") {
-    rmSync(tombstone, { recursive: true, force: true });
-    return true;
-  }
-  return false;
-}
-
-function profileOperationArtifacts(
-  lockDir: string,
-  lockRoot: string,
-  kind: "claim" | "stale",
-): string[] {
-  const prefix = `${basename(lockDir)}.${kind}-`;
-  try {
-    return readdirSync(lockRoot)
-      .filter((name) => name.startsWith(prefix))
-      .map((name) => join(lockRoot, name));
-  } catch {
-    return [];
-  }
-}
-
-function scavengeProfileOperationArtifacts(lockDir: string, lockRoot: string): boolean {
-  let retainedTombstone = false;
-  for (const tombstone of profileOperationArtifacts(lockDir, lockRoot, "stale")) {
-    if (profileOperationArtifactState(tombstone) === "stale") {
-      rmSync(tombstone, { recursive: true, force: true });
-    } else {
-      retainedTombstone = true;
-    }
-  }
-  for (const claim of profileOperationArtifacts(lockDir, lockRoot, "claim")) {
-    if (profileOperationArtifactState(claim) === "stale") {
-      rmSync(claim, { recursive: true, force: true });
-    }
-  }
-  return retainedTombstone;
-}
-
-function restoreOwnedProfileOperationTombstone(
-  lockDir: string,
-  lockRoot: string,
-  token: string,
-): boolean {
-  for (const tombstone of profileOperationArtifacts(lockDir, lockRoot, "stale")) {
-    if (readProfileOperationOwner(tombstone)?.token !== token) continue;
-    try {
-      linkSync(tombstone, lockDir);
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== "EEXIST") return false;
-      if (readProfileOperationOwner(lockDir)?.token !== token) return false;
-    }
-    rmSync(tombstone, { force: true });
-    return readProfileOperationOwner(lockDir)?.token === token;
-  }
-  return false;
-}
-
-function ownedProfileOperationLease(
-  lockDir: string,
-  lockRoot: string,
-  token: string,
+/** BEGIN EXCLUSIVE holds SQLite's OS byte-range lock on the open connection.
+ * The kernel drops it on every exit path, including SIGKILL. The file itself
+ * contains no owner record and is never unlinked. */
+export function acquireProfileOperationGuard(
+  profileDir: string = CHROME_PROFILE_DIR,
 ): ProfileOperationLease {
+  const path = profileOperationLockPath(profileDir);
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  let db: InstanceType<typeof Database> | undefined;
+  try {
+    db = new Database(path, { timeout: 0 });
+    db.exec("BEGIN EXCLUSIVE");
+  } catch (error) {
+    db?.close();
+    if ((error as { code?: string }).code === "SQLITE_BUSY" ||
+        (error as { code?: string }).code === "SQLITE_LOCKED") {
+      throw new ProfileBusyError(PROFILE_BUSY_MESSAGE);
+    }
+    throw error;
+  }
   let released = false;
   return {
-    release: (): void => {
+    release(): void {
       if (released) return;
       released = true;
-      if (readProfileOperationOwner(lockDir)?.token === token) {
-        rmSync(lockDir, { recursive: true, force: true });
-        return;
-      }
-      for (const tombstone of profileOperationArtifacts(lockDir, lockRoot, "stale")) {
-        if (readProfileOperationOwner(tombstone)?.token === token) {
-          rmSync(tombstone, { recursive: true, force: true });
-          return;
-        }
-      }
+      try { db!.exec("ROLLBACK"); } finally { db!.close(); }
     },
   };
 }
 
-export function acquireProfileOperationGuard(
-  profileDir: string = CHROME_PROFILE_DIR,
-  lockRoot: string = tmpdir(),
-): ProfileOperationLease {
-  const lockDir = profileOperationLockDir(profileDir, lockRoot);
-  const token = randomUUID();
-  const birth = processBirthIdentity(process.pid);
-  const startTime = birth?.start_time ?? "unknown";
-  for (;;) {
-    if (scavengeProfileOperationArtifacts(lockDir, lockRoot)) {
-      if (
-        restoreOwnedProfileOperationTombstone(lockDir, lockRoot, token) &&
-        !scavengeProfileOperationArtifacts(lockDir, lockRoot)
-      ) {
-        return ownedProfileOperationLease(lockDir, lockRoot, token);
-      }
-      throw new ProfileBusyError(PROFILE_BUSY_MESSAGE);
-    }
-    const claimPath = `${lockDir}.claim-${randomUUID()}`;
-    writeFileSync(
-      claimPath,
-      JSON.stringify({ host: hostname(), pid: process.pid, start_time: startTime, token }),
-      { mode: 0o600, flag: "wx" },
-    );
-    try {
-      linkSync(claimPath, lockDir);
-    } catch (err) {
-      rmSync(claimPath, { force: true });
-      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
-      try {
-        lstatSync(lockDir);
-      } catch (lockErr) {
-        if ((lockErr as NodeJS.ErrnoException).code === "ENOENT") continue;
-        throw err;
-      }
-      if (quarantineReclaimableProfileOperationLock(lockDir)) {
-        continue;
-      }
-      throw new ProfileBusyError(PROFILE_BUSY_MESSAGE);
-    }
-    rmSync(claimPath, { force: true });
-    try {
-      if (scavengeProfileOperationArtifacts(lockDir, lockRoot)) {
-        if (
-          !restoreOwnedProfileOperationTombstone(lockDir, lockRoot, token) ||
-          scavengeProfileOperationArtifacts(lockDir, lockRoot)
-        ) {
-          rmSync(lockDir, { recursive: true, force: true });
-          throw new ProfileBusyError(PROFILE_BUSY_MESSAGE);
-        }
-      }
-    } catch (err) {
-      if (readProfileOperationOwner(lockDir)?.token === token) {
-        rmSync(lockDir, { recursive: true, force: true });
-      }
-      throw err;
-    }
-    return ownedProfileOperationLease(lockDir, lockRoot, token);
+export function profileOperationIsLocked(profileDir: string = CHROME_PROFILE_DIR): boolean {
+  try {
+    const lease = acquireProfileOperationGuard(profileDir);
+    lease.release();
+    return false;
+  } catch (error) {
+    if (error instanceof ProfileBusyError) return true;
+    throw error;
   }
 }
 
 export async function acquireFreeProfileOperationGuard(
   profileDir: string = CHROME_PROFILE_DIR,
-  lockRoot: string = tmpdir(),
 ): Promise<ProfileOperationLease> {
-  const lease = acquireProfileOperationGuard(profileDir, lockRoot);
+  const lease = acquireProfileOperationGuard(profileDir);
   if (await waitForProfileFree(profileDir, { deadlineMs: 0 })) return lease;
   lease.release();
   throw new ProfileBusyError(PROFILE_BUSY_MESSAGE);
@@ -705,12 +521,11 @@ export async function acquireFreeProfileOperationGuard(
 export async function withProfileOperationGuard<T>(
   profileDir: string,
   fn: () => Promise<T>,
-  lockRoot: string = tmpdir(),
 ): Promise<T> {
   const key = profilePathIdentity(profileDir);
   const active = profileOperationContext.getStore();
   if (active?.has(key) === true) return await fn();
-  const lease = await acquireFreeProfileOperationGuard(profileDir, lockRoot);
+  const lease = await acquireFreeProfileOperationGuard(profileDir);
   try {
     return await profileOperationContext.run(new Set([...(active ?? []), key]), fn);
   } finally {
@@ -762,32 +577,6 @@ export function readLockHolder(profileDir: string): LockHolder | null {
   return { host, pid, stale: onThisHost && !isPidAlive(pid) };
 }
 
-function removeSingletons(profileDir: string): void {
-  for (const f of SINGLETON_FILES) {
-    try {
-      rmSync(join(profileDir, f), { force: true });
-    } catch {
-      /* best-effort */
-    }
-  }
-}
-
-// Self-heal a stale Chrome SingletonLock on the bot profile.
-//
-// Chrome single-instances a userDataDir via SingletonLock. A run that was
-// SIGKILLed or a bot Chrome we tore down hard leaves the lock behind, and
-// Playwright's launchPersistentContext then aborts with "Failed to create
-// a ProcessSingleton ... File exists". Removing it is safe ONLY when the
-// holder is provably gone (dead pid on this host). A lock held by a LIVE
-// pid is a genuine concurrent run and is left untouched. Returns true iff
-// a stale lock was cleared. Never throws.
-export function clearStaleSingletonLock(profileDir: string = CHROME_PROFILE_DIR): boolean {
-  const holder = readLockHolder(profileDir);
-  if (holder === null || !holder.stale) return false;
-  removeSingletons(profileDir);
-  return true;
-}
-
 // The pid currently holding the profile's SingletonLock, IF it is on this
 // host. Read right after a successful launch, this is unambiguously the
 // Chrome WE just started (it created the lock). Stored by the caller so
@@ -799,19 +588,7 @@ export function currentProfileHolderPid(profileDir: string = CHROME_PROFILE_DIR)
   return holder.pid;
 }
 
-export function reapLeakedProfileHolder(profileDir: string = CHROME_PROFILE_DIR): boolean {
-  const holder = readLockHolder(profileDir);
-  if (holder === null || holder.host !== hostname()) return false;
-  if (!holder.stale) {
-    const identity = profileProcessIdentity(holder.pid, profileDir);
-    if (identity !== null) signalProfileProcess(identity, profileDir, "SIGKILL");
-    return false;
-  }
-  removeSingletons(profileDir);
-  return true;
-}
-
-export function reapProfileHolderIfOwned(
+export function signalProfileHolderIfOwned(
   profileDir: string,
   identity: ProfileProcessIdentity | null,
   kill: (pid: number, signal: NodeJS.Signals) => unknown = process.kill,
@@ -819,12 +596,9 @@ export function reapProfileHolderIfOwned(
   if (identity === null) return false;
   const holder = readLockHolder(profileDir);
   if (holder === null || holder.host !== hostname() || holder.pid !== identity.pid) return false;
-  if (!holder.stale) {
-    signalProfileProcess(identity, profileDir, "SIGKILL", kill);
-    return false;
-  }
-  removeSingletons(profileDir);
-  return true;
+  if (holder.stale) return false;
+  signalProfileProcess(identity, profileDir, "SIGKILL", kill);
+  return false;
 }
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -845,9 +619,8 @@ export interface WaitForProfileOptions {
 // run a parallel lock system, this waits on Chrome's OWN SingletonLock as
 // the semaphore:
 //   - no lock              → free, return immediately
-//   - lock, holder dead    → stale, reclaim it (clearStaleSingletonLock)
-//   - lock, holder alive   → try identity-proven dead-owner recovery on Linux;
-//                            otherwise poll for release, up to deadlineMs
+//   - lock, holder dead    → let Chrome decide how to handle its own symlink
+//   - lock, holder alive   → poll for release, up to deadlineMs
 //
 // Returns true once the profile is free to open, or false if a live
 // holder never released within the deadline (caller surfaces ProfileBusyError).
@@ -861,28 +634,9 @@ export async function waitForProfileFree(
   const pollMs = opts.pollMs ?? 1_000;
   const deadline = Date.now() + deadlineMs;
   let warned = false;
-  let triedOwnerRecovery = false;
   for (;;) {
     const holder = readLockHolder(profileDir);
-    if (holder === null) return true; // free
-    if (holder.stale) {
-      removeSingletons(profileDir);
-      return true; // reclaimed a dead holder
-    }
-    if (!triedOwnerRecovery && process.platform === "linux" && holder.host === hostname()) {
-      triedOwnerRecovery = true;
-      // A live Chrome PID can belong to a dead MCP owner. The detached
-      // watchdog/startup sweep may not have run yet (or may have died too).
-      // Await the same identity-proven cleanup before declaring the profile
-      // busy. A live/unknown owner or an unrecorded browser is never reclaimed.
-      try {
-        const { sweepOrphanedOwnerProcesses } = await import("./owner-process-reaper.js");
-        await sweepOrphanedOwnerProcesses(undefined, profileDir);
-      } catch {
-        // Recovery uncertainty retains the lock; the normal busy path applies.
-      }
-      continue; // Re-read the lock after cleanup, including a replacement holder.
-    }
+    if (holder === null || holder.stale) return true;
     // Live holder (or a pid on another host we can't reclaim).
     if (!warned) {
       warned = true;

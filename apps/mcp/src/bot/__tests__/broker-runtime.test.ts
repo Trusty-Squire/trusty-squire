@@ -29,25 +29,19 @@ vi.mock("../profile.js", async (importActual) => ({
   profilePathIdentity: (path: string) => path,
   CHROME_PROFILE_DIR: "/unused",
   waitForProfileFree: async () => true,
-  acquireProfileOperationGuard: state.guard,
 }));
 import { BrokerRuntime } from "../broker/runtime.js";
 import { BrokerRefusal } from "../broker/refusal.js";
 import { ProfileBusyError, PROFILE_BUSY_MESSAGE } from "../profile.js";
 import { withBrokerAdmission } from "../broker/admission-context.js";
 import { readBrokerAccountBinding } from "../broker/account-binding.js";
-import {
-  OperatorBrowserProcessWatchdog,
-  createOperatorBrowserMarker,
-  dispatchOperatorBrowserProcessTermination,
-} from "../operator-browser-watchdog.js";
+
 let root: string;
 beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), "ts-broker-runtime-"));
   vi.clearAllMocks();
   state.start.mockResolvedValue(undefined);
   state.close.mockResolvedValue("closed");
-  state.guard.mockReturnValue({ release: state.release });
   state.connected = true;
   state.constructed.length = 0;
 });
@@ -80,7 +74,7 @@ it("shares a physical launch, serializes duplicate tab release, and retains sibl
   expect(state.release).not.toHaveBeenCalled();
   await runtime.release(second as never);
   expect(await runtime.close()).toBe(true);
-  expect(state.release).toHaveBeenCalledTimes(1);
+  expect(state.release).not.toHaveBeenCalled();
 });
 it("does not classify a physical launch as lost before it finishes connecting", async () => {
   let finishStart!: () => void;
@@ -110,47 +104,18 @@ it("does not classify a physical launch as lost before it finishes connecting", 
   await runtime.release(acquired.browser);
   expect(await runtime.close()).toBe(true);
 });
-it("recycles a watchdog-killed browser without a callback before the next session", async () => {
+it("recycles a lost physical browser before the next session", async () => {
   const oldTab = { closeOwnPagesOnly: vi.fn(async () => "closed") };
   const newTab = { closeOwnPagesOnly: vi.fn(async () => "closed") };
   state.attach.mockResolvedValueOnce(oldTab).mockResolvedValueOnce(newTab);
   const runtime = new BrokerRuntime();
-  const first = await runtime.acquire({ profileDir: root });
-  expect(first.browser).toBe(oldTab);
-
-  const marker = createOperatorBrowserMarker(1_000, "broker-recycle");
-  const record = {
-    pid: 301,
-    parentPid: 1,
-    processGroupId: 301,
-    startTime: 17,
-    cpuTicks: 0,
-    marker,
-  };
-  let browserAlive = true;
-  const watchdog = new OperatorBrowserProcessWatchdog({
-    readProcesses: () => (browserAlive ? [record] : []),
-    processMatches: (pid, startTime, seenMarker) =>
-      browserAlive && pid === record.pid && startTime === record.startTime && seenMarker === marker,
-    kill: (_pid, signal) => {
-      if (signal === "SIGKILL") {
-        browserAlive = false;
-        state.connected = false;
-      }
-    },
-    onTerminate: dispatchOperatorBrowserProcessTermination,
-    maxLifetimeMs: 10_000,
-  });
-  expect(await watchdog.check(11_000)).toHaveLength(1);
-  await vi.waitFor(() => expect(runtime.browserLost()).toBe(true), { timeout: 3_000 });
-
+  await runtime.acquire({ profileDir: root });
+  state.connected = false;
+  expect(runtime.browserLost()).toBe(true);
   const second = await runtime.acquire({ profileDir: root });
+  state.connected = true;
   expect(second.browser).toBe(newTab);
-  expect(state.close).toHaveBeenCalledOnce();
-  expect(state.release).toHaveBeenCalledOnce();
-  expect(state.guard).toHaveBeenCalledTimes(2);
   expect(state.start).toHaveBeenCalledTimes(2);
-  expect(oldTab.closeOwnPagesOnly).not.toHaveBeenCalled();
   await runtime.release(second.browser);
   expect(await runtime.close()).toBe(true);
 });
@@ -193,7 +158,7 @@ it("bounds a hung physical launch and retains an unproven process lease", async 
   expect(await runtime.close()).toBe(false);
   state.close.mockResolvedValue("closed");
   expect(await runtime.close()).toBe(true);
-  expect(state.release).toHaveBeenCalledTimes(1);
+  expect(state.release).not.toHaveBeenCalled();
 });
 it("refuses another account on a previously enrolled profile before launching", async () => {
   const first = new BrokerRuntime();
@@ -344,21 +309,4 @@ it("retains target custody when terminal persistence fails and refuses orphan cl
   );
   expect(persisted).toHaveBeenCalledOnce();
   expect(await runtime.close()).toBe(true);
-});
-
-it("refuses a held profile lease under the profile-busy code, not a generic failure", async () => {
-  // A plain ProfileBusyError serializes onto the wire as
-  // broker_execution_failed, which no caller can map to the profile layer.
-  // The `connect` ceremony holding this same lease is the common real case.
-  state.guard.mockImplementation(() => {
-    throw new ProfileBusyError(PROFILE_BUSY_MESSAGE);
-  });
-  const runtime = new BrokerRuntime();
-  await expect(runtime.acquire({ profileDir: root })).rejects.toSatisfy((error: unknown) => {
-    expect(error).toBeInstanceOf(BrokerRefusal);
-    expect((error as BrokerRefusal).code).toBe("profile_busy");
-    expect((error as Error).message).toBe(PROFILE_BUSY_MESSAGE);
-    return true;
-  });
-  expect(state.constructed).toHaveLength(0);
 });

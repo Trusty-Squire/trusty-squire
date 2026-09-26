@@ -3,7 +3,11 @@
 The broker is the sole production path for MCP operator Chrome custody.
 Independent MCP servers retain their session IDs and forward commands
 over local IPC. One broker owns one canonical profile, one Chrome,
-and the existing operator handlers and payment state. There is no direct-server
+and the existing operator handlers and payment state. Each session gets its
+own tab, so agents run concurrently; only Google OAuth sign-in is serialized.
+The profile lock elects the broker and never serializes sessions. A session
+overrun closes its tab, leaving shared Chrome and sibling tabs available.
+There is no direct-server
 browser launch and no fallback anywhere in the product: the broker performs the
 Turnstile-safe self-launch itself, once, and hands every tab out from it.
 
@@ -17,19 +21,19 @@ and starts or attaches the elected broker. `TRUSTY_SQUIRE_BROKER_SOCKET` optiona
 overrides that endpoint; its parent must exist, belong to the current user, and
 have mode 0700. The default private parent is created automatically.
 
-Endpoint election is bind-exclusive against a live incumbent. When the socket
-path exists but no listener answers it (a broker killed with SIGKILL cannot run
-its graceful close, so it orphans `broker.sock`), the starting broker probes the
-endpoint with a client connect, then unlinks the stale socket and binds
-normally. A live listener keeps winning election: the probe succeeds and the
-`EADDRINUSE` refusal is preserved.
+The broker holds one exclusive SQLite transaction on a stable file beside the
+canonical profile. SQLite's OS byte-range lock is released by the kernel when
+the broker dies, including on SIGKILL. It claims the lock before binding its
+socket or launching Chrome. The next broker removes the old
+socket path after claiming the lock, then binds its own listener; the socket
+file itself is never an ownership record.
 
 `operate_start` accepts `proxy` as an HTTP or HTTPS URL (optional credentials)
 or an unauthenticated SOCKS5 URL. It configures the shared browser at launch,
 not an individual tab family. Concurrent sessions must request compatible proxy
 settings; incompatible settings are never applied to the live browser. When no
 other session is active on the profile, a different proxy recycles the shared
-Chrome in-band (close, release the lease, relaunch) without restarting the
+Chrome in-band (close, relaunch) without restarting the
 broker; with other active sessions it is refused with `incompatible_runtime`
 until they finish. The recycle mechanics live in
 [`browser-process-page-boundary.md`](browser-process-page-boundary.md). Omitting
@@ -81,9 +85,9 @@ broker, real Chrome, and real MCP stdio servers.
 Connect approaches the browser only when it needs it. The already-provisioned
 preflight — stored session, account-bound plumbing, and a byte-copy read of the
 profile's cookie store (`detectProviderSessionsFromProfile`) — runs BEFORE any
-broker or browser work, takes no profile lease, waits for nothing, and opens no
+broker or browser work, takes no profile SQLite lock, waits for nothing, and opens no
 browser. An install that is already connected therefore completes while the
-broker keeps both its lease and its Chrome. An absent profile or cookie store
+broker keeps both its SQLite lock and its Chrome. An absent profile or cookie store
 requires the ceremony; a failed preflight probe is reported as `unverified`
 instead of forcing re-pairing.
 
@@ -108,7 +112,7 @@ additional completion gate.
 When an install does need the login ceremony, the ceremony opens the confirm
 page as a TAB in the shared broker browser — an ordinary `open` on a
 `connectOrLaunchBroker` connection, no drain, no second Chrome, and no touch of
-the profile lease. **There is no fallback browser.** The broker is the only
+the broker SQLite lock. **There is no fallback browser.** The broker is the only
 thing in the product that launches one: with no resident broker the ordinary
 connect-or-launch path spawns the daemon (which requires no enrollment), whose
 browser hosts the tab (and keeps the reclaim contracts below). A host with a screen (`hasDisplay()` in
@@ -132,8 +136,7 @@ in `apps/mcp/src/bot/display-env.ts`); every other named display — the
 broker's Xvfb, or the host's screen seen from a screenless connect — is
 exposed over noVNC. The noVNC URL therefore shows whatever that display is
 carrying, the machine's own desktop included; the disclosure label says so.
-Display discovery first reads the holder profile's tracked launch display from
-the owner-reaper manifest, then falls back to the holder's process tree: Chrome
+Display discovery reads the live Chrome process tree: Chrome
 can erase its main process environment while children retain DISPLAY/XAUTHORITY.
 The holder's own evidence classifies its display: every rig this repo starts
 sets DISPLAY and XAUTHORITY together, so a holder carrying DISPLAY without
@@ -208,47 +211,27 @@ and its other sessions intact.
 
 ## Ownership and contracts
 
-- A canonical-profile election lease prevents competing broker processes even
-  when clients choose different socket paths or temporary directories. A
-  separate physical-profile lease coordinates Chrome custody, including the
-  ceremony browser's. The first account-acting open pins the account on disk;
-  a ceremony open names none and touches no binding.
-- Default discovery is probe then unlink then bind: a socket path with no live
-  listener is a dead predecessor's orphan and is removed and rebound; that orphan
-  path has no owner record and no process signaling. A same-contract broker that
-  still answers keeps the endpoint. Neither path replays a mutation.
-- After an upgrade, a client that finds a resident prior-contract broker reclaims
-  the profile before launching a new-contract daemon. Positive identification is
-  required before any signal: the resident must refuse this release's token-less
-  `connect` with the legacy `unauthorized` refusal, still authenticate the
-  pre-Contract-B `hello` handshake (sent only as this post-refusal probe, never
-  a re-added wire operation, and only when the caller has an enrolled agent
-  session token to authenticate it with), and hold this profile's election lease
-  with a live, broker-argv-corroborated owner pid on this host. Reclaim is
-  SIGTERM, then a bounded wait for both the election lease and the socket
-  endpoint to clear, then SIGKILL; if reclaim cannot complete, the client fails
-  with a `broker_unavailable` refusal naming the pid. A just-started
-  same-contract lease holder that has not yet bound its socket is never a
-  reclaim target, and a provably-reborn lease pid is left to the ordinary
-  stale-owner scavenge. The same reclaim runs whenever a client
-  connects-or-launches — the connect ceremony included.
-- A resident from an earlier release that gated `connect` on a credential —
-  every release before the token-less handshake, so this covers an immediate
-  upgrade as well as a rotation that left a broker holding a stale digest — is a
-  separate reclaim. Its refusal of the token-less handshake is the whole upgrade
-  signal; positive identification is the same election-lease and
-  broker-argv-corroborated owner pid on this host plus the profile's account
-  binding naming the caller's own enrolled account. The refusal alone cannot
-  tell an older release from another account's broker — one profile and one
-  socket serve every account on the box — so a resident on a profile bound
-  elsewhere, or carrying no readable binding, is never signalled and the
-  `unauthorized` refusal propagates unchanged. Reclaim uses the same SIGTERM →
-  bounded wait → SIGKILL mechanics, but only when the resident has no attached
-  clients. A broker with an attached client is never killed; the client fails
-  with one `broker_unavailable` refusal naming the pid and the manual TERM
-  reclaim step. Reclaim timings are internal, never a tool parameter or config
-  knob. `broker-prior-contract-reclaim.test.ts` pins both reclaim paths with
-  real child processes, signals, lease files, and sockets.
+- One profile-scoped kernel-released SQLite lock elects the broker, including when clients
+  choose different socket paths. The lock file contains no owner record and is
+  never unlinked. On first start the new daemon deletes the four legacy lease
+  roots. The account binding is separate from ownership: the first
+  account-acting open pins the account, while a ceremony open names none.
+- Linux probes one disposable systemd user scope at broker start. When the
+  user manager and `setpriv` work, Chrome launches inside a named scope before
+  forking, while the broker stays outside it. A new broker drains any old scope
+  with SIGINT, a bounded wait, and SIGKILL. Empty scope population proves
+  Chrome is gone. Without a usable scope Chrome starts in its own process
+  group; normal stop signals that group with SIGINT then SIGKILL after a bound.
+  `setpriv` still gives Chrome parent-death SIGINT when installed. That fallback
+  can leave reparented descendants after a broker crash, as on macOS/Windows.
+  The broker logs its selected mode once. Broker SIGKILL may lose cookies
+  written very recently; normal browser stops use SIGINT so they flush.
+- During upgrade, a client that receives a legacy `unauthorized` handshake
+  identifies the resident broker from the live Unix listener and its broker
+  argv. It requires either the prior wire handshake with an enrolled token or
+  the profile's own account binding before sending SIGTERM to that old broker.
+  It waits for the old listener to disappear, then launches the new broker.
+  Unknown or differently bound listeners are left alone.
 - Each session owns a target family and a serialized command queue. A service
   URL does not reserve a site; one authenticated client drives the shared profile.
   Several connections to the same profile attach at once, one per client process,
@@ -264,10 +247,9 @@ and its other sessions intact.
   one meaning — another connection owns a live session — and never stands in for
   a session that was never created. `broker-forwarder.test.ts` pins the replay.
 - Browser egress is unrestricted for all targets. Session cleanup closes only that owned
-  family. A close that cannot be proven leaves the broker alive holding physical
-  custody. A failed close restores the prior closing state: it must neither latch
-  a new refusal nor clear a pre-existing custody-unproven latch. The existing exact
-  owner-process identity backstop remains the only physical-process custody.
+  family. A close that cannot be proven drains the Chrome scope or process
+  group before another session can use it. Scope population is the strong
+  physical-process custody proof where available.
 - Per-session approval, charge dispatch fences, and post-submit outcome custody
   continue in the existing handlers. Approval notifications travel over the
   originating request's IPC connection to its MCP client before the tool completes;
@@ -292,11 +274,10 @@ and its other sessions intact.
   is never replayed. `broker-operator.test.ts` and `broker-forwarder.test.ts`
   pin both paths.
 - When the shared Chrome dies, the next `operate_start` proves the old process
-  closed, releases the profile lease, and relaunches on the same persistent
-  profile. Live sessions end with it; cookies and enrollment survive on disk.
+  closed through the scope, and relaunches on the same persistent profile. Live sessions end with it; cookies and enrollment survive on disk.
 - Idle shutdown requires zero connected clients, zero live sessions, zero
   in-flight admissions, and zero pending graceful session closes for the
-  configured minutes-scale bound. Graceful Chrome closure precedes lease release.
+  configured minutes-scale bound. Graceful Chrome closure precedes SQLite lock release.
   A connection that declared itself a `status` probe is not a connected client
   for this purpose — see [Busy façade](#busy-façade).
 
@@ -315,10 +296,14 @@ starve the idle timer. The Linux dead-caller regression in
 Implementation entry points: `src/bot/broker/daemon.ts`, `discovery.ts`,
 `authority.ts`, `runtime.ts`, `operator.ts`, `forwarder.ts`, `protocol.ts`, and
 `transport.ts` under `apps/mcp`.
+Linux real-Chrome crash, session-timer, and graceful-cookie regressions are
+`apps/mcp/scripts/kernel-broker-chaos.mjs`, `kernel-session-timer.mjs`,
+`kernel-graceful-cookie.mjs`, and `kernel-no-systemd-browser.mjs`; build the
+MCP package before running them.
 
 ## Busy façade
 
-Browser availability depends on the profile election / SingletonLock lease
+Browser availability depends on the broker SQLite lock and Chrome SingletonLock
 (`profile.ts`) and custody (`custody.ts`); live tab families (`runtime.ts`)
 share the browser. Connect holds an ordinary tab family, not a maintenance
 window. A second consumer imports one fold from
@@ -377,16 +362,10 @@ broker's idle accounting (`BrokerClientRegistry` in `daemon.ts`). Probing is a
 read, and a consumer following the probe-before-act pattern on any cadence
 under the idle bound would otherwise pin the shared Chrome resident forever.
 
-The profile layer reaches the client under `profile_busy` in all of its senses.
-`BrokerRuntime.acquire` converts the `ProfileBusyError` that Chrome's
-SingletonLock and a launch collision raise, because the wire would otherwise
-flatten a plain `Error` to `broker_execution_failed`. The profile-operation
-lease — the one `connect` holds for a whole interactive login — is claimed in
-daemon startup *before* the socket listens, so a held lease kills the daemon
-rather than refusing a request; `connectOrLaunchBroker` therefore reads that
-lease's owner when a spawned daemon dies before attachment and refuses
-`profile_busy` naming the holder, instead of reporting a broker that merely
-failed to start.
+The profile layer reaches the client under `profile_busy` when Chrome's own
+SingletonLock refuses a launch. `BrokerRuntime.acquire` converts that typed
+error for the wire. A competing broker cannot bind or launch because it cannot
+acquire the SQLite lock; clients attach to the elected listener.
 
 A start the broker hands back (no live provider session in the bot profile —
 the likeliest first run) is not a busy layer either: `openTab` throws
@@ -407,8 +386,8 @@ per-layer wire vocabulary never reaches the consumer:
 
 `browserBusy()` is the read-only fold over that one served profile, and
 read-only is load-bearing: it probes for a live broker listener and reads the
-profile's SingletonLock holder. It never reclaims a lock, sweeps owner
-processes, signals anything, or sleeps. A live broker owns the profile lease
+profile's SingletonLock holder. It never reclaims a lock, signals a process,
+or sleeps. A live broker owns the profile SQLite lock
 and multiplexes tab families on one shared Chrome, so its own Chrome is
 reported free rather than as a foreign process to close.
 
@@ -443,8 +422,8 @@ await runFixtureAcceptance(process.cwd(), true);
 JS
 ```
 
-The harness creates an isolated HOME, profile, caches, temporary directory, and
-reaper inventory inside `.broker-acceptance/`. It starts a broker and three
+The harness creates an isolated HOME, profile, caches, and temporary directory
+inside `.broker-acceptance/`. It starts a broker and three
 separate OS client processes. Three loopback origins require persistent HTTP-only
 authentication cookies and a successful provisioning POST. It asserts distinct
 session and target IDs, overlapping activity, exactly one physical Chrome root,

@@ -11,8 +11,9 @@ challenge during a plain `operate_*` drive (captain: challenge renders, expires
 `attemptOperateCaptchaAutoSolve` (`apps/mcp/src/bot/captcha-solve.ts`) runs
 unconditionally from every observation (`observe.ts`). Its diagnostics — the
 `[captcha-autosolve-diag]` `console.error` lines AND the `provision-audit`
-entries — go to **the broker daemon's stderr**,
-`~/.trusty-squire/.trusty-squire-broker-leases/launch/broker.log`, never to the
+entries — go to **the broker daemon's stderr**, historically captured in a
+lease-root broker log and now in `broker.log` beside the profile-derived broker
+socket, never to the
 MCP server's or operator's log. The daemon serving the reported drive was a
 stale npx-cached release (`@trusty-squire/mcp@1.1.15-rc.2`) launched with
 stderr → `/dev/null`, so **no diagnostic could ever appear**. Watching the
@@ -83,7 +84,7 @@ Added the missing unsealed diag line at detect, matching the existing pattern:
 
 ## Operational notes for future Kaggle/recaptcha repro
 
-- Watch `~/.trusty-squire/.trusty-squire-broker-leases/launch/broker.log`, not
+- Watch `broker.log` beside the profile-derived broker socket, not
   the operator log, for `[captcha-autosolve-diag]` and audit lines; audit
   outcome values are sealed — only diag lines and `challenge_rendered` /
   `card_released` booleans are readable.

@@ -4,12 +4,9 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { BrowserController } from "../browser.js";
 import { IdentityRuntime } from "../identity-runtime.js";
 import {
-  acquireProfileOperationGuard,
   profilePathIdentity,
   CHROME_PROFILE_DIR,
   ProfileBusyError,
-  waitForProfileFree,
-  type ProfileOperationLease,
 } from "../profile.js";
 import type { BrokerBrowserCustody } from "./custody.js";
 import { BrokerRefusal } from "./refusal.js";
@@ -33,8 +30,7 @@ export class BrokerRuntime implements BrokerBrowserCustody {
   private readonly releases = new Map<BrowserController, Promise<void>>();
   private readonly releaseHooks = new Map<BrowserController, Set<() => Promise<void>>>();
   private readonly provenClosed = new WeakSet<BrowserController>();
-  private lease: ProfileOperationLease | undefined;
-  private leaseProfile: string | undefined;
+  private claimedProfile: string | undefined;
   private owner: BrowserController | undefined;
   private closing = false;
   private recycling = false;
@@ -42,13 +38,9 @@ export class BrokerRuntime implements BrokerBrowserCustody {
 
   claimProfile(profileDir = CHROME_PROFILE_DIR): void {
     const identity = profilePathIdentity(profileDir);
-    if (this.lease !== undefined) {
-      if (this.leaseProfile !== identity)
-        throw new BrokerRefusal("incompatible_runtime", "Broker is pinned to one physical profile");
-      return;
-    }
-    this.lease = acquireProfileOperationGuard(identity);
-    this.leaseProfile = identity;
+    if (this.claimedProfile !== undefined && this.claimedProfile !== identity)
+      throw new BrokerRefusal("incompatible_runtime", "Broker is pinned to one physical profile");
+    this.claimedProfile = identity;
   }
 
   /**
@@ -132,8 +124,6 @@ export class BrokerRuntime implements BrokerBrowserCustody {
       const acquired = await this.runtimeIdentity.acquire(settings, async (settings) => {
         this.claimProfile(settings.profileDir);
         try {
-          if (!(await waitForProfileFree(settings.profileDir, { deadlineMs: 0 })))
-            throw new BrokerRefusal("profile_busy", "Profile is already open");
           await mkdir(settings.profileDir, { recursive: true, mode: 0o700 });
           const owner = new BrowserController(settings);
           this.owner = owner;
@@ -158,9 +148,6 @@ export class BrokerRuntime implements BrokerBrowserCustody {
             this.owner === undefined ||
             (await this.owner.close({ cancelStart: true }).catch(() => "unknown")) === "closed";
           if (closed) {
-            this.lease?.release();
-            this.lease = undefined;
-            this.leaseProfile = undefined;
             this.owner = undefined;
           } else this.closing = true;
           throw error;
@@ -178,10 +165,8 @@ export class BrokerRuntime implements BrokerBrowserCustody {
       if (admissionId !== undefined) this.admissionIds.set(browser, admissionId);
       return { browser, profileDir };
     } catch (error) {
-      // The profile-operation lease and Chrome's SingletonLock both refuse
-      // with a plain ProfileBusyError, which the wire flattens to
-      // broker_execution_failed. It is the profile layer saying "not now", so
-      // it has to reach the client under the code that says so.
+      // Chrome's SingletonLock refuses with a plain ProfileBusyError. Preserve
+      // that cause on the wire as profile_busy.
       if (error instanceof ProfileBusyError) throw new BrokerRefusal("profile_busy", error.message);
       throw error;
     } finally {
@@ -204,7 +189,7 @@ export class BrokerRuntime implements BrokerBrowserCustody {
 
   /** Clean IN-BAND identity recycle for a compatible-profile settings change
    * (notably a new proxy): prove the live Chrome closed, release the profile
-   * lease, then forget so the next acquire launches fresh. The broker process
+   * browser, then forget so the next acquire launches fresh. The broker process
    * stays up; the persistent profile — enrollment and Google login cookies —
    * lives on disk and survives the close. Callers must have proven no other
    * active sessions first; recycling under live siblings would yank the
@@ -223,9 +208,6 @@ export class BrokerRuntime implements BrokerBrowserCustody {
           );
       }
     }
-    this.lease?.release();
-    this.lease = undefined;
-    this.leaseProfile = undefined;
     this.owner = undefined;
     this.runtimeIdentity.forgetAfterShutdown();
   }
@@ -247,9 +229,6 @@ export class BrokerRuntime implements BrokerBrowserCustody {
           "Lost broker browser did not close; refusing to relaunch over the shared profile",
         );
     }
-    this.lease?.release();
-    this.lease = undefined;
-    this.leaseProfile = undefined;
     this.owner = undefined;
     this.runtimeIdentity.forgetAfterShutdown();
   }
@@ -313,8 +292,12 @@ export class BrokerRuntime implements BrokerBrowserCustody {
       return;
     }
     const state = await browser.closeOwnPagesOnly();
-    if (state !== "closed")
+    if (state !== "closed") {
+      // A tab that cannot close within its bound makes the shared browser
+      // uncertain. Tear down its scope before another session can use it.
+      await this.owner?.forceCloseOwnedProcessTree().catch(() => undefined);
       throw new BrokerRefusal("cleanup_unknown", "Tab family remains quarantined");
+    }
     for (const hook of hooks) await hook();
     this.provenClosed.add(browser);
     this.sessions.delete(browser);
@@ -363,9 +346,6 @@ export class BrokerRuntime implements BrokerBrowserCustody {
         return false;
       }
     }
-    this.lease?.release();
-    this.lease = undefined;
-    this.leaseProfile = undefined;
     this.owner = undefined;
     this.runtimeIdentity.forgetAfterShutdown();
     return true;

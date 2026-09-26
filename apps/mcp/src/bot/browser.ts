@@ -661,7 +661,10 @@ export class BrowserController implements BrowserDriver {
     }
     await Promise.all(
       [...family].map(async (page) => {
-        await page.close().catch(() => undefined);
+        await Promise.race([
+          page.close().catch(() => undefined),
+          new Promise<void>((resolve) => setTimeout(resolve, 1_000)),
+        ]);
       }),
     );
     if ([...family].some((page) => !page.isClosed())) return "unknown";

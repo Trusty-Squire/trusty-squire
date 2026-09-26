@@ -22,7 +22,7 @@ import {
   launchWithProfileGate,
   ProfileBusyError,
 } from "../profile.js";
-import { OPERATOR_BROWSER_MARKER_ENV } from "../operator-browser-watchdog.js";
+import { OPERATOR_BROWSER_MARKER_ENV } from "../browser-launch-marker.js";
 import {
   openInstallConfirmInBotChrome,
   classifyGoogleAuthState,
@@ -195,7 +195,6 @@ describe("login browser lifecycle guards", () => {
     vi.useFakeTimers();
     const profileDir = "/unused/profile";
     const readIdentity = vi.fn(() => null);
-    const clearStaleLock = vi.fn(() => false);
     const resolving = resolvePersistentFallbackIdentity({
       profileDir,
       platform: "linux",
@@ -203,13 +202,11 @@ describe("login browser lifecycle guards", () => {
       pollMs: 25,
       currentHolderPid: () => 424_244,
       readIdentity,
-      clearStaleLock,
     });
 
     await vi.advanceTimersByTimeAsync(100);
     await expect(resolving).resolves.toEqual({ state: "unknown" });
     expect(readIdentity).toHaveBeenCalled();
-    expect(clearStaleLock).toHaveBeenCalled();
 
     const controller = new BrowserController({ profileDir });
     const cleanupUnproven = vi.fn(async () => undefined);

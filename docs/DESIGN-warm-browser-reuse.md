@@ -26,37 +26,45 @@ Interactive `connect` uses that real profile too. Its ceremony admission
 exception, completion, and cookie-snapshot probes are owned by the
 [broker guide](browser-broker.md).
 
-## Lease, ownership, and containment
+## Kernel ownership and containment
 
-The profile lease resolves the recorded holder by host, PID, and process start
-time. A proven-dead or absent holder is reaped and claimed; a live or
-indeterminate holder returns `PROFILE_BUSY_MESSAGE`. There is no TTL.
+One broker holds an exclusive SQLite transaction on the canonical profile's
+stable lock file for its whole life. SQLite's OS byte-range lock is released by
+the kernel on every process exit, including SIGKILL. The file contains no owner
+data and is never removed. Sessions do not
+acquire the lock; each owns only a tab family in the shared Chrome.
 
-### Recovering after reconnect
+On Linux with a working systemd user manager and `setpriv`, Chrome starts inside
+one named user scope per profile before it forks. The broker stays outside that
+scope. The launch wrapper gives its
+`systemd-run` parent a parent-death SIGINT, so Chrome exits when its broker
+dies. A crash may lose cookies written in the last ~30 seconds. The next
+broker, after claiming the lock, sends SIGINT to the
+scope, waits briefly, then uses SIGKILL on the remaining scope members. Empty
+scope population is the proof that physical custody ended. Chrome's own
+`SingletonLock` is left to Chrome to handle.
 
-Use the [broker recovery contract](browser-broker.md#ownership-and-recovery-contracts)
-for connection loss, retained session capabilities, and uncertain payment outcomes;
-the [configuration section](browser-broker.md#configuration-and-operation) explains
-the accepted fresh-lineage limitation after an operator process restart.
-An unknown session is not a release receipt or permission to repeat a payment.
-Use the original live connection to finish an owned session when available.
-Never delete `SingletonLock` or manually kill a shared process to bypass custody.
+On Linux without a usable user scope, Chrome launches in its own process group.
+The broker sends SIGINT to that group, waits briefly, then sends SIGKILL on a
+normal stop. `setpriv` still supplies parent-death SIGINT when installed. This
+mode, like macOS and Windows, cannot prove that reparented Chrome descendants
+are gone after a broker crash; the broker logs the selected mode once.
 
-Raw PID equality is never authority to signal a process. A local browser binding
-records the host, PID, Linux process start time, Trusty Squire launch marker,
-and normalized expected `--user-data-dir`. Cleanup signals only processes whose
-birth identity and exact profile path still match. Root-PID-only signaling and
-broad `pkill` remain forbidden.
+Ordinary session expiry is a broker timer. It closes that session's tab family
+and leaves sibling sessions and Chrome running. A tab close that misses its
+bound is treated as a wedged shared browser and its scope or process group is
+torn down. Google
+OAuth sign-in uses a broker-local mutex; other sessions remain concurrent.
 
-Every provision session owns the cross-platform watchdog. The 10-minute
-browser-start timeout and shutdown cancellation race ordinary close with the
-bounded identity-proven force boundary. On Linux, each self-launched Chrome runs
-in a detached process group; marked Chromium descendants are accounted through
-`/proc` and bounded SIGTERM-to-SIGKILL cleanup.
+macOS and Windows retain ordinary Playwright close and process-group fallback
+without Linux cgroup containment, so crash-orphan guarantees are weaker there.
 
-The accepted residual is a briefly reparented idle renderer. The strict cgroup
-follow-up remains tracked by
-[`TODOS.md`](../TODOS.md#ts-operator-browser-cgroup-containment-p1-infra).
+### Recovery after reconnect
+
+Use the [broker recovery contract](browser-broker.md#ownership-and-contracts)
+for connection loss, retained session capabilities, and uncertain payment
+outcomes. An unknown session is not a release receipt or permission to repeat
+a payment.
 
 ## Preserved invariants
 

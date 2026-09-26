@@ -1,0 +1,11 @@
+#!/bin/sh
+# Playwright's executablePath entrypoint. The broker remains outside the scope.
+if [ "$TRUSTY_SQUIRE_CHROME_CONTAINMENT" = "scope" ]; then
+  exec setpriv --pdeathsig INT systemd-run --user --scope --collect \
+    --unit "$TRUSTY_SQUIRE_CHROME_SCOPE_UNIT" \
+    "$TRUSTY_SQUIRE_CHROME_BINARY" "$@"
+fi
+if [ "$TRUSTY_SQUIRE_CHROME_SET_PRIV" = "1" ]; then
+  exec setpriv --pdeathsig INT "$TRUSTY_SQUIRE_CHROME_BINARY" "$@"
+fi
+exec "$TRUSTY_SQUIRE_CHROME_BINARY" "$@"

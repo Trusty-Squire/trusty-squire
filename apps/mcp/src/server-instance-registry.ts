@@ -28,7 +28,6 @@ import {
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
-import { sweepOrphanedOwnerProcesses } from "./bot/owner-process-reaper.js";
 import {
   processBirthIdentity,
   processBirthIdentityState,
@@ -526,12 +525,6 @@ export async function reapStaleServerInstances(
       `[trusty-squire] reaped stale prior server pid=${record.pid} ` +
         `identity=${record.agent_identity} v${record.server_version}\n`,
     );
-  }
-  if (summary.reaped > 0) {
-    // Their owner-reaper manifests now name a dead owner, so the existing
-    // sweep collects any browser the tree walk missed (already re-parented
-    // to init before the snapshot).
-    await (runtime.sweep ?? sweepOrphanedOwnerProcesses)().catch(() => 0);
   }
   return summary;
 }

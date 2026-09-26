@@ -20,14 +20,14 @@ import { createServer, type Server } from "node:http";
 import { chromium } from "playwright";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
-import { spawn } from "node:child_process";
+import { spawn, execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import { afterEach, describe, expect, it } from "vitest";
 import { SessionStore } from "../session.js";
-import { brokerElectionRoot, defaultBrokerSocket } from "../bot/broker/discovery.js";
+import { defaultBrokerSocket } from "../bot/broker/discovery.js";
 import { BrokerClient } from "../bot/broker/transport.js";
 import { profilePathIdentity } from "../bot/profile.js";
 
@@ -114,16 +114,13 @@ interface Stack {
   stop: () => Promise<void>;
 }
 
-/** The pid of the elected broker for this profile, when one is resident. */
+/** The elected broker is the process listening on this profile's socket. */
 async function brokerPid(profile: string): Promise<number | null> {
-  const root = brokerElectionRoot(profile);
-  const names = await readdir(root).catch(() => [] as string[]);
-  const lock = names.find((name) => name.endsWith(".lock"));
-  if (lock === undefined) return null;
-  const raw = await readFile(join(root, lock), "utf8").catch(() => null);
-  if (raw === null) return null;
-  const owner = JSON.parse(raw) as { pid?: number };
-  return typeof owner.pid === "number" ? owner.pid : null;
+  try {
+    const output = execFileSync("lsof", ["-t", "-U", "--", defaultBrokerSocket(profile)], { encoding: "utf8" });
+    const pid = Number(output.trim().split(/\s+/)[0]);
+    return Number.isSafeInteger(pid) && pid > 0 ? pid : null;
+  } catch { return null; }
 }
 
 async function waitForBrokerSocket(socket: string): Promise<void> {

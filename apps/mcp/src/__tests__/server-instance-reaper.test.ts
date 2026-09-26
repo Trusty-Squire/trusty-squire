@@ -213,13 +213,11 @@ describe("reapStaleServerInstances", () => {
   }
 
   it("terminates an orphaned prior instance and its whole child tree", async () => {
-    // pid 100 is the wedged server; 101 its Chrome, 102 a Chrome renderer,
-    // 103 the owner-process-reaper worker it left behind.
-    const alive = new Set([100, 101, 102, 103]);
+    // pid 100 is the wedged server; 101 and 102 are its child processes.
+    const alive = new Set([100, 101, 102]);
     const tree = new Map<number, number>([
       [101, 100],
       [102, 101],
-      [103, 100],
     ]);
     const killed: Array<[number, NodeJS.Signals]> = [];
     const root = rootWith([
@@ -229,7 +227,6 @@ describe("reapStaleServerInstances", () => {
         last_activity_at: NOW - 5 * 60_000,
       }),
     ]);
-    const sweep = vi.fn(async () => 0);
 
     const summary = await reapStaleServerInstances({
       rootDir: root,
@@ -250,7 +247,6 @@ describe("reapStaleServerInstances", () => {
         if (pid !== 100) alive.delete(pid);
       },
       wait: async () => undefined,
-      sweep,
     });
 
     expect(summary.reaped).toBe(1);
@@ -259,13 +255,10 @@ describe("reapStaleServerInstances", () => {
         .filter(([, signal]) => signal === "SIGTERM")
         .map(([pid]) => pid)
         .sort(),
-    ).toEqual([100, 101, 102, 103]);
+    ).toEqual([100, 101, 102]);
     // Grace first, SIGKILL only for what survived it.
     expect(killed.filter(([, signal]) => signal === "SIGKILL")).toEqual([[100, "SIGKILL"]]);
-    expect(killed.every(([pid]) => [100, 101, 102, 103].includes(pid))).toBe(true);
-    // The dead owner's reaper manifest is swept so a re-parented browser the
-    // PPid walk already missed still goes.
-    expect(sweep).toHaveBeenCalledOnce();
+    expect(killed.every(([pid]) => [100, 101, 102].includes(pid))).toBe(true);
   });
 
   it("leaves a live same-identity server and a live different-identity server alone", async () => {
