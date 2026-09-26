@@ -10,52 +10,12 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
-import {
-  lstatSync,
-  mkdirSync,
-  readFileSync,
-  readlinkSync,
-  realpathSync,
-  readdirSync,
-} from "node:fs";
-import { homedir, hostname } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { lstatSync, mkdirSync, readFileSync, readlinkSync, readdirSync } from "node:fs";
+import { hostname } from "node:os";
+import { dirname, join } from "node:path";
+import { CHROME_PROFILE_DIR, currentProfileDir, profilePathIdentity } from "./profile-path.js";
 
-export const CHROME_PROFILE_DIR =
-  process.env.TRUSTY_SQUIRE_PROFILE_DIR ?? join(homedir(), ".trusty-squire", "chrome-profile");
-
-/**
- * The profile directory in force for THIS call.
- *
- * `CHROME_PROFILE_DIR` freezes the launch-time environment, but `connect`
- * deliberately re-points `TRUSTY_SQUIRE_PROFILE_DIR` at the target agent's
- * recorded profile (`withConnectTargetEnvironment`) before it does any broker
- * or browser work. Every runtime resolution of "the profile" — a broker
- * endpoint or profile lock — must therefore read the
- * environment live. Reading the frozen constant instead addresses a
- * DIFFERENT profile's broker than the one about to be guarded, which skips
- * the shared browser and collides with the live broker that owns the real profile.
- */
-export function currentProfileDir(): string {
-  const configured = (process.env.TRUSTY_SQUIRE_PROFILE_DIR ?? "").trim();
-  return configured.length > 0 ? configured : CHROME_PROFILE_DIR;
-}
-
-export function profilePathIdentity(profileDir: string): string {
-  const absolute = resolve(profileDir);
-  const suffix: string[] = [];
-  let candidate = absolute;
-  for (;;) {
-    try {
-      return join(realpathSync.native(candidate), ...suffix.reverse());
-    } catch {
-      const parent = dirname(candidate);
-      if (parent === candidate) return absolute;
-      suffix.push(basename(candidate));
-      candidate = parent;
-    }
-  }
-}
+export { CHROME_PROFILE_DIR, currentProfileDir, profilePathIdentity };
 
 // Chrome's SingletonLock is a symlink whose target is "<hostname>-<pid>".
 // It belongs to Chrome; Squire reads it for diagnostics and never unlinks it.

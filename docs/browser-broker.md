@@ -14,10 +14,14 @@ Turnstile-safe self-launch itself, once, and hands every tab out from it.
 
 ## Shared MCP socket and relay
 
-Start one resident `mcp broker` per host. It listens for MCP at
-`~/.trusty-squire/mcp.sock` in the existing 0700 private Squire directory
-(socket mode 0600). This path is under the host home so an agent with
-`PrivateTmp` or a separate `/tmp` can still reach it when that home path is
+Start one resident `mcp broker` per browser profile. The canonical default
+profile (`~/.trusty-squire/chrome-profile`) listens for MCP at
+`~/.trusty-squire/mcp.sock`. Any other profile listens at
+`~/.trusty-squire/mcp-<digest>.sock`, where the digest comes from the same
+canonical profile path identity used for broker discovery. Both sockets live
+in the existing 0700 private Squire directory (socket mode 0600). The path is
+under the host home, so an agent with `PrivateTmp` or a separate `/tmp` can
+still reach it when that home path is
 mounted into its sandbox. There is no HTTP endpoint or token. Reaching the
 socket has the same local-user boundary as the existing broker connection.
 The MCP socket has no server-instance record, heartbeat, stale-server sweep,
@@ -41,7 +45,10 @@ server` stdio clients continue to work.
 
 For a Beeline-style MCP configuration, point at the installed package's Node
 entry directly so each agent starts only the small relay and no `npm exec`
-wrapper. Replace the path and identity with the host's values:
+wrapper. Replace the path and identity with the host's values. This example
+uses the default profile; for another profile, set the same
+`TRUSTY_SQUIRE_PROFILE_DIR` in both the broker and relay environments. The relay
+derives that profile's socket path itself:
 
 ```json
 {

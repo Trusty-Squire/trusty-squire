@@ -6,10 +6,11 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { afterEach, expect, it, vi } from "vitest";
 import { OperatorBroker } from "../broker/operator.js";
-import { listenSharedMcp } from "../broker/mcp-socket.js";
+import { listenSharedMcp, sharedMcpSocketPath } from "../broker/mcp-socket.js";
 import { listenBroker } from "../broker/transport.js";
 import { OperatorForwarder } from "../broker/forwarder.js";
 import { buildServer } from "../../server.js";
@@ -86,7 +87,12 @@ it("relay sends the agent identity before MCP traffic and exits with its pipe", 
   const bin = fileURLToPath(new URL("../../bin.ts", import.meta.url));
   const relay = spawn(process.execPath, ["--import", "tsx", bin, "relay"], {
     cwd: process.cwd(),
-    env: { ...process.env, HOME: root, TRUSTY_SQUIRE_AGENT_IDENTITY: "relay-agent" },
+    env: {
+      ...process.env,
+      HOME: root,
+      TRUSTY_SQUIRE_PROFILE_DIR: join(root, ".trusty-squire", "chrome-profile"),
+      TRUSTY_SQUIRE_AGENT_IDENTITY: "relay-agent",
+    },
     stdio: ["pipe", "pipe", "pipe"],
   });
   cleanup.push(async () => {
@@ -119,6 +125,61 @@ it("relay sends the agent identity before MCP traffic and exits with its pipe", 
   expect((await initialized).id).toBe(1);
   relay.stdin.end();
   await new Promise<void>((resolve) => relay.once("exit", () => resolve()));
+});
+
+it("serves two profile brokers through their own relays at the same time", async () => {
+  const root = await mkdtemp(join(process.cwd(), "../..", ".mp-"));
+  cleanup.push(async () => await rm(root, { recursive: true, force: true }));
+  const profiles = [
+    join(root, ".trusty-squire", "chrome-profile"),
+    join(root, ".trusty-squire", "signup-test-profile"),
+  ];
+  const paths = profiles.map((profile) => sharedMcpSocketPath(root, profile));
+  expect(paths[0]).toBe(join(root, ".trusty-squire", "mcp.sock"));
+  expect(paths[1]).toMatch(/mcp-[0-9a-f]{16}\.sock$/);
+  expect(paths[0]).not.toBe(paths[1]);
+  const admissions = [0, 0];
+  for (const [index, path] of paths.entries()) {
+    const listener = await listenSharedMcp(
+      new OperatorBroker({ registryBaseUrl: "http://unused.test" }),
+      path,
+      () => {
+        admissions[index] = (admissions[index] ?? 0) + 1;
+        return {
+          bind: async () => null,
+          inspect: async () => ({ problem: null }),
+          boundAccountId: () => null,
+        };
+      },
+    );
+    cleanup.push(async () => await listener.close());
+  }
+  const bin = fileURLToPath(new URL("../../bin.ts", import.meta.url));
+  const transports = profiles.map(
+    (profile, index) =>
+      new StdioClientTransport({
+        command: process.execPath,
+        args: ["--import", "tsx", bin, "relay"],
+        env: {
+          ...process.env,
+          HOME: root,
+          TRUSTY_SQUIRE_PROFILE_DIR: profile,
+          TRUSTY_SQUIRE_AGENT_IDENTITY: `profile-agent-${index}`,
+        } as Record<string, string>,
+        stderr: "pipe",
+      }),
+  );
+  const clients = profiles.map(
+    (_, index) => new Client({ name: `profile-client-${index}`, version: "1" }),
+  );
+  cleanup.push(async () => {
+    await Promise.allSettled(clients.map(async (client) => await client.close()));
+    await Promise.allSettled(transports.map(async (transport) => await transport.close()));
+  });
+  await Promise.all(clients.map(async (client, index) => await client.connect(transports[index]!)));
+  const lists = await Promise.all(clients.map(async (client) => await client.listTools()));
+  expect(lists.every(({ tools }) => tools.some(({ name }) => name === "operate_start"))).toBe(true);
+  expect(admissions).toEqual([1, 1]);
 });
 
 it("relay restores initialization after a broker restart and fails a dropped in-flight call", async () => {
@@ -181,7 +242,12 @@ it("relay restores initialization after a broker restart and fails a dropped in-
   const bin = fileURLToPath(new URL("../../bin.ts", import.meta.url));
   const relay = spawn(process.execPath, ["--import", "tsx", bin, "relay"], {
     cwd: process.cwd(),
-    env: { ...process.env, HOME: root, TRUSTY_SQUIRE_AGENT_IDENTITY: "relay-agent" },
+    env: {
+      ...process.env,
+      HOME: root,
+      TRUSTY_SQUIRE_PROFILE_DIR: join(root, ".trusty-squire", "chrome-profile"),
+      TRUSTY_SQUIRE_AGENT_IDENTITY: "relay-agent",
+    },
     stdio: ["pipe", "pipe", "pipe"],
   });
   cleanup.push(async () => {
