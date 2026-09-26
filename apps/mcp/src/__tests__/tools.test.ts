@@ -462,7 +462,7 @@ describe("TOOLS registry", () => {
     ]) {
       expect(findTool(name)).toBeNull();
     }
-    expect(findTool("operate_login")).toBe(operateLoginTool);
+    expect(findTool("operate_login")?.jsonInputSchema).toEqual(operateLoginTool.jsonInputSchema);
   });
 
   it("exposes consolidated lifecycle/recipe schemas and drops their former standalone tool names", () => {

@@ -25,10 +25,6 @@ import {
   withOperatorRequestContext,
 } from "./bot/request-cancellation.js";
 import {
-  maskOperatorSessionOutput,
-  UnknownProvisionSessionError,
-} from "./bot/provision-session.js";
-import {
   heartbeatIntervalMs,
   idleCheckIntervalMs,
   idleTimeoutMs,
@@ -39,7 +35,12 @@ import {
   shutdownDeadlineMs,
 } from "./server-instance-registry.js";
 import { buildToolRegistry, findTool } from "./tools/index.js";
-import { createSessionGuard, setServingAccountId, type SessionGuard } from "./session-guard.js";
+import {
+  createSessionGuard,
+  setServingAccountId,
+  withServingAccountId,
+  type SessionGuard,
+} from "./session-guard.js";
 import { VERSION } from "./version.js";
 
 const SERVER_NAME = "trusty-squire";
@@ -183,6 +184,7 @@ export async function buildServer(
     resolveBrokerSocket(),
     sessionGuard ?? createSessionGuard(),
   ),
+  requestingAgent?: string,
 ): Promise<Server> {
   let activeApi = api;
   const tools = buildToolRegistry();
@@ -254,12 +256,12 @@ export async function buildServer(
     // Only the MCP client's own cancellation may cancel operator work — there
     // is no server-side work budget.
     const composed = composeOperatorSignals([extra.signal]);
-    const sessionId =
-      typeof parsed.data.session_id === "string" ? parsed.data.session_id : undefined;
     let lifecycleHeldByWork = false;
     try {
       const callApi = activeApi;
-      callApi.setRequestingAgent(server.getClientVersion()?.name ?? "unknown-agent");
+      callApi.setRequestingAgent(
+        requestingAgent ?? server.getClientVersion()?.name ?? "unknown-agent",
+      );
       const operationId = randomUUID();
       const notifyUser = async (message: string, data?: Record<string, unknown>) => {
         await server.sendLoggingMessage({
@@ -272,10 +274,14 @@ export async function buildServer(
         await withOperatorRequestContext(
           composed.signal,
           async () =>
-            await tool.handler(parsed.data, callApi, {
-              signal: composed.signal,
-              notifyUser,
-            }),
+            await withServingAccountId(
+              sessionGuard?.boundAccountId() ?? null,
+              async () =>
+                await tool.handler(parsed.data, callApi, {
+                  signal: composed.signal,
+                  notifyUser,
+                }),
+            ),
           undefined,
           { operationId },
         );
@@ -300,13 +306,10 @@ export async function buildServer(
         composed.signal,
         tool.name === "operate_finish" ? 500 : 2_000,
       );
-      return toolResultContent(
-        sessionId === undefined ? result : maskOperatorSessionOutput(sessionId, result),
-      );
+      return toolResultContent(result);
     } catch (err) {
       const rawMessage = err instanceof Error ? err.message : String(err);
-      const message =
-        sessionId === undefined ? rawMessage : maskOperatorSessionOutput(sessionId, rawMessage);
+      const message = rawMessage;
       const loginSession =
         tool.name === "operate_login" &&
         "provider" in parsed.data &&
@@ -314,7 +317,8 @@ export async function buildServer(
           ? { session_id: parsed.data.session_id }
           : undefined;
       const brokerUnavailable = err instanceof BrokerRefusal && err.code === "broker_unavailable";
-      const serverUnavailable = brokerUnavailable || err instanceof UnknownProvisionSessionError;
+      const serverUnavailable =
+        brokerUnavailable || (err instanceof Error && err.name === "UnknownProvisionSessionError");
       if (message.startsWith("operator_session_busy:"))
         return errorContent(
           "session_busy",
