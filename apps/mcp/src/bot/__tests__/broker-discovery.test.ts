@@ -98,6 +98,37 @@ describe("broker discovery election", () => {
     await rm(socket.slice(0, socket.lastIndexOf("/")), { recursive: true });
   });
 
+  it("does not report a dead legacy profile lease as a live holder after daemon exit", async () => {
+    const { discovery, profileModule } = await modules();
+    // The legacy operation lease lives in tmpdir(), separate from broker election.
+    const digest = (await import("node:crypto"))
+      .createHash("sha256")
+      .update(profile)
+      .digest("hex")
+      .slice(0, 24);
+    const lock = join(tmpdir(), `trusty-squire-profile-${digest}.lock`);
+    await writeFile(
+      lock,
+      JSON.stringify({ host: hostname(), pid: 2147483647, start_time: "1", token: "dead" }),
+    );
+    socket = discovery.resolveBrokerSocket();
+    state.spawn.mockImplementation(() => ({
+      once: (event: string, callback: (code: number) => void) => {
+        if (event === "exit") setTimeout(() => callback(1), 0);
+      },
+      unref: vi.fn(),
+    }));
+    try {
+      await expect(discovery.connectOrLaunchBroker(socket)).rejects.toMatchObject({
+        code: "broker_unavailable",
+      });
+      const nextSession = profileModule.acquireProfileOperationGuard(profile);
+      nextSession.release();
+    } finally {
+      await rm(lock, { force: true });
+    }
+  });
+
   it("attaches to an election holder without launching another broker", async () => {
     const { discovery, profileModule, transport } = await modules();
     const electionRoot = discovery.brokerElectionRoot(profile);

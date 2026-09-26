@@ -1,11 +1,19 @@
 import { describe, expect, it, vi } from "vitest";
+import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { hostname, tmpdir } from "node:os";
+import { join } from "node:path";
+import { acquireProfileOperationGuard, processBirthIdentityState } from "../profile.js";
 import {
   OperatorBrowserProcessWatchdog,
   OperatorBrowserWatchdog,
+  OPERATOR_BROWSER_MARKER_ENV,
   createOperatorBrowserMarker,
   dispatchOperatorBrowserProcessTermination,
   isOperatorChromiumCommand,
   operatorBrowserProcessCommandState,
+  operatorBrowserProcessMarkerState,
   operatorBrowserMarkerStartedAt,
   type OperatorBrowserProcessRecord,
   type OperatorBrowserWatchdogReason,
@@ -114,6 +122,113 @@ describe("operator browser process watchdog", () => {
     ]);
     await vi.waitFor(() => expect(killed).toEqual([205]));
   });
+
+  it("terminates once even when session teardown refuses an overrun", async () => {
+    const marker = createOperatorBrowserMarker(1_000, "overrun");
+    let alive = true;
+    const record = {
+      pid: 207,
+      parentPid: 1,
+      processGroupId: 207,
+      startTime: 46,
+      cpuTicks: 0,
+      marker,
+    };
+    const kill = vi.fn((_pid: number, signal: NodeJS.Signals) => {
+      if (signal === "SIGKILL") alive = false;
+    });
+    const onTerminate = vi.fn(async () => false);
+    const watchdog = new OperatorBrowserProcessWatchdog({
+      readProcesses: () => (alive ? [record] : []),
+      processMatches: () => alive,
+      kill,
+      onTerminate,
+      maxLifetimeMs: 10_000,
+    });
+
+    expect(await watchdog.check(11_000)).toHaveLength(1);
+    await vi.waitFor(() => expect(onTerminate).toHaveBeenCalledOnce());
+    expect(await watchdog.check(12_000)).toEqual([]);
+    await vi.waitFor(() => expect(alive).toBe(false), { timeout: 3_000 });
+    expect(await watchdog.check(12_000)).toEqual([]);
+    expect(onTerminate).toHaveBeenCalledOnce();
+    expect(kill).toHaveBeenCalledWith(-207, "SIGTERM");
+    expect(kill).toHaveBeenCalledWith(-207, "SIGKILL");
+  });
+
+  it.skipIf(process.platform !== "linux")(
+    "kills a SIGTERM-resistant process group and frees its operation lease",
+    async () => {
+      const root = mkdtempSync(join(tmpdir(), "ts-watchdog-"));
+      const profile = join(root, "profile");
+      const marker = createOperatorBrowserMarker(1_000, "resistant");
+      const lockPath = join(
+        root,
+        `trusty-squire-profile-${createHash("sha256").update(profile).digest("hex").slice(0, 24)}.lock`,
+      );
+      const child = spawn(
+        process.execPath,
+        [
+          "-e",
+          `const fs = require("node:fs");
+           process.on("SIGTERM", () => {});
+           const stat = fs.readFileSync("/proc/self/stat", "utf8");
+           const start = stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19];
+           fs.writeFileSync(${JSON.stringify(lockPath)}, JSON.stringify({host:${JSON.stringify(hostname())},pid:process.pid,start_time:start,token:"resistant"}));
+           process.stdout.write("ready\\n");
+           setInterval(() => {}, 1000);`,
+        ],
+        {
+          detached: true,
+          stdio: ["ignore", "pipe", "ignore"],
+          env: { ...process.env, [OPERATOR_BROWSER_MARKER_ENV]: marker },
+        },
+      );
+      try {
+        await new Promise<void>((resolve, reject) => {
+          child.stdout!.once("data", () => resolve());
+          child.once("error", reject);
+          child.once("exit", () => reject(new Error("child exited before ready")));
+        });
+        const startTime = JSON.parse(readFileSync(lockPath, "utf8")).start_time as string;
+        const record = {
+          pid: child.pid!,
+          parentPid: process.pid,
+          processGroupId: child.pid!,
+          startTime: Number(startTime),
+          cpuTicks: 0,
+          marker,
+        };
+        const alive = () =>
+          processBirthIdentityState({ pid: child.pid!, start_time: startTime }) === "matching";
+        const watchdog = new OperatorBrowserProcessWatchdog({
+          readProcesses: () => (alive() ? [record] : []),
+          processMatches: (pid, birth, expectedMarker) => {
+            const found = operatorBrowserProcessMarkerState(pid);
+            return (
+              pid === child.pid &&
+              birth === Number(startTime) &&
+              alive() &&
+              found.state === "present" &&
+              found.marker === expectedMarker
+            );
+          },
+          onTerminate: async () => false,
+          maxLifetimeMs: 10_000,
+        });
+        expect(() => acquireProfileOperationGuard(profile, root)).toThrow();
+        expect(await watchdog.check(11_000)).toHaveLength(1);
+        await new Promise<void>((resolve) => child.once("exit", () => resolve()));
+        const nextSession = acquireProfileOperationGuard(profile, root);
+        nextSession.release();
+        expect(await watchdog.check(12_000)).toEqual([]);
+      } finally {
+        if (child.exitCode === null && child.pid !== undefined) child.kill("SIGKILL");
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+    7_000,
+  );
 
   it("lets session teardown own marked processes beyond the old process grace", async () => {
     vi.useFakeTimers();
