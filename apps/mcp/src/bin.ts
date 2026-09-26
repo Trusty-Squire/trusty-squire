@@ -13,10 +13,6 @@
 // "am I main?" guard — duplicated in cli.ts and server.ts, and wrong in
 // both when launched via a bin symlink — is gone by construction.
 import process from "node:process";
-import { runBrokerDaemon } from "./bot/broker/daemon.js";
-import { MissingSessionError } from "./api-client.js";
-import { runCli } from "./install/cli.js";
-import { runServer } from "./server.js";
 import { VERSION } from "./version.js";
 
 const argv = process.argv.slice(2);
@@ -34,22 +30,31 @@ if (isVersionFlag) {
 
 const isServer = argv[0] === "server";
 const isBroker = argv[0] === "broker";
+const isRelay = argv[0] === "relay";
 // NB: the `housekeeper` subcommand moved to its own operator-only package
 // (@trusty-squire/housekeeper, the `ts-housekeeper` bin). `mcp housekeeper`
 // no longer exists here; the systemd timer invokes ts-housekeeper directly.
 
 async function dispatch(): Promise<number> {
   if (isBroker) {
+    const { runBrokerDaemon } = await import("./bot/broker/daemon.js");
     await runBrokerDaemon();
     return 0;
   }
   if (isServer) {
+    const { runServer } = await import("./server.js");
     await runServer();
     // runServer force-exits when its client disconnects or it receives a
     // termination signal. A return here is therefore only a normal startup
     // path with no active stdio loop left to keep alive.
     return 0;
   }
+  if (isRelay) {
+    const { runRelay } = await import("./relay.js");
+    await runRelay();
+    return 0;
+  }
+  const { runCli } = await import("./install/cli.js");
   await runCli(argv);
   return 0;
 }
@@ -65,11 +70,11 @@ dispatch()
     //
     // The `server` branch exits from runServer's disconnect/signal shutdown
     // path; `skill` returns its own code via T30 taxonomy.
-    if (!isServer && !isBroker) process.exit(code);
+    if (!isServer && !isBroker && !isRelay) process.exit(code);
   })
   .catch((err: unknown) => {
     // stderr lands in the host agent's MCP log; keep it useful.
-    if (err instanceof MissingSessionError) {
+    if (err instanceof Error && err.name === "MissingSessionError") {
       console.error(err.message);
     } else {
       const surface = isServer ? "server" : "cli";

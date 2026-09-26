@@ -33,6 +33,12 @@ const notificationContext = new AsyncLocalStorage<BrokerNotifier | undefined>();
 export function brokerNotifier(): BrokerNotifier | undefined {
   return notificationContext.getStore();
 }
+export async function withBrokerNotifier<T>(
+  notify: BrokerNotifier | undefined,
+  work: () => Promise<T>,
+): Promise<T> {
+  return await notificationContext.run(notify, work);
+}
 const notificationSchema = z.object({
   message: z.string(),
   data: z.record(z.unknown()).optional(),

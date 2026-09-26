@@ -17,21 +17,11 @@ import { stopBrowserScope } from "../browser-scope.js";
 import { OperatorBroker } from "./operator.js";
 import { BrokerRefusal } from "./refusal.js";
 import { listenBroker } from "./transport.js";
-
-const MIN_BROKER_IDLE_TIMEOUT_MS = 60_000;
-const DEFAULT_BROKER_IDLE_TIMEOUT_MS = 5 * 60_000;
-
-export function brokerIdleTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
-  const configured = Number(env.TRUSTY_SQUIRE_BROKER_IDLE_TIMEOUT_MS);
-  if (!Number.isFinite(configured) || configured <= 0) return DEFAULT_BROKER_IDLE_TIMEOUT_MS;
-  return Math.max(MIN_BROKER_IDLE_TIMEOUT_MS, configured);
-}
+import { listenSharedMcp } from "./mcp-socket.js";
 
 /**
- * Which connections keep the shared Chrome resident. A `status` probe is a
- * read: it must never reset the idle countdown, or a consumer following the
- * probe-before-act pattern on any cadence under the idle bound would pin the
- * browser tree forever.
+ * Wire connections that hold a claim on the browser. Status probes are reads
+ * and do not count as active clients when explicit shutdown checks drain.
  */
 export class BrokerClientRegistry {
   private readonly counting = new Set<string>();
@@ -42,7 +32,7 @@ export class BrokerClientRegistry {
     else this.counting.add(clientId);
   }
 
-  /** Whether this client's traffic should hold off the idle countdown. */
+  /** Whether this wire client holds a claim during explicit shutdown. */
   counts(clientId: string): boolean {
     return !this.probes.has(clientId);
   }
@@ -103,8 +93,6 @@ export async function runBrokerDaemon(): Promise<void> {
   const clients = new BrokerClientRegistry();
   let closing = false;
   let listenerClosed = false;
-  let idleTimer: NodeJS.Timeout | undefined;
-  const idleTimeout = brokerIdleTimeoutMs();
   const drained = (): boolean => {
     const inventory = operator.authority.inventory();
     return inventory.sessions === 0 && inventory.admitting === 0 && inventory.closing === 0;
@@ -119,13 +107,11 @@ export async function runBrokerDaemon(): Promise<void> {
       const probe = params.probe === true;
       clients.admit(principal.clientId, probe);
       if (probe) return;
-      if (idleTimer !== undefined) clearTimeout(idleTimer);
     },
     call: async (principal, method, params, id) => {
       const execute = async (registeredSignal?: AbortSignal): Promise<unknown> => {
         if (clients.counts(principal.clientId)) {
           clients.touch(principal.clientId);
-          if (idleTimer !== undefined) clearTimeout(idleTimer);
         }
         if (closing)
           throw new BrokerRefusal(
@@ -161,24 +147,13 @@ export async function runBrokerDaemon(): Promise<void> {
     },
     abort: (principal, requestId) => operator.cancel(principal, requestId),
     disconnect: async (principal, explicit) => {
-      const counted = clients.counts(principal.clientId);
       await operator.disconnect(principal, explicit);
       clients.retire(principal.clientId);
-      // A probe never held off the countdown, so its departure must not re-arm one.
-      if (!counted) return;
-      scheduleShutdownIfIdle();
     },
   });
-  function scheduleShutdownIfIdle(): void {
-    if (idleTimer !== undefined) clearTimeout(idleTimer);
-    idleTimer = undefined;
-    if (closing || !clients.idle()) return;
-    idleTimer = setTimeout(() => {
-      idleTimer = undefined;
-      void shutdown();
-    }, idleTimeout);
-    idleTimer.unref();
-  }
+  // The MCP listener is a separate surface on the elected broker. It does not
+  // participate in profile election, Chrome custody, or the broker wire.
+  const mcpListener = await listenSharedMcp(operator);
   const shutdown = async (): Promise<void> => {
     if (closing || !clients.idle() || !drained()) return;
     closing = true;
@@ -189,6 +164,7 @@ export async function runBrokerDaemon(): Promise<void> {
     }
     if (!listenerClosed) {
       listenerClosed = true;
+      await mcpListener.close();
       await listener.close();
     }
     profileElection.release();

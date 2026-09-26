@@ -19,6 +19,7 @@ import {
   type SessionStore,
 } from "./session.js";
 import { VERSION } from "./version.js";
+import { AsyncLocalStorage } from "node:async_hooks";
 
 export interface SessionStateProblem {
   code: "account_session_missing";
@@ -49,12 +50,22 @@ export interface SessionGuard {
 // is the pinned value the guard itself starts from, and operator/CI paths
 // (skill CLI, direct registry publishes) run with no guard at all.
 let servingAccount: string | null = null;
+const callAccount = new AsyncLocalStorage<string | null>();
+
+export async function withServingAccountId<T>(
+  id: string | null,
+  work: () => Promise<T>,
+): Promise<T> {
+  return await callAccount.run(id, work);
+}
 
 export function setServingAccountId(accountId: string | null): void {
   servingAccount = accountId;
 }
 
 export function servingAccountId(): string | undefined {
+  const scoped = callAccount.getStore();
+  if (scoped !== undefined) return scoped ?? undefined;
   if (servingAccount !== null) return servingAccount;
   return accountFromEnv();
 }

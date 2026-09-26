@@ -1,5 +1,5 @@
 import { expect, it, vi } from "vitest";
-import { BrokerClientRegistry, brokerIdleTimeoutMs } from "../broker/daemon.js";
+import { BrokerClientRegistry } from "../broker/daemon.js";
 import { brokerEnvironment } from "../broker/discovery.js";
 import { BrokerRuntime } from "../broker/runtime.js";
 
@@ -10,17 +10,10 @@ it("passes the socket path to a detached broker without disturbing its environme
   });
 });
 
-it("uses a minutes-scale idle policy", () => {
-  expect(brokerIdleTimeoutMs({})).toBe(5 * 60_000);
-  expect(brokerIdleTimeoutMs({ TRUSTY_SQUIRE_BROKER_IDLE_TIMEOUT_MS: "1000" })).toBe(60_000);
-  expect(brokerIdleTimeoutMs({ TRUSTY_SQUIRE_BROKER_IDLE_TIMEOUT_MS: "600000" })).toBe(600_000);
-});
-
-it("does not let a status probe keep the shared Chrome resident", () => {
+it("does not count a status probe as an active broker client", () => {
   const clients = new BrokerClientRegistry();
   clients.admit("probe-1", true);
-  // A probe is admitted but never holds off the idle countdown, so a consumer
-  // probing on any cadence cannot pin the browser tree.
+  // A probe is admitted but does not hold a client claim.
   expect(clients.idle()).toBe(true);
   expect(clients.counts("probe-1")).toBe(false);
   clients.touch("probe-1");

@@ -1,7 +1,8 @@
 # Cross-process identity browser broker
 
 The broker is the sole production path for MCP operator Chrome custody.
-Independent MCP servers retain their session IDs and forward commands
+It also hosts one MCP service for agents that opt into the shared endpoint.
+Existing stdio MCP servers retain their session IDs and forward commands
 over local IPC. One broker owns one canonical profile, one Chrome,
 and the existing operator handlers and payment state. Each session gets its
 own tab, so agents run concurrently; only Google OAuth sign-in is serialized.
@@ -10,6 +11,53 @@ overrun closes its tab, leaving shared Chrome and sibling tabs available.
 There is no direct-server
 browser launch and no fallback anywhere in the product: the broker performs the
 Turnstile-safe self-launch itself, once, and hands every tab out from it.
+
+## Shared MCP socket and relay
+
+Start one resident `mcp broker` per host. It listens for MCP at
+`~/.trusty-squire/mcp.sock` in the existing 0700 private Squire directory
+(socket mode 0600). This path is under the host home so an agent with
+`PrivateTmp` or a separate `/tmp` can still reach it when that home path is
+mounted into its sandbox. There is no HTTP endpoint or token. Reaching the
+socket has the same local-user boundary as the existing broker connection.
+The MCP socket has no server-instance record, heartbeat, stale-server sweep,
+or idle exit. Its listener starts and stops with the elected broker.
+
+For each agent MCP connection, `mcp relay` sends one line from
+`TRUSTY_SQUIRE_AGENT_IDENTITY`, then relays MCP stdio messages in both directions.
+If the broker restarts, the relay reconnects while the agent's pipe remains open,
+replays initialization, and returns an error for calls lost in flight. Broker
+sessions and tabs end with the old connection. The relay exits when its pipe
+closes.
+
+The broker creates a separate MCP Server, API client, and broker principal for that
+connection. Session IDs and tabs belong to that principal; closing one agent's
+connection closes its sessions without closing another agent's sessions.
+Vault requests use that connection's agent identity in
+`X-Squire-Agent-Identity`. As with stdio, the label is self-declared and grants
+no authority. Operator tools call the broker's existing ownership layer in
+process; existing `connect/open/command/close/status` wire clients and `mcp
+server` stdio clients continue to work.
+
+For a Beeline-style MCP configuration, point at the installed package's Node
+entry directly so each agent starts only the small relay and no `npm exec`
+wrapper. Replace the path and identity with the host's values:
+
+```json
+{
+  "mcpServers": {
+    "squire": {
+      "command": "node",
+      "args": ["/home/USER/.trusty-squire/lib/node_modules/@trusty-squire/mcp/dist/bin.js", "relay"],
+      "env": { "TRUSTY_SQUIRE_AGENT_IDENTITY": "beeline-agent-1" }
+    }
+  }
+}
+```
+
+The broker can be run as a user service with the same entry path and the
+`broker` subcommand. Start it before agents connect. The legacy `server`
+subcommand remains the installed default for clients that have not opted in.
 
 ## Configuration and operation
 
@@ -40,9 +88,9 @@ until they finish. The recycle mechanics live in
 it requests direct egress. The value is sensitive and is not returned in
 session status, action traces, or saved recipes.
 
-`TRUSTY_SQUIRE_BROKER_IDLE_TIMEOUT_MS` defaults to five minutes, clamped to a
-minimum of one minute. Idle shutdown never
-changes the fact that the next operator call must attach or start a broker.
+The broker stays resident between MCP connections. An explicit broker stop
+closes both sockets after active sessions have drained.
+
 **The broker requires no enrollment.** It is the machine's shared browser, and
 the moment a machine most needs it is the moment it is being enrolled: the
 ceremony has to run somewhere, and an account is exactly what it does not have

@@ -356,6 +356,17 @@ export class OperatorBroker implements BrokerTransportPort {
               const preDispatch = provenPreDispatchMutationFailure(error);
               if (!dispatchAttempted && preDispatch !== null)
                 return new DeliveredPreDispatchFailure(preDispatch.code);
+              // The stdio and shared MCP front ends have no browser-owned card
+              // mask. Scrub a browser error here, before either transport can
+              // return it to a model-facing tool result.
+              if (error instanceof Error) {
+                const masked = maskSessionOutput<string>(session, error.message);
+                if (masked !== error.message)
+                  throw new BrokerRefusal(
+                    error instanceof BrokerRefusal ? error.code : "broker_execution_failed",
+                    masked,
+                  );
+              }
               throw error;
             }
           },
