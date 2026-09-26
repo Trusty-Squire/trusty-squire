@@ -397,7 +397,14 @@ function daemonExitRefusal(
   reason: NodeJS.Signals | number | null,
 ): BrokerRefusal {
   const owner = profileOperationLockOwner(profileDir, tmpdir());
-  if (owner !== null && owner.host === hostname() && owner.pid !== process.pid)
+  if (
+    owner !== null &&
+    owner.host === hostname() &&
+    owner.pid !== process.pid &&
+    (owner.start_time === null
+      ? isProcessAlive(owner.pid)
+      : processBirthIdentityState({ pid: owner.pid, start_time: owner.start_time }) !== "stale")
+  )
     return new BrokerRefusal(
       "profile_busy",
       `The Chrome profile lease is held by pid ${owner.pid}; no operator command was dispatched`,

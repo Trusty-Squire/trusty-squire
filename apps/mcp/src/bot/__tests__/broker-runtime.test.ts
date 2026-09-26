@@ -36,6 +36,11 @@ import { BrokerRefusal } from "../broker/refusal.js";
 import { ProfileBusyError, PROFILE_BUSY_MESSAGE } from "../profile.js";
 import { withBrokerAdmission } from "../broker/admission-context.js";
 import { readBrokerAccountBinding } from "../broker/account-binding.js";
+import {
+  OperatorBrowserProcessWatchdog,
+  createOperatorBrowserMarker,
+  dispatchOperatorBrowserProcessTermination,
+} from "../operator-browser-watchdog.js";
 let root: string;
 beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), "ts-broker-runtime-"));
@@ -103,6 +108,50 @@ it("does not classify a physical launch as lost before it finishes connecting", 
   expect(runtime.browserLost()).toBe(true);
 
   await runtime.release(acquired.browser);
+  expect(await runtime.close()).toBe(true);
+});
+it("recycles a watchdog-killed browser without a callback before the next session", async () => {
+  const oldTab = { closeOwnPagesOnly: vi.fn(async () => "closed") };
+  const newTab = { closeOwnPagesOnly: vi.fn(async () => "closed") };
+  state.attach.mockResolvedValueOnce(oldTab).mockResolvedValueOnce(newTab);
+  const runtime = new BrokerRuntime();
+  const first = await runtime.acquire({ profileDir: root });
+  expect(first.browser).toBe(oldTab);
+
+  const marker = createOperatorBrowserMarker(1_000, "broker-recycle");
+  const record = {
+    pid: 301,
+    parentPid: 1,
+    processGroupId: 301,
+    startTime: 17,
+    cpuTicks: 0,
+    marker,
+  };
+  let browserAlive = true;
+  const watchdog = new OperatorBrowserProcessWatchdog({
+    readProcesses: () => (browserAlive ? [record] : []),
+    processMatches: (pid, startTime, seenMarker) =>
+      browserAlive && pid === record.pid && startTime === record.startTime && seenMarker === marker,
+    kill: (_pid, signal) => {
+      if (signal === "SIGKILL") {
+        browserAlive = false;
+        state.connected = false;
+      }
+    },
+    onTerminate: dispatchOperatorBrowserProcessTermination,
+    maxLifetimeMs: 10_000,
+  });
+  expect(await watchdog.check(11_000)).toHaveLength(1);
+  await vi.waitFor(() => expect(runtime.browserLost()).toBe(true), { timeout: 3_000 });
+
+  const second = await runtime.acquire({ profileDir: root });
+  expect(second.browser).toBe(newTab);
+  expect(state.close).toHaveBeenCalledOnce();
+  expect(state.release).toHaveBeenCalledOnce();
+  expect(state.guard).toHaveBeenCalledTimes(2);
+  expect(state.start).toHaveBeenCalledTimes(2);
+  expect(oldTab.closeOwnPagesOnly).not.toHaveBeenCalled();
+  await runtime.release(second.browser);
   expect(await runtime.close()).toBe(true);
 });
 it("keeps an uncertain failed admission until its own tab cleanup succeeds", async () => {

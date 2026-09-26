@@ -18,6 +18,7 @@ export interface ProcessCpuRecord {
 export interface OperatorBrowserProcessRecord extends ProcessCpuRecord {
   startTime: number;
   marker: string;
+  processGroupId?: number;
 }
 
 export interface CpuSample {
@@ -173,6 +174,7 @@ export function cpuPercentBetween(
 
 function parseProcessStat(pid: number): {
   parentPid: number;
+  processGroupId: number;
   cpuTicks: number;
   startTime: number;
 } | null {
@@ -185,18 +187,20 @@ function parseProcessStat(pid: number): {
       .trim()
       .split(/\s+/);
     const parentPid = Number(fields[1]);
+    const processGroupId = Number(fields[2]);
     const utime = Number(fields[11]);
     const stime = Number(fields[12]);
     const startTime = Number(fields[19]);
     if (
       !Number.isSafeInteger(parentPid) ||
+      !Number.isSafeInteger(processGroupId) ||
       !Number.isFinite(utime) ||
       !Number.isFinite(stime) ||
       !Number.isSafeInteger(startTime)
     ) {
       return null;
     }
-    return { parentPid, cpuTicks: utime + stime, startTime };
+    return { parentPid, processGroupId, cpuTicks: utime + stime, startTime };
   } catch {
     return null;
   }
@@ -367,6 +371,9 @@ export class OperatorBrowserProcessWatchdog {
     for (const marker of [...this.samples.keys()]) {
       if (!groups.has(marker)) this.samples.delete(marker);
     }
+    for (const marker of [...this.terminating]) {
+      if (!groups.has(marker)) this.terminating.delete(marker);
+    }
     const reasons: OperatorBrowserWatchdogReason[] = [];
     for (const [marker, records] of groups) {
       if (this.terminating.has(marker)) continue;
@@ -427,32 +434,59 @@ export class OperatorBrowserProcessWatchdog {
     process.stderr.write(
       `[operator] process watchdog terminate marker=${marker} reason=${JSON.stringify(reason)}\n`,
     );
-    let maySignal = true;
     if (this.options.onTerminate !== undefined) {
       try {
-        maySignal = (await this.options.onTerminate(marker, reason)) !== false;
+        await this.options.onTerminate(marker, reason);
       } catch (error) {
-        maySignal = false;
         const detail = error instanceof Error ? error.message : String(error);
         process.stderr.write(`[operator] process watchdog teardown failed: ${detail}\n`);
       }
     }
-    if (!maySignal) {
-      this.terminating.delete(marker);
-      return;
-    }
     const current = this.readProcesses().filter((record) => record.marker === marker);
     const candidates = current.length > 0 ? current : records;
+    this.signalCandidates(candidates, marker, "SIGTERM");
+    await new Promise<void>((resolve) => setTimeout(resolve, 2_000));
+    this.signalCandidates(
+      this.readProcesses().filter((record) => record.marker === marker),
+      marker,
+      "SIGKILL",
+    );
+    this.samples.delete(marker);
+  }
+
+  private signalCandidates(
+    candidates: readonly OperatorBrowserProcessRecord[],
+    marker: string,
+    signal: NodeJS.Signals,
+  ): void {
+    const signalledGroups = new Set<number>();
     for (const record of candidates) {
       if (!this.processMatches(record.pid, record.startTime, marker)) continue;
+      const groupId = record.processGroupId;
+      const leader =
+        groupId === undefined
+          ? undefined
+          : candidates.find((candidate) => candidate.pid === groupId);
+      if (
+        groupId !== undefined &&
+        leader !== undefined &&
+        this.processMatches(leader.pid, leader.startTime, marker)
+      ) {
+        if (signalledGroups.has(groupId)) continue;
+        try {
+          this.kill(-groupId, signal);
+          signalledGroups.add(groupId);
+          continue;
+        } catch {
+          // A group may disappear after the identity check; try its live member.
+        }
+      }
       try {
-        this.kill(record.pid, "SIGKILL");
+        this.kill(record.pid, signal);
       } catch {
-        continue;
+        // The process exited after its identity check.
       }
     }
-    this.samples.delete(marker);
-    this.terminating.delete(marker);
   }
 }
 
