@@ -37,10 +37,6 @@ import { compactV2AuditValue } from "../compact-observation-v2.js";
 import type { ApiClient } from "../../api-client.js";
 import { loginSessionGuidance } from "../skill-hint.js";
 import type { OAuthProviderId } from "../oauth-providers.js";
-import {
-  OperatorBrowserWatchdog,
-  type OperatorBrowserWatchdogReason,
-} from "../operator-browser-watchdog.js";
 import { createSession } from "./model.js";
 import type { AllowedHostEntry, Session, SessionTerminalTeardownOwner } from "./model.js";
 import { hostStrings, registrableHost } from "./hosts.js";
@@ -213,11 +209,12 @@ async function closeBrowserUntilProven(
 }
 
 function stopSessionWatchdog(session: Session): void {
-  session.watchdog?.stop();
+  if (session.watchdog !== null) clearTimeout(session.watchdog);
+  session.watchdog = null;
 }
 
 function disposeSessionWatchdog(session: Session): void {
-  session.watchdog?.dispose();
+  if (session.watchdog !== null) clearTimeout(session.watchdog);
   session.watchdog = null;
 }
 
@@ -297,59 +294,36 @@ async function forceTerminateProvisionSessionOwned(
   return terminalError;
 }
 
-async function terminateExpiredProvisionSession(
-  session: Session,
-  reason: OperatorBrowserWatchdogReason,
-): Promise<boolean> {
-  if (
-    session.initializing ||
-    session.closing ||
-    session.callCount > 0 ||
-    sessions.get(session.id) !== session
-  ) {
-    return false;
-  }
-  const owner =
-    session.terminalTeardownOwner ??
-    (session.terminalTeardownOwner = {
-      forced: false,
-      forcePromise: null,
-      routinePromise: null,
-      requireProvenBrowserClose: false,
-    });
-  if (owner.forcePromise !== null) return false;
-  if (owner.routinePromise !== null) {
-    await owner.routinePromise;
-    return true;
-  }
-  session.closing = true;
-  stopSessionWatchdog(session);
-  owner.routinePromise = (async () => {
-    if (owner.forcePromise !== null) {
-      await owner.forcePromise;
+/** The broker owns this timer directly. Expiry is a terminal operation,
+ * independent of request callbacks or process-marker discovery. */
+function startSessionWatchdog(session: Session): void {
+  if (session.watchdog !== null) return;
+  const maxLifetimeMs = positiveTimeout("TRUSTY_SQUIRE_OPERATOR_BROWSER_MAX_LIFETIME_MS", 30 * 60_000);
+  const idleTimeoutMs = positiveTimeout("TRUSTY_SQUIRE_SESSION_IDLE_TIMEOUT_MS", 60 * 60_000);
+  const tick = (): void => {
+    session.watchdog = null;
+    if (session.closing || sessions.get(session.id) !== session) return;
+    const now = Date.now();
+    const lifetimeMs = now - session.startedAt;
+    const idleMs = now - session.lastActivityAt;
+    if (lifetimeMs >= maxLifetimeMs || idleMs >= idleTimeoutMs) {
+      const reason = lifetimeMs >= maxLifetimeMs
+        ? { kind: "max_lifetime", lifetime_ms: lifetimeMs, timeout_ms: maxLifetimeMs }
+        : { kind: "idle_timeout", idle_ms: idleMs, timeout_ms: idleTimeoutMs };
+      void forceTerminateProvisionSession(session, "browser_watchdog_terminate", reason)
+        .catch((error) => console.error("[operator] session timer teardown failed", error));
       return;
     }
-    await forceTerminateProvisionSession(session, "browser_watchdog_terminate", { ...reason });
-  })();
-  await owner.routinePromise;
-  return true;
-}
-
-function startSessionWatchdog(session: Session): void {
-  if (session.watchdog !== null) {
-    session.watchdog.start();
-    return;
-  }
-  const watchdog = new OperatorBrowserWatchdog({
-    startedAt: session.startedAt,
-    lastActivityAt: () => session.lastActivityAt,
-    hasActiveCall: () =>
-      brokerBrowserCustody() !== undefined || session.initializing || session.callCount > 0,
-    processMarker: () => session.browser.operatorBrowserMarker?.() ?? null,
-    onTerminate: async (reason) => await terminateExpiredProvisionSession(session, reason),
-  });
-  session.watchdog = watchdog;
-  watchdog.start();
+    const remaining = Math.max(1, Math.min(maxLifetimeMs - lifetimeMs, idleTimeoutMs - idleMs));
+    session.watchdog = setTimeout(tick, remaining);
+    session.watchdog.unref();
+  };
+  const initial = Math.max(1, Math.min(
+    maxLifetimeMs - (Date.now() - session.startedAt),
+    idleTimeoutMs - (Date.now() - session.lastActivityAt),
+  ));
+  session.watchdog = setTimeout(tick, initial);
+  session.watchdog.unref();
 }
 
 /** Thrown when a session-addressed call names a session this process does not own. */

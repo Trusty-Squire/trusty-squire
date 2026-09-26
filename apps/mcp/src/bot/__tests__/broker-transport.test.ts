@@ -1,5 +1,5 @@
 import { createServer, type Socket } from "node:net";
-import { mkdtemp, rm, stat } from "node:fs/promises";
+import { mkdtemp, rm, stat, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -150,7 +150,7 @@ describe("broker IPC", () => {
     }
   });
 
-  it("reclaims a socket and owner record orphaned by a dead broker, but still refuses a live one", async () => {
+  it("leaves stale socket cleanup to the elected daemon and refuses a live listener", async () => {
     const root = await mkdtemp(join(tmpdir(), "ts-ipc-orphan-"));
     const path = join(root, "b.sock");
     // A broker that binds then dies without its graceful close leaves the Unix
@@ -168,10 +168,12 @@ describe("broker IPC", () => {
       child.kill("SIGKILL");
       await new Promise<void>((resolve) => child.once("exit", () => resolve()));
       expect((await stat(path)).isSocket()).toBe(true);
-      const broker = await listenBroker(path, {
-        call: async () => ({}),
-        disconnect: async () => undefined,
-      });
+      const port = { call: async () => ({}), disconnect: async () => undefined };
+      await expect(listenBroker(path, port)).rejects.toThrow("EADDRINUSE");
+      // The elected daemon unlinks only after it holds the profile flock.
+      // Transport never probes or unlinks a socket on its own.
+      await unlink(path);
+      const broker = await listenBroker(path, port);
       let client: BrokerClient | undefined;
       try {
         client = await BrokerClient.connect(path);

@@ -5,8 +5,8 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } fr
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
+import { scopedChromeCommand } from "./browser-scope.js";
 import {
-  clearStaleSingletonLock,
   currentProfileHolderPid,
   processBirthIdentity,
   processBirthIdentityState,
@@ -14,17 +14,13 @@ import {
   ProfileBusyError,
   profileProcessIdentity,
   profileProcessMatches,
-  reapProfileHolderIfOwned,
+  signalProfileHolderIfOwned,
   signalProfileProcess,
   type ProcessIdentityState,
   type ProfileCloseState,
   type ProfileProcessIdentity,
 } from "./profile.js";
-import {
-  createOperatorBrowserMarker,
-  OPERATOR_BROWSER_MARKER_ENV,
-  operatorBrowserProcessMarker,
-} from "./operator-browser-watchdog.js";
+import { createOperatorBrowserMarker, OPERATOR_BROWSER_MARKER_ENV } from "./browser-launch-marker.js";
 import {
   bindOwnerBrowserLaunch,
   markOwnerBrowserLaunchTerminal,
@@ -53,7 +49,7 @@ export function registerLocalBrowserLaunch(
   baseEnv: NodeJS.ProcessEnv = process.env,
   marker = createOperatorBrowserMarker(),
 ): { marker: string; env: NodeJS.ProcessEnv } {
-  trackOwnerBrowserLaunch(marker, profileDir, { env: baseEnv });
+  if (process.platform !== "linux") trackOwnerBrowserLaunch(marker, profileDir, { env: baseEnv });
   return {
     marker,
     env: { ...baseEnv, [OPERATOR_BROWSER_MARKER_ENV]: marker },
@@ -75,16 +71,12 @@ export function registerLocalBrowserLaunch(
 // and a process-group signal.
 export const BROWSER_QUIT_SIGNAL: NodeJS.Signals = "SIGINT";
 
-// How long to let Chrome's graceful shutdown run before handing over to the
-// owner-launch reaper, whose own escalation starts at SIGTERM and would undo
-// the flush we just asked for.
+// How long to let Chrome's graceful shutdown run before forcing the remaining
+// browser process tree to exit.
 const BROWSER_QUIT_DEADLINE_MS = 10_000;
 
-// Quit the locally owned browser and only THEN run the ownership-proving
-// teardown. Exported for tests: the ordering here is the fix, not an
-// implementation detail — `finalize` (the reaper) escalates SIGTERM →
-// SIGKILL, so running it while Chrome is still flushing reintroduces the
-// abrupt exit this signal choice exists to avoid.
+// Quit the locally owned browser and only THEN force any remaining processes
+// down. Exported for tests because ordering protects Chrome's cookie flush.
 export async function quitBrowserGracefully(opts: {
   signalQuit: (signal: NodeJS.Signals) => boolean;
   isRunning: () => boolean;
@@ -96,8 +88,7 @@ export async function quitBrowserGracefully(opts: {
   const pollMs = opts.pollMs ?? 25;
   const wait =
     opts.wait ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
-  // An undelivered quit has nothing to wait for — hand straight over to the
-  // reaper rather than burning the grace window on a process we cannot signal.
+  // An undelivered quit has nothing to wait for.
   if (opts.signalQuit(BROWSER_QUIT_SIGNAL)) {
     const deadline = Date.now() + (opts.deadlineMs ?? BROWSER_QUIT_DEADLINE_MS);
     while (opts.isRunning() && Date.now() < deadline) await wait(pollMs);
@@ -138,13 +129,14 @@ export function spawnLocalBrowser(
 ): ChildProcess {
   const ownership = registerLocalBrowserLaunch(profileDir, options.env, options.marker);
   try {
-    const child = spawn(binary, [...args], {
+    const scoped = scopedChromeCommand(profileDir, binary, args);
+    const child = spawn(scoped.command, scoped.args, {
       env: ownership.env,
       stdio: options.stdio,
       detached: options.detached,
     });
     localBrowserLaunchMarkers.set(child, ownership.marker);
-    child.once("exit", () => {
+    if (process.platform !== "linux") child.once("exit", () => {
       setTimeout(() => {
         reconcileOwnerBrowserLaunchAfterLeaderExit(ownership.marker, profileDir);
       }, 0).unref();
@@ -421,7 +413,6 @@ export async function resolvePersistentFallbackIdentity(opts: {
   absenceGraceMs?: number;
   currentHolderPid?: (profileDir: string) => number | null;
   readIdentity?: (pid: number, profileDir: string) => ProfileProcessIdentity | null;
-  clearStaleLock?: (profileDir: string) => boolean;
 }): Promise<PersistentFallbackIdentityProof> {
   if ((opts.platform ?? process.platform) !== "linux") return { state: "unknown" };
   const timeoutMs = opts.timeoutMs ?? PROFILE_IDENTITY_PROOF_TIMEOUT_MS;
@@ -429,7 +420,6 @@ export async function resolvePersistentFallbackIdentity(opts: {
   const absenceGraceMs = opts.absenceGraceMs ?? PROFILE_HOLDER_ABSENCE_GRACE_MS;
   const readHolder = opts.currentHolderPid ?? currentProfileHolderPid;
   const readIdentity = opts.readIdentity ?? profileProcessIdentity;
-  const clearStaleLock = opts.clearStaleLock ?? clearStaleSingletonLock;
   const deadline = Date.now() + timeoutMs;
   let absentSince: number | null = null;
   for (;;) {
@@ -441,7 +431,6 @@ export async function resolvePersistentFallbackIdentity(opts: {
       absentSince = null;
       const identity = readIdentity(holderPid, opts.profileDir);
       if (identity !== null) return { state: "owned", identity };
-      if (clearStaleLock(opts.profileDir)) return { state: "absent" };
     }
     if (Date.now() >= deadline) return { state: "unknown" };
     await new Promise<void>((resolveWait) => {
@@ -677,15 +666,8 @@ function installSelfManagedChromeCleanup(): void {
   }
 }
 
-// A custody bind is verified against /proc state Chrome itself mutates during
-// startup: it rewrites argv into a single process title and erases its own
-// environ marker (see bindLaunch's marker note in owner-process-reaper.ts).
-// A snapshot taken mid-rewrite can read "stale"/"unknown" for a healthy, live
-// Chrome, so one failed bind proves nothing. Retry within a short bounded
-// window; a definitively exited tree fails fast, and a persistent mismatch
-// still refuses custody at the call sites. The bind's proof requirements
-// (birth identity + per-launch profile + marker non-contradiction) are
-// unchanged.
+// Portable process-tree custody tolerates a brief Chromium process-title
+// rewrite during launch. Linux browser custody uses the scope instead.
 const LAUNCH_CUSTODY_BIND_WINDOW_MS = 2_000;
 const LAUNCH_CUSTODY_BIND_RETRY_MS = 10;
 const launchCustodyBindWait = new Int32Array(new SharedArrayBuffer(4));
@@ -890,9 +872,7 @@ export function trackOwnedChromeProcessTree(
   processGroup: boolean,
 ): OwnedChromeProcessTreeProof | null {
   installSelfManagedChromeCleanup();
-  const marker = operatorBrowserProcessMarker(identity.pid);
-  const trackedIdentity = marker === null ? identity : { ...identity, process_marker: marker };
-  const proof = captureOwnedChromeProcessTreeProof(trackedIdentity, processGroup);
+  const proof = captureOwnedChromeProcessTreeProof(identity, processGroup);
   if (proof === null) return null;
   ownedChromeProcessTrees.add(proof);
   trackOwnerProcess(proof.identity);
@@ -999,7 +979,7 @@ export async function terminateTrackedProfileChild(
     options.terminate ??
     ((ownedIdentity: ProfileProcessIdentity, ownedProfileDir: string): boolean => {
       const signalled = signalProfileProcess(ownedIdentity, ownedProfileDir, "SIGKILL");
-      reapProfileHolderIfOwned(ownedProfileDir, ownedIdentity);
+      signalProfileHolderIfOwned(ownedProfileDir, ownedIdentity);
       return signalled;
     });
   let identity = options.identity ?? null;

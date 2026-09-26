@@ -2,7 +2,7 @@
 //
 // Every layer has its own word for busy and its own refusal code. Folding them
 // from outside is what produces a confident answer about the wrong layer: a
-// live socket does not say whose Chrome holds the profile lease, and the
+// live socket does not say which Chrome holds the profile, and the
 // custody drain state is not observable from the socket alone.
 // The availability contract is owned by docs/browser-broker.md (Busy façade).
 

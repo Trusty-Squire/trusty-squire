@@ -1,24 +1,19 @@
 import type { Browser, BrowserContext } from "playwright";
 import { existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { type ChildProcess } from "node:child_process";
 import {
-  clearStaleSingletonLock,
   closeProfileWithProof,
   currentProfileHolderPid,
   profileProcessIdentity,
   profileProcessIdentityState,
   profileProcessMatches,
-  reapProfileHolderIfOwned,
+  signalProfileHolderIfOwned,
   type ProfileCloseState,
   type ProfileProcessIdentity,
 } from "./profile.js";
-import {
-  createOperatorBrowserMarker,
-  OPERATOR_BROWSER_MARKER_ENV,
-  operatorBrowserProcessMatchesMarker,
-  startGlobalOperatorBrowserProcessWatchdog,
-} from "./operator-browser-watchdog.js";
+import { createOperatorBrowserMarker, OPERATOR_BROWSER_MARKER_ENV } from "./browser-launch-marker.js";
 import {
   markOwnerBrowserLaunchTerminal,
   terminateOwnerBrowserLaunch,
@@ -64,6 +59,7 @@ import {
 import type { RemoteLoginRig } from "./remote-login-display.js";
 import type { PageDriver } from "./page-driver.js";
 import { hostDisplayAcceptsConnections } from "./display-env.js";
+import { stopBrowserScope, browserScopeIsEmpty, browserScopeUnit } from "./browser-scope.js";
 
 const OPERATOR_BROWSER_WINDOW_SIZE = { width: 1280, height: 1024 };
 
@@ -171,10 +167,7 @@ export class BrowserProcessOwner {
         await import("./remote-login-display.js");
       const rig = createXvfbDisplayRig(OPERATOR_BROWSER_WINDOW_SIZE);
       this.ownedDisplayRig = rig;
-      // Reaped through ownership, not process hooks: the Xvfb is an
-      // owner-tracked helper in its own process group, recorded in the reaper
-      // manifest, so the reaper worker reaps it when this owner dies — SIGKILL
-      // included — and the next start sweeps whatever that missed.
+      // Display helpers are direct children with a Linux parent-death signal.
       await startRemoteLoginDisplay(rig);
     }
     const { remoteLoginEnvironment } = await import("./remote-login-display.js");
@@ -195,6 +188,7 @@ export class BrowserProcessOwner {
     identity: ProfileProcessIdentity,
     processGroup: boolean,
   ): OwnedChromeProcessTreeProof | null {
+    if (process.platform === "linux") return null;
     if (
       this.ownedChromeProcessTreeProof?.identity.pid === identity.pid &&
       this.ownedChromeProcessTreeProof.identity.start_time === identity.start_time
@@ -312,7 +306,6 @@ export class BrowserProcessOwner {
     }
     const endpoint = await (async () => {
       this.throwIfStartCancelled();
-      clearStaleSingletonLock(this.profileDir);
       rmSync(join(this.profileDir, DEVTOOLS_ACTIVE_PORT_FILE), { force: true });
       const argv = [
         "--remote-debugging-port=0",
@@ -338,11 +331,9 @@ export class BrowserProcessOwner {
         marker: this.operatorBrowserMarker(),
       });
       this.childChrome = child;
-      this.childChromeProcessGroup = process.platform !== "win32";
-      this.childChromeIdentity = registerSelfManagedChrome(
-        child,
-        this.profileDir,
-        this.childChromeProcessGroup,
+      this.childChromeProcessGroup = process.platform === "darwin";
+      this.childChromeIdentity = process.platform === "linux" ? null : registerSelfManagedChrome(
+        child, this.profileDir, this.childChromeProcessGroup,
       );
       if (this.childChromeIdentity !== null) {
         this.adoptOwnedChromeProcessTree(this.childChromeIdentity, this.childChromeProcessGroup);
@@ -361,12 +352,13 @@ export class BrowserProcessOwner {
       }
       try {
         const endpoint = await waitForOwnedDevtoolsEndpoint(this.profileDir, 30_000, child);
-        this.childChromeIdentity = await resolveAttachedProfileChildIdentity(
-          child,
-          this.profileDir,
-          this.childChromeIdentity,
-          { processGroup: this.childChromeProcessGroup },
-        );
+        this.childChromeIdentity = process.platform === "linux"
+          ? (() => {
+              const pid = currentProfileHolderPid(this.profileDir);
+              return pid === null ? null : profileProcessIdentity(pid, this.profileDir);
+            })()
+          : await resolveAttachedProfileChildIdentity(child, this.profileDir,
+              this.childChromeIdentity, { processGroup: this.childChromeProcessGroup });
         if (process.platform === "linux" && this.childChromeIdentity === null) {
           throw new Error("self-launched Chrome exited before identity was proven");
         }
@@ -375,6 +367,12 @@ export class BrowserProcessOwner {
         }
         return endpoint;
       } catch (err) {
+        if (process.platform === "linux") {
+          await stopBrowserScope(this.profileDir);
+          this.childChrome = null;
+          this.childChromeIdentity = null;
+          throw err;
+        }
         const alive =
           this.childChromeIdentity !== null &&
           profileProcessMatches(this.childChromeIdentity, this.profileDir);
@@ -391,7 +389,7 @@ export class BrowserProcessOwner {
                   : { proof: this.ownedChromeProcessTreeProof }),
               },
             );
-            reapProfileHolderIfOwned(profileDir, identity);
+            signalProfileHolderIfOwned(profileDir, identity);
             return signalled;
           },
           processGroup: this.childChromeProcessGroup,
@@ -421,6 +419,11 @@ export class BrowserProcessOwner {
   }
 
   private async cancelSpawnedSelfManagedChrome(child: ChildProcess): Promise<void> {
+    if (process.platform === "linux") {
+      await stopBrowserScope(this.profileDir);
+      if (this.childChrome === child) this.childChrome = null;
+      return;
+    }
     this.childChromeIdentity = await terminateTrackedProfileChild(child, this.profileDir, {
       identity: this.childChromeIdentity,
       terminate: (identity, profileDir) => {
@@ -434,7 +437,7 @@ export class BrowserProcessOwner {
               : { proof: this.ownedChromeProcessTreeProof }),
           },
         );
-        reapProfileHolderIfOwned(profileDir, identity);
+        signalProfileHolderIfOwned(profileDir, identity);
         return signalled;
       },
       processGroup: this.childChromeProcessGroup,
@@ -455,7 +458,6 @@ export class BrowserProcessOwner {
 
   private async startOnce(): Promise<void> {
     const remoteMode = (process.env.BOT_CDP_ENDPOINT ?? "").trim().length > 0;
-    if (!remoteMode) startGlobalOperatorBrowserProcessWatchdog();
     try {
       await this.startBrowser();
       if (this.startCancellationRequested) {
@@ -513,7 +515,7 @@ export class BrowserProcessOwner {
       );
     }
     const browserEnv = remoteMode ? process.env : await this.ownedHeadedBrowserEnvironment();
-    if (!remoteMode && !this.ownerLaunchTracked) {
+    if (!remoteMode && process.platform !== "linux" && !this.ownerLaunchTracked) {
       registerLocalBrowserLaunch(this.profileDir, browserEnv, this.operatorBrowserMarker());
       this.ownerLaunchTracked = true;
     }
@@ -625,6 +627,10 @@ export class BrowserProcessOwner {
       this.persistentFallbackLaunchInFlight = true;
       this.startPersistentFallbackOwnershipMonitor();
       const cleanupProfileHolder = async (): Promise<ProfileCloseState> => {
+        if (process.platform === "linux") {
+          await stopBrowserScope(this.profileDir);
+          return await browserScopeIsEmpty(this.profileDir) ? "closed" : "unknown";
+        }
         const proof = await this.waitForPersistentFallbackIdentity();
         if (proof.state === "absent") return "closed";
         if (proof.state === "unknown") return "unknown";
@@ -636,6 +642,11 @@ export class BrowserProcessOwner {
         return (await this.waitForOwnedProfileExit(identity, treeProof)) ? "closed" : "unknown";
       };
       const cleanupCancelled = async (lateContext: BrowserContext): Promise<ProfileCloseState> => {
+        if (process.platform === "linux") {
+          await closeBrowserContextWithin(lateContext, 1_000);
+          await stopBrowserScope(this.profileDir);
+          return await browserScopeIsEmpty(this.profileDir) ? "closed" : "unknown";
+        }
         const proof = await this.waitForPersistentFallbackIdentity().catch(
           () => ({ state: "unknown" }) as const,
         );
@@ -653,7 +664,7 @@ export class BrowserProcessOwner {
             signalOwnedChromeProcessTree(identity, false, "SIGKILL", {
               ...(treeProof === null ? {} : { proof: treeProof }),
             });
-            reapProfileHolderIfOwned(this.profileDir, identity);
+            signalProfileHolderIfOwned(this.profileDir, identity);
           },
           ...(treeProof === null
             ? {}
@@ -671,8 +682,14 @@ export class BrowserProcessOwner {
               env: {
                 ...browserEnv,
                 [OPERATOR_BROWSER_MARKER_ENV]: this.operatorBrowserMarker(),
+                ...(process.platform === "linux" ? {
+                  TRUSTY_SQUIRE_CHROME_SCOPE_UNIT: browserScopeUnit(this.profileDir),
+                  TRUSTY_SQUIRE_CHROME_BINARY: selfLaunchBinary ?? launcher.executablePath(),
+                } : {}),
               },
-              ...(channel !== null ? { channel } : {}),
+              ...(process.platform === "linux"
+                ? { executablePath: fileURLToPath(new URL("../../assets/chrome-scope-launcher", import.meta.url)) }
+                : channel !== null ? { channel } : {}),
               ...persistentProxyOptions(proxy),
               args: [...launchArgs],
               viewport: null,
@@ -714,6 +731,12 @@ export class BrowserProcessOwner {
       this.launchedContext = true;
       this.launchedProfileHolderIdentity = await this.requirePersistentFallbackOwnership(
         async () => {
+          if (process.platform === "linux") {
+            await stopBrowserScope(this.profileDir);
+            this.context = null;
+            this.launchedContext = false;
+            return;
+          }
           markOwnerBrowserLaunchTerminal(this.operatorBrowserMarker());
           await Promise.race([
             context.close().catch(() => undefined),
@@ -841,6 +864,14 @@ export class BrowserProcessOwner {
   }
 
   async forceCloseOwnedProcessTree(): Promise<ProfileCloseState> {
+    if (process.platform === "linux") {
+      this.startCancellationRequested = true;
+      this.resolveStartCancellation?.();
+      const ownedScope = this.childChrome !== null || this.launchedContext;
+      await stopBrowserScope(this.profileDir);
+      await this.teardownOwnedDisplay().catch(() => undefined);
+      return ownedScope && await browserScopeIsEmpty(this.profileDir) ? "closed" : "unknown";
+    }
     this.startCancellationRequested = true;
     this.resolveStartCancellation?.();
     this.resolveStartCancellation = null;
@@ -852,7 +883,7 @@ export class BrowserProcessOwner {
       signalOwnedChromeProcessTree(identity, proof?.processGroup ?? false, "SIGKILL", {
         ...(proof === null ? {} : { proof }),
       });
-      reapProfileHolderIfOwned(this.profileDir, identity);
+      signalProfileHolderIfOwned(this.profileDir, identity);
     }
     const closed =
       identity === null
@@ -892,11 +923,15 @@ export class BrowserProcessOwner {
   }
 
   private async monitorCancelledStartProcess(): Promise<void> {
+    if (process.platform === "linux") {
+      await stopBrowserScope(this.profileDir);
+      return;
+    }
     while (!this.startSettled) {
       const identity = this.currentOwnedProfileIdentity();
       if (identity !== null) {
         this.signalCurrentSelfManagedChrome(identity, "SIGKILL");
-        reapProfileHolderIfOwned(this.profileDir, identity);
+        signalProfileHolderIfOwned(this.profileDir, identity);
       }
       await new Promise<void>((resolveWait) => {
         const timer = setTimeout(resolveWait, 25);
@@ -915,10 +950,7 @@ export class BrowserProcessOwner {
     if (holderPid === null) return null;
     const identity = profileProcessIdentity(holderPid, this.profileDir);
     if (identity === null) return null;
-    if (!this.startCancellationRequested) return identity;
-    return operatorBrowserProcessMatchesMarker(identity.pid, this.operatorBrowserMarker())
-      ? identity
-      : null;
+    return identity;
   }
 
   private async waitForPersistentFallbackIdentity(): Promise<PersistentFallbackIdentityProof> {
@@ -926,13 +958,6 @@ export class BrowserProcessOwner {
       return { state: "owned", identity: this.ownedChromeProcessTreeProof.identity };
     }
     const proof = await resolvePersistentFallbackIdentity({ profileDir: this.profileDir });
-    if (
-      proof.state === "owned" &&
-      this.startCancellationRequested &&
-      !operatorBrowserProcessMatchesMarker(proof.identity.pid, this.operatorBrowserMarker())
-    ) {
-      return { state: "unknown" };
-    }
     if (proof.state === "owned") this.adoptOwnedChromeProcessTree(proof.identity, false);
     return proof;
   }
@@ -942,7 +967,8 @@ export class BrowserProcessOwner {
   ): Promise<ProfileProcessIdentity> {
     try {
       const proof = await this.waitForPersistentFallbackIdentity();
-      if (proof.state !== "owned" || this.ownedChromeProcessTreeProof === null) {
+      if (proof.state !== "owned" ||
+          (process.platform !== "linux" && this.ownedChromeProcessTreeProof === null)) {
         throw new Error("persistent browser launch identity could not be bound to owner custody");
       }
       return proof.identity;
@@ -960,10 +986,7 @@ export class BrowserProcessOwner {
         const holderPid = currentProfileHolderPid(this.profileDir);
         const identity =
           holderPid === null ? null : profileProcessIdentity(holderPid, this.profileDir);
-        const controllerOwnsIdentity =
-          identity !== null &&
-          (!this.startCancellationRequested ||
-            operatorBrowserProcessMatchesMarker(identity.pid, this.operatorBrowserMarker()));
+        const controllerOwnsIdentity = identity !== null;
         if (identity !== null && controllerOwnsIdentity) {
           this.launchedProfileHolderIdentity = identity;
           try {
@@ -1005,7 +1028,7 @@ export class BrowserProcessOwner {
           : ownedChromeProcessTreeState(proof);
     }
     if (state !== "stale") return false;
-    reapProfileHolderIfOwned(this.profileDir, identity);
+    signalProfileHolderIfOwned(this.profileDir, identity);
     return true;
   }
 
@@ -1027,6 +1050,24 @@ export class BrowserProcessOwner {
       this.pages.oauthProviderPageClosed = false;
       this.context = null;
       return "closed";
+    }
+    if (process.platform === "linux") {
+      const page = this.pages.page;
+      const context = this.context;
+      const cdp = this.cdpBrowser;
+      this.pages.page = null;
+      this.pages.primaryPage = null;
+      this.pages.oauthProductPage = null;
+      this.pages.oauthProviderPage = null;
+      this.context = null;
+      this.cdpBrowser = null;
+      this.childChrome = null;
+      if (page !== null) await closeBrowserContextWithin(page, 1_000);
+      if (context !== null) await closeBrowserContextWithin(context, 1_000);
+      if (cdp !== null) await closeBrowserContextWithin(cdp, 1_000);
+      await stopBrowserScope(this.profileDir);
+      await this.teardownOwnedDisplay().catch(() => undefined);
+      return await browserScopeIsEmpty(this.profileDir) ? "closed" : "unknown";
     }
     const marker = this.operatorBrowserMarker();
     if (this.ownerLaunchTracked) markOwnerBrowserLaunchTerminal(marker);
@@ -1110,14 +1151,13 @@ export class BrowserProcessOwner {
             { ...(treeProof === null ? {} : { proof: treeProof }) },
           );
         }
-        reapProfileHolderIfOwned(this.profileDir, identity);
+        signalProfileHolderIfOwned(this.profileDir, identity);
       },
       ...(treeProof === null
         ? {}
         : { identityState: () => ownedChromeProcessTreeState(treeProof) }),
     });
-    // Only release ownership after process-tree proof establishes exit. The
-    // marker reaper below remains the backstop for descendants and failed quits.
+    // Only release the portable process-tree proof after exit is established.
     if (treeProof !== null && ownedChromeProcessTreeState(treeProof) === "stale") {
       releaseOwnedChromeProcessTree(treeProof);
       const tracked = selfManagedChromes.get(treeProof.identity.pid);

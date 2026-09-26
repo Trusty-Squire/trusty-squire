@@ -922,7 +922,7 @@ export async function runCeremonyInSharedBroker(opts: RunInBotChromeOpts): Promi
           (detail !== "" ? ` ${detail}` : "") +
           ` Nothing in this run can show or navigate the page, so waiting out the deadline ` +
           `would only burn it. Re-run \`npx @trusty-squire/mcp connect\`; if it repeats, ` +
-          `check the broker log at ~/.trusty-squire/.trusty-squire-broker-leases/launch/broker.log.`,
+          `check broker.log in the private broker socket directory.`,
       );
     }
     if (opts.forceReloginProviders?.length) {

@@ -56,7 +56,6 @@ import {
 } from "../remote-login-display.js";
 import { LOGIN_RIG_OWNED_LIFETIME_MS } from "../../pairing-ttl.js";
 import { synchronizeSelfManagedChromeTerminationSignalHandlers } from "../browser.js";
-import { spawnOwnerTrackedHelper } from "../owner-process-reaper.js";
 
 function processIsLive(pid: number): boolean {
   try {
@@ -222,50 +221,6 @@ describe("remote interactive login display", () => {
     }
   });
 
-  it("reaps a marked helper group after its original leader exits", async () => {
-    if (process.platform !== "linux") return;
-    const dir = mkdtempSync(join(tmpdir(), "ts-remote-login-group-"));
-    const childFile = join(dir, "child.pid");
-    const leader = spawnOwnerTrackedHelper(
-      process.execPath,
-      [
-        "-e",
-        `const { spawn } = require("node:child_process"); const { writeFileSync } = require("node:fs"); const child = spawn(process.execPath, ["-e", "setInterval(() => undefined, 1000)"], { stdio: "ignore" }); child.unref(); writeFileSync(${JSON.stringify(childFile)}, String(child.pid));`,
-      ],
-      { stdio: "ignore" },
-    );
-    const leaderPid = leader.pid;
-    if (leaderPid === undefined) throw new Error("helper leader did not expose a pid");
-    let childPid = 0;
-    const rig: RemoteLoginRig = {
-      display: ":99",
-      width: 720,
-      height: 1280,
-      procs: [leader],
-      binaries: {
-        xvfb: "/unused/Xvfb",
-        x11vnc: "/unused/x11vnc",
-        websockify: "/unused/websockify",
-      },
-    };
-    try {
-      await waitUntil(() => existsSync(childFile));
-      childPid = Number(readFileSync(childFile, "utf8"));
-      await waitUntil(() => leader.exitCode !== null || leader.signalCode !== null);
-      expect(processIsLive(childPid)).toBe(true);
-
-      await teardownRemoteLoginRig(rig, 50);
-      await waitUntil(() => !processIsLive(childPid));
-
-      expect(processIsLive(childPid)).toBe(false);
-    } finally {
-      try {
-        process.kill(-leaderPid, "SIGKILL");
-      } catch {}
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
   it("uses HTTP/2 for the ephemeral Cloudflare tunnel", () => {
     expect(fallbackCloudflaredArgs(4567)).toEqual([
       "tunnel",
@@ -279,7 +234,6 @@ describe("remote interactive login display", () => {
   it("gives a headed Chrome child a display when the parent has none", async () => {
     const executable = fakeExecutable(`
 const fs = require("node:fs");
-if (!/^v1:/.test(process.env.TRUSTY_SQUIRE_OWNER_HELPER_MARKER || "")) process.exit(24);
 if (process.argv.includes("-ac")) process.exit(20);
 const authFlag = process.argv.indexOf("-auth");
 if (authFlag < 0 || !fs.existsSync(process.argv[authFlag + 1])) process.exit(22);

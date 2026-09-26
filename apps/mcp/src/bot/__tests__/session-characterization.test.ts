@@ -342,7 +342,7 @@ describe("characterization: Session construction", () => {
       startedAt: expect.any(Number),
       terminalTeardownOwner: null,
       userEmail: null,
-      watchdog: { kind: "object", ctor: "OperatorBrowserWatchdog" },
+      watchdog: { kind: "object", ctor: "Timeout" },
     });
     // `api` is ABSENT (not present-and-undefined) when the tool layer passed none.
     expect(Object.keys(constructed!)).not.toContain("api");
@@ -412,7 +412,7 @@ describe("characterization: Session construction", () => {
       startedAt: expect.any(Number),
       terminalTeardownOwner: null,
       userEmail: null,
-      watchdog: { kind: "object", ctor: "OperatorBrowserWatchdog" },
+      watchdog: { kind: "object", ctor: "Timeout" },
     });
     expect(Object.keys(constructed!)).not.toContain("api");
   });

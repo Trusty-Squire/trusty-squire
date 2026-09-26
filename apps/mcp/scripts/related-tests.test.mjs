@@ -57,28 +57,17 @@ describe("direct-import selection", () => {
     expect(tests).not.toContain("src/bot/__tests__/oauth-login.test.ts");
   });
 
-  it("follows a new URL worker edge from owner-process-reaper", () => {
+  it("follows a new URL module edge", () => {
     const specs = extractImportSpecs(
       [
         'import { fileURLToPath } from "node:url";',
-        'const compiled = fileURLToPath(new URL("./owner-process-reaper-worker.js", import.meta.url));',
-        'const source = fileURLToPath(new URL("./owner-process-reaper-worker.ts", import.meta.url));',
+        'const compiled = fileURLToPath(new URL("./browser-scope.js", import.meta.url));',
+        'const source = fileURLToPath(new URL("./browser-scope.ts", import.meta.url));',
       ].join("\n"),
     );
-    expect(specs).toEqual([
-      "node:url",
-      "./owner-process-reaper-worker.js",
-      "./owner-process-reaper-worker.ts",
-    ]);
-    expect(
-      resolveSpecifier(
-        packageRoot,
-        "src/bot/owner-process-reaper.ts",
-        "./owner-process-reaper-worker.ts",
-      ),
-    ).toBe("src/bot/owner-process-reaper-worker.ts");
-    const { tests } = select("src/bot/owner-process-reaper-worker.ts");
-    expect(tests).toContain("src/bot/__tests__/owner-process-reaper.test.ts");
+    expect(specs).toEqual(["node:url", "./browser-scope.js", "./browser-scope.ts"]);
+    expect(resolveSpecifier(packageRoot, "src/bot/browser.ts", "./browser-scope.ts"))
+      .toBe("src/bot/browser-scope.ts");
   });
 
   it("treats vi.mock as a direct import and ignores missing ghost tier paths", () => {

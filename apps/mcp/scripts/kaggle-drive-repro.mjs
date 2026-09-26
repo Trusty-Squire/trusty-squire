@@ -5,8 +5,7 @@
  * (.kaggle-drive-queue/*.json, one JSON object per file: {name, args}) so the
  * operator can drive a PLAIN operate_* run step by step across shells.
  * Server stderr (provision-audit + captcha-autosolve-diag lines) is inherited;
- * note the broker daemon's stderr (where those lines actually land) is
- * ~/.trusty-squire/.trusty-squire-broker-leases/launch/broker.log.
+ * broker daemon stderr is inherited by its launcher when available.
  *
  * Usage:
  *   node scripts/kaggle-drive-repro.mjs > .kaggle-drive-out.log 2> .kaggle-drive-server.log &

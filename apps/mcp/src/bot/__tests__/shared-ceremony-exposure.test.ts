@@ -13,20 +13,13 @@ import { existsSync, symlinkSync } from "node:fs";
 import { mkdtemp, mkdir, rm } from "node:fs/promises";
 import { spawn, type ChildProcess } from "node:child_process";
 import { hostname, tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   exposeSharedBrokerCeremonyDisplay,
   sharedBrowserDisclosureWarning,
 } from "../google-login.js";
-import { registerLocalBrowserLaunch } from "../browser-process-runtime.js";
-import {
-  bindOwnerBrowserLaunch,
-  spawnOwnerTrackedHelper,
-  stopOwnerProcessReaper,
-  untrackOwnerBrowserLaunch,
-} from "../owner-process-reaper.js";
-import { profileProcessIdentity } from "../profile.js";
+import { spawnOwnerTrackedHelper } from "../owner-process-reaper.js";
 import type * as RemoteLoginDisplayModule from "../remote-login-display.js";
 
 const mockState = {
@@ -88,7 +81,6 @@ const children: ChildProcess[] = [];
 
 afterEach(async () => {
   for (const child of mockState.helpers.splice(0)) child.kill("SIGKILL");
-  stopOwnerProcessReaper();
   vi.unstubAllEnvs();
   for (const child of children.splice(0)) child.kill("SIGKILL");
   for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true });
@@ -193,66 +185,6 @@ describe("sharedBrowserDisclosureWarning", () => {
 });
 
 describe("exposeSharedBrokerCeremonyDisplay", () => {
-  it("prefers the tracked rig for the holder profile over the process environment", async () => {
-    const profile = await tempProfile();
-    vi.stubEnv("TRUSTY_SQUIRE_REAPER_DIR", join(profile, "reaper"));
-    const authFile = join(tmpdir(), "tsq-login-tracked", "xauthority");
-    const launch = registerLocalBrowserLaunch(profile, { DISPLAY: ":72", XAUTHORITY: authFile });
-    const child = await spawnHolder({ DISPLAY: ":0", XAUTHORITY: "/foreign/xauthority" }, profile);
-    await holderOwnsProfile(profile, child);
-    expect(
-      bindOwnerBrowserLaunch(launch.marker, profileProcessIdentity(child.pid!, profile)!),
-    ).toBe(true);
-    mockState.attachSucceeds = true;
-    try {
-      const exposure = await exposeSharedBrokerCeremonyDisplay(profile);
-      expect(exposure.kind).toBe("exposed");
-      expect(mockState.rigs[0]).toMatchObject({ display: ":72", authFile });
-      if (exposure.kind === "exposed") await exposure.stop();
-      expect(mockState.privateDirs.every((path) => !existsSync(path))).toBe(true);
-      untrackOwnerBrowserLaunch(launch.marker);
-      const fallback = await exposeSharedBrokerCeremonyDisplay(profile);
-      expect(fallback.kind).toBe("exposed");
-      expect(mockState.rigs[1]).toMatchObject({
-        display: ":0",
-        authFile: "/foreign/xauthority",
-      });
-      if (fallback.kind === "exposed") await fallback.stop();
-    } finally {
-      untrackOwnerBrowserLaunch(launch.marker);
-    }
-  });
-
-  // The broker daemon and connect are different processes and may run under
-  // different TMPDIRs — broker discovery supports exactly that. A rig this
-  // repo RECORDED for the holder launch is ours wherever the daemon's temp
-  // root put it; rejecting it because its parent is not the CLIENT's temp
-  // root exposed no noVNC URL and stranded a headless user until the
-  // deadline, on a display we created ourselves.
-  it("exposes the tracked rig when the broker's temp root differs from this process's", async () => {
-    const profile = await tempProfile();
-    vi.stubEnv("TRUSTY_SQUIRE_REAPER_DIR", join(profile, "reaper"));
-    const brokerTemp = join(profile, "broker-temp");
-    await mkdir(join(brokerTemp, "tsq-login-elsewhere"), { recursive: true, mode: 0o700 });
-    const authFile = join(brokerTemp, "tsq-login-elsewhere", "xauthority");
-    expect(dirname(dirname(authFile))).not.toBe(tmpdir());
-    const launch = registerLocalBrowserLaunch(profile, { DISPLAY: ":73", XAUTHORITY: authFile });
-    const child = await spawnHolder({ DISPLAY: ":0", XAUTHORITY: "/foreign/xauthority" }, profile);
-    await holderOwnsProfile(profile, child);
-    expect(
-      bindOwnerBrowserLaunch(launch.marker, profileProcessIdentity(child.pid!, profile)!),
-    ).toBe(true);
-    mockState.attachSucceeds = true;
-    try {
-      const exposure = await exposeSharedBrokerCeremonyDisplay(profile);
-      expect(exposure.kind).toBe("exposed");
-      expect(mockState.rigs[0]).toMatchObject({ display: ":73", authFile });
-      if (exposure.kind === "exposed") await exposure.stop();
-    } finally {
-      untrackOwnerBrowserLaunch(launch.marker);
-    }
-  });
-
   it("exposes the child's display when Chrome erased the holder environment", async () => {
     const profile = await tempProfile();
     const authFile = join(tmpdir(), "tsq-login-child", "xauthority");
@@ -295,7 +227,6 @@ describe("exposeSharedBrokerCeremonyDisplay", () => {
       XAUTHORITY: join(tmpdir(), "tsq-login-broker", "xauthority"),
     });
     await holderOwnsProfile(profile, child);
-    vi.stubEnv("TRUSTY_SQUIRE_REAPER_DIR", join(profile, "reaper"));
     mockState.secretSetupFails = true;
     const exposure = await exposeSharedBrokerCeremonyDisplay(profile);
     expect(exposure).toMatchObject({
@@ -392,32 +323,6 @@ describe("exposeSharedBrokerCeremonyDisplay", () => {
     // was attempted (and threw).
     expect(mockState.rigCreated).toBe(1);
     expect(mockState.attachAttempts).toBe(1);
-  });
-
-  it("treats a tracked host display as already visible when connect is at that screen", async () => {
-    const profile = await tempProfile();
-    screenedHost();
-    vi.stubEnv("TRUSTY_SQUIRE_REAPER_DIR", join(profile, "reaper"));
-    const authFile = "/home/someone/.Xauthority";
-    const launch = registerLocalBrowserLaunch(profile, { DISPLAY: ":0", XAUTHORITY: authFile });
-    const child = await spawnHolder(
-      { DISPLAY: ":99", XAUTHORITY: join(tmpdir(), "tsq-login-x", "x") },
-      profile,
-    );
-    await holderOwnsProfile(profile, child);
-    expect(
-      bindOwnerBrowserLaunch(launch.marker, profileProcessIdentity(child.pid!, profile)!),
-    ).toBe(true);
-    try {
-      await expect(exposeSharedBrokerCeremonyDisplay(profile)).resolves.toMatchObject({
-        kind: "already_visible",
-        reason: expect.stringMatching(/this machine's own screen/),
-      });
-      expect(mockState.rigCreated).toBe(0);
-      expect(mockState.attachAttempts).toBe(0);
-    } finally {
-      untrackOwnerBrowserLaunch(launch.marker);
-    }
   });
 
   // The ceremony goes where the PERSON RUNNING CONNECT can see it. A broker

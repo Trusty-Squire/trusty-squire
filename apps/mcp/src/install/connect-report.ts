@@ -14,13 +14,11 @@
 // prose.
 
 import { writeSync } from "node:fs";
-import { hostname, tmpdir } from "node:os";
+import { hostname } from "node:os";
 import type { CeremonyBrowserPlacement } from "../bot/google-login.js";
 import type { OAuthProviderId } from "../bot/oauth-providers.js";
 import {
-  isPidAlive,
-  processBirthIdentityState,
-  profileOperationLockOwner,
+  profileOperationIsLocked,
   readLockHolder,
 } from "../bot/profile.js";
 import type { SessionData } from "../session.js";
@@ -46,7 +44,8 @@ export type ConnectReasonCode =
 // it with no browser running at all). Both are holders; the code says which.
 export type ConnectHolder =
   | { kind: "none" }
-  | { kind: "other"; code: "singleton_lock" | "operation_lease"; pid: number }
+  | { kind: "other"; code: "singleton_lock"; pid: number }
+  | { kind: "other"; code: "operation_lease" }
   | { kind: "unknown"; reason: "cross_host" };
 
 // The placement half is whatever the code that PLACED the ceremony browser
@@ -399,8 +398,7 @@ export function snapshotConnectHolder(
   const lock = readLockHolder(profileDir);
   if (lock === null) return leaseHolder(profileDir);
   if (lock.host !== hostname()) return { kind: "unknown", reason: "cross_host" };
-  // A lock whose pid is gone is what `reapLeakedProfileHolder` exists to
-  // clear; reporting it as a live holder is the opposite answer.
+  // Chrome owns its SingletonLock. A dead recorded pid is not a live holder.
   if (lock.stale) return leaseHolder(profileDir);
   // Our own ceremony window masks nothing: a lease another session holds is
   // still worth naming, so fall through the way the other branches do.
@@ -413,16 +411,9 @@ export function snapshotConnectHolder(
 // SingletonLock with it — so a run refused by the lease has no Chrome lock to
 // name, and reading only that lock answered "nobody holds it".
 function leaseHolder(profileDir: string): ConnectHolder {
-  const owner = profileOperationLockOwner(profileDir, tmpdir());
-  if (owner === null) return { kind: "none" };
-  if (owner.host !== hostname()) return { kind: "unknown", reason: "cross_host" };
-  if (owner.pid === process.pid) return { kind: "none" };
-  // Same two questions the browser lock asks: is that process still there,
-  // and is it still the one the lease recorded rather than a recycled pid.
-  if (!isPidAlive(owner.pid)) return { kind: "none" };
-  const birth = { pid: owner.pid, start_time: owner.start_time ?? "unknown" };
-  if (processBirthIdentityState(birth) === "stale") return { kind: "none" };
-  return { kind: "other", code: "operation_lease", pid: owner.pid };
+  return profileOperationIsLocked(profileDir)
+    ? { kind: "other", code: "operation_lease" }
+    : { kind: "none" };
 }
 
 let terminated = false;

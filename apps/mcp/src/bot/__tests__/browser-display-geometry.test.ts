@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type * as Fs from "node:fs";
 import type * as BrowserProcessRuntime from "../browser-process-runtime.js";
-import type * as OperatorBrowserWatchdog from "../operator-browser-watchdog.js";
 import type * as RemoteLoginDisplay from "../remote-login-display.js";
 import type { PageDriver } from "../page-driver.js";
 
@@ -32,10 +31,6 @@ vi.mock("../browser-process-runtime.js", async (importOriginal) => ({
   getChromium: () => {
     throw new Error("chromium launch boundary");
   },
-}));
-vi.mock("../operator-browser-watchdog.js", async (importOriginal) => ({
-  ...(await importOriginal<typeof OperatorBrowserWatchdog>()),
-  startGlobalOperatorBrowserProcessWatchdog: vi.fn(),
 }));
 vi.mock("../remote-login-display.js", async (importOriginal) => ({
   ...(await importOriginal<typeof RemoteLoginDisplay>()),

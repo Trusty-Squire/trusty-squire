@@ -1,44 +1,29 @@
-// Regression: stale Chrome SingletonLock self-heal.
-//
-// A bot Chrome that was SIGKILLed (or torn down hard) leaves a
-// SingletonLock symlink behind. Without recovery, the next
-// launchPersistentContext aborts with "Failed to create a
-// ProcessSingleton" and bricks every signup AND `mcp connect` — the
-// "relogin prompted, still failed" bug. clearStaleSingletonLock
-// removes the lock iff its holder pid is provably dead on this host, and
-// NEVER yanks a lock held by a live process.
+// Chrome owns its SingletonLock; the broker owns only the kernel flock.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  existsSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
-  readdirSync,
-  renameSync,
   rmSync,
   symlinkSync,
-  utimesSync,
   writeFileSync,
 } from "node:fs";
-import { createHash } from "node:crypto";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import {
   acquireFreeProfileOperationGuard,
   acquireProfileOperationGuard,
-  clearStaleSingletonLock,
+  profileOperationLockPath,
   closeProfileWithProof,
   currentProfileHolderPid,
   launchWithProfileGate,
   profileProcessIdentity,
-  profileProcessGroupMarkerState,
   profileProcessIdentityState,
   processBirthIdentityState,
   ProfileBusyError,
-  reapLeakedProfileHolder,
-  reapProfileHolderIfOwned,
+  signalProfileHolderIfOwned,
   signalProfileProcess,
   waitForProfileFree,
   withProfileOperationGuard,
@@ -147,7 +132,7 @@ describe("profile close proof", () => {
           identityState: () => states.shift() ?? "stale",
         }),
       ).resolves.toBe("closed");
-      expect(lockPresent(profileDir)).toBe(false);
+      expect(lockPresent(profileDir)).toBe(true); // Chrome owns its symlink.
     } finally {
       rmSync(profileDir, { recursive: true, force: true });
     }
@@ -206,46 +191,6 @@ function deadPid(): number {
   return r.pid;
 }
 
-describe("clearStaleSingletonLock", () => {
-  let dir: string;
-  beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), "ts-profile-"));
-  });
-  afterEach(() => {
-    rmSync(dir, { recursive: true, force: true });
-  });
-
-  it("returns false when there is no lock", () => {
-    expect(clearStaleSingletonLock(dir)).toBe(false);
-  });
-
-  it("clears a stale lock whose holder pid is dead (this host)", () => {
-    writeSingletons(dir, `${hostname()}-${deadPid()}`);
-    expect(clearStaleSingletonLock(dir)).toBe(true);
-    expect(lockPresent(dir)).toBe(false);
-    expect(existsSync(join(dir, "SingletonSocket"))).toBe(false);
-    expect(existsSync(join(dir, "SingletonCookie"))).toBe(false);
-  });
-
-  it("leaves a lock held by a LIVE pid untouched", () => {
-    writeSingletons(dir, `${hostname()}-${process.pid}`); // we're alive
-    expect(clearStaleSingletonLock(dir)).toBe(false);
-    expect(lockPresent(dir)).toBe(true);
-  });
-
-  it("leaves a lock minted on another host untouched", () => {
-    writeSingletons(dir, `some-other-host-${deadPid()}`);
-    expect(clearStaleSingletonLock(dir)).toBe(false);
-    expect(lockPresent(dir)).toBe(true);
-  });
-
-  it("ignores a malformed lock target", () => {
-    symlinkSync("garbage-no-pid-here", join(dir, "SingletonLock"));
-    expect(clearStaleSingletonLock(dir)).toBe(false);
-    expect(lockPresent(dir)).toBe(true);
-  });
-});
-
 describe("waitForProfileFree (cross-process gate)", () => {
   let dir: string;
   beforeEach(() => {
@@ -259,10 +204,10 @@ describe("waitForProfileFree (cross-process gate)", () => {
     expect(await waitForProfileFree(dir, { deadlineMs: 200, pollMs: 20 })).toBe(true);
   });
 
-  it("reclaims a stale lock and returns free", async () => {
+  it("recognizes a stale Chrome lock and leaves recovery to Chrome", async () => {
     writeSingletons(dir, `${hostname()}-${deadPid()}`);
     expect(await waitForProfileFree(dir, { deadlineMs: 200, pollMs: 20 })).toBe(true);
-    expect(lockPresent(dir)).toBe(false);
+    expect(lockPresent(dir)).toBe(true);
   });
 
   it("returns busy (false) when a live holder never releases", async () => {
@@ -289,179 +234,43 @@ describe("waitForProfileFree (cross-process gate)", () => {
   });
 });
 
-describe("profile operation guard", () => {
+describe("kernel profile lock", () => {
   let dir: string;
-  let lockRoot: string;
-  beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), "ts-profile-"));
-    lockRoot = mkdtempSync(join(tmpdir(), "ts-profile-locks-"));
-  });
-  afterEach(() => {
-    rmSync(dir, { recursive: true, force: true });
-    rmSync(lockRoot, { recursive: true, force: true });
-  });
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "ts-profile-kernel-")); });
+  afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
 
-  it("rejects a concurrent operation and releases cleanly", async () => {
-    const first = await acquireFreeProfileOperationGuard(dir, lockRoot);
-    expect(() => acquireProfileOperationGuard(dir, lockRoot)).toThrow(ProfileBusyError);
+  it("respects a live holder and releases on close", () => {
+    const first = acquireProfileOperationGuard(dir);
+    expect(() => acquireProfileOperationGuard(dir)).toThrow(ProfileBusyError);
     first.release();
-    const second = await acquireFreeProfileOperationGuard(dir, lockRoot);
-    second.release();
+    acquireProfileOperationGuard(dir).release();
   });
 
-  it("evicts and claims a holder proven dead by its recorded identity", () => {
-    const digest = createHash("sha256").update(dir).digest("hex").slice(0, 24);
-    const lockDir = join(lockRoot, `trusty-squire-profile-${digest}.lock`);
-    mkdirSync(lockDir);
-    writeFileSync(
-      join(lockDir, "owner.json"),
-      JSON.stringify({ host: hostname(), pid: deadPid(), start_time: "gone", token: "dead" }),
-    );
-
-    const lease = acquireProfileOperationGuard(dir, lockRoot);
-    lease.release();
+  it.skipIf(process.platform === "win32")("frees immediately when its holder is SIGKILLed", async () => {
+    const path = profileOperationLockPath(dir);
+    const child = spawn(process.execPath, ["-e", `
+      const fs = require('node:fs');
+      const {flockSync} = require('fs-ext-extra-prebuilt');
+      const fd = fs.openSync(process.argv[1], 'a');
+      flockSync(fd, 'exnb');
+      process.stdout.write('held\\n');
+      setInterval(() => {}, 1000);
+    `, path], { cwd: join(import.meta.dirname, "../../.."), stdio: ["ignore", "pipe", "ignore"] });
+    try {
+      await new Promise<void>((resolve, reject) => {
+        child.stdout!.once("data", () => resolve());
+        child.once("error", reject);
+      });
+      expect(() => acquireProfileOperationGuard(dir)).toThrow(ProfileBusyError);
+      child.kill("SIGKILL");
+      await new Promise<void>((resolve) => child.once("exit", () => resolve()));
+      acquireProfileOperationGuard(dir).release();
+    } finally { child.kill("SIGKILL"); }
   });
 
-  it("refuses a holder proven alive by its recorded identity", () => {
-    const first = acquireProfileOperationGuard(dir, lockRoot);
-    expect(() => acquireProfileOperationGuard(dir, lockRoot)).toThrow(ProfileBusyError);
-    first.release();
-  });
-
-  it("refuses an indeterminate holder instead of evicting it", () => {
-    const digest = createHash("sha256").update(dir).digest("hex").slice(0, 24);
-    const lockDir = join(lockRoot, `trusty-squire-profile-${digest}.lock`);
-    mkdirSync(lockDir);
-    writeFileSync(
-      join(lockDir, "owner.json"),
-      JSON.stringify({
-        host: "another-host",
-        pid: process.pid,
-        start_time: "unknown",
-        token: "remote",
-      }),
-    );
-
-    expect(() => acquireProfileOperationGuard(dir, lockRoot)).toThrow(ProfileBusyError);
-    expect(existsSync(lockDir)).toBe(true);
-  });
-
-  it.skipIf(process.platform !== "linux")(
-    "quarantines only the exact stale process birth before reclaiming",
-    () => {
-      const digest = createHash("sha256").update(dir).digest("hex").slice(0, 24);
-      const lockDir = join(lockRoot, `trusty-squire-profile-${digest}.lock`);
-      mkdirSync(lockDir);
-      writeFileSync(
-        join(lockDir, "owner.json"),
-        JSON.stringify({
-          host: hostname(),
-          pid: process.pid,
-          start_time: "not-this-process",
-          token: "stale-token",
-        }),
-      );
-
-      const lease = acquireProfileOperationGuard(dir, lockRoot);
-      expect(() => acquireProfileOperationGuard(dir, lockRoot)).toThrow(ProfileBusyError);
-      expect(readdirSync(lockRoot).filter((name) => name.includes(".stale-"))).toEqual([]);
-      lease.release();
-    },
-  );
-
-  it("keeps a quarantined live owner exclusive until that owner releases", () => {
-    const digest = createHash("sha256").update(dir).digest("hex").slice(0, 24);
-    const lockDir = join(lockRoot, `trusty-squire-profile-${digest}.lock`);
-    const tombstone = `${lockDir}.stale-race`;
-    const lease = acquireProfileOperationGuard(dir, lockRoot);
-    renameSync(lockDir, tombstone);
-
-    expect(() => acquireProfileOperationGuard(dir, lockRoot)).toThrow(ProfileBusyError);
-    lease.release();
-    expect(existsSync(tombstone)).toBe(false);
-    const next = acquireProfileOperationGuard(dir, lockRoot);
-    next.release();
-  });
-
-  it("reclaims an aged ownerless public lock without reclaiming a fresh one", () => {
-    const digest = createHash("sha256").update(dir).digest("hex").slice(0, 24);
-    const lockDir = join(lockRoot, `trusty-squire-profile-${digest}.lock`);
-    mkdirSync(lockDir);
-    expect(() => acquireProfileOperationGuard(dir, lockRoot)).toThrow(ProfileBusyError);
-
-    const old = new Date(Date.now() - 60_000);
-    utimesSync(lockDir, old, old);
-    const lease = acquireProfileOperationGuard(dir, lockRoot);
-    lease.release();
-  });
-
-  it("retains an aged legacy guard while its same-host process is alive", () => {
-    const digest = createHash("sha256").update(dir).digest("hex").slice(0, 24);
-    const lockDir = join(lockRoot, `trusty-squire-profile-${digest}.lock`);
-    mkdirSync(lockDir);
-    writeFileSync(
-      join(lockDir, "owner.json"),
-      JSON.stringify({ host: hostname(), pid: process.pid, token: "legacy-token" }),
-    );
-    const old = new Date(Date.now() - 60_000);
-    utimesSync(lockDir, old, old);
-
-    expect(() => acquireProfileOperationGuard(dir, lockRoot)).toThrow(ProfileBusyError);
-  });
-
-  it("reclaims an aged legacy guard after its same-host process exits", () => {
-    const digest = createHash("sha256").update(dir).digest("hex").slice(0, 24);
-    const lockDir = join(lockRoot, `trusty-squire-profile-${digest}.lock`);
-    mkdirSync(lockDir);
-    writeFileSync(
-      join(lockDir, "owner.json"),
-      JSON.stringify({ host: hostname(), pid: deadPid(), token: "legacy-token" }),
-    );
-    const old = new Date(Date.now() - 60_000);
-    utimesSync(lockDir, old, old);
-
-    const lease = acquireProfileOperationGuard(dir, lockRoot);
-    lease.release();
-  });
-
-  it.skipIf(process.platform !== "linux")(
-    "scavenges a stale private tombstone left by a crashed reclaimer",
-    () => {
-      const digest = createHash("sha256").update(dir).digest("hex").slice(0, 24);
-      const tombstone = join(lockRoot, `trusty-squire-profile-${digest}.lock.stale-crashed`);
-      mkdirSync(tombstone);
-      writeFileSync(
-        join(tombstone, "owner.json"),
-        JSON.stringify({
-          host: hostname(),
-          pid: process.pid,
-          start_time: "not-this-process",
-          token: "stale-token",
-        }),
-      );
-
-      const lease = acquireProfileOperationGuard(dir, lockRoot);
-      expect(existsSync(tombstone)).toBe(false);
-      lease.release();
-    },
-  );
-
-  it("releases the operation lock when Chrome already owns the profile", async () => {
-    writeSingletons(dir, `${hostname()}-${process.pid}`);
-    await expect(acquireFreeProfileOperationGuard(dir, lockRoot)).rejects.toThrow(ProfileBusyError);
-    rmSync(join(dir, "SingletonLock"), { force: true });
-    const lease = await acquireFreeProfileOperationGuard(dir, lockRoot);
-    lease.release();
-  });
-
-  it("allows nested work in the same operation", async () => {
-    await expect(
-      withProfileOperationGuard(
-        dir,
-        () => withProfileOperationGuard(dir, async () => "nested", lockRoot),
-        lockRoot,
-      ),
-    ).resolves.toBe("nested");
+  it("permits nested work in one operation", async () => {
+    await expect(withProfileOperationGuard(dir, () =>
+      withProfileOperationGuard(dir, async () => "nested"))).resolves.toBe("nested");
   });
 });
 
@@ -555,39 +364,7 @@ describe("currentProfileHolderPid", () => {
   });
 });
 
-describe("reapLeakedProfileHolder", () => {
-  let dir: string;
-  beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), "ts-profile-"));
-  });
-  afterEach(() => {
-    rmSync(dir, { recursive: true, force: true });
-  });
-
-  it("returns false when there is no lock", () => {
-    expect(reapLeakedProfileHolder(dir)).toBe(false);
-  });
-
-  it("leaves a holder on ANOTHER host alone (shared profile)", () => {
-    writeSingletons(dir, `some-other-box-${process.pid}`);
-    expect(reapLeakedProfileHolder(dir)).toBe(false);
-    expect(lockPresent(dir)).toBe(true);
-  });
-
-  it("frees the lock for a local holder (dead pid → SIGKILL no-ops, lock cleared)", () => {
-    // A dead pid stands in for our leaked Chrome: the SIGKILL no-ops (already
-    // gone) but the lock + sockets are reaped so the next run starts clean.
-    // We do NOT pid-match — Chrome rewrites the lock asynchronously, so the
-    // close() caller only knows "we own the profile, free whatever's here".
-    writeSingletons(dir, `${hostname()}-${deadPid()}`);
-    expect(reapLeakedProfileHolder(dir)).toBe(true);
-    expect(lockPresent(dir)).toBe(false);
-    expect(existsSync(join(dir, "SingletonSocket"))).toBe(false);
-    expect(existsSync(join(dir, "SingletonCookie"))).toBe(false);
-  });
-});
-
-describe("reapProfileHolderIfOwned", () => {
+describe("signalProfileHolderIfOwned", () => {
   let dir: string;
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), "ts-profile-"));
@@ -600,7 +377,7 @@ describe("reapProfileHolderIfOwned", () => {
     writeSingletons(dir, `${hostname()}-${process.pid}`);
     const killed: number[] = [];
     expect(
-      reapProfileHolderIfOwned(
+      signalProfileHolderIfOwned(
         dir,
         {
           host: hostname(),
@@ -634,7 +411,7 @@ describe("reapProfileHolderIfOwned", () => {
         writeSingletons(dir, `${hostname()}-${child.pid}`);
         const killed: number[] = [];
         expect(
-          reapProfileHolderIfOwned(dir, identity, (pid) => {
+          signalProfileHolderIfOwned(dir, identity, (pid) => {
             killed.push(pid);
           }),
         ).toBe(false);
@@ -645,62 +422,4 @@ describe("reapProfileHolderIfOwned", () => {
       }
     },
   );
-
-  it("clears a dead captured holder without signaling a recycled pid", () => {
-    const pid = deadPid();
-    writeSingletons(dir, `${hostname()}-${pid}`);
-    const killed: number[] = [];
-    expect(
-      reapProfileHolderIfOwned(
-        dir,
-        { host: hostname(), pid, start_time: "dead", user_data_dir: dir },
-        (signaledPid) => {
-          killed.push(signaledPid);
-        },
-      ),
-    ).toBe(true);
-    expect(killed).toEqual([]);
-    expect(lockPresent(dir)).toBe(false);
-  });
-});
-
-describe("owner reaper group proof", () => {
-  const identity = {
-    host: hostname(),
-    pid: 100,
-    start_time: "old",
-    user_data_dir: "/fixture/profile",
-    process_group_id: 100,
-    process_marker: "fixture-marker",
-  };
-  it("ignores unreadable markers in proven unrelated process groups", () => {
-    expect(
-      profileProcessGroupMarkerState(identity, {
-        processIds: () => [200],
-        groupId: () => 200,
-        markerState: () => "unknown",
-        uidState: () => "matching",
-      }),
-    ).toBe("stale");
-  });
-  it("retains uncertainty for an unreadable member of the owned group", () => {
-    expect(
-      profileProcessGroupMarkerState(identity, {
-        processIds: () => [101],
-        groupId: () => 100,
-        markerState: () => "unknown",
-        uidState: () => "matching",
-      }),
-    ).toBe("unknown");
-  });
-  it("finds a surviving exact-marker child after the leader exits", () => {
-    expect(
-      profileProcessGroupMarkerState(identity, {
-        processIds: () => [101],
-        groupId: () => 100,
-        markerState: () => "matching",
-        profileState: () => "matching",
-      }),
-    ).toBe("matching");
-  });
 });

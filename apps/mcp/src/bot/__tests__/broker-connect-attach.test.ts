@@ -25,7 +25,8 @@
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type * as ProfileModule from "../profile.js";
@@ -41,6 +42,7 @@ vi.mock("../../session-guard.js", () => ({
   }),
 }));
 
+const require = createRequire(import.meta.url);
 const CONFIRM_URL = "https://trustysquire.ai/install/confirm?install=fixture";
 // Minted by the same function the real observation uses, so the fixture can
 // never encode a label shape production does not emit.
@@ -64,10 +66,6 @@ const path = require("node:path");
 const [marker, socketPath, lockPath, connectMode, openNeedsUser, profileDir] = process.argv.slice(2);
 const CONFIRM_URL = ${JSON.stringify(CONFIRM_URL)};
 if (marker !== "broker") process.exit(78);
-function startTime() {
-  const stat = fs.readFileSync("/proc/self/stat", "utf8");
-  return stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19];
-}
 // The ceremony's exposure helper discovers the shared display from the
 // browser process's OWN environment via the profile's SingletonLock symlink
 // — so the fixture holder must look exactly like that: a live pid owning the
@@ -81,11 +79,8 @@ try {
       path.join(profileDir, "SingletonLock"),
     );
 } catch {}
-fs.writeFileSync(
-  lockPath,
-  JSON.stringify({ host: os.hostname(), pid: process.pid, start_time: startTime(), token: "lease" }),
-  { mode: 0o600 },
-);
+const lockFd = fs.openSync(lockPath, "a");
+require(process.env.TS_FS_EXT).flockSync(lockFd, "exnb");
 const seen = { openUrl: null, openCeremony: false, closedSession: null, commands: [] };
 const server = net.createServer((socket) => {
   let buffered = "";
@@ -227,20 +222,6 @@ async function waitFor(predicate: () => boolean, timeoutMs = 10_000): Promise<vo
 
 /** The profile lease file the guard machinery will read, derived through the
  * real lease machinery so the fixture writes exactly where production reads. */
-async function profileLockPath(
-  profileModule: typeof ProfileModule,
-  profileDir: string,
-  lockRoot: string,
-): Promise<string> {
-  const lease = profileModule.acquireProfileOperationGuard(profileDir, lockRoot);
-  const name = (await readdir(lockRoot)).find(
-    (entry) => entry.startsWith("trusty-squire-profile-") && entry.endsWith(".lock"),
-  )!;
-  lease.release();
-  await rm(join(lockRoot, name), { force: true });
-  return join(lockRoot, name);
-}
-
 /**
  * The `connect` shape: `withConnectTargetEnvironment` re-points
  * `TRUSTY_SQUIRE_PROFILE_DIR` at the target's recorded profile BEFORE any
@@ -300,7 +281,7 @@ async function connectFixture(
 
   const socketPath = discovery.defaultBrokerSocket(targetProfile);
   await mkdir(dirname(socketPath), { recursive: true, mode: 0o700 });
-  const lockPath = await profileLockPath(profileModule, targetProfile, lockRoot);
+  const lockPath = profileModule.profileOperationLockPath(targetProfile);
   const scriptPath = join(root, "broker-fixture.cjs");
   await writeFile(scriptPath, BROKER_FIXTURE_SCRIPT, { mode: 0o600 });
   const child = spawn(
@@ -315,13 +296,14 @@ async function connectFixture(
       targetProfile,
     ],
     {
-      stdio: "ignore",
+      stdio: ["ignore", "ignore", "pipe"],
       // The exposure helper reads the holder's exec-time environment: a
       // foreign XAUTHORITY names the machine's own display, so the real
       // helper resolves already_visible without spawning any helpers.
-      env: { ...process.env, DISPLAY: ":0", XAUTHORITY: "/tmp/fixture-foreign-Xauthority" },
+      env: { ...process.env, DISPLAY: ":0", XAUTHORITY: "/tmp/fixture-foreign-Xauthority", TS_FS_EXT: require.resolve("fs-ext-extra-prebuilt") },
     },
   );
+  child.stderr?.on("data", (chunk) => process.stderr.write(`[broker fixture] ${String(chunk)}`));
   cleanup.children.push(child);
   await waitFor(() => existsSync(lockPath) && existsSync(socketPath));
 
@@ -367,7 +349,7 @@ async function connectFixture(
     profileIdentity: profileModule.profilePathIdentity(targetProfile),
     // Attaching never released the broker's custody of the profile, not even
     // momentarily: the ceremony is a tab in the broker's browser.
-    lockNeverReleased: existsSync(lockPath),
+    lockNeverReleased: profileModule.profileOperationIsLocked(targetProfile),
     openUrl: seen.openUrl,
     openCeremony: seen.openCeremony === true,
     closedSession: seen.closedSession,

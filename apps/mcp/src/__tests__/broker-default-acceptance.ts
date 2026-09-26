@@ -3,37 +3,24 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { chromium } from "playwright";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, readdir, symlink, rm } from "node:fs/promises";
-import { createHash } from "node:crypto";
 import { hostname } from "node:os";
+import { execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { expect } from "vitest";
 import { SessionStore } from "../session.js";
-import { defaultBrokerSocket, brokerElectionRoot } from "../bot/broker/discovery.js";
-import { processBirthIdentityState, profilePathIdentity } from "../bot/profile.js";
+import { defaultBrokerSocket } from "../bot/broker/discovery.js";
+import { processBirthIdentity, processBirthIdentityState } from "../bot/profile.js";
 
 export const canRunDefaultBrokerAcceptance =
   process.platform === "linux" && existsSync(chromium.executablePath());
 
 type Owner = { pid: number; start_time: string };
-/** The broker holds the profile operation lease for its whole life, so the
- * lease record is where its pid and birth identity are published. */
-function brokerLeasePath(profile: string): string {
-  const digest = createHash("sha256")
-    .update(profilePathIdentity(profile))
-    .digest("hex")
-    .slice(0, 24);
-  return join(brokerElectionRoot(profile), `trusty-squire-profile-${digest}.lock`);
-}
-async function readLeaseOwner(path: string): Promise<Owner | undefined> {
-  const candidate = await readFile(path, "utf8").then(
-    (source) => source,
-    async () => await readFile(join(path, "owner.json"), "utf8").catch(() => undefined),
-  );
-  if (candidate === undefined) return undefined;
-  const owner = JSON.parse(candidate) as Owner;
-  return Number.isSafeInteger(owner.pid) && typeof owner.start_time === "string"
-    ? owner
-    : undefined;
+/** The live Unix listener identifies the elected broker in this test. */
+async function readBrokerOwner(profile: string): Promise<Owner | undefined> {
+  try {
+    const pid = Number(execFileSync("lsof", ["-t", "-U", "--", defaultBrokerSocket(profile)], { encoding: "utf8" }).trim().split(/\s+/)[0]);
+    return processBirthIdentity(pid) ?? undefined;
+  } catch { return undefined; }
 }
 async function waitFor<T>(read: () => Promise<T | undefined>, description: string): Promise<T> {
   const deadline = Date.now() + 20_000;
@@ -107,7 +94,7 @@ export async function checkDefaultBrokerAcceptance(
   let owner: Owner | undefined;
   const readOwner = async (): Promise<Owner | undefined> => {
     try {
-      return await readLeaseOwner(brokerLeasePath(profile));
+      return await readBrokerOwner(profile);
     } catch {
       return undefined;
     }

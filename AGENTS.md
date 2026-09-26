@@ -2,6 +2,12 @@
 
 > If you are an AI agent (Claude, Goose, Codex, Cursor, Cline, Continue, …) working in this repo, read this file fully before taking any action that publishes, deploys, or modifies external state. Re-read it before claiming any such action succeeded.
 
+**Browser model:** One broker per profile owns one Chrome. Multiple agents run
+concurrent sessions in separate tabs; only Google OAuth sign-in is serialized.
+The kernel lock elects the broker, never a session. A session overrun closes
+that session's tab, not shared Chrome. [Browser broker](docs/browser-broker.md)
+owns the full contract.
+
 ## TL;DR — the three rules that matter most
 
 1. **Never trust stdout alone.** `npm publish` can print `+ @trusty-squire/mcp@0.6.13` while the upload fails. `gh run view` can show old successful runs instead of the run you just triggered. Always verify external state with an independent read.
@@ -461,26 +467,19 @@ Raw live runtime evaluation remains internal rather than a public read API.
 
 ### 12. Broker browser custody and session tab lifetime
 
-The broker exclusively owns the physical operator browser; sessions own independent
-families of tabs. Preserve the election, physical-profile lease, and process-marker
-watchdog/reaper contracts in [`docs/browser-broker.md`](docs/browser-broker.md).
-The broker is the ONLY browser path in the product: it performs the
-Turnstile-safe self-launch itself and hands every tab out from it, the connect
-ceremony included, and it starts with no enrollment so the machine being
-enrolled can reach it. Account identity is named by the calls that act as an
-account, never by the connection; do not reintroduce a credential on `connect`.
-A resident broker from an earlier release that refuses the token-less handshake
-is reclaimed or refused by that guide's reclaim contract; do not
-diagnose it as a missing CLI kill-switch. `stale_lease` means another connection
-owns a live session, never a session that was never created — a wall-refused
-start's `session_id` replays its wall. The underlying bounded teardown and
-accepted reparented-idle-renderer residual are
-in [`docs/DESIGN-warm-browser-reuse.md`](docs/DESIGN-warm-browser-reuse.md#5-ownership-crash-recovery-and-containment).
-Never replace identity-proven Chrome containment with root-PID-only signaling or
-broad `pkill`. The strict containment follow-up remains
-`ts-operator-browser-cgroup-containment` in `TODOS.md`.
+The broker exclusively owns one Chrome per profile through a kernel `flock`;
+sessions own independent tab families and run concurrently. The lock elects
+brokers, never sessions. A broker-local mutex serializes only Google OAuth
+sign-in. A session timer closes only its own tab family; a wedged tab close may
+require physical browser teardown. On Linux Chrome launches in a systemd user
+scope and receives parent-death SIGINT so it cannot outlive a broker crash.
+Recent cookies may be lost on a crash; normal whole-browser stops flush them
+with SIGINT. The next broker empties any surviving scope members. The broker is the
+only browser path, including `connect`, and starts without enrollment. Account
+identity is named by account-acting calls, never by `connect`. See
+[`docs/browser-broker.md`](docs/browser-broker.md) for the full contract.
 
-### 13. OAuth identity uses the real profile and a narrow lease
+### 13. OAuth identity uses the real profile and a broker-local mutex
 
 Every OAuth action routed through `operate_login` stays in the single real
 `CHROME_PROFILE_DIR` browser context. The serialized boundary preserves the
@@ -536,19 +535,16 @@ failure as a safety regression, not a test to weaken.
 
 ### 15. Operator browser lifetime is owner-bound
 
-`apps/mcp/src/bot/owner-process-reaper.ts` is the crash/SIGKILL backstop for
-self-managed and Playwright-launched local operator browsers. Every local launch
-must receive the private operator marker at the shared launch boundary; never
-register external/remote CDP browsers. The manifest records exact PID/group,
-marker, process birth identity, and `user_data_dir`; it owns process signaling,
-not profile or snapshot deletion. Physical profile custody follows
-[`docs/browser-broker.md`](docs/browser-broker.md). Process teardown uses bounded
-SIGTERM→SIGKILL.
+The broker holds one kernel flock for the physical profile. Linux Chrome runs
+inside its own systemd user scope; normal whole-browser teardown sends SIGINT,
+waits briefly, then SIGKILLs remaining scope members. A broker crash releases
+the flock immediately, and the next broker drains the old scope before launch.
+See [`docs/browser-broker.md`](docs/browser-broker.md).
 
 Idle cleanup uses the provision-session call lease as its action boundary. Any new
 session-addressed operate/auth/payment surface must acquire that lease, and session
 teardown must clear its rolling observe snapshot before removing the live session.
-That lease, the watchdog, and the whole terminal-teardown ordering now live in
+That lease, the session timer, and the whole terminal-teardown ordering live in
 `apps/mcp/src/bot/session/lifecycle.ts` (`provision-session.ts` re-exports them);
 see CLAUDE.md's "Operator session model" for what may not be reordered.
 
@@ -726,7 +722,7 @@ Evidence ledger: `data/ts-hosted-field-fill-nondeterministic/findings.md`.
 ### 21. Captcha auto-solve diagnostics live in the broker daemon's stderr, and token lifetime outpaces sparse observers
 
 `[captcha-autosolve-diag]` lines and `provision-audit` entries go to the
-broker daemon's stderr (`~/.trusty-squire/.trusty-squire-broker-leases/launch/broker.log`),
+broker daemon's stderr (the private broker socket directory's `broker.log`),
 NEVER the MCP server's or operator's log — the operator log shows no solver
 output by design. Audit outcome values are sealed; only diag lines and the
 `challenge_rendered`/`card_released` booleans are readable. The broker also
@@ -839,7 +835,7 @@ Read this file. Follow the rules. Run the verify script. Paste the output. Then 
   relabelled afterwards — one value, decided where the browser was placed. A refusal that means another session holds the browser —
   `ProfileBusyError` or a contention `BrokerRefusal` (`broker_unavailable`,
   `profile_busy`) — reaches connect typed and reports `busy` with the holder,
-  read from Chrome's lock OR the operation lease. Every other refusal code is
+  read from Chrome's lock when available. Every other refusal code is
   the run breaking, not contention, and reports `run_failed`. `account` carries
   the binding whenever the run proved one, `connected` or not, and its
   `providers` is `null` — not `[]` — when the probe could not read the profile. A rejected flag is answered as a
@@ -851,7 +847,7 @@ Read this file. Follow the rules. Run the verify script. Paste the output. Then 
   seconds after a sign-in silently discards the session that sign-in just
   established — the 2026-09-04 `connect` regression. The ceremony browser quits
   with `BROWSER_QUIT_SIGNAL` (SIGINT) and waits for the graceful exit before
-  the owner reaper's SIGTERM → SIGKILL escalation takes over
+  a bounded SIGKILL fallback takes over
   (`apps/mcp/src/bot/browser-process-runtime.ts`, re-exported by `browser.ts`);
   the operator owner shares that bounded graceful quit after page/context close.
   `browser-close-cookie.test.ts` proves fresh login cookies survive the local
@@ -865,8 +861,8 @@ Read this file. Follow the rules. Run the verify script. Paste the output. Then 
   Do not start Xvfb when the host already has a live screen.
   Launch helpers live in `browser-process-runtime.ts`; the supported local
   and remote-CDP operator paths stay there.
-- `apps/mcp/src/bot/broker/runtime.ts` owns Chrome's identity runtime and physical
-  profile lease. The broker is the only operator launch path; sessions acquire
+- `apps/mcp/src/bot/broker/runtime.ts` owns Chrome's identity runtime; the daemon
+  owns the profile flock. The broker is the only operator launch path; sessions acquire
   independent tab families and MCP servers forward over IPC. See
   `docs/browser-broker.md` for discovery, election, and recovery.
 - Interactive login display custody follows
