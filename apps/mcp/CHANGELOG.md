@@ -1,5 +1,11 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.18-rc.1 (2026-09-26)
+
+- feat(mcp): share one Squire service per host (#972)
+- Replace broker browser lease records with kernel ownership (#971)
+- Fix dead broker lease refusal and overrun browser termination (#970)
+
 ## 1.1.17-rc.1 (2026-09-23)
 
 - fix(mcp): preserve stdio and broker browser availability (#963)
