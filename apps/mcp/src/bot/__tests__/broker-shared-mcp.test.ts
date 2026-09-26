@@ -1,7 +1,7 @@
 import { createServer, type Server as HttpServer } from "node:http";
-import { createConnection, type Socket } from "node:net";
+import { createConnection, createServer as createNetServer, type Socket } from "node:net";
 import { spawn } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
@@ -117,6 +117,105 @@ it("relay sends the agent identity before MCP traffic and exits with its pipe", 
     }) + "\n",
   );
   expect((await initialized).id).toBe(1);
+  relay.stdin.end();
+  await new Promise<void>((resolve) => relay.once("exit", () => resolve()));
+});
+
+it("relay restores initialization after a broker restart and fails a dropped in-flight call", async () => {
+  const root = await mkdtemp(join(process.cwd(), ".rr-"));
+  cleanup.push(async () => await rm(root, { recursive: true, force: true }));
+  const path = join(root, ".trusty-squire", "mcp.sock");
+  await mkdir(join(root, ".trusty-squire"), { mode: 0o700 });
+  const identities: string[] = [];
+  const brokerFrames: Array<{ method?: string; id?: number | string }> = [];
+  let generation = 0;
+  const startBroker = async () => {
+    generation++;
+    const current = generation;
+    const server = createNetServer((socket) => {
+      let buffer = "";
+      let identified = false;
+      socket.on("data", (chunk: Buffer) => {
+        buffer += chunk.toString("utf8");
+        for (;;) {
+          const end = buffer.indexOf("\n");
+          if (end < 0) break;
+          const line = buffer.slice(0, end);
+          buffer = buffer.slice(end + 1);
+          if (!identified) {
+            identities.push(line);
+            identified = true;
+            continue;
+          }
+          const frame = JSON.parse(line);
+          brokerFrames.push(frame);
+          if (frame.method === "initialize") {
+            socket.write(
+              JSON.stringify({
+                jsonrpc: "2.0",
+                id: frame.id,
+                result: { protocolVersion: "2025-03-26", capabilities: {}, serverInfo: { name: "broker", version: "1" } },
+              }) + "\n",
+            );
+          } else if (frame.method === "tools/call") {
+            if (current === 1) socket.destroy();
+            else socket.write(JSON.stringify({ jsonrpc: "2.0", id: frame.id, result: { ok: true } }) + "\n");
+          }
+        }
+      });
+    });
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(path, resolve);
+    });
+    return server;
+  };
+  let broker = await startBroker();
+  const bin = fileURLToPath(new URL("../../bin.ts", import.meta.url));
+  const relay = spawn(process.execPath, ["--import", "tsx", bin, "relay"], {
+    cwd: process.cwd(),
+    env: { ...process.env, HOME: root, TRUSTY_SQUIRE_AGENT_IDENTITY: "relay-agent" },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  cleanup.push(async () => {
+    relay.kill();
+    broker.close();
+  });
+  const responses: Array<{ id: number; result?: unknown; error?: { message: string } }> = [];
+  let output = "";
+  relay.stdout.on("data", (chunk: Buffer) => {
+    output += chunk.toString("utf8");
+    for (;;) {
+      const end = output.indexOf("\n");
+      if (end < 0) break;
+      responses.push(JSON.parse(output.slice(0, end)));
+      output = output.slice(end + 1);
+    }
+  });
+  const send = (id: number, method: string, params = {}) =>
+    relay.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
+  send(1, "initialize", {
+    protocolVersion: "2025-03-26",
+    capabilities: {},
+    clientInfo: { name: "fixture", version: "1" },
+  });
+  await vi.waitFor(() => expect(responses.find((frame) => frame.id === 1)?.result).toBeTruthy());
+  relay.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n");
+  send(2, "tools/call", { name: "tools/list", arguments: {} });
+  await vi.waitFor(() =>
+    expect(responses.find((frame) => frame.id === 2)?.error?.message).toContain("connection lost"),
+  );
+  await new Promise<void>((resolve) => broker.close(() => resolve()));
+  broker = await startBroker();
+  await vi.waitFor(() =>
+    expect(brokerFrames.filter((frame) => frame.method === "notifications/initialized")).toHaveLength(2),
+  );
+  send(3, "tools/call", { name: "tools/list", arguments: {} });
+  await vi.waitFor(() => expect(responses.find((frame) => frame.id === 3)?.result).toEqual({ ok: true }));
+  expect(relay.exitCode).toBeNull();
+  expect(responses.filter((frame) => frame.id === 1)).toHaveLength(1);
+  expect(brokerFrames.filter((frame) => frame.method === "initialize")).toHaveLength(2);
+  expect(identities).toEqual(["relay-agent", "relay-agent"]);
   relay.stdin.end();
   await new Promise<void>((resolve) => relay.once("exit", () => resolve()));
 });

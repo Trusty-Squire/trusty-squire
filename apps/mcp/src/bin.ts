@@ -13,7 +13,6 @@
 // "am I main?" guard — duplicated in cli.ts and server.ts, and wrong in
 // both when launched via a bin symlink — is gone by construction.
 import process from "node:process";
-import { MissingSessionError } from "./api-client.js";
 import { VERSION } from "./version.js";
 
 const argv = process.argv.slice(2);
@@ -75,7 +74,7 @@ dispatch()
   })
   .catch((err: unknown) => {
     // stderr lands in the host agent's MCP log; keep it useful.
-    if (err instanceof MissingSessionError) {
+    if (err instanceof Error && err.name === "MissingSessionError") {
       console.error(err.message);
     } else {
       const surface = isServer ? "server" : "cli";
