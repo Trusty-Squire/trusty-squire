@@ -109,7 +109,7 @@ export async function connectOrLaunchBroker(path: string, options: BrokerConnect
   catch (error) {
     if (!isUnavailable(error) && !(await reclaimLegacyBroker(path, options, error))) throw error;
   }
-  // Launches may race. Each daemon claims the same kernel flock before it
+  // Launches may race. Each daemon claims the same kernel SQLite lock before it
   // touches Chrome or the socket; losers exit while clients attach to winner.
   const logPath = join(dirname(path), "broker.log");
   let logFd: number | undefined;

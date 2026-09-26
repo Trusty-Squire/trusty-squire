@@ -37,13 +37,15 @@ remains only for the two cases the spawn cannot serve (no on-disk binary for
 the channel, a credentialed proxy the spawned Chrome cannot authenticate).
 
 Each session closes only its own page family. A failed bounded tab close drains
-the whole Chrome scope before a new session launches. Normal whole-browser
-teardown closes page and context references, sends SIGINT to the scope, waits
-briefly, and uses SIGKILL for any remaining scope members. Empty scope
-population is the Linux proof of closure. Cancellation and late-start cleanup
-use the same scope.
+the whole Chrome process tree before a new session launches. With a usable
+systemd user manager, normal whole-browser teardown sends SIGINT to Chrome's
+scope, waits briefly, and SIGKILLs any remaining scope members. Empty scope
+population proves closure. Linux without a user scope uses the bounded
+process-group fallback, with weaker crash-orphan proof. Cancellation and
+late-start cleanup use the selected containment mode.
 
-`profile.ts` owns canonical path resolution and the broker's kernel flock.
+`profile.ts` owns canonical path resolution and the broker's kernel-released
+SQLite lock.
 `browser-scope.ts` owns Linux Chrome containment and SIGINT → bounded wait →
 SIGKILL teardown; `session/lifecycle.ts` owns per-session timers. There are no
 owner manifests or process-marker watchdog. Connect ceremony custody is defined in the
@@ -91,7 +93,7 @@ test (`identity-runtime.test.ts` exercises it against a fake handle).
   persistent profile, enrollment, and Google login all survive the recycle.
 
 `broker/runtime.ts` owns the identity runtime; `broker/daemon.ts` holds the
-physical profile flock.
+physical profile SQLite lock.
 `session/lifecycle.ts` acquires and releases session pages through broker custody;
 it cannot launch Chrome. Explicit harness starts accept caller-owned pages.
 `browser-close-cookie.test.ts` covers cookie persistence through physical shutdown,

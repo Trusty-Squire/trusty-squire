@@ -28,13 +28,15 @@ exception, completion, and cookie-snapshot probes are owned by the
 
 ## Kernel ownership and containment
 
-One broker holds a `flock` on the canonical profile's stable lock inode for its
-whole life. The file contains no owner data and is never removed. The kernel
-releases the lock on every process exit, including SIGKILL. Sessions do not
+One broker holds an exclusive SQLite transaction on the canonical profile's
+stable lock file for its whole life. SQLite's OS byte-range lock is released by
+the kernel on every process exit, including SIGKILL. The file contains no owner
+data and is never removed. Sessions do not
 acquire the lock; each owns only a tab family in the shared Chrome.
 
-On Linux, Chrome starts inside one named systemd user scope per profile before
-it forks. The broker stays outside that scope. The launch wrapper gives its
+On Linux with a working systemd user manager and `setpriv`, Chrome starts inside
+one named user scope per profile before it forks. The broker stays outside that
+scope. The launch wrapper gives its
 `systemd-run` parent a parent-death SIGINT, so Chrome exits when its broker
 dies. A crash may lose cookies written in the last ~30 seconds. The next
 broker, after claiming the lock, sends SIGINT to the
@@ -42,9 +44,16 @@ scope, waits briefly, then uses SIGKILL on the remaining scope members. Empty
 scope population is the proof that physical custody ended. Chrome's own
 `SingletonLock` is left to Chrome to handle.
 
+On Linux without a usable user scope, Chrome launches in its own process group.
+The broker sends SIGINT to that group, waits briefly, then sends SIGKILL on a
+normal stop. `setpriv` still supplies parent-death SIGINT when installed. This
+mode, like macOS and Windows, cannot prove that reparented Chrome descendants
+are gone after a broker crash; the broker logs the selected mode once.
+
 Ordinary session expiry is a broker timer. It closes that session's tab family
 and leaves sibling sessions and Chrome running. A tab close that misses its
-bound is treated as a wedged shared browser and the scope is torn down. Google
+bound is treated as a wedged shared browser and its scope or process group is
+torn down. Google
 OAuth sign-in uses a broker-local mutex; other sessions remain concurrent.
 
 macOS and Windows retain ordinary Playwright close and process-group fallback

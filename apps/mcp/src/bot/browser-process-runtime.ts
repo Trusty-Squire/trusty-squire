@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } fr
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
-import { scopedChromeCommand } from "./browser-scope.js";
+import { linuxBrowserUsesScope, scopedChromeCommand } from "./browser-scope.js";
 import {
   currentProfileHolderPid,
   processBirthIdentity,
@@ -49,7 +49,7 @@ export function registerLocalBrowserLaunch(
   baseEnv: NodeJS.ProcessEnv = process.env,
   marker = createOperatorBrowserMarker(),
 ): { marker: string; env: NodeJS.ProcessEnv } {
-  if (process.platform !== "linux") trackOwnerBrowserLaunch(marker, profileDir, { env: baseEnv });
+  if (!linuxBrowserUsesScope()) trackOwnerBrowserLaunch(marker, profileDir, { env: baseEnv });
   return {
     marker,
     env: { ...baseEnv, [OPERATOR_BROWSER_MARKER_ENV]: marker },
@@ -136,7 +136,7 @@ export function spawnLocalBrowser(
       detached: options.detached,
     });
     localBrowserLaunchMarkers.set(child, ownership.marker);
-    if (process.platform !== "linux") child.once("exit", () => {
+    if (!linuxBrowserUsesScope()) child.once("exit", () => {
       setTimeout(() => {
         reconcileOwnerBrowserLaunchAfterLeaderExit(ownership.marker, profileDir);
       }, 0).unref();

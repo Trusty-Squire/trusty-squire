@@ -21,9 +21,10 @@ and starts or attaches the elected broker. `TRUSTY_SQUIRE_BROKER_SOCKET` optiona
 overrides that endpoint; its parent must exist, belong to the current user, and
 have mode 0700. The default private parent is created automatically.
 
-The broker holds one kernel `flock` on a stable inode beside the canonical
-profile. It claims the lock before binding its socket or launching Chrome. A
-broker crash releases that lock immediately. The next broker removes the old
+The broker holds one exclusive SQLite transaction on a stable file beside the
+canonical profile. SQLite's OS byte-range lock is released by the kernel when
+the broker dies, including on SIGKILL. It claims the lock before binding its
+socket or launching Chrome. The next broker removes the old
 socket path after claiming the lock, then binds its own listener; the socket
 file itself is never an ownership record.
 
@@ -84,9 +85,9 @@ broker, real Chrome, and real MCP stdio servers.
 Connect approaches the browser only when it needs it. The already-provisioned
 preflight — stored session, account-bound plumbing, and a byte-copy read of the
 profile's cookie store (`detectProviderSessionsFromProfile`) — runs BEFORE any
-broker or browser work, takes no profile flock, waits for nothing, and opens no
+broker or browser work, takes no profile SQLite lock, waits for nothing, and opens no
 browser. An install that is already connected therefore completes while the
-broker keeps both its flock and its Chrome. An absent profile or cookie store
+broker keeps both its SQLite lock and its Chrome. An absent profile or cookie store
 requires the ceremony; a failed preflight probe is reported as `unverified`
 instead of forcing re-pairing.
 
@@ -111,7 +112,7 @@ additional completion gate.
 When an install does need the login ceremony, the ceremony opens the confirm
 page as a TAB in the shared broker browser — an ordinary `open` on a
 `connectOrLaunchBroker` connection, no drain, no second Chrome, and no touch of
-the broker flock. **There is no fallback browser.** The broker is the only
+the broker SQLite lock. **There is no fallback browser.** The broker is the only
 thing in the product that launches one: with no resident broker the ordinary
 connect-or-launch path spawns the daemon (which requires no enrollment), whose
 browser hosts the tab (and keeps the reclaim contracts below). A host with a screen (`hasDisplay()` in
@@ -210,16 +211,21 @@ and its other sessions intact.
 
 ## Ownership and contracts
 
-- One profile-scoped kernel `flock` elects the broker, including when clients
+- One profile-scoped kernel-released SQLite lock elects the broker, including when clients
   choose different socket paths. The lock file contains no owner record and is
   never unlinked. On first start the new daemon deletes the four legacy lease
   roots. The account binding is separate from ownership: the first
   account-acting open pins the account, while a ceremony open names none.
-- Linux Chrome launches inside a named systemd user scope before forking. The
-  broker stays outside it. After claiming the flock, a new broker drains any
-  old Chrome scope with SIGINT, a bounded wait, and SIGKILL. Empty scope
-  population proves Chrome is gone. Broker SIGKILL may lose cookies written
-  very recently; normal browser stops use SIGINT so they flush.
+- Linux probes one disposable systemd user scope at broker start. When the
+  user manager and `setpriv` work, Chrome launches inside a named scope before
+  forking, while the broker stays outside it. A new broker drains any old scope
+  with SIGINT, a bounded wait, and SIGKILL. Empty scope population proves
+  Chrome is gone. Without a usable scope Chrome starts in its own process
+  group; normal stop signals that group with SIGINT then SIGKILL after a bound.
+  `setpriv` still gives Chrome parent-death SIGINT when installed. That fallback
+  can leave reparented descendants after a broker crash, as on macOS/Windows.
+  The broker logs its selected mode once. Broker SIGKILL may lose cookies
+  written very recently; normal browser stops use SIGINT so they flush.
 - During upgrade, a client that receives a legacy `unauthorized` handshake
   identifies the resident broker from the live Unix listener and its broker
   argv. It requires either the prior wire handshake with an enrolled token or
@@ -241,8 +247,9 @@ and its other sessions intact.
   one meaning — another connection owns a live session — and never stands in for
   a session that was never created. `broker-forwarder.test.ts` pins the replay.
 - Browser egress is unrestricted for all targets. Session cleanup closes only that owned
-  family. A close that cannot be proven drains the Chrome scope before another
-  session can use it. The scope is the physical-process custody proof.
+  family. A close that cannot be proven drains the Chrome scope or process
+  group before another session can use it. Scope population is the strong
+  physical-process custody proof where available.
 - Per-session approval, charge dispatch fences, and post-submit outcome custody
   continue in the existing handlers. Approval notifications travel over the
   originating request's IPC connection to its MCP client before the tool completes;
@@ -270,7 +277,7 @@ and its other sessions intact.
   closed through the scope, and relaunches on the same persistent profile. Live sessions end with it; cookies and enrollment survive on disk.
 - Idle shutdown requires zero connected clients, zero live sessions, zero
   in-flight admissions, and zero pending graceful session closes for the
-  configured minutes-scale bound. Graceful Chrome closure precedes flock release.
+  configured minutes-scale bound. Graceful Chrome closure precedes SQLite lock release.
   A connection that declared itself a `status` probe is not a connected client
   for this purpose — see [Busy façade](#busy-façade).
 
@@ -290,12 +297,13 @@ Implementation entry points: `src/bot/broker/daemon.ts`, `discovery.ts`,
 `authority.ts`, `runtime.ts`, `operator.ts`, `forwarder.ts`, `protocol.ts`, and
 `transport.ts` under `apps/mcp`.
 Linux real-Chrome crash, session-timer, and graceful-cookie regressions are
-`apps/mcp/scripts/kernel-broker-chaos.mjs`, `kernel-session-timer.mjs`, and
-`kernel-graceful-cookie.mjs`; build the MCP package before running them.
+`apps/mcp/scripts/kernel-broker-chaos.mjs`, `kernel-session-timer.mjs`,
+`kernel-graceful-cookie.mjs`, and `kernel-no-systemd-browser.mjs`; build the
+MCP package before running them.
 
 ## Busy façade
 
-Browser availability depends on the broker flock and Chrome SingletonLock
+Browser availability depends on the broker SQLite lock and Chrome SingletonLock
 (`profile.ts`) and custody (`custody.ts`); live tab families (`runtime.ts`)
 share the browser. Connect holds an ordinary tab family, not a maintenance
 window. A second consumer imports one fold from
@@ -357,7 +365,7 @@ under the idle bound would otherwise pin the shared Chrome resident forever.
 The profile layer reaches the client under `profile_busy` when Chrome's own
 SingletonLock refuses a launch. `BrokerRuntime.acquire` converts that typed
 error for the wire. A competing broker cannot bind or launch because it cannot
-acquire the flock; clients attach to the elected listener.
+acquire the SQLite lock; clients attach to the elected listener.
 
 A start the broker hands back (no live provider session in the bot profile —
 the likeliest first run) is not a busy layer either: `openTab` throws
@@ -379,7 +387,7 @@ per-layer wire vocabulary never reaches the consumer:
 `browserBusy()` is the read-only fold over that one served profile, and
 read-only is load-bearing: it probes for a live broker listener and reads the
 profile's SingletonLock holder. It never reclaims a lock, signals a process,
-or sleeps. A live broker owns the profile flock
+or sleeps. A live broker owns the profile SQLite lock
 and multiplexes tab families on one shared Chrome, so its own Chrome is
 reported free rather than as a foreign process to close.
 

@@ -13,8 +13,6 @@ import { createRequire } from "node:module";
 import {
   lstatSync,
   mkdirSync,
-  openSync,
-  closeSync,
   readFileSync,
   readlinkSync,
   realpathSync,
@@ -458,34 +456,34 @@ export async function closeProfileWithProof(opts: {
 }
 
 const require = createRequire(import.meta.url);
-const { flockSync } = require("fs-ext-extra-prebuilt") as {
-  flockSync(fd: number, operation: "exnb" | "un"): void;
-};
+const Database = require("better-sqlite3") as typeof import("better-sqlite3");
 const profileOperationContext = new AsyncLocalStorage<ReadonlySet<string>>();
 
-/** A stable file is only the lock's inode; it contains no owner record. It
+/** A stable SQLite file is only the lock's inode; it contains no owner record. It
  * must stay outside the profile directory because --force-relogin may replace
  * that directory while custody is held. */
 export function profileOperationLockPath(profileDir: string): string {
   const identity = profilePathIdentity(profileDir);
   const digest = createHash("sha256").update(identity).digest("hex").slice(0, 24);
-  return join(dirname(identity), `.trusty-squire-profile-${digest}.flock`);
+  return join(dirname(identity), `.trusty-squire-profile-${digest}.lock.sqlite`);
 }
 
-/** flock belongs to an open file description, so the kernel drops custody on
- * every exit path, including SIGKILL. The file itself is never unlinked. */
+/** BEGIN EXCLUSIVE holds SQLite's OS byte-range lock on the open connection.
+ * The kernel drops it on every exit path, including SIGKILL. The file itself
+ * contains no owner record and is never unlinked. */
 export function acquireProfileOperationGuard(
   profileDir: string = CHROME_PROFILE_DIR,
 ): ProfileOperationLease {
   const path = profileOperationLockPath(profileDir);
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  const fd = openSync(path, "a", 0o600);
+  let db: InstanceType<typeof Database> | undefined;
   try {
-    flockSync(fd, "exnb");
+    db = new Database(path, { timeout: 0 });
+    db.exec("BEGIN EXCLUSIVE");
   } catch (error) {
-    closeSync(fd);
-    if ((error as NodeJS.ErrnoException).code === "EWOULDBLOCK" ||
-        (error as NodeJS.ErrnoException).code === "EAGAIN") {
+    db?.close();
+    if ((error as { code?: string }).code === "SQLITE_BUSY" ||
+        (error as { code?: string }).code === "SQLITE_LOCKED") {
       throw new ProfileBusyError(PROFILE_BUSY_MESSAGE);
     }
     throw error;
@@ -495,7 +493,7 @@ export function acquireProfileOperationGuard(
     release(): void {
       if (released) return;
       released = true;
-      closeSync(fd);
+      try { db!.exec("ROLLBACK"); } finally { db!.close(); }
     },
   };
 }

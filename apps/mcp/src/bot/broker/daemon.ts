@@ -109,7 +109,7 @@ export async function runBrokerDaemon(): Promise<void> {
     const inventory = operator.authority.inventory();
     return inventory.sessions === 0 && inventory.admitting === 0 && inventory.closing === 0;
   };
-  // Only the elected flock holder may remove a dead predecessor's socket.
+  // Only the elected SQLite lock holder may remove a dead predecessor's socket.
   // The transport itself simply binds and therefore respects live listeners.
   await unlink(path).catch((error: NodeJS.ErrnoException) => {
     if (error.code !== "ENOENT") throw error;

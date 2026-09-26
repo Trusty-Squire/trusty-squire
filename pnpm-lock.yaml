@@ -129,9 +129,6 @@ importers:
       chalk:
         specifier: ^5.3.0
         version: 5.6.2
-      fs-ext-extra-prebuilt:
-        specifier: 2.2.13
-        version: 2.2.13
       jose:
         specifier: ^5.9.6
         version: 5.10.0
@@ -4420,14 +4417,6 @@ packages:
     requiresBuild: true
     dev: false
 
-  /fs-ext-extra-prebuilt@2.2.13:
-    resolution: {integrity: sha512-mVSm+UDKvftEMHljOThNW3NtI8/gX7f1z9U1WGRbBf6JXQTFbS8Wv+qPVpZhYH6zCj1rXV/XnhQMek3tEn41Pg==}
-    engines: {node: '>= 8.0.0'}
-    requiresBuild: true
-    dependencies:
-      nan: 2.29.0
-    dev: false
-
   /fs-extra@10.1.0:
     resolution: {integrity: sha512-oRXApq54ETRj4eMiFzGnHWGy+zo5raudjuxN0b8H7s/RU2oW0Wvsx9O0ACRN/kRq9E8Vu/ReskGB5o3ji+FzHQ==}
     engines: {node: '>=12'}
@@ -5646,10 +5635,6 @@ packages:
     resolution: {integrity: sha512-9J+tqTEsbHqY8YohazYgty7LgerFIWxvMLpUjqETSmjHojtJm2WnX2kK/2a1fLI7CO7ERP1YSEUXMucz4j+yBA==}
     optionalDependencies:
       msgpackr-extract: 3.0.3
-    dev: false
-
-  /nan@2.29.0:
-    resolution: {integrity: sha512-GlGk3HIvitbvs+LT3g6XUP1kpirKNvmDFwF/bmo6XNWSb/eYEs/O4bfgIEIXCZ+lIOTS5xNwDvSGMw6FJdAhtA==}
     dev: false
 
   /nanoid@3.3.12:

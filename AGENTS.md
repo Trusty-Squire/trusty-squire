@@ -4,7 +4,7 @@
 
 **Browser model:** One broker per profile owns one Chrome. Multiple agents run
 concurrent sessions in separate tabs; only Google OAuth sign-in is serialized.
-The kernel lock elects the broker, never a session. A session overrun closes
+The kernel-released SQLite lock elects the broker, never a session. A session overrun closes
 that session's tab, not shared Chrome. [Browser broker](docs/browser-broker.md)
 owns the full contract.
 
@@ -467,14 +467,17 @@ Raw live runtime evaluation remains internal rather than a public read API.
 
 ### 12. Broker browser custody and session tab lifetime
 
-The broker exclusively owns one Chrome per profile through a kernel `flock`;
+The broker exclusively owns one Chrome per profile through a kernel-released
+SQLite exclusive lock;
 sessions own independent tab families and run concurrently. The lock elects
 brokers, never sessions. A broker-local mutex serializes only Google OAuth
 sign-in. A session timer closes only its own tab family; a wedged tab close may
-require physical browser teardown. On Linux Chrome launches in a systemd user
-scope and receives parent-death SIGINT so it cannot outlive a broker crash.
-Recent cookies may be lost on a crash; normal whole-browser stops flush them
-with SIGINT. The next broker empties any surviving scope members. The broker is the
+require physical browser teardown. Linux uses a systemd user scope when the
+user manager and `setpriv` work; otherwise Chrome launches in its own process
+group with parent-death SIGINT when available. The process-group fallback has
+weaker crash-orphan containment. Recent cookies may be lost on a crash; normal
+whole-browser stops flush them with SIGINT. In scope mode the next broker
+empties any surviving scope members. The broker is the
 only browser path, including `connect`, and starts without enrollment. Account
 identity is named by account-acting calls, never by `connect`. See
 [`docs/browser-broker.md`](docs/browser-broker.md) for the full contract.
@@ -535,10 +538,12 @@ failure as a safety regression, not a test to weaken.
 
 ### 15. Operator browser lifetime is owner-bound
 
-The broker holds one kernel flock for the physical profile. Linux Chrome runs
-inside its own systemd user scope; normal whole-browser teardown sends SIGINT,
-waits briefly, then SIGKILLs remaining scope members. A broker crash releases
-the flock immediately, and the next broker drains the old scope before launch.
+The broker holds one SQLite exclusive transaction for the physical profile;
+the kernel releases its lock when the broker dies. Linux Chrome uses a systemd
+user scope when available and a process-group fallback otherwise. Normal
+whole-browser teardown sends SIGINT, waits briefly, then SIGKILLs remaining
+members. The next broker drains an old scope before launch when scope mode is
+available.
 See [`docs/browser-broker.md`](docs/browser-broker.md).
 
 Idle cleanup uses the provision-session call lease as its action boundary. Any new
@@ -862,7 +867,7 @@ Read this file. Follow the rules. Run the verify script. Paste the output. Then 
   Launch helpers live in `browser-process-runtime.ts`; the supported local
   and remote-CDP operator paths stay there.
 - `apps/mcp/src/bot/broker/runtime.ts` owns Chrome's identity runtime; the daemon
-  owns the profile flock. The broker is the only operator launch path; sessions acquire
+  owns the profile SQLite lock. The broker is the only operator launch path; sessions acquire
   independent tab families and MCP servers forward over IPC. See
   `docs/browser-broker.md` for discovery, election, and recovery.
 - Interactive login display custody follows

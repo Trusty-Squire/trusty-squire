@@ -282,13 +282,30 @@ jobs:
           NODE_GYP_FORCE_PYTHON: /bin/false
           npm_config_python: /bin/false
         run: pnpm install --frozen-lockfile --filter '@trusty-squire/mcp...'
-      - name: Load better-sqlite3 on Node 26
+      - name: Load and exercise the broker profile lock on Node 26
         run: |
           pnpm --filter '@trusty-squire/mcp' exec node -e '
             const Database = require("better-sqlite3");
             const version = new Database(":memory:").prepare("select sqlite_version() as version").get().version;
             if (!version) throw new Error("better-sqlite3 did not return a SQLite version");
-            console.log(`better-sqlite3 loaded SQLite ${version}`);
+            const fs = require("node:fs");
+            const os = require("node:os");
+            const path = require("node:path");
+            const dir = fs.mkdtempSync(path.join(os.tmpdir(), "squire-node26-lock-"));
+            try {
+              const file = path.join(dir, "profile.lock.sqlite");
+              const holder = new Database(file, { timeout: 0 });
+              const contender = new Database(file, { timeout: 0 });
+              try {
+                holder.exec("BEGIN EXCLUSIVE");
+                try { contender.exec("BEGIN EXCLUSIVE"); throw new Error("live holder was ignored"); }
+                catch (error) { if (error.code !== "SQLITE_BUSY") throw error; }
+                holder.exec("ROLLBACK");
+                contender.exec("BEGIN EXCLUSIVE");
+                contender.exec("ROLLBACK");
+              } finally { holder.close(); contender.close(); }
+              console.log(`Node 26 SQLite ${version}: broker lock acquired, contested, and released`);
+            } finally { fs.rmSync(dir, { recursive: true, force: true }); }
           '
 
   test:

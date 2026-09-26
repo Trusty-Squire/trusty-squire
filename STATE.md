@@ -224,11 +224,11 @@ complete the Google sign-in.
 - **Fix:** `PLAIN_LOGIN_BROWSER_QUIT_SIGNAL = "SIGINT"` plus a bounded wait for
   the graceful exit BEFORE handing over to `closeLocalBrowserLaunch` — the
   old owner reaper escalated SIGTERM → SIGKILL, so handing over mid-flush would
-  reintroduce the abrupt exit. The current kernel-scope design retains
+  reintroduce the abrupt exit. The current broker design retains
   SIGINT → bounded wait → SIGKILL for normal whole-Chrome stops. A broker
   SIGKILL is a crash and may lose very recent cookies. Never SIGTERM a Chrome
   whose profile state you still need.
-- **✓ FIXED (operator browser):** `BrowserProcessOwner.closeBrowser()` now gives page and context closes independent bounds, then the browser scope receives SIGINT before a bounded SIGKILL fallback. The current lifecycle contract and its real-browser
+- **✓ FIXED (operator browser):** `BrowserProcessOwner.closeBrowser()` now gives page and context closes independent bounds, then the selected scope or process group receives SIGINT before a bounded SIGKILL fallback. The current lifecycle contract and its real-browser
   regression coverage are owned by
   [`docs/browser-process-page-boundary.md`](docs/browser-process-page-boundary.md#cross-process-broker-groundwork-first-increment).
 

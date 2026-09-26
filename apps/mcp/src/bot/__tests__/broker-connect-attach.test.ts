@@ -17,8 +17,8 @@
 // browser — close it first" and, because the install never finished, a pairing
 // code that does not exist and a `not_found` sign-in page.
 //
-// The fixture is a real separate process: it holds the profile operation lease
-// in the exact on-disk format the lease machinery reads, and it speaks the
+// The fixture is a real separate process: it holds the profile's SQLite lock
+// through an open transaction, and it speaks the
 // connect/open/close wire contract over a real unix socket. Nothing here
 // launches Chrome — and crucially, the lock is NEVER released: attaching
 // means tab-sharing the broker's browser, not taking the profile from it.
@@ -51,8 +51,7 @@ const SIGN_OUT_LABEL = controlLabelV2("Sign out")!;
 /**
  * A real broker fixture: a separate process that
  *
- * - holds the profile operation lease (the file whose owner record the guard
- *   machinery reads) for as long as it lives — like `BrokerRuntime`, which
+ * - holds the profile's kernel SQLite lock for as long as it lives — like `BrokerRuntime`, which
  *   keeps the election guard across its whole custody,
  * - answers the connect handshake and then one `open` with a session id,
  *   recording what it was asked to open,
@@ -79,8 +78,9 @@ try {
       path.join(profileDir, "SingletonLock"),
     );
 } catch {}
-const lockFd = fs.openSync(lockPath, "a");
-require(process.env.TS_FS_EXT).flockSync(lockFd, "exnb");
+const lockDb = new (require(process.env.TS_SQLITE))(lockPath, { timeout: 0 });
+lockDb.exec("BEGIN EXCLUSIVE");
+process.on("exit", () => lockDb.close());
 const seen = { openUrl: null, openCeremony: false, closedSession: null, commands: [] };
 const server = net.createServer((socket) => {
   let buffered = "";
@@ -220,8 +220,7 @@ async function waitFor(predicate: () => boolean, timeoutMs = 10_000): Promise<vo
   throw new Error("fixture did not become ready");
 }
 
-/** The profile lease file the guard machinery will read, derived through the
- * real lease machinery so the fixture writes exactly where production reads. */
+/** The fixture uses the same stable lock path as production. */
 /**
  * The `connect` shape: `withConnectTargetEnvironment` re-points
  * `TRUSTY_SQUIRE_PROFILE_DIR` at the target's recorded profile BEFORE any
@@ -300,7 +299,7 @@ async function connectFixture(
       // The exposure helper reads the holder's exec-time environment: a
       // foreign XAUTHORITY names the machine's own display, so the real
       // helper resolves already_visible without spawning any helpers.
-      env: { ...process.env, DISPLAY: ":0", XAUTHORITY: "/tmp/fixture-foreign-Xauthority", TS_FS_EXT: require.resolve("fs-ext-extra-prebuilt") },
+      env: { ...process.env, DISPLAY: ":0", XAUTHORITY: "/tmp/fixture-foreign-Xauthority", TS_SQLITE: require.resolve("better-sqlite3") },
     },
   );
   child.stderr?.on("data", (chunk) => process.stderr.write(`[broker fixture] ${String(chunk)}`));

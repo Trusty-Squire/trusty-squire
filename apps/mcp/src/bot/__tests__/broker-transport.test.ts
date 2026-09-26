@@ -170,7 +170,7 @@ describe("broker IPC", () => {
       expect((await stat(path)).isSocket()).toBe(true);
       const port = { call: async () => ({}), disconnect: async () => undefined };
       await expect(listenBroker(path, port)).rejects.toThrow("EADDRINUSE");
-      // The elected daemon unlinks only after it holds the profile flock.
+      // The elected daemon unlinks only after it holds the profile SQLite lock.
       // Transport never probes or unlinks a socket on its own.
       await unlink(path);
       const broker = await listenBroker(path, port);

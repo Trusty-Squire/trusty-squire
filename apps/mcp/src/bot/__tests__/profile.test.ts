@@ -1,4 +1,4 @@
-// Chrome owns its SingletonLock; the broker owns only the kernel flock.
+// Chrome owns its SingletonLock; the broker owns only the kernel SQLite lock.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -249,10 +249,10 @@ describe("kernel profile lock", () => {
   it.skipIf(process.platform === "win32")("frees immediately when its holder is SIGKILLed", async () => {
     const path = profileOperationLockPath(dir);
     const child = spawn(process.execPath, ["-e", `
-      const fs = require('node:fs');
-      const {flockSync} = require('fs-ext-extra-prebuilt');
-      const fd = fs.openSync(process.argv[1], 'a');
-      flockSync(fd, 'exnb');
+      const Database = require('better-sqlite3');
+      const db = new Database(process.argv[1], {timeout: 0});
+      db.exec('BEGIN EXCLUSIVE');
+      process.on('exit', () => db.close());
       process.stdout.write('held\\n');
       setInterval(() => {}, 1000);
     `, path], { cwd: join(import.meta.dirname, "../../.."), stdio: ["ignore", "pipe", "ignore"] });

@@ -1,8 +1,8 @@
 /** Compatibility surface for local display helpers. Browser custody is the
- * broker's kernel flock and browser scope; no owner manifests or worker exist. */
+ * broker's kernel SQLite lock and browser scope; no owner manifests or worker exist. */
 import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
 import type { ProfileCloseState, ProfileProcessIdentity, ProcessIdentityState } from "./profile.js";
-import { browserScopeIsEmpty, stopBrowserScope } from "./browser-scope.js";
+import { browserScopeIsEmpty, linuxBrowserHasSetpriv, linuxBrowserUsesScope, stopBrowserScope } from "./browser-scope.js";
 
 interface Display { display: string; authFile: string }
 const displays = new Map<string, Display>();
@@ -33,7 +33,7 @@ export async function terminateOwnerBrowserLaunch(
   _marker: string,
   profileDir: string,
 ): Promise<boolean> {
-  if (process.platform !== "linux") return true;
+  if (!linuxBrowserUsesScope()) return true;
   await stopBrowserScope(profileDir);
   return await browserScopeIsEmpty(profileDir);
 }
@@ -45,7 +45,7 @@ export function spawnOwnerTrackedHelper(
   options: SpawnOptions = {},
   runtime: { spawn?: typeof spawn } = {},
 ): ChildProcess {
-  const usePdeath = process.platform === "linux";
+  const usePdeath = linuxBrowserHasSetpriv();
   return (runtime.spawn ?? spawn)(usePdeath ? "setpriv" : command,
     usePdeath ? ["--pdeathsig", "KILL", command, ...args] : [...args], {
       ...options,
