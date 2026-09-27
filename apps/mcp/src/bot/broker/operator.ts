@@ -494,4 +494,10 @@ export class OperatorBroker implements BrokerTransportPort {
     await this.authority.disconnect(principal, explicit);
     this.apis.delete(principal.clientId);
   }
+
+  async shutdown(): Promise<void> {
+    for (const request of this.requestControllers.values())
+      request.controller.abort(new BrokerRefusal("broker_lost", "Broker is shutting down"));
+    await this.authority.shutdown();
+  }
 }

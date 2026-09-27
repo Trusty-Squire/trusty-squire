@@ -52,9 +52,12 @@ interface RecordedCall {
 async function startApiStub(): Promise<{
   baseUrl: string;
   calls: RecordedCall[];
+  slowStarted: Promise<void>;
   close: () => Promise<void>;
 }> {
   const calls: RecordedCall[] = [];
+  let markSlowStarted: () => void = () => undefined;
+  const slowStarted = new Promise<void>((resolve) => { markSlowStarted = resolve; });
   const server: Server = createServer((request, response) => {
     const url = request.url ?? "/";
     calls.push({
@@ -62,6 +65,10 @@ async function startApiStub(): Promise<{
       url,
       authorization: request.headers.authorization as string | undefined,
     });
+    if (url === "/slow") {
+      markSlowStarted();
+      return;
+    }
     if (url.startsWith("/v1/")) {
       response.writeHead(200, { "content-type": "application/json" });
       response.end("{}");
@@ -79,7 +86,11 @@ async function startApiStub(): Promise<{
   return {
     baseUrl: `http://127.0.0.1:${address.port}`,
     calls,
-    close: async () => await new Promise<void>((resolve) => server.close(() => resolve())),
+    slowStarted,
+    close: async () => {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    },
   };
 }
 
@@ -108,6 +119,7 @@ interface Stack {
   /** Publish an enrollment exactly as `connect` completes one. */
   enroll: (token: string) => Promise<void>;
   startServer: () => Promise<Client>;
+  startRelay: () => Promise<Client>;
   /** Launch the daemon the way `connect` does — with the caller's isolated
    * environment — so a test can reach the broker with no enrollment at all. */
   startBroker: () => Promise<void>;
@@ -238,7 +250,20 @@ async function startStack(
       env,
       stderr: "pipe",
     });
-    transport.stderr?.on("data", () => undefined);
+    transport.stderr?.on("data", (chunk) => process.stderr.write(String(chunk)));
+    await client.connect(transport);
+    return client;
+  };
+  const startRelay = async (): Promise<Client> => {
+    const client = new Client({ name: "broker-relay-fixture", version: "1" });
+    clients.push(client);
+    const transport = new StdioClientTransport({
+      command: process.execPath,
+      args: [DIST_BIN, "relay"],
+      env,
+      stderr: "pipe",
+    });
+    transport.stderr?.on("data", (chunk) => process.stderr.write(String(chunk)));
     await client.connect(transport);
     return client;
   };
@@ -260,6 +285,7 @@ async function startStack(
     calls: options.calls,
     enroll,
     startServer,
+    startRelay,
     startBroker,
     stop: async () => {
       await Promise.all(clients.map(async (client) => await client.close().catch(() => undefined)));
@@ -369,6 +395,37 @@ describeReal("broker-only path acceptance", () => {
       ]);
     },
   );
+
+  it("SIGTERM drains two relay sessions and interrupts a slow navigation", { timeout: 90_000 }, async () => {
+    const { stack, api } = await fixture(true);
+    await stack.startBroker();
+    const [first, second] = await Promise.all([stack.startRelay(), stack.startRelay()]);
+    const [one, two] = await Promise.all([
+      call(first, "operate_start", { service_url: `${stack.baseUrl}/a` }),
+      call(second, "operate_start", { service_url: `${stack.baseUrl}/b` }),
+    ]);
+    expect(one.session_id).toBeTruthy();
+    expect(two.session_id).toBeTruthy();
+    expect(await chromeRoots(stack.profile)).toBe(1);
+    const navigation = call(first, "operate_navigate", {
+      session_id: one.session_id,
+      url: `${stack.baseUrl}/slow`,
+    }).then(() => null, (error: unknown) => error);
+    await api.slowStarted;
+    const pid = await brokerPid(stack.profile);
+    expect(pid).not.toBeNull();
+    const signalAt = Date.now();
+    process.kill(pid!, "SIGTERM");
+    await expect.poll(() => alive(pid!), { timeout: 12_000, interval: 100 }).toBe(false);
+    expect(Date.now() - signalAt).toBeLessThan(12_000);
+    const error = await Promise.race([
+      navigation,
+      new Promise<Error>((resolve) => setTimeout(() => resolve(new Error("navigation did not settle")), 12_000)),
+    ]);
+    expect(error).toBeInstanceOf(Error);
+    expect(String(error)).not.toContain("navigation did not settle");
+    await expect.poll(() => chromeRoots(stack.profile), { timeout: 12_000, interval: 100 }).toBe(0);
+  });
 
   it("an enrollment completes while a session is already live", { timeout: 180_000 }, async () => {
     const { stack, api } = await fixture(true);

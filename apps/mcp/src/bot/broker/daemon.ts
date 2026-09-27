@@ -93,10 +93,6 @@ export async function runBrokerDaemon(): Promise<void> {
   const clients = new BrokerClientRegistry();
   let closing = false;
   let listenerClosed = false;
-  const drained = (): boolean => {
-    const inventory = operator.authority.inventory();
-    return inventory.sessions === 0 && inventory.admitting === 0 && inventory.closing === 0;
-  };
   // Only the elected SQLite lock holder may remove a dead predecessor's socket.
   // The transport itself simply binds and therefore respects live listeners.
   await unlink(path).catch((error: NodeJS.ErrnoException) => {
@@ -104,6 +100,7 @@ export async function runBrokerDaemon(): Promise<void> {
   });
   const listener = await listenBroker(path, {
     connected: async (principal, params) => {
+      if (closing) throw new BrokerRefusal("broker_lost", "Broker is shutting down");
       const probe = params.probe === true;
       clients.admit(principal.clientId, probe);
       if (probe) return;
@@ -155,11 +152,14 @@ export async function runBrokerDaemon(): Promise<void> {
   // participate in profile election, Chrome custody, or the broker wire.
   const mcpListener = await listenSharedMcp(operator);
   const shutdown = async (): Promise<void> => {
-    if (closing || !clients.idle() || !drained()) return;
+    if (closing) return;
     closing = true;
+    // A signal is an explicit stop even with live relay clients. Let an
+    // in-flight call finish briefly, then abort the rest and close their tabs.
+    await new Promise((resolve) => setTimeout(resolve, 750));
+    await operator.shutdown();
     if (!(await runtime.close())) {
       process.stderr.write("[browser-broker] cleanup unproven; retaining physical custody\n");
-      closing = false;
       return;
     }
     if (!listenerClosed) {
