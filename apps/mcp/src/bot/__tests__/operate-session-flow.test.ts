@@ -164,6 +164,7 @@ const h = vi.hoisted(() => ({
   } | null,
   utilityTabsOpened: 0,
   utilityTabsClosed: 0,
+  utilityTabRedirect: null as string | null,
   focusedLabels: [] as string[],
   pressedKeys: [] as string[],
   scrolls: [] as string[],
@@ -463,7 +464,10 @@ vi.mock("../browser.js", async (importOriginal) => ({
       h.gotos.push(url);
       // A second argument is the utility tab the verification read navigates —
       // never the operation page, which must stay on its own URL.
-      if (page !== undefined) return;
+      if (page !== undefined) {
+        (page as { navigate: (url: string) => void }).navigate(url);
+        return;
+      }
       if (this.detached) this.detachedUrl = url;
       else {
         h.currentUrl = url;
@@ -560,7 +564,12 @@ vi.mock("../browser.js", async (importOriginal) => ({
     }
     async openUtilityTab(): Promise<unknown> {
       h.utilityTabsOpened += 1;
+      let url = "about:blank";
       return {
+        url: () => url,
+        navigate: (next: string) => {
+          url = h.utilityTabRedirect ?? next;
+        },
         close: async () => {
           h.utilityTabsClosed += 1;
         },
@@ -1477,6 +1486,7 @@ beforeEach(() => {
   h.openedMailBody = null;
   h.utilityTabsOpened = 0;
   h.utilityTabsClosed = 0;
+  h.utilityTabRedirect = null;
   h.focusedLabels = [];
   h.pressedKeys = [];
   h.scrolls = [];
@@ -5182,6 +5192,22 @@ describe("operate session — await_verification into_slot (T3 fix: OTP never ro
     if (!expected.ok) expect(res.needs_user).toEqual(expected.needs_user);
     expect(res.found).toBe(false);
     expect(h.utilityTabsOpened).toBe(0);
+  });
+
+  it("returns the Google session wall when Gmail redirects to an account chooser", async () => {
+    h.providers = ["google"];
+    h.liveGoogleEmail = "captain@example.test";
+    h.utilityTabRedirect = "https://accounts.google.com/v3/signin/accountchooser";
+    h.visibleText = "Choose an account " + "padding".repeat(40);
+    const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+
+    const res = await awaitVerification(obs.session_id, { recipient: "captain@example.test" });
+
+    expect(res.found).toBe(false);
+    expect(res.needs_user?.wall).toBe("google_session");
+    expect(res.needs_user?.message).toContain("Gmail redirected to Google sign-in");
+    expect(h.utilityTabsOpened).toBe(1);
+    expect(h.utilityTabsClosed).toBe(1);
   });
 
   it("allows an explicit opt-out and a later session-only opt-in", async () => {

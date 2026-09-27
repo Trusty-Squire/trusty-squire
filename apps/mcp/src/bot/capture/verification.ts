@@ -851,6 +851,7 @@ export async function awaitVerification(
       let code: string | null = null;
       let link: string | null = null;
       let sourceFrom: string | null = null;
+      let gmailAuthRedirect = false;
       // A row that matched THIS session (mailRowMatchedSession, not merely a
       // candidate) whose own date predates the session start is a PREVIOUS
       // task's mail (see mailRowPredatesSession): it never becomes the hit,
@@ -862,12 +863,23 @@ export async function awaitVerification(
         if (attempt > 0)
           await waitForCaptchaChallengeToSettle(browser, 4000, 0, inboxTab).catch(() => false);
         await browser.goto(searchUrl, inboxTab);
-        const { text: listText, links: listLinks } = await readGmailSearchResultsResilient(
+        const searchRead = await readGmailSearchResultsResilient(
           browser,
           searchUrl,
           inboxTab,
           rawLinksOf,
-        );
+        ).catch((error: unknown) => {
+          if (new URL(inboxTab.url()).hostname === "accounts.google.com") return null;
+          throw error;
+        });
+        // A live provider marker can outlast Gmail's own login session. Its
+        // account chooser is not an empty inbox or a mail result row.
+        if (new URL(inboxTab.url()).hostname === "accounts.google.com") {
+          gmailAuthRedirect = true;
+          break;
+        }
+        if (searchRead === null) continue;
+        const { text: listText, links: listLinks } = searchRead;
         // Read the result ROWS with their From/display/subject/date metadata so
         // BOTH the sender filter and the newest-first pick are decisions made on
         // what the rows actually say — never on Gmail's search operators or on
@@ -1102,13 +1114,30 @@ export async function awaitVerification(
           ));
         }
       }
-      return { code, link, sourceFrom, staleMatchSeen };
+      return { code, link, sourceFrom, staleMatchSeen, gmailAuthRedirect };
     } finally {
       await inboxTab.close().catch(() => undefined);
       await allMailTab?.close().catch(() => undefined);
     }
   });
-  const { code, link, sourceFrom, staleMatchSeen } = verification;
+  const { code, link, sourceFrom, staleMatchSeen, gmailAuthRedirect } = verification;
+  if (gmailAuthRedirect) {
+    audit(sessionId, "await_verification", { refused: "gmail_auth_redirect" });
+    return {
+      session_id: sessionId,
+      found: false,
+      code: null,
+      link: null,
+      needs_user: {
+        wall: "google_session",
+        message:
+          "Gmail redirected to Google sign-in, so the verification email could not be checked. " +
+          "Reconnect with `npx @trusty-squire/mcp connect --force-relogin=google`, then retry " +
+          "the inbox read. Your signup page remains open.",
+        resume: "connect",
+      },
+    };
+  }
   const found = code !== null || link !== null;
   audit(sessionId, "await_verification", {
     sender: search.sender ?? null,
