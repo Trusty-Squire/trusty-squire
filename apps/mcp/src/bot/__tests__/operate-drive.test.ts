@@ -877,6 +877,17 @@ describe("decideAfterJev stop reasons", () => {
     expect(typeableCandidates(rows, facts, true, ["@e:email"]).map((row) => row.ref)).toEqual([
       "@e:q",
     ]);
+    // Same rows on the checkout URL: Search must stay out of TYPE_TEXT so the
+    // planner cannot type the purchase goal into it after inject_card.
+    expect(
+      typeableCandidates(
+        rows,
+        facts,
+        true,
+        ["@e:email"],
+        "https://shop.test/checkouts/cn1",
+      ).map((row) => row.ref),
+    ).toEqual([]);
     const resolved = fillableCandidates(rows, facts, true, ["@e:email", "@e:state"]);
     expect(resolved).toEqual([]);
   });
@@ -895,6 +906,14 @@ describe("decideAfterJev stop reasons", () => {
       ["@e:rate", "r", "Standard shipping|s=c"], card,
     ])).toBe(false);
     expect(checkoutWorkBeforeCard([card], [{ kind: "validation", text: "Enter shipping address" }])).toBe(true);
+    expect(checkoutWorkBeforeCard([
+      ["@e:when", "t", "Delivery date|s=r"],
+      card,
+    ])).toBe(false);
+    expect(checkoutWorkBeforeCard([card], [{
+      kind: "validation",
+      text: "Card number CVV Expiration date (MM / YY) Name on card Delivery date Search payment",
+    }])).toBe(false);
   });
 
   it("does not treat a Shopify geo-default state as already filled", () => {

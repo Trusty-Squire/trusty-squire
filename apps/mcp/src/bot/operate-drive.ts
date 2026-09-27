@@ -2465,6 +2465,16 @@ export function outstandingRequiredFill(
   return outstandingEmptyFill(rows, filledRefs);
 }
 
+/** A required address control whose value still changes merchant costing.
+ * Delivery-date / search / other non-address required fields are not this —
+ * gating the card on them deadlocks a checkout the drive has no fact for. */
+function isCheckoutAddressWorkRow(row: WireRow): boolean {
+  const hay = `${normalizeKey(fieldNameForRow(row))} ${normalizeKey(readableLabel(row))}`;
+  return /(?:^|_)(?:address|street|city|zip|postal|postcode|province|country|state|line1|line2|address1|address2)(?:_|$)/.test(
+    hay,
+  );
+}
+
 /** Ordering signal for the drive's card step. It only postpones that step;
  * inject_card and the human purchase approval remain unchanged. */
 export function checkoutWorkBeforeCard(
@@ -2472,7 +2482,8 @@ export function checkoutWorkBeforeCard(
   blockers: readonly { kind?: string; text: string }[] = [],
 ): boolean {
   if (rows.some((row) =>
-    isRequiredRow(row) && isFillableRow(row) && !isPaymentRow(row) && !isCvvRow(row) &&
+    isRequiredRow(row) && isFillableRow(row) && isCheckoutAddressWorkRow(row) &&
+    !isPaymentRow(row) && !isCvvRow(row) &&
     !isExpiryRow(row) && !isCardholderNameRow(row) &&
     (isInvalidRow(row) || rowValueMissing(row))
   )) return true;
@@ -2482,8 +2493,14 @@ export function checkoutWorkBeforeCard(
   );
   if (shippingChoices.length > 0 && !shippingChoices.some((row) => rowChecked(row) === true))
     return true;
+  // Merchant address/shipping validation only. A compact-v2 label dump that
+  // happens to include "Delivery date" is not that — matching bare "delivery"
+  // postponed card inject on a filled checkout and the drive typed the goal
+  // into Search instead.
   return blockers.some((blocker) => blocker.kind === "validation" &&
-    /\b(?:address|shipping|delivery)\b/i.test(blocker.text));
+    /\b(?:shipping address|enter (?:your )?(?:shipping |billing )?address|select (?:a )?shipping)\b/i.test(
+      blocker.text,
+    ));
 }
 
 export type DisabledSubmitKind = "in_flight" | "needs_fill" | "widget_unready" | "none";
@@ -3194,6 +3211,11 @@ export function typeableCandidates(
     if (filled.has(row[0]) || seen.has(row[0])) continue;
     if (isOffscreenRow(row) && !allowOffscreen) continue;
     if (isPaymentRow(row) || isCvvRow(row)) continue;
+    // A checkout site-search box is not a fill. Offering it after the card
+    // is in play lets a planner dump the purchase goal into Search and then
+    // stick on the truncated observed value. fillableCandidates already
+    // omits it so it cannot hold the card back.
+    if (isSearchRow(row) && includePayment && isCheckoutUrl(pageUrl)) continue;
     if (!isOtpRow(row) && !isSearchRow(row) && !isFormValueField(row, rows, goal ?? "")) continue;
     const role = ROLE_LETTERS[row[1]] ?? row[1];
     const seed = `${row[2] ?? readableLabel(row)}_${role}`;
