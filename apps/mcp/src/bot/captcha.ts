@@ -697,9 +697,7 @@ export async function detectCaptchaVariant(
         hasVisibleCheckboxAnchor: present(
           'iframe[src*="recaptcha/api2/anchor"]:not([src*="size=invisible"])',
         ),
-        hasInvisibleAnchor: present(
-          'iframe[src*="recaptcha/api2/anchor"][src*="size=invisible"]',
-        ),
+        hasInvisibleAnchor: present('iframe[src*="recaptcha/api2/anchor"][src*="size=invisible"]'),
         hasBadge: present(".grecaptcha-badge"),
       };
       let variant = "unknown";
@@ -856,6 +854,7 @@ export function recaptchaMainWorldFire(tok: string): {
     error: null as string | null,
   };
   const win = window as unknown as Record<string, unknown>;
+  const invoked = new Set<Function>();
   const resolvePath = (path: string): unknown => {
     let cur: unknown = win;
     for (const part of path.split(".")) {
@@ -867,6 +866,11 @@ export function recaptchaMainWorldFire(tok: string): {
   };
   const invoke = (fn: unknown): boolean => {
     if (typeof fn !== "function") return false;
+    // reCAPTCHA exposes the same callback through several aliases in its
+    // client graph. Calling each alias resubmits one response token many
+    // times; only the first submit can consume it.
+    if (invoked.has(fn)) return false;
+    invoked.add(fn);
     try {
       (fn as (t: string) => void)(tok);
       out.callbacksFired += 1;
@@ -885,8 +889,32 @@ export function recaptchaMainWorldFire(tok: string): {
     const clients = cfg?.clients;
     if (clients !== undefined) {
       out.clients = Object.keys(clients).length;
-      const walk = (obj: unknown, depth: number): void => {
-        if (obj === null || typeof obj !== "object" || depth > 8) return;
+      // Explicit widgets often read the SDK response in their submit handler
+      // rather than the textarea. The bought token must be visible through
+      // the same accessor as a user-solved checkbox before callbacks run.
+      if (out.clients === 1) {
+        const widgetId = Object.keys(clients)[0];
+        for (const api of [
+          win.grecaptcha,
+          (win.grecaptcha as Record<string, unknown> | undefined)?.enterprise,
+        ]) {
+          if (api === null || typeof api !== "object") continue;
+          const runtime = api as { getResponse?: (id?: string | number) => string };
+          const original = runtime.getResponse?.bind(runtime);
+          if (original === undefined) continue;
+          try {
+            runtime.getResponse = (id?: string | number) =>
+              id === undefined || String(id) === widgetId ? tok : original(id);
+          } catch {
+            // The textarea and callback path still work if the SDK is sealed.
+          }
+        }
+      }
+      const visited = new WeakSet<object>();
+      const walk = (obj: unknown, depth: number): boolean => {
+        if (obj === null || typeof obj !== "object" || depth > 8) return false;
+        if (visited.has(obj)) return false;
+        visited.add(obj);
         for (const [key, v] of Object.entries(obj as Record<string, unknown>)) {
           const normalized = key.toLowerCase();
           if (
@@ -896,16 +924,19 @@ export function recaptchaMainWorldFire(tok: string): {
           ) {
             if (typeof v === "function") {
               out.callbacksFunction += 1;
-              invoke(v);
+              if (invoke(v)) return true;
             } else if (typeof v === "string" && v.length > 0) {
-              invokeNamed(v);
+              if (invokeNamed(v)) return true;
             }
             continue;
           }
-          if (v !== null && typeof v === "object") walk(v, depth + 1);
+          if (v !== null && typeof v === "object" && walk(v, depth + 1)) return true;
         }
+        return false;
       };
-      walk(clients, 0);
+      // One success callback per rendered client consumes its response token.
+      // Distinct internal callbacks in the same client are not extra widgets.
+      for (const client of Object.values(clients)) walk(client, 0);
     }
   } catch (err) {
     out.error = err instanceof Error ? err.message : String(err);
@@ -1113,7 +1144,8 @@ export async function injectRecaptchaTokenDetail(
               return fireFromValue(res.result.value, res.exceptionDetails?.text ?? null);
             };
             const preferred = mainWorlds.get(mainFrameId);
-            let best = preferred === undefined ? emptyFire("no_main_world") : await tryContext(preferred);
+            let best =
+              preferred === undefined ? emptyFire("no_main_world") : await tryContext(preferred);
             if (best.clients === 0 && best.callbacksFired === 0) {
               for (const [frameId, contextId] of mainWorlds) {
                 if (frameId === mainFrameId) continue;
@@ -1124,7 +1156,11 @@ export async function injectRecaptchaTokenDetail(
                 }
               }
             }
-            return { isolatedCount, best, usedMain: preferred !== undefined || mainWorlds.size > 0 };
+            return {
+              isolatedCount,
+              best,
+              usedMain: preferred !== undefined || mainWorlds.size > 0,
+            };
           },
         );
         isolatedClients = worlds.isolatedCount;
@@ -1465,6 +1501,19 @@ export async function hasCaptchaResponseTokenForVariant(
   page: Page | null = browser.page,
 ): Promise<boolean> {
   if (variant === "unknown") return false;
+  if (variant === "recaptcha_v2" && page !== null) {
+    for (const frame of page.frames()) {
+      if (!/\/recaptcha\/api2\/anchor(?:\?|$)/.test(frame.url())) continue;
+      const expired = await frame
+        .evaluate(() =>
+          /verification challenge expired|check the checkbox again/i.test(
+            document.body?.innerText ?? "",
+          ),
+        )
+        .catch(() => false);
+      if (expired) return false;
+    }
+  }
   return hasResponseTokenIn(page, [VARIANT_RESPONSE_SELECTOR[variant]], variant === "turnstile");
 }
 
@@ -1742,6 +1791,35 @@ export async function injectHcaptchaToken(
       });
     } catch {
       ok = false;
+    }
+    if (ok) return true;
+    // A cross-origin gate can be an out-of-process iframe. The page CDP
+    // session above has no main-world context for that frame, while
+    // frame.evaluate runs in Patchright's isolated world and cannot see the
+    // gate's data-callback function. A script element executes in the frame's
+    // page world; read its value-free result through a DOM attribute.
+    const marker = "data-ts-hcaptcha-inject-result";
+    const safePayload = JSON.stringify(payload).replaceAll("<", "\\u003c");
+    const source = `document.documentElement.setAttribute(${JSON.stringify(marker)}, JSON.stringify((${hcaptchaInjectScript.toString()})(${safePayload})))`;
+    for (const frame of page.frames()) {
+      try {
+        const tag = await frame.addScriptTag({ content: source });
+        const diag = await frame.evaluate((attr) => {
+          const raw = document.documentElement.getAttribute(attr);
+          document.documentElement.removeAttribute(attr);
+          return raw === null ? null : JSON.parse(raw);
+        }, marker);
+        await tag.evaluate((el) => el.parentNode?.removeChild(el)).catch(() => undefined);
+        if (diag?.ok) {
+          console.error(
+            `[captcha-inject-diag] world=frame-main ok=true textareas=${diag.textareas} widgets=${diag.widgets} callbackFired=${diag.callbackFired} formSubmitted=${diag.formSubmitted}`,
+          );
+          ok = true;
+        }
+      } catch {
+        // A strict CSP or detached frame can refuse the script. The isolated
+        // textarea fill below remains the final fallback.
+      }
     }
     if (ok) return true;
     for (const frame of page.frames()) {
