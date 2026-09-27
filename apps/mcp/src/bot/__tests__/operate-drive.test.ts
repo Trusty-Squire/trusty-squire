@@ -68,6 +68,7 @@ import {
   solverOutcomeBlocksSubmit,
   DRIVE_IN_FLIGHT_MS,
   outstandingRequiredFill,
+  checkoutWorkBeforeCard,
   paymentArgs,
   driveApprovalPageTexts,
   DRIVE_EMPTY_SNAPSHOT_WAITS,
@@ -878,6 +879,22 @@ describe("decideAfterJev stop reasons", () => {
     ]);
     const resolved = fillableCandidates(rows, facts, true, ["@e:email", "@e:state"]);
     expect(resolved).toEqual([]);
+  });
+
+  it("orders card approval after required address and shipping selection", () => {
+    const address: WireRow = ["@e:line1", "combobox", "Address|f=address_line1|s=r"];
+    const shipping: WireRow = ["@e:rate", "r", "Standard shipping|s=u"];
+    const card: WireRow = ["@e:pan", "t", "Card number|f=payment|s=r"];
+    expect(checkoutWorkBeforeCard([address, shipping, card])).toBe(true);
+    expect(checkoutWorkBeforeCard([
+      ["@e:line1", "combobox", "Address|f=address_line1|s=r|n=1 Main St"],
+      shipping, card,
+    ])).toBe(true);
+    expect(checkoutWorkBeforeCard([
+      ["@e:line1", "combobox", "Address|f=address_line1|s=r|n=1 Main St"],
+      ["@e:rate", "r", "Standard shipping|s=c"], card,
+    ])).toBe(false);
+    expect(checkoutWorkBeforeCard([card], [{ kind: "validation", text: "Enter shipping address" }])).toBe(true);
   });
 
   it("does not treat a Shopify geo-default state as already filled", () => {

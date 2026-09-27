@@ -82,12 +82,8 @@ interface CardReleaseDependencies {
   onCardResolved: (cardRef: string) => void;
   // Hands the session layer the approved card identity and terms.
   onCardFilled: (pending: ReleasedCardApproval) => void;
-  // [P0] Resume a previously-created, still-pending approval instead of
-  // minting a new one. Set by the MCP tool layer from session state when a
-  // prior call on this checkout already returned approval_pending. When
-  // present, args' merchant/amount/currency/card_ref/item/reason/phase are
-  // IGNORED in favor of the resumed values — a later call can never mutate
-  // the terms of an approval already presented to the human for signing.
+  // Resume only while the requested purchase terms still match. Changed terms
+  // start a new approval; an old approval can never authorize the new terms.
   resumeFrom?: PendingApprovalWait;
   // [P0] How long (ms, from this call's start) THIS invocation will actively
   // wait for approval before giving up and returning approval_pending,
@@ -501,6 +497,20 @@ export async function executeCardReleaseApproval(
 ): Promise<Record<string, unknown>> {
   const deps = { ...defaultDependencies(), ...overrides };
   let resume = deps.resumeFrom;
+  if (
+    resume !== undefined &&
+    (resume.checkout.merchant !== args.merchant ||
+      resume.checkout.amount_cents !== args.amount_cents ||
+      resume.checkout.currency !== args.currency.toUpperCase() ||
+      (resume.cardRef ?? resume.boundCardRef) !== args.card_ref)
+  ) {
+    // The API has no agent-side cancellation endpoint. Retire the local
+    // capability and keypair; any later signature on the old URL cannot open
+    // a card in this session.
+    resume.keypair.privateKey = "";
+    deps.onApprovalTerminal();
+    resume = undefined;
+  }
   let keypair = resume !== undefined ? resume.keypair : await generateOperatorKeypair();
   let keypairHandedOff = resume !== undefined;
   let cardBytes: Uint8Array | undefined;

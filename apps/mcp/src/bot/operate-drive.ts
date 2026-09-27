@@ -2465,6 +2465,27 @@ export function outstandingRequiredFill(
   return outstandingEmptyFill(rows, filledRefs);
 }
 
+/** Ordering signal for the drive's card step. It only postpones that step;
+ * inject_card and the human purchase approval remain unchanged. */
+export function checkoutWorkBeforeCard(
+  rows: readonly WireRow[],
+  blockers: readonly { kind?: string; text: string }[] = [],
+): boolean {
+  if (rows.some((row) =>
+    isRequiredRow(row) && isFillableRow(row) && !isPaymentRow(row) && !isCvvRow(row) &&
+    !isExpiryRow(row) && !isCardholderNameRow(row) &&
+    (isInvalidRow(row) || rowValueMissing(row))
+  )) return true;
+  const shippingChoices = rows.filter((row) =>
+    (row[1] === "r" || row[1] === "radio") &&
+    /\b(?:shipping|delivery|express|standard|free shipping)\b/i.test(readableLabel(row)),
+  );
+  if (shippingChoices.length > 0 && !shippingChoices.some((row) => rowChecked(row) === true))
+    return true;
+  return blockers.some((blocker) => blocker.kind === "validation" &&
+    /\b(?:address|shipping|delivery)\b/i.test(blocker.text));
+}
+
 export type DisabledSubmitKind = "in_flight" | "needs_fill" | "widget_unready" | "none";
 
 /** A rendered image/audio challenge in a cross-origin frame. */
@@ -6436,6 +6457,10 @@ async function driveLoop(input: {
     }
 
     if (decision.special === "card") {
+      if (checkoutWorkBeforeCard(rows, observation.semantic?.blockers)) {
+        automaticDecisionRefused = true;
+        return "continue";
+      }
       if (api === null) {
         return finish("jev_unavailable", {
           jevRetried: "inject_card requires an active Trusty Squire session",
@@ -7603,6 +7628,7 @@ async function driveLoop(input: {
         (!alreadyCard || cardRetry) &&
         onCheckout &&
         remainingFills.length === 0 &&
+        !checkoutWorkBeforeCard(rows, observation.semantic?.blockers) &&
         (fields.pan !== undefined || fields.cvv !== undefined)
       ) {
         // Bind the automatic decision to the current snapshot before applying
