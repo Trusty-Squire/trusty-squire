@@ -129,7 +129,7 @@ interface Stack {
 /** The elected broker is the process listening on this profile's socket. */
 async function brokerPid(profile: string): Promise<number | null> {
   try {
-    const output = execFileSync("lsof", ["-t", "-U", "--", defaultBrokerSocket(profile)], { encoding: "utf8" });
+    const output = execFileSync("lsof", ["-a", "-t", "-U", "--", defaultBrokerSocket(profile)], { encoding: "utf8" });
     const pid = Number(output.trim().split(/\s+/)[0]);
     return Number.isSafeInteger(pid) && pid > 0 ? pid : null;
   } catch { return null; }

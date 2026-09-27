@@ -18,7 +18,7 @@ type Owner = { pid: number; start_time: string };
 /** The live Unix listener identifies the elected broker in this test. */
 async function readBrokerOwner(profile: string): Promise<Owner | undefined> {
   try {
-    const pid = Number(execFileSync("lsof", ["-t", "-U", "--", defaultBrokerSocket(profile)], { encoding: "utf8" }).trim().split(/\s+/)[0]);
+    const pid = Number(execFileSync("lsof", ["-a", "-t", "-U", "--", defaultBrokerSocket(profile)], { encoding: "utf8" }).trim().split(/\s+/)[0]);
     return processBirthIdentity(pid) ?? undefined;
   } catch { return undefined; }
 }
