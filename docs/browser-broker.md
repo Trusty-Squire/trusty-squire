@@ -1,9 +1,10 @@
 # Cross-process identity browser broker
 
-The broker is the sole production path for MCP operator Chrome custody.
-It also hosts one MCP service for agents that opt into the shared endpoint.
-Existing stdio MCP servers retain their session IDs and forward commands
-over local IPC. One broker owns one canonical profile, one Chrome,
+The broker is the sole production path for MCP operator Chrome custody
+and the only MCP service on the host. Agent-facing `mcp server` (and
+`mcp relay`) is a lightweight stdio proxy onto that shared socket — there
+is no per-agent operator server and no leftover compatibility path.
+One broker owns one canonical profile, one Chrome,
 and the existing operator handlers and payment state. Each session gets its
 own tab, so agents run concurrently; only Google OAuth sign-in is serialized.
 The profile lock elects the broker and never serializes sessions. A session
@@ -27,38 +28,37 @@ socket has the same local-user boundary as the existing broker connection.
 The MCP socket has no server-instance record, heartbeat, stale-server sweep,
 or idle exit. Its listener starts and stops with the elected broker.
 
-For each agent MCP connection, `mcp relay` sends one line with the agent identity,
-then relays MCP stdio messages in both directions. An explicit
-`TRUSTY_SQUIRE_AGENT_IDENTITY` wins; Beeline's private room `HOME` provides a
-stable fallback across its MCP process restarts. Other callers without an
-explicit identity get a process-scoped fallback.
-If the broker restarts, the relay reconnects while the agent's pipe remains open,
-replays initialization, and returns an error for calls lost in flight. Broker
-sessions and tabs end with the broker. The relay exits when its pipe
-closes.
+For each agent MCP connection, `mcp server` (and the `relay` alias) sends one
+line from `TRUSTY_SQUIRE_AGENT_IDENTITY` (or `unknown`), then relays MCP stdio
+messages in both directions.
+If the shared socket is down, the proxy starts the elected broker the same
+way other clients do, then waits for the MCP listener.
+If the broker restarts, the proxy reconnects while the agent's pipe remains open,
+replays initialization, and returns an error for calls lost in flight. The
+connection owns the sessions it opened; dropping it closes those sessions after
+a short grace for a socket blip. A reconnecting client starts fresh. The proxy
+exits when its pipe or a termination signal closes.
 
 The broker creates a separate MCP Server, API client, and broker principal for that
-connection. Session IDs and tabs belong to its agent identity; retiring an MCP
-connection leaves sessions available to later connections from that agent.
-Vault requests use that connection's agent identity in
-`X-Squire-Agent-Identity`. As with stdio, the label is self-declared and grants
-no authority. Operator tools call the broker's existing ownership layer in
-process; existing `connect/open/command/close/status` wire clients and `mcp
-server` stdio clients continue to work.
+connection. Session IDs and tabs belong to that connection. Vault requests use
+that connection's agent identity in `X-Squire-Agent-Identity`. As with stdio,
+the label is self-declared and grants no authority. Operator tools call the
+broker's existing ownership layer in process. Existing
+`connect/open/command/close/status` wire clients still reach the same broker.
 
 For a Beeline-style MCP configuration, point at the installed package's Node
-entry directly so each agent starts only the small relay and no `npm exec`
+entry directly so each agent starts only the small proxy and no `npm exec`
 wrapper. Replace the path and identity with the host's values. This example
 uses the default profile; for another profile, set the same
-`TRUSTY_SQUIRE_PROFILE_DIR` in both the broker and relay environments. The relay
-derives that profile's socket path itself:
+`TRUSTY_SQUIRE_PROFILE_DIR` in both the broker and `server` environments. The
+proxy derives that profile's socket path itself:
 
 ```json
 {
   "mcpServers": {
     "squire": {
       "command": "node",
-      "args": ["/home/USER/.trusty-squire/lib/node_modules/@trusty-squire/mcp/dist/bin.js", "relay"],
+      "args": ["/home/USER/.trusty-squire/lib/node_modules/@trusty-squire/mcp/dist/bin.js", "server"],
       "env": { "TRUSTY_SQUIRE_AGENT_IDENTITY": "beeline-agent-1" }
     }
   }
@@ -66,13 +66,13 @@ derives that profile's socket path itself:
 ```
 
 The broker can be run as a user service with the same entry path and the
-`broker` subcommand. Start it before agents connect. The legacy `server`
-subcommand remains the installed default for clients that have not opted in.
+`broker` subcommand. The first `mcp server` starts it on demand.
 
 ## Configuration and operation
 
 Build with `pnpm --filter @trusty-squire/mcp build`, then run
 `node apps/mcp/dist/bin.js server` with the enrolled profile and account.
+That process is the stdio proxy; it does not start a second operator stack.
 No broker-specific environment is required. Discovery derives a private local
 socket from the canonical profile path and user ID, independent of cwd and TMPDIR,
 and starts or attaches the elected broker. `TRUSTY_SQUIRE_BROKER_SOCKET` optionally
@@ -292,16 +292,16 @@ and its other sessions intact.
 - Each session owns a target family and a serialized command queue. A service
   URL does not reserve a site; one authenticated client drives the shared profile.
   Several connections to the same profile attach at once, one per client process,
-  and each agent identity owns the sessions it opened. A client presenting a
-  session id owned by a different agent is refused with `stale_lease`. A retired
-  connection's sessions remain available to the same agent and end through
-  `operate_finish`, idle timeout, lifetime overrun, or broker shutdown.
+  and each connection owns the sessions it opened. The opaque session id is the
+  only capability: a connection presenting another connection's session id is
+  refused with `stale_lease`, and a dropped connection's sessions close after a
+  five-second grace. A reconnecting client starts fresh and does not adopt them.
 - A start refused by a wall (`needs_user`, such as `google_session`) still reports
-  a `session_id`, but that id was never owned by any agent. The client
+  a `session_id`, but that id was never owned by any connection. The client
   remembers it and answers locally without dispatching: a follow-up operate call
   replays the same wall, and `operate_finish` returns the closed,
   `mutation: "not_dispatched"` receipt and forgets the id. So `stale_lease` keeps
-  one meaning — the agent does not own a live session with that id — and never stands in for
+  one meaning — another connection owns a live session — and never stands in for
   a session that was never created. `broker-forwarder.test.ts` pins the replay.
 - Browser egress is unrestricted for all targets. Session cleanup closes only that owned
   family. A close that cannot be proven drains the Chrome scope or process
@@ -312,9 +312,9 @@ and its other sessions intact.
   originating request's IPC connection to its MCP client before the tool completes;
   clients without notification support receive the approval link in the result.
   Observation output follows the [narrow released-card mask policy](observation-model.md#45-narrow-released-card-output-mask-final-owners-order-2026-09-12).
-- A live socket owns its in-flight requests: dropping it aborts that connection's
-  in-flight starting sessions and queues no further work. There is no journal
-  or `recover`/`reclaim`/`acknowledge` RPC. A
+- A live socket is the connection lease: dropping it aborts that connection's
+  in-flight starting sessions and queues no further work. There is no journal,
+  no identity-based session sharing, and no `recover`/`reclaim`/`acknowledge` RPC. A
   lost connection surfaces `broker_lost` with an explicit do-not-replay warning;
   an in-flight request whose outcome is unknown is reported in that call's own
   error and blocks nothing later.
@@ -338,23 +338,16 @@ and its other sessions intact.
   A connection that declared itself a `status` probe is not a connected client
   for this purpose — see [Busy façade](#busy-façade).
 
-MCP server-instance records use the hash of
-`TRUSTY_SQUIRE_SERVER_LINEAGE` (or the forwarder credential when present) to
-scope predecessor cleanup to one launcher lane. During terminal shutdown the
-record remains `draining` until cleanup completes or the configured
-`TRUSTY_SQUIRE_SERVER_SHUTDOWN_DEADLINE_MS` expires (30 seconds by default).
-Errors on the MCP server's stdout or stderr (including `EPIPE` after its caller
-exits) trigger this same bounded shutdown as stdin EOF or transport closure.
-An output error during startup is retained until the shutdown handler is ready.
-It must not recurse through the uncaught-exception logger on broken stderr and
-starve the idle timer. The Linux dead-caller regression in
+`mcp server` is a stdio proxy: it exits when its pipe or a termination
+signal closes, and it never keeps a server-instance record or idle timer.
+The Linux dead-caller regression in
 `apps/mcp/src/__tests__/bin-smoke.test.ts` covers this process-exit boundary.
 
 Implementation entry points: `src/bot/broker/daemon.ts`, `discovery.ts`,
 `authority.ts`, `runtime.ts`, `operator.ts`, `forwarder.ts`, `protocol.ts`, and
 `transport.ts` under `apps/mcp`.
-Linux real-Chrome crash, session-timer, and graceful-cookie regressions are
-`apps/mcp/scripts/kernel-broker-chaos.mjs`, `kernel-session-timer.mjs`,
+Linux real-Chrome crash and graceful-cookie regressions are
+`apps/mcp/scripts/kernel-broker-chaos.mjs`,
 `kernel-graceful-cookie.mjs`, and `kernel-no-systemd-browser.mjs`; build the
 MCP package before running them.
 

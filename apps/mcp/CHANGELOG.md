@@ -1,5 +1,11 @@
 # Changelog — @trusty-squire/mcp
 
+## Unreleased
+
+- Make `mcp server` a stdio proxy onto the host broker's shared MCP socket.
+  There is one operator stack per profile. A session belongs to the
+  connection that opened it and closes when that connection dies.
+
 ## 1.1.18-rc.2 (2026-09-27)
 
 - Enforce the sender filter when reading the verification inbox (#975).

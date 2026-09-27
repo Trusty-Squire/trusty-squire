@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { createConnection, type Socket } from "node:net";
+import { ensureSharedMcp } from "./bot/broker/discovery.js";
 import { sharedMcpSocketPath } from "./bot/broker/mcp-socket-path.js";
-import { brokerAgentIdentity } from "./bot/broker/agent-identity.js";
+import { VERSION } from "./version.js";
 
 type RpcFrame = { id?: string | number; method?: string; error?: unknown };
 
@@ -17,7 +18,8 @@ function frames(chunk: Buffer, buffered: Buffer, receive: (line: string) => void
 
 /** Keep the agent's stdio MCP connection alive across broker restarts. */
 export async function runRelay(): Promise<void> {
-  const agentId = brokerAgentIdentity();
+  process.stderr.write(`[trusty-squire] server v${VERSION}\n`);
+  const agentId = (process.env.TRUSTY_SQUIRE_AGENT_IDENTITY ?? "unknown").trim();
   if (!agentId || agentId.length > 128 || agentId.includes("\n") || agentId.includes("\r"))
     throw new Error("TRUSTY_SQUIRE_AGENT_IDENTITY must be a single line of at most 128 characters");
 
@@ -53,7 +55,23 @@ export async function runRelay(): Promise<void> {
   };
   const connect = () => {
     if (stopped) return;
-    const peer = createConnection(sharedMcpSocketPath());
+    void ensureSharedMcp()
+      .then(() => {
+        if (stopped) return;
+        attach(createConnection(sharedMcpSocketPath()));
+      })
+      .catch((error: unknown) => {
+        if (stopped) return;
+        const message = error instanceof Error ? error.message : String(error);
+        process.stderr.write(`[trusty-squire] relay: ${message}\n`);
+        reconnect();
+      });
+  };
+  const attach = (peer: Socket) => {
+    if (stopped) {
+      peer.destroy();
+      return;
+    }
     socket = peer;
     output = Buffer.alloc(0);
     peer.once("connect", () => {
@@ -128,6 +146,9 @@ export async function runRelay(): Promise<void> {
     };
     process.stdin.once("end", close);
     process.stdin.once("close", close);
+    process.once("SIGHUP", close);
+    process.once("SIGTERM", close);
+    process.once("SIGINT", close);
     process.stdin.resume();
     connect();
   });

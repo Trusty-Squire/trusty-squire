@@ -2,21 +2,11 @@ import { resolveBrokerSocket } from "./bot/broker/discovery.js";
 import { randomUUID } from "node:crypto";
 import { BrokerRefusal } from "./bot/broker/refusal.js";
 import { ForwardedResultError, OperatorForwarder } from "./bot/broker/forwarder.js";
-// MCP server: reads its account's session from the session file, sets up an ApiClient
-// against the configured API base URL, and exposes the registered tools
-// over stdio.
-//
-// `runServer()` is invoked by bin.ts for the `server` subcommand. This
-// file is a pure module — no shebang, no entrypoint guard, no top-level
-// execution. The host agent launches `mcp server`; bin.ts dispatches.
-//
-// Single-tier auth (post-Tier-0 collapse): every session is account-
-// bound. Sessions that pre-date the single-tier change (only a
-// machine_token, no agent_session_token) fail loud at tool-call time
-// with a re-install instruction. There is no anonymous mode.
+// MCP tool server used by the broker's shared socket. Agent-facing
+// `mcp server` is a relay onto that socket (`relay.ts`); this module
+// is not a process entrypoint.
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { ApiClient } from "./api-client.js";
 import {
@@ -24,20 +14,9 @@ import {
   composeOperatorSignals,
   withOperatorRequestContext,
 } from "./bot/request-cancellation.js";
-import {
-  heartbeatIntervalMs,
-  idleCheckIntervalMs,
-  idleTimeoutMs,
-  idleTimeoutWithSessionMs,
-  reapStaleServerInstances,
-  registerServerInstance,
-  serverLauncherLineage,
-  shutdownDeadlineMs,
-} from "./server-instance-registry.js";
 import { buildToolRegistry, findTool } from "./tools/index.js";
 import {
   createSessionGuard,
-  setServingAccountId,
   withServingAccountId,
   type SessionGuard,
 } from "./session-guard.js";
@@ -45,32 +24,13 @@ import { VERSION } from "./version.js";
 
 const SERVER_NAME = "trusty-squire";
 
-const DEFAULT_REGISTRY_BASE =
-  process.env.ADAPTER_REGISTRY_URL ?? "https://registry.trustysquire.ai";
+const DEFAULT_SHUTDOWN_DEADLINE_MS = 30_000;
 
-// Idle self-exit backstop. transport.onclose / stdin EOF / SIGTERM already
-// exit the process on a well-behaved disconnect (see requestShutdown below).
-// This covers what a live box surfaced instead: a host agent spawns a *new*
-// server on reconnect without ever closing the old child's stdio or signaling
-// it — the old process just sits sleeping on an open pipe forever. No signal
-// from a host like that will ever arrive. A time bound can be enabled by a
-// host that accepts closing a quiet stdio connection.
-//
-// A live host can stay quiet between turns for longer than either historical
-// bound. The idle backstop is opt-in; the bounds live in
-// server-instance-registry.ts.
-
-// Exported for unit testing; kept pure so the branches (recent activity,
-// no-session idle, session-open idle) don't need a live process/interval.
-export function shouldIdleExit(
-  now: number,
-  lastActivityAt: number,
-  sessionCount: number,
-  timeoutMs: number,
-  timeoutWithSessionMs: number,
-): boolean {
-  const threshold = sessionCount === 0 ? timeoutMs : timeoutWithSessionMs;
-  return threshold > 0 && now - lastActivityAt >= threshold;
+export function shutdownDeadlineMs(): number {
+  const raw = process.env.TRUSTY_SQUIRE_SERVER_SHUTDOWN_DEADLINE_MS;
+  if (raw === undefined) return DEFAULT_SHUTDOWN_DEADLINE_MS;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_SHUTDOWN_DEADLINE_MS;
 }
 
 // Injected into the model's system prompt every turn (≤2KB). Teaches
@@ -428,252 +388,4 @@ function errorContent(code: string, message: string, guidance?: Record<string, u
       },
     ],
   };
-}
-
-// Process-level backstop for the stdio server. Every tool handler is already
-// wrapped in try/catch, but an async error can still escape that boundary —
-// e.g. a Playwright event waiter whose rejection fires while another await is
-// pending (the uploadFile filechooser race that took the server down mid-run).
-// Node's default response to an unhandledRejection/uncaughtException is to
-// kill the process, which turns one bad operate_* call into "MCP server
-// unreachable" for the host agent. Log the escape and keep serving: the
-// in-flight call fails on its own (its awaited promise threw or timed out),
-// session/browser state is self-contained and bounded by its watchdog and
-// terminal teardown, and no security gate depends on process death — a crash
-// leaves any half-done page action in exactly the same state, minus the
-// transport. Installed only for `mcp server`; the CLI keeps fail-fast.
-export function installServerProcessGuards(
-  onOutputFailure: () => void = () => process.exit(0),
-): void {
-  const describe = (reason: unknown): string =>
-    reason instanceof Error ? (reason.stack ?? reason.message) : String(reason);
-  const outputFailed = (): void => {
-    onOutputFailure();
-  };
-  // A dead stdio peer closes the read ends of stdout/stderr. Without explicit
-  // listeners, Node promotes the resulting EPIPE to uncaughtException; the
-  // handler below then writes that exception to the same broken stderr and
-  // enters a tight EPIPE loop. Treat output failure as transport loss instead.
-  process.stdout.on("error", outputFailed);
-  process.stderr.on("error", outputFailed);
-  process.on("unhandledRejection", (reason) => {
-    process.stderr.write(
-      `[trusty-squire] unhandled rejection (server kept alive): ${describe(reason)}\n`,
-    );
-  });
-  process.on("uncaughtException", (err) => {
-    process.stderr.write(
-      `[trusty-squire] uncaught exception (server kept alive): ${describe(err)}\n`,
-    );
-  });
-}
-
-// Start the MCP stdio server. Throws on a fatal startup failure; bin.ts
-// owns the process-level error handling.
-export async function runServer(): Promise<void> {
-  let outputFailed = false;
-  let shutdownAfterOutputFailure: (() => void) | undefined;
-  installServerProcessGuards(() => {
-    outputFailed = true;
-    shutdownAfterOutputFailure?.();
-  });
-  // Startup breadcrumb on stderr (which lands in the host agent's MCP
-  // log). A silent no-op was the worst part of the entrypoint-guard
-  // bug — this line makes "did the server actually start?" answerable
-  // at a glance.
-  process.stderr.write(`[trusty-squire] server v${VERSION} starting\n`);
-
-  // Owns this server's answer to "which account am I serving?".
-  const sessionGuard = createSessionGuard();
-  const loadPublishedAccountSession = async (): Promise<ApiClient | null> => {
-    try {
-      const session = await sessionGuard.bind();
-      setServingAccountId(sessionGuard.boundAccountId());
-      // Single-tier: every session is account-bound. A session with just a
-      // machine_token (pre-collapse install) yields api=null, and every
-      // tool call returns the re-install instruction.
-      if (session === null || session.agent_session_token === undefined) return null;
-      return new ApiClient({
-        apiBaseUrl: session.api_base_url,
-        registryBaseUrl: DEFAULT_REGISTRY_BASE,
-        agentSessionToken: session.agent_session_token,
-        agentIdentity: process.env.TRUSTY_SQUIRE_AGENT_IDENTITY ?? "unknown",
-        ...(session.account_id !== undefined ? { accountId: session.account_id } : {}),
-      });
-    } catch {
-      // A failed session read must remain fail-closed; the next tool call can
-      // retry after a transient session-storage problem clears.
-      return null;
-    }
-  };
-  const api = await loadPublishedAccountSession();
-  const instanceLineage = serverLauncherLineage();
-  try {
-    await reapStaleServerInstances({ launcherLineage: instanceLineage });
-  } catch (err) {
-    process.stderr.write(
-      `[trusty-squire] stale server reap failed: ${
-        err instanceof Error ? err.message : String(err)
-      }\n`,
-    );
-  }
-
-  const callAdmission = createServerCallAdmission();
-  const brokerFrontend = Boolean(process.env.TRUSTY_SQUIRE_BROKER_SOCKET?.trim());
-  const forwarder = new OperatorForwarder(resolveBrokerSocket(), sessionGuard);
-  const server = await buildServer(
-    api,
-    callAdmission,
-    loadPublishedAccountSession,
-    sessionGuard,
-    forwarder,
-  );
-  const transport = new StdioServerTransport();
-  // Publishes what a later launch of this identity needs to tell "still
-  // serving a client" from "wedged": last inbound message, open sessions,
-  // in-flight calls. Without it every prior instance looks equally idle.
-  const instance = registerServerInstance({ launcherLineage: instanceLineage });
-
-  // A stdio client can disappear without sending a signal (for example when
-  // its parent agent exits). Chrome keeps Node's event loop alive in that
-  // case, so close every active provisioning browser and explicitly exit.
-  // Keep the single promise so EOF, transport closure, a signal, and the
-  // idle backstop below racing together cannot run teardown twice.
-  let shutdown: Promise<void> | undefined;
-  let idleTimer: NodeJS.Timeout | undefined;
-  let heartbeatTimer: NodeJS.Timeout | undefined;
-  let staleInstanceSweepTimer: NodeJS.Timeout | undefined;
-  let staleInstanceSweepRunning = false;
-  const sweepStaleInstances = (): void => {
-    if (shutdown !== undefined || staleInstanceSweepRunning) return;
-    staleInstanceSweepRunning = true;
-    void reapStaleServerInstances({ launcherLineage: instanceLineage })
-      .catch((err) => {
-        process.stderr.write(
-          `[trusty-squire] stale server reap failed: ${
-            err instanceof Error ? err.message : String(err)
-          }\n`,
-        );
-      })
-      .finally(() => {
-        staleInstanceSweepRunning = false;
-      });
-  };
-  const requestShutdown = (): void => {
-    if (shutdown !== undefined) return;
-    const admittedCallsDrained = callAdmission.closeAndDrain();
-
-    const deadlineMs = shutdownDeadlineMs();
-    const shutdownDeadlineAt = Date.now() + deadlineMs;
-    instance?.markDraining(shutdownDeadlineAt, {
-      lastActivityAt,
-      activeSessions: forwarder.sessionCount(),
-      inFlightCalls: callAdmission.inFlightCount(),
-    });
-
-    shutdown = (async () => {
-      process.stdin.removeListener("end", requestShutdown);
-      process.stdin.removeListener("close", requestShutdown);
-      process.removeListener("SIGHUP", requestShutdown);
-      process.removeListener("SIGTERM", requestShutdown);
-      process.removeListener("SIGINT", requestShutdown);
-      if (idleTimer !== undefined) clearInterval(idleTimer);
-      if (heartbeatTimer !== undefined) clearInterval(heartbeatTimer);
-      if (staleInstanceSweepTimer !== undefined) clearInterval(staleInstanceSweepTimer);
-      try {
-        const outcome = await runBoundedServerCleanup(
-          admittedCallsDrained,
-          async () => {
-            await forwarder.close();
-            await server.close();
-          },
-          deadlineMs,
-        );
-        if (outcome === "deadline")
-          process.stderr.write(
-            `[trusty-squire] server shutdown deadline reached after ${deadlineMs}ms; forcing exit\n`,
-          );
-      } catch (err) {
-        // Teardown is best-effort: the host is gone, so leave a breadcrumb but
-        // never let a failed browser close turn into an orphaned MCP process.
-        process.stderr.write(
-          `[trusty-squire] server shutdown cleanup failed: ${
-            err instanceof Error ? err.message : String(err)
-          }\n`,
-        );
-      }
-
-      // Browser/Chrome child processes can keep the event loop alive briefly
-      // even after their teardown. This mirrors bin.ts's forced CLI exit and
-      // makes disconnect a reliable process-lifecycle boundary.
-      // Keep the draining record discoverable for the entire terminal cleanup.
-      // The owner reaper remains armed until process.exit; only now is the
-      // instance record no longer needed by a same-lineage replacement.
-      instance?.release();
-      process.exit(0);
-    })();
-  };
-
-  // Protocol.connect preserves a transport callback installed before it takes
-  // ownership, so this also covers an explicit transport close.
-  transport.onclose = requestShutdown;
-  process.stdin.once("end", requestShutdown);
-  process.stdin.once("close", requestShutdown);
-  process.once("SIGHUP", requestShutdown);
-  process.once("SIGTERM", requestShutdown);
-  process.once("SIGINT", requestShutdown);
-
-  // Protocol.connect chains transport.onmessage the same way it chains
-  // onclose (see the comment above), so this sees every inbound message —
-  // requests, notifications, pings — not just tool calls, without having to
-  // reach into buildServer's request handlers.
-  let lastActivityAt = Date.now();
-  transport.onmessage = () => {
-    lastActivityAt = Date.now();
-  };
-
-  // A broker front end owns no browser. Keep its stdio transport available
-  // until the host closes it; the broker owns browser lifetime and cleanup.
-  if (!brokerFrontend) {
-    idleTimer = setInterval(() => {
-      if (shutdown !== undefined) return;
-      if (forwarder.connected()) return;
-      const sessionCount = forwarder.sessionCount();
-      if (
-        !shouldIdleExit(
-          Date.now(),
-          lastActivityAt,
-          sessionCount,
-          idleTimeoutMs(),
-          idleTimeoutWithSessionMs(),
-        )
-      ) {
-        return;
-      }
-      process.stderr.write(
-        `[trusty-squire] server idle with ${sessionCount} open session(s) and no client ` +
-          `activity past the bound; exiting (this tears down any open session's browser)\n`,
-      );
-      requestShutdown();
-    }, idleCheckIntervalMs());
-    idleTimer.unref();
-  }
-
-  if (instance !== null) {
-    heartbeatTimer = setInterval(() => {
-      if (shutdown !== undefined) return;
-      instance.heartbeat({
-        lastActivityAt: forwarder.connected() ? Date.now() : lastActivityAt,
-        activeSessions: forwarder.sessionCount(),
-        inFlightCalls: callAdmission.inFlightCount(),
-      });
-    }, heartbeatIntervalMs());
-    heartbeatTimer.unref();
-  }
-  staleInstanceSweepTimer = setInterval(sweepStaleInstances, heartbeatIntervalMs());
-  staleInstanceSweepTimer.unref();
-
-  shutdownAfterOutputFailure = requestShutdown;
-  if (outputFailed) requestShutdown();
-  await server.connect(transport);
 }

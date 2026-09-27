@@ -47,7 +47,7 @@ late-start cleanup use the selected containment mode.
 `profile.ts` owns canonical path resolution and the broker's kernel-released
 SQLite lock.
 `browser-scope.ts` owns Linux Chrome containment and SIGINT → bounded wait →
-SIGKILL teardown; `session/lifecycle.ts` owns per-session timers. There are no
+SIGKILL teardown; `session/lifecycle.ts` owns session start/finish. There are no
 owner manifests or process-marker watchdog. Connect ceremony custody is defined in the
 [broker guide](browser-broker.md); the shared graceful-quit helper lives in
 `browser-process-runtime.ts` and is re-exported by `browser.ts`.

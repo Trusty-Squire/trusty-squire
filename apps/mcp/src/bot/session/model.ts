@@ -133,9 +133,8 @@ export interface Session {
   lastActivityAt: number;
   callCount: number;
   callDrainWaiters: Set<() => void>;
-  // Session ownership must be a resource boundary, not merely a convention for
-  // cooperative hosts. The watchdog observes the browser but teardown may only
-  // begin between complete action leases.
+  // Session ownership is the opening connection. The field remains so
+  // characterization can pin the Session shape; no expiry timer is armed.
   watchdog: NodeJS.Timeout | null;
   terminalTeardownOwner: SessionTerminalTeardownOwner | null;
   // Jev-driven operate_drive loop. Null until the first drive call; finish

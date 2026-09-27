@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   BrokerAuthority,
+  CONNECTION_SESSION_GRACE_MS,
   type BrokerPrincipal,
   type BrokerSessionPort,
 } from "../broker/authority.js";
@@ -42,14 +43,13 @@ describe("broker authority", () => {
     expect(order).toEqual(["start:one", "end:one", "start:two", "end:two"]);
   });
 
-  it("allows the same agent on another connection and refuses a different agent", async () => {
+  it("refuses a session opened by another connection", async () => {
     const authority = new BrokerAuthority();
     const owner = principal("a");
     const sessionId = await authority.open(owner, async () => port());
-    expect(await authority.invoke(principal("b"), sessionId, "r1", "one", {})).toEqual({});
-    expect(() =>
-      authority.invoke({ agentId: "other", clientId: "c" }, sessionId, "r2", "one", {}),
-    ).toThrow("Session does not name an owned live session");
+    expect(() => authority.invoke(principal("b"), sessionId, "r1", "one", {})).toThrow(
+      "Session does not name an owned live session",
+    );
     expect(await authority.invoke(owner, sessionId, "r1", "one", {})).toEqual({});
   });
 
@@ -132,11 +132,11 @@ describe("broker authority", () => {
     expect(await authority.close(owner, sessionId, true)).toBe(true);
   });
 
-  it("retains an explicitly released connection's sessions for its agent", async () => {
+  it("closes an explicitly released connection's sessions immediately", async () => {
     const authority = new BrokerAuthority();
     const owner = principal("a");
     const closed: string[] = [];
-    const sessionId = await authority.open(owner, async (id) =>
+    await authority.open(owner, async (id) =>
       port({
         close: async () => {
           closed.push(id);
@@ -145,20 +145,17 @@ describe("broker authority", () => {
       }),
     );
     await authority.disconnect(owner, true);
-    expect(closed).toEqual([]);
-    expect(authority.inventory()).toEqual({ sessions: 1, admitting: 0, closing: 0 });
-    expect(await authority.invoke(principal("next-client"), sessionId, "r", "observe", {})).toEqual(
-      {},
-    );
+    expect(closed).toHaveLength(1);
+    expect(authority.inventory()).toEqual({ sessions: 0, admitting: 0, closing: 0 });
   });
 
-  it("retains a dropped connection's session beyond the old grace period", async () => {
+  it("closes a dropped connection's sessions after a short grace", async () => {
     vi.useFakeTimers();
     try {
       const authority = new BrokerAuthority();
       const owner = principal("a");
       const closed: string[] = [];
-      const sessionId = await authority.open(owner, async (id) =>
+      await authority.open(owner, async (id) =>
         port({
           close: async () => {
             closed.push(id);
@@ -168,12 +165,10 @@ describe("broker authority", () => {
       );
       await authority.disconnect(owner, false);
       expect(closed).toEqual([]);
-      await vi.advanceTimersByTimeAsync(5_001);
-      expect(closed).toEqual([]);
-      expect(
-        await authority.invoke(principal("next-client"), sessionId, "r", "observe", {}),
-      ).toEqual({});
-      expect(authority.inventory()).toEqual({ sessions: 1, admitting: 0, closing: 0 });
+      expect(authority.inventory().closing).toBe(1);
+      await vi.advanceTimersByTimeAsync(CONNECTION_SESSION_GRACE_MS + 1);
+      expect(closed).toHaveLength(1);
+      expect(authority.inventory()).toEqual({ sessions: 0, admitting: 0, closing: 0 });
     } finally {
       vi.useRealTimers();
     }

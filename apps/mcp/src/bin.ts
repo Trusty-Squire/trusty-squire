@@ -41,15 +41,7 @@ async function dispatch(): Promise<number> {
     await runBrokerDaemon();
     return 0;
   }
-  if (isServer) {
-    const { runServer } = await import("./server.js");
-    await runServer();
-    // runServer force-exits when its client disconnects or it receives a
-    // termination signal. A return here is therefore only a normal startup
-    // path with no active stdio loop left to keep alive.
-    return 0;
-  }
-  if (isRelay) {
+  if (isServer || isRelay) {
     const { runRelay } = await import("./relay.js");
     await runRelay();
     return 0;
@@ -68,9 +60,11 @@ dispatch()
     // actually reap them. Without this exit the CLI appears to hang
     // after printing "You're done."
     //
-    // The `server` branch exits from runServer's disconnect/signal shutdown
-    // path; `skill` returns its own code via T30 taxonomy.
-    if (!isServer && !isBroker && !isRelay) process.exit(code);
+    // The `server`/`relay` branch returns when the stdio pipe or a signal
+    // closes the proxy; force-exit so a detached broker child cannot keep
+    // this process alive. `skill` returns its own code via T30 taxonomy.
+    if (isServer || isRelay) process.exit(code);
+    if (!isBroker) process.exit(code);
   })
   .catch((err: unknown) => {
     // stderr lands in the host agent's MCP log; keep it useful.

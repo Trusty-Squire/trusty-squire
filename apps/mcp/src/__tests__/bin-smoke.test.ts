@@ -19,6 +19,9 @@ import { existsSync, readFileSync, readdirSync, promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { OperatorBroker } from "../bot/broker/operator.js";
+import { listenSharedMcp } from "../bot/broker/mcp-socket.js";
+import { sharedMcpSocketPath } from "../bot/broker/mcp-socket-path.js";
 import { VERSION } from "../version.js";
 
 const pkgRoot = fileURLToPath(new URL("../../", import.meta.url));
@@ -161,6 +164,7 @@ describe("launched through a bin symlink", () => {
     // The startup breadcrumb (a silent no-op was the worst part of the
     // guard bug — this line makes "did it start?" answerable).
     expect(stderr).toMatch(/\[trusty-squire\] server v\d/);
+    expect(stderr).not.toMatch(/starting\n/);
   }, 30_000);
 
   it("exits when the MCP client closes stdin", async () => {
@@ -185,51 +189,11 @@ describe("launched through a bin symlink", () => {
     await expect(exited).resolves.toEqual({ code: 0, signal: null });
   }, 30_000);
 
-  it("self-exits after the idle window when a host abandons it without closing stdio or signaling it", async () => {
-    // Reproduces the live-box leak: a host reconnects to a fresh server
-    // without ever closing the old child's stdin or sending it a signal, so
-    // neither transport.onclose nor the EOF/SIGTERM listeners above ever
-    // fire. Nothing here closes stdin or sends a signal — the idle backstop
-    // must exit on its own once TRUSTY_SQUIRE_SERVER_IDLE_TIMEOUT_MS elapses
-    // with zero active provision sessions.
-    const link = await linkTo("mcp-server-idle-link.js");
-    const child = spawn(process.execPath, [link, "server"], {
-      env: {
-        ...process.env,
-        HOME: tmpDir,
-        XDG_CONFIG_HOME: path.join(tmpDir, "server-idle-config"),
-        TRUSTY_SQUIRE_SERVER_IDLE_TIMEOUT_MS: "200",
-        TRUSTY_SQUIRE_SERVER_IDLE_CHECK_INTERVAL_MS: "50",
-      },
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-    await mcpRequest(child, {
-      jsonrpc: "2.0",
-      id: 1,
-      method: "initialize",
-      params: {
-        protocolVersion: "2024-11-05",
-        capabilities: {},
-        clientInfo: { name: "idle-smoke", version: "1" },
-      },
-    });
-
-    const exited = waitForExit(child);
-    // No stdin.end(), no kill() — only the idle timer may end this process.
-    await expect(exited).resolves.toEqual({ code: 0, signal: null });
-  }, 30_000);
-
-  it("keeps a quiet stdio connection usable when idle exit is disabled", async () => {
+  it("keeps a quiet stdio connection usable", async () => {
     const link = await linkTo("mcp-server-quiet-client-link.js");
+    const mcp = await startSmokeMcp(tmpDir);
     const child = spawn(process.execPath, [link, "server"], {
-      env: {
-        ...process.env,
-        HOME: tmpDir,
-        XDG_CONFIG_HOME: path.join(tmpDir, "server-quiet-client-config"),
-        TRUSTY_SQUIRE_SERVER_IDLE_TIMEOUT_MS: "0",
-        TRUSTY_SQUIRE_SERVER_IDLE_TIMEOUT_WITH_SESSION_MS: "0",
-        TRUSTY_SQUIRE_SERVER_IDLE_CHECK_INTERVAL_MS: "50",
-      },
+      env: serverEnv(tmpDir),
       stdio: ["pipe", "pipe", "pipe"],
     });
     try {
@@ -250,6 +214,7 @@ describe("launched through a bin symlink", () => {
       const exited = waitForExit(child);
       child.stdin?.end();
       await exited;
+      await mcp.close();
     }
   }, 30_000);
 
@@ -261,6 +226,7 @@ describe("launched through a bin symlink", () => {
       // EPIPE. This used to recurse through the uncaughtException logger and
       // spin forever, preventing both EOF shutdown and the idle timer.
       const link = await linkTo("mcp-server-dead-caller-link.js");
+      const mcp = await startSmokeMcp(tmpDir);
       const launcher = `
       const { spawn } = require("node:child_process");
       const child = spawn(process.execPath, [${JSON.stringify(link)}, "server"], {
@@ -268,8 +234,7 @@ describe("launched through a bin symlink", () => {
           ...process.env,
           HOME: ${JSON.stringify(tmpDir)},
           XDG_CONFIG_HOME: ${JSON.stringify(path.join(tmpDir, "server-dead-caller-config"))},
-          TRUSTY_SQUIRE_SERVER_IDLE_TIMEOUT_MS: "200",
-          TRUSTY_SQUIRE_SERVER_IDLE_CHECK_INTERVAL_MS: "50",
+          TRUSTY_SQUIRE_PROFILE_DIR: ${JSON.stringify(path.join(tmpDir, ".trusty-squire", "chrome-profile"))},
         },
         stdio: ["pipe", "pipe", "pipe"],
       });
@@ -301,6 +266,7 @@ describe("launched through a bin symlink", () => {
         expect(processIsRunning(serverPid)).toBe(false);
       } finally {
         if (processIsRunning(serverPid)) process.kill(serverPid, "SIGKILL");
+        await mcp.close();
       }
     },
     30_000,
@@ -387,30 +353,6 @@ describe("launched through a bin symlink", () => {
     // rc.6 voice pass — heading is "Trusty Squire" with a separate
     // dim subline "Setting up this machine."
     expect(out).toContain("Setting up this machine");
-  }, 30_000);
-
-  it("the server process survives an escaped async error (unhandledRejection backstop)", async () => {
-    // Operator crash hardening: an async rejection that escapes a tool
-    // handler's try/catch (the uploadFile filechooser race) used to kill the
-    // whole server — the host agent saw "MCP server unreachable" and gave up.
-    // Prove the guards in the BUILT artifact keep the process alive through
-    // both escape classes and that it can still do work afterwards.
-    const distServer = path.join(pkgRoot, "dist", "server.js");
-    const probe = `
-      import { installServerProcessGuards } from ${JSON.stringify(distServer)};
-      installServerProcessGuards();
-      Promise.reject(new Error("escaped-rejection"));
-      setTimeout(() => { throw new Error("escaped-exception"); }, 30);
-      setTimeout(() => { console.log("STILL-ALIVE"); process.exit(0); }, 120);
-    `;
-    const r = spawnSync(process.execPath, ["--input-type=module", "-e", probe], {
-      encoding: "utf8",
-      timeout: 25_000,
-    });
-    expect(r.status).toBe(0);
-    expect(r.stdout).toContain("STILL-ALIVE");
-    expect(r.stderr).toContain("unhandled rejection (server kept alive): Error: escaped-rejection");
-    expect(r.stderr).toContain("uncaught exception (server kept alive): Error: escaped-exception");
   }, 30_000);
 
   it("`mcp install` is removed", async () => {
@@ -540,13 +482,13 @@ function mcpConversation(
   >,
 ): Promise<McpResponse[]> {
   return new Promise((resolve, reject) => {
+    void startSmokeMcp(home).then((mcp) => {
     const child = spawn(process.execPath, [scriptPath, "server"], {
-      env: {
-        ...process.env,
-        HOME: home,
-        XDG_CONFIG_HOME: path.join(home, ".config"),
-      },
+      env: serverEnv(home),
       stdio: ["pipe", "pipe", "pipe"],
+    });
+    child.once("exit", () => {
+      void mcp.close();
     });
     const replies = new Map<number, McpResponse>();
     let buffer = "";
@@ -590,17 +532,42 @@ function mcpConversation(
         "name" in request ? { name: request.name, arguments: request.arguments } : request.params;
       child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
     }
+    }).catch(reject);
   });
 }
 
+async function startSmokeMcp(home: string): Promise<{ close(): Promise<void> }> {
+  const profile = path.join(home, ".trusty-squire", "chrome-profile");
+  const socket = sharedMcpSocketPath(home, profile);
+  await fs.mkdir(path.dirname(socket), { recursive: true, mode: 0o700 });
+  return await listenSharedMcp(
+    new OperatorBroker({ registryBaseUrl: "http://unused.test" }),
+    socket,
+    () => ({
+      bind: async () => null,
+      inspect: async () => ({ problem: null }),
+      boundAccountId: () => null,
+    }),
+  );
+}
+
+function serverEnv(home: string): NodeJS.ProcessEnv {
+  return {
+    ...process.env,
+    HOME: home,
+    XDG_CONFIG_HOME: path.join(home, ".config"),
+    TRUSTY_SQUIRE_PROFILE_DIR: path.join(home, ".trusty-squire", "chrome-profile"),
+  };
+}
+
 async function startMcpServer(scriptPath: string): Promise<ChildProcess> {
+  const mcp = await startSmokeMcp(tmpDir);
   const child = spawn(process.execPath, [scriptPath, "server"], {
-    env: {
-      ...process.env,
-      HOME: tmpDir,
-      XDG_CONFIG_HOME: path.join(tmpDir, "server-shutdown-config"),
-    },
+    env: serverEnv(tmpDir),
     stdio: ["pipe", "pipe", "pipe"],
+  });
+  child.once("exit", () => {
+    void mcp.close();
   });
   await mcpRequest(child, {
     jsonrpc: "2.0",
@@ -697,9 +664,13 @@ function processIsRunning(pid: number): boolean {
 // the parsed first stdout line and the collected stderr.
 function mcpHandshake(scriptPath: string): Promise<{ response: InitResponse; stderr: string }> {
   return new Promise((resolve, reject) => {
+    void startSmokeMcp(tmpDir).then((mcp) => {
     const child = spawn(process.execPath, [scriptPath, "server"], {
-      env: { ...process.env, HOME: tmpDir },
+      env: serverEnv(tmpDir),
       stdio: ["pipe", "pipe", "pipe"],
+    });
+    child.once("exit", () => {
+      void mcp.close();
     });
     let stdout = "";
     let stderr = "";
@@ -740,6 +711,7 @@ function mcpHandshake(scriptPath: string): Promise<{ response: InitResponse; std
     child.stdin.write(`${init}\n`);
     // Leave stdin open — closing it (EOF) shuts the stdio transport down
     // before it can reply.
+    }).catch(reject);
   });
 }
 

@@ -433,7 +433,8 @@ the source repo locally.
 The package has exactly **one bin**, `mcp` → `dist/bin.js`, matching
 the unscoped package name so `npx @trusty-squire/mcp <subcommand>`
 always resolves. `bin.ts` is the _only_ file with a shebang and
-top-level execution; it dispatches `server` → `runServer()` and
+top-level execution; it dispatches `server` / `relay` → `runRelay()`
+(stdio proxy onto the host broker's shared MCP socket) and
 everything else → `runCli()`. `server.ts` and `install/cli.ts` are
 pure modules — no shebang, no `import.meta.url === argv[1]` "am I
 main?" guard. That guard was wrong in both files (it fails under a bin
@@ -710,35 +711,7 @@ extension state on launch and won't reload mid-session.
 | `TRUSTY_SQUIRE_MACHINE_TOKEN` | (from session) | Machine token for the operator inbox-OTP service |
 | `TRUSTY_SQUIRE_ACCOUNT_ID` | (from session) | The account this server serves. `connect` pins it into the host agent's MCP config env, so an already-running server keeps the account it was launched for after a different account is connected. Also the auto-promote attribution on provisions. Falls back to the most recently connected account in `session.json` when the config predates the field. |
 | `TRUSTY_SQUIRE_API_BASE` | `https://trusty-squire-api.fly.dev` | API base URL |
-| `TRUSTY_SQUIRE_OPERATOR_SESSION_IDLE_TIMEOUT_MS` | `600000` (10m) | Closes an operator session that has no active call and has received no operation within this bound. The lifecycle contract lives in `docs/DESIGN-warm-browser-reuse.md`. |
-| `TRUSTY_SQUIRE_OPERATOR_BROWSER_MAX_LIFETIME_MS` | `1800000` (30m) | Cross-platform maximum operator-session lifetime, checked before the active-call guard. An active payment receives only the bounded terminal-transition grace. |
 | `TRUSTY_SQUIRE_OPERATOR_BROWSER_CPU_CEILING_PERCENT` | `200` | Linux marked-Chromium aggregate CPU ceiling. The process watchdog terminates after `TRUSTY_SQUIRE_OPERATOR_BROWSER_CPU_CONSECUTIVE_SAMPLES` (default `3`) consecutive over-budget samples. |
-| `TRUSTY_SQUIRE_SERVER_IDLE_TIMEOUT_MS` | `0` (disabled) | Optional idle self-exit bound when `mcp server` holds no provision session. A quiet stdio connection may still have a live host, so enabling this can strand that host on its next tool call. EOF, transport closure, signals, and output failure remain the default shutdown paths. |
-| `TRUSTY_SQUIRE_SERVER_IDLE_TIMEOUT_WITH_SESSION_MS` | `0` (disabled) | Optional idle self-exit bound while a provision session is open. The operator-session watchdog independently closes abandoned browsers after 10 minutes idle and begins bounded terminal teardown at 30 minutes. |
-| `TRUSTY_SQUIRE_SERVER_IDLE_CHECK_INTERVAL_MS` | `300000` (5m) | Poll interval for configured idle bounds. Keep this interval below any enabled timeout. |
-| `TRUSTY_SQUIRE_SERVER_HEARTBEAT_INTERVAL_MS` | `30000` (30s) | How often a running server republishes its heartbeat record (`~/.trusty-squire/server-instances/`): last inbound client message, open sessions, in-flight calls. The startup reaper uses the record's identity, lineage, and draining deadline before signaling a process. |
-| `TRUSTY_SQUIRE_SERVER_REAP_GRACE_MS` | `2000` (2s) | SIGTERM→SIGKILL grace when the startup reaper terminates a stale instance's process tree. |
-
-### Startup reap of stale prior server instances
-
-A host relaunches `mcp server` on every reconnect but does not reliably kill
-the instance it superseded — a live box carried a superseded server beside its
-replacement plus two orphaned to init for ~31 hours, each keeping a browser
-tree resident. `reapStaleServerInstances()` (`apps/mcp/src/server-instance-registry.ts`)
-runs before the server serves and terminates such an instance plus its PPid
-descendant tree.
-
-**The gate is the whole feature — this box runs many legitimate concurrent
-servers, including several of the SAME identity (one per project/lane).** There
-is no process-name match and no blanket kill anywhere in it. A prior instance is
-a candidate only when its recorded `TRUSTY_SQUIRE_AGENT_IDENTITY` and launcher
-lineage match ours, its birth identity still names a live process, and it is
-draining past its published shutdown deadline. A quiet serving instance is
-kept because its stdio client may resume after a long pause.
-Anything unreadable is kept. Killing walks the PPid chain, never the process
-group — a stdio server shares its parent's group, so `kill(-pgid)` would take
-the host agent with it. `serverInstanceReapDecision` is the pure predicate that
-owns this contract; don't widen it without a test.
 
 ### Housekeeper — extracted to its own repo
 
