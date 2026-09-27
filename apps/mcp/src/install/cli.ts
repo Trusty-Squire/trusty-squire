@@ -51,6 +51,7 @@ import {
 import { detectAsn, type AsnInfo } from "../bot/index.js";
 import {
   detectProviderSessionsFromProfile,
+  confirmLiveGoogleProviderSnapshot,
   openInstallConfirmInBotChrome,
   probeProviderSessionsAfterCeremony,
   type InstallClaimPollResult,
@@ -756,6 +757,13 @@ async function settleAlreadyConnected(
 ): Promise<boolean> {
   if (args.forceRelogin) return false;
   const preflight = await checkAlreadyProvisioned(profileDir, accountId);
+  if (preflight.kind === "stale_google") {
+    // The app claim can survive Google's session. Refresh only Google through
+    // the ordinary ceremony so a plain connect offers the credential prompt.
+    args.forceRelogin = true;
+    args.forceReloginProvider = "google";
+    return false;
+  }
   if (preflight.kind === "ceremony") return false;
   ui.divider();
   await hydrateArgsFromStoredPreferences(args, accountId);
@@ -779,7 +787,7 @@ async function settleAlreadyConnected(
     return true;
   }
   // Connect session validation: we short-circuited because Google is
-  // cookie-present + bound, but if GitHub cookies are absent, proactively
+  // live + bound, but if GitHub cookies are absent, proactively
   // offer to reconnect it — a missing GitHub session is why people re-run
   // connect (GitHub-OAuth signups fail). Skippable; non-interactive notices.
   // Saying yes falls THROUGH into the same ceremony rather than branching into
@@ -803,11 +811,7 @@ async function settleAlreadyConnected(
     });
     ui.success(alreadyConnectedMessage(preflight.providers, agent.display_name));
     printProviderState(preflight.providers);
-    ui.hint(
-      `Pass ${ui.code("--force-relogin")} to switch accounts or to refresh a ` +
-        `stale/expired session (this "connected" check reads cached cookies, ` +
-        `which can outlive the real session).`,
-    );
+    ui.hint(`Pass ${ui.code("--force-relogin")} to switch accounts.`);
     return true;
   }
   args.forceRelogin = true;
@@ -1018,14 +1022,14 @@ async function runConnectInstall(
   args.noRegistry = session.consent_skillify_telemetry !== true;
   args.consentOperatorInboxOtp = session.consent_operator_inbox_otp !== false;
 
-  // Probe the real profile. Cookie/session state is the source of truth; no
-  // persisted provider marker is allowed to outlive the session it describes.
+  // Probe the real profile. A cookie snapshot may establish that a candidate
+  // session reached disk; the broker checks whether Google still accepts it.
   // This probe is also the SUCCESS GATE: the machine claim alone proves the
   // account plumbing, not that the bot can wear the user's identity at a third-
   // party site. After a broker-hosted ceremony the broker's Chrome still holds
   // the profile, so the live probe busy-fails: probeProviderSessionsAfterCeremony
   // falls back to the committed-cookie snapshot (polling past Chrome's ~30s
-  // commit lag) instead of failing the gate for winning the broker path.
+  // commit lag), then confirms Google through a temporary broker tab.
   // `null` means the probe itself failed, which is not a pass.
   let providers: OAuthProviderId[] | null = null;
   try {
@@ -1038,6 +1042,9 @@ async function runConnectInstall(
           awaitProviders: providersConnectMustAwait(args.forceReloginProvider),
         }),
     });
+    if (providers !== null) {
+      providers = await confirmLiveGoogleProviderSnapshot(profileDir, providers);
+    }
   } catch (err) {
     console.error(
       `[connect] provider-session probe failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -1151,6 +1158,7 @@ export async function agentTokenStillValid(
 
 type CheckedConnectPreflight =
   | { kind: "ceremony" }
+  | { kind: "stale_google" }
   | { kind: "provisioned"; providers: OAuthProviderId[]; session: SessionData }
   | { kind: "unverified"; detail: string; session: SessionData };
 
@@ -1200,6 +1208,18 @@ async function checkAlreadyProvisioned(
         };
       }
       return preflight;
+    }
+    if (stillValid) {
+      // The disk row is a cheap negative, never proof that Google still accepts
+      // the session. Ask the browser that owns the profile in a temporary tab.
+      const liveProviders = await confirmLiveGoogleProviderSnapshot(profileDir, providers);
+      if (liveProviders === null) {
+        return { kind: "unverified", detail: "Google session could not be checked", session };
+      }
+      if (providers.includes("google") && !liveProviders.includes("google")) {
+        return { kind: "stale_google" };
+      }
+      providers = liveProviders;
     }
     const preflight = decideConnectPreflight(session, stillValid, providers);
     // The profile IS the record: what its cookie store proves decides the
@@ -1328,36 +1348,29 @@ async function writeAgentConfig(
   }
 }
 
-// A claimed enrollment is complete for the account. The claim is the authoritative fact: the
-// server has bound this machine to the account and handed back its agent
-// token, and the CLI polls that same fact independently of the browser. A
-// scoped GitHub refresh additionally keeps the ceremony visible until its
-// session reaches the profile; the account claim alone cannot prove that step.
-// The browser's Finish control is a courtesy that closes the page early, not a
-// second completion gate — on a headless machine that page exists only behind
-// a single-use pairing link, so a gate on it can expire before the human ever
-// reaches the control and throw away a claim the server already established.
-// A fact already true must never be withheld for want of a confirmation of
-// itself. `_wizardCompleted` remains part of the callback contract (the loopback
-// listener still accepts Finish) but can no longer extend the wait.
+// The claim records the account binding, while Finish records that the human
+// is done using the sign-in window. Keep the window visible until Finish or
+// the ceremony deadline. A claimed token is retained even if Finish never
+// arrives before that deadline.
 export function shouldCompleteInstallClaim(
   claimed: boolean,
-  _wizardCompleted = false,
+  wizardCompleted = false,
   requestedProvider?: OAuthProviderId,
   observedProviders: readonly OAuthProviderId[] = [],
 ): boolean {
   return (
-    claimed && (requestedProvider === undefined || observedProviders.includes(requestedProvider))
+    claimed &&
+    wizardCompleted &&
+    (requestedProvider === undefined || observedProviders.includes(requestedProvider))
   );
 }
 
-// Once the required session is observed the ceremony returns; Finish remains
-// a courtesy rather than a requirement.
+// The heartbeat names the remaining action while the ceremony stays open.
 export function claimHeartbeatMessage(claimed: boolean, waitingForGithub = false): string {
   return claimed
     ? waitingForGithub
-      ? "Account connected — finish the requested GitHub sign-in in this window."
-      : "Sign-in complete — the account is claimed, closing the sign-in window."
+      ? "Account connected — finish the requested GitHub sign-in, then press Finish in this window."
+      : "Sign-in complete — press Finish in the sign-in window when you're done."
     : "Still waiting for you to finish signing in — the URL/window above stays live until you do.";
 }
 

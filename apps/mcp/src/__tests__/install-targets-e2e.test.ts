@@ -83,6 +83,7 @@ vi.mock("../bot/google-login.js", async (importOriginal) => {
     // never sees a mocked export.
     detectActiveProviderSessions: vi.fn(async () => ["google"] as const),
     probeProviderSessionsAfterCeremony: vi.fn(async () => ["google"] as const),
+    confirmLiveGoogleProviderSnapshot: vi.fn(async (_profile, providers) => providers),
     openInstallConfirmInBotChrome: vi.fn(async (options) => {
       await options.pollUntilClaimed(true);
       return { status: "claimed" as const };

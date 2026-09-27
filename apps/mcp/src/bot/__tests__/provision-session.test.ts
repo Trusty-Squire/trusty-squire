@@ -44,7 +44,6 @@ function el(partial: Partial<InteractiveElement>): InteractiveElement {
   };
 }
 
-
 describe("resolveTarget", () => {
   const inv = [
     el({ index: 0, visibleText: "Continue with Google", selector: "#g" }),
@@ -202,7 +201,6 @@ describe("resolveTarget", () => {
   });
 });
 
-
 describe("generatePassword (PR3c signup password)", () => {
   it("clamps length to [16,64] and is policy-compliant (lower/upper/digit/symbol)", () => {
     for (const req of [1, 16, 24, 64, 200]) {
@@ -321,9 +319,7 @@ describe("googleSessionGate (Change 5 — fail-closed precondition gate)", () =>
       expect(r.needs_user.wall).toBe("google_session");
       expect(r.needs_user.resume).toBe("connect");
       expect(r.needs_user.message).toMatch(/has NOT started/i);
-      expect(r.needs_user.message).toContain(
-        "npx @trusty-squire/mcp connect --force-relogin=google",
-      );
+      expect(r.needs_user.message).toContain("npx @trusty-squire/mcp connect");
       expect(r.needs_user.message).not.toContain(["mcp", "login"].join(" "));
     }
   });

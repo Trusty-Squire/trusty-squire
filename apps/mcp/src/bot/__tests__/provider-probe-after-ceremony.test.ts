@@ -8,7 +8,10 @@
 
 import { describe, expect, it, vi } from "vitest";
 import { ProfileBusyError } from "../profile.js";
-import { probeProviderSessionsAfterCeremony } from "../google-login.js";
+import {
+  confirmLiveGoogleProviderSnapshot,
+  probeProviderSessionsAfterCeremony,
+} from "../google-login.js";
 import type { OAuthProviderId } from "../oauth-providers.js";
 
 describe("probeProviderSessionsAfterCeremony", () => {
@@ -162,5 +165,21 @@ describe("probeProviderSessionsAfterCeremony", () => {
       awaitProviders: ["github"],
     });
     expect(result).toEqual(["google"]);
+  });
+});
+
+describe("confirmLiveGoogleProviderSnapshot", () => {
+  it("removes stale Google despite a committed cookie marker", async () => {
+    const result = await confirmLiveGoogleProviderSnapshot(
+      "/unused",
+      ["google", "github"],
+      async () => false,
+    );
+    expect(result).toEqual(["github"]);
+  });
+
+  it("treats an unreadable live Google check as unknown", async () => {
+    const result = await confirmLiveGoogleProviderSnapshot("/unused", ["google"], async () => null);
+    expect(result).toBeNull();
   });
 });

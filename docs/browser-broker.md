@@ -143,32 +143,26 @@ any account exists and still refuse a second account afterwards.
 `broker-only-path-acceptance.test.ts` proves both behaviours against a real
 broker, real Chrome, and real MCP stdio servers.
 
-Connect approaches the browser only when it needs it. The already-provisioned
-preflight — stored session, account-bound plumbing, and a byte-copy read of the
-profile's cookie store (`detectProviderSessionsFromProfile`) — runs BEFORE any
-broker or browser work, takes no profile SQLite lock, waits for nothing, and opens no
-browser. An install that is already connected therefore completes while the
-broker keeps both its SQLite lock and its Chrome. An absent profile or cookie store
-requires the ceremony; a failed preflight probe is reported as `unverified`
-instead of forcing re-pairing.
+Connect's already-provisioned preflight first reads the stored session and a
+byte copy of the profile's cookie store (`detectProviderSessionsFromProfile`).
+That read takes no profile SQLite lock. An absent Google marker goes straight
+to the ceremony. A present marker is checked in a temporary tab through the
+shared broker: Google My Account must still accept the session. The tab closes
+without taking the profile from its broker or touching sibling operator tabs.
+An unreadable snapshot or failed live check reports `unverified`; a rejected
+Google session enters the ordinary Google refresh ceremony on plain `connect`.
 
-Ordering it the other way round, or answering it with a probe that opens the
-profile, both fail the same way: the machines that are already connected are
-exactly the machines whose browser is busy, so the question contends with the
-browser it is about and connect reports the profile as busy. Cookie presence is
-all that read proves; a cookie can outlive its server-side session. After the
-ceremony, `probeProviderSessionsAfterCeremony` first tries the live probe. If the
-profile is still busy, it polls committed-cookie snapshots for up to 45 seconds,
-awaiting Google and any explicitly requested provider before accepting early.
-Unreadable snapshots are unknown, not proof of sign-out; no provider list is
-persisted in the account session file. For an ordinary install, the account
-claim completes the ceremony without waiting for a cookie read. A scoped GitHub
-refresh is different: Google can claim the account before GitHub sign-in is
-finished, so the ceremony keeps its tab and noVNC exposure open until the
-GitHub session appears in the profile or the ceremony deadline expires. The
-post-ceremony provider gate reports a missing GitHub session if the deadline
-expires. The browser's nonce-scoped Finish callback is a courtesy, not an
-additional completion gate.
+After the ceremony, `probeProviderSessionsAfterCeremony` first tries a live
+probe. If the broker still holds the profile, it polls committed-cookie
+snapshots for up to 45 seconds, awaiting Google and any explicitly requested
+provider before accepting early. The Google marker is then confirmed through
+the broker. Unreadable snapshots are unknown, not proof of sign-out; no
+provider list is persisted in the account session file. The account claim is
+recorded as soon as the server reports it, while the ceremony keeps its tab
+and noVNC exposure open until the browser's nonce-scoped Finish callback or
+the existing deadline. A scoped GitHub refresh also waits for its provider
+session to appear before Finish can close the ceremony. The post-ceremony
+provider gate reports any missing session.
 
 When an install does need the login ceremony, the ceremony opens the confirm
 page as a TAB in the shared broker browser — an ordinary `open` on a
@@ -248,6 +242,12 @@ single place that decides it.
 
 A deferred
 `--force-relogin` cookie clear rides the same tab as ordinary logout navigation.
+
+An operator action that needs Google identity checks that same live session at
+the action boundary. If Google rejects it, Google OAuth and inbox reads return
+`needs_user` with `wall: "google_session"` and `resume: "connect"`. Clients
+should show a re-login prompt for that wall and retry the action after connect;
+polling the blocked action cannot restore the session.
 
 The ceremony's broker endpoint is derived from the profile the caller is about
 to use, not from the launch-time default. `connect` resolves its target's
