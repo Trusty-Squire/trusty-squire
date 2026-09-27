@@ -93,7 +93,11 @@ import {
   readPageCheckoutTexts,
   resolveDriveApprovalAmount,
 } from "./checkout-total.js";
-import { attemptOperateCaptchaAutoSolve } from "./captcha-solve.js";
+import {
+  attemptOperateCaptchaAutoSolve,
+  captchaAutoSolveHasWork,
+  injectPendingCaptchaToken,
+} from "./captcha-solve.js";
 import {
   RES_POLL_INTERVAL_MS,
   RES_TIMEOUT_MS,
@@ -614,6 +618,12 @@ function driveProgressFingerprint(
     observation.dom ?? "",
     observation.semantic?.headings ?? [],
   );
+}
+
+/** Bound a wait to the drive's remaining budget so a solver poll cannot overrun max_seconds. */
+export function driveWaitMs(remainingMs: number, requestedMs: number): number {
+  if (remainingMs <= 0 || requestedMs <= 0) return 0;
+  return Math.min(remainingMs, requestedMs);
 }
 
 function sleepDrive(ms: number, signal: AbortSignal | undefined): Promise<void> {
@@ -5375,6 +5385,10 @@ async function snapshotDriveSession(
   deps: DriveDependencies,
   needFrames: boolean,
 ): Promise<Awaited<ReturnType<typeof captureDriveSession>>> {
+  // Drive snapshots bypass observe(), which is otherwise the lease-holding
+  // inject half. A token purchased while the drive is looping (Kaggle 2026-09-27:
+  // token_purchased, then two budget handoffs with no inject) has to land here.
+  await injectPendingCaptchaToken(session, session.browser.page ?? undefined);
   const snap = await captureDriveSession(session, sessionId, drive, deps, needFrames);
   if (deps.onSnapshot !== undefined) await deps.onSnapshot();
   return snap;
@@ -7490,14 +7504,32 @@ async function driveLoop(input: {
         rows.length > 0 &&
         session.browser.page !== null &&
         !pageHasRenderedCaptcha(rows) &&
+        !captchaAutoSolveHasWork(session) &&
         !(drive.checkboxChallengePressedKeys ?? []).includes(progressKey) &&
         (await hasVisibleCheckboxCaptchaWidget(session.browser.page))
       ) {
+        const pressBudget = driveWaitMs(
+          remainingMs(),
+          DRIVE_CHECKBOX_CHALLENGE_PRESS_TIMEOUT_MS,
+        );
+        if (pressBudget === 0) {
+          return (
+            finishWithSubmitResponse() ??
+            finish("budget", { reason: widgetUnreadySolveReason(lastCaptchaOutcome ?? "in_flight") })
+          );
+        }
         drive.checkboxChallengePressedKeys = [
           ...(drive.checkboxChallengePressedKeys ?? []),
           progressKey,
         ];
-        const pressed = await pressCheckboxChallenge();
+        const pressed =
+          dependencies.pressCheckboxChallenge !== undefined
+            ? await pressCheckboxChallenge()
+            : await solveVisibleCaptcha(
+                session.browser,
+                pressBudget,
+                session.browser.page ?? undefined,
+              );
         if (pressed.found) dispatchedActs += 1;
         if (pressed.found && pressed.solved) lastCaptchaOutcome = "ok";
         const pressedSnap = await snapshotOrTimeout(framesIfNeeded());
@@ -7590,13 +7622,14 @@ async function driveLoop(input: {
               finish("stuck", { reason: widgetUnreadySolveReason(outcome) })
             );
           }
-          if (remainingMs() <= RES_POLL_INTERVAL_MS) {
+          const waitMs = driveWaitMs(remainingMs(), RES_POLL_INTERVAL_MS);
+          if (waitMs === 0) {
             return (
               finishWithSubmitResponse() ??
               finish("budget", { reason: widgetUnreadySolveReason(outcome) })
             );
           }
-          await sleepDrive(RES_POLL_INTERVAL_MS, context?.signal);
+          await sleepDrive(waitMs, context?.signal);
           spendStep("captcha_poll");
           continue;
         }
