@@ -29,6 +29,9 @@ export interface BrokerSessionPort {
   orphan(): Promise<void>;
 }
 
+/** How long a dropped connection's sessions survive before they are closed. */
+export const CONNECTION_SESSION_GRACE_MS = 5_000;
+
 interface Admission {
   clientId: string;
   abort: AbortController;
@@ -46,15 +49,16 @@ interface Actor {
 /** This object lives only in the broker. No Page, Browser or CDP handle crosses
  * the transport. A principal is established by connection setup, which takes
  * no credential and names no account. A session is named by a plain session id
- * and owned by the agent that opened it: there are no capabilities,
+ * and owned by the connection that opened it: there are no capabilities,
  * leases, or detached states. */
 export class BrokerAuthority {
   private readonly actors = new Map<string, Actor>();
   private readonly admissions = new Map<string, Admission>();
+  private readonly pendingGraceCloses = new Set<string>();
 
   private resolve(principal: BrokerPrincipal, sessionId: string): Actor {
     const actor = this.actors.get(sessionId);
-    if (actor === undefined || actor.principal.agentId !== principal.agentId)
+    if (actor === undefined || actor.principal.clientId !== principal.clientId)
       throw new BrokerRefusal("stale_lease", "Session does not name an owned live session");
     return actor;
   }
@@ -207,7 +211,7 @@ export class BrokerAuthority {
   /** Terminal cleanup already removed the session; drop its broker bookkeeping. */
   retire(principal: BrokerPrincipal, sessionId: string): void {
     const actor = this.actors.get(sessionId);
-    if (actor !== undefined && actor.principal.agentId === principal.agentId)
+    if (actor !== undefined && actor.principal.clientId === principal.clientId)
       this.actors.delete(sessionId);
   }
 
@@ -235,9 +239,31 @@ export class BrokerAuthority {
     return actor.closePromise;
   }
 
-  async disconnect(principal: BrokerPrincipal, _explicit = false): Promise<void> {
+  private async closeOwnedSessions(clientId: string, reason: "finish" | "disconnect") {
+    await Promise.all(
+      [...this.actors.values()]
+        .filter((actor) => actor.principal.clientId === clientId)
+        .map(async (actor) => await this.closeActor(actor, reason)),
+    );
+  }
+
+  async disconnect(principal: BrokerPrincipal, explicit = false): Promise<void> {
     for (const admission of this.admissions.values())
       if (admission.clientId === principal.clientId) admission.abort.abort();
+    if (explicit || this.actors.size === 0) {
+      await this.closeOwnedSessions(principal.clientId, "disconnect");
+      return;
+    }
+    // A dropped socket gets a short grace so a tab family is not torn down for
+    // a momentary blip. The reconnecting client starts fresh either way.
+    const clientId = principal.clientId;
+    this.pendingGraceCloses.add(clientId);
+    const timer = setTimeout(() => {
+      void this.closeOwnedSessions(clientId, "disconnect").finally(() =>
+        this.pendingGraceCloses.delete(clientId),
+      );
+    }, CONNECTION_SESSION_GRACE_MS);
+    timer.unref();
   }
 
   /** Signal shutdown fences every session, including clients whose sockets
@@ -261,7 +287,7 @@ export class BrokerAuthority {
     return {
       sessions: this.actors.size,
       admitting: this.admissions.size,
-      closing: 0,
+      closing: this.pendingGraceCloses.size,
     };
   }
 }

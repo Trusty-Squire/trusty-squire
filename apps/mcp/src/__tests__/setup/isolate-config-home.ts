@@ -10,7 +10,7 @@
 //   * ~/.trusty-squire/chrome-profile — the single real browser profile. Its
 //     claim file is what `ProfileBusyError` guards; a test taking or clearing
 //     that claim fights a live provision for the operator's browser.
-//   * ~/.trusty-squire/server-instances — the live servers' heartbeat records.
+//   * ~/.trusty-squire/mcp.sock — the shared MCP socket of a live broker.
 //
 // Individual tests may still override HOME/XDG_CONFIG_HOME for their own
 // fixtures; this only guarantees the DEFAULT never resolves to a real home.

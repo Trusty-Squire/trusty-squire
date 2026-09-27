@@ -79,7 +79,7 @@ describe("MCP broker forwarding over the Contract B wire", () => {
     );
   });
 
-  it("asks the broker to authorize an explicit session id", async () => {
+  it("refuses an explicit session id this connection does not own", async () => {
     let calls = 0;
     await withBroker(
       "ts-forward-foreign-",
@@ -93,7 +93,7 @@ describe("MCP broker forwarding over the Contract B wire", () => {
           await expect(
             forwarder.invoke("operate_click", { session_id: "not-mine" }, "click"),
           ).rejects.toMatchObject({ code: "stale_lease" });
-          expect(calls).toBe(1);
+          expect(calls).toBe(0);
         } finally {
           await forwarder.close();
         }
@@ -335,7 +335,7 @@ describe("MCP broker forwarding over the Contract B wire", () => {
           await expect(
             forwarder.invoke("operate_observe", { session_id: "drive-refused" }, "after-finish"),
           ).rejects.toMatchObject({ code: "stale_lease" });
-          expect(seen).toEqual(["open", "command"]);
+          expect(seen).toEqual(["open"]);
         } finally {
           await forwarder.close();
         }

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { spawn, execFileSync } from "node:child_process";
 import { closeSync, lstatSync, openSync, readFileSync } from "node:fs";
-import { hostname } from "node:os";
+import { createConnection } from "node:net";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { mkdirSync } from "node:fs";
@@ -9,6 +9,7 @@ import { currentProfileDir, ProfileBusyError, profilePathIdentity } from "../pro
 import { BrokerClient, brokerSpeaksLegacyWire } from "./transport.js";
 import { readBrokerAccountBinding } from "./account-binding.js";
 import { BrokerRefusal } from "./refusal.js";
+import { sharedMcpSocketPath } from "./mcp-socket-path.js";
 
 const BROKER_CONNECT_TIMEOUT_MS = 10_000;
 const BROKER_CONNECT_POLL_MS = 100;
@@ -45,6 +46,20 @@ export function isBrowserContentionRefusal(error: unknown): boolean {
 
 const sleep = async (ms: number): Promise<void> =>
   await new Promise((resolve) => setTimeout(resolve, ms));
+
+export async function liveUnixSocket(path: string): Promise<boolean> {
+  return await new Promise((resolve) => {
+    const probe = createConnection(path);
+    probe.once("connect", () => {
+      probe.destroy();
+      resolve(true);
+    });
+    probe.once("error", () => {
+      probe.destroy();
+      resolve(false);
+    });
+  });
+}
 
 /** Upgrade only: identify the old daemon from its live Unix listener, rather
  * than reading any of its four recorded ownership files. */
@@ -104,11 +119,7 @@ export interface BrokerConnectOptions {
   agentSessionToken?: string | undefined;
 }
 
-export async function connectOrLaunchBroker(path: string, options: BrokerConnectOptions = {}): Promise<BrokerClient> {
-  try { return await BrokerClient.connect(path); }
-  catch (error) {
-    if (!isUnavailable(error) && !(await reclaimLegacyBroker(path, options, error))) throw error;
-  }
+function launchBrokerDaemon(path: string): () => Error | undefined {
   // Launches may race. Each daemon claims the same kernel SQLite lock before it
   // touches Chrome or the socket; losers exit while clients attach to winner.
   const logPath = join(dirname(path), "broker.log");
@@ -128,9 +139,37 @@ export async function connectOrLaunchBroker(path: string, options: BrokerConnect
     failure = new BrokerRefusal("broker_unavailable", `Broker exited before attachment (${signal ?? code})`);
   });
   child.unref();
-  try { return await waitForBroker(path, () => failure); }
+  return () => failure;
+}
+
+export async function connectOrLaunchBroker(path: string, options: BrokerConnectOptions = {}): Promise<BrokerClient> {
+  try { return await BrokerClient.connect(path); }
+  catch (error) {
+    if (!isUnavailable(error) && !(await reclaimLegacyBroker(path, options, error))) throw error;
+  }
+  const failure = launchBrokerDaemon(path);
+  try { return await waitForBroker(path, failure); }
   catch (error) {
     if (error instanceof ProfileBusyError) return await waitForBroker(path);
     throw error;
   }
+}
+
+/** Start the elected broker if needed, then wait for its shared MCP socket.
+ * Does not open a wire session — a probe connection would start last-close grace. */
+export async function ensureSharedMcp(path = sharedMcpSocketPath()): Promise<void> {
+  if (await liveUnixSocket(path)) return;
+  const wire = resolveBrokerSocket();
+  const failure = (await liveUnixSocket(wire)) ? undefined : launchBrokerDaemon(wire);
+  const deadline = Date.now() + BROKER_CONNECT_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    const launchFailure = failure?.();
+    if (launchFailure !== undefined) throw launchFailure;
+    if (await liveUnixSocket(path)) return;
+    await sleep(BROKER_CONNECT_POLL_MS);
+  }
+  throw new BrokerRefusal(
+    "broker_unavailable",
+    "Shared MCP socket did not become available within 10 seconds",
+  );
 }

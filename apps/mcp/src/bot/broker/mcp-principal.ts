@@ -152,8 +152,8 @@ export class InProcessOperatorPrincipal {
       delete args.url;
     }
     const sessionId = args.session_id;
-    if (typeof sessionId !== "string")
-      throw new BrokerRefusal("stale_lease", "A session id is required");
+    if (typeof sessionId !== "string" || !this.sessions.has(sessionId))
+      throw new BrokerRefusal("stale_lease", "Session is not owned by this MCP connection");
     if (name === "operate_finish") {
       const reply = await dispatch("close", { sessionId, args, ...(account ? { account } : {}) });
       if (!record(reply)) throw new BrokerRefusal("invalid_broker_result", "Invalid close reply");

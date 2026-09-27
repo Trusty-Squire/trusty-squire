@@ -35,7 +35,7 @@ const h = vi.hoisted(() => ({
   closeCalls: 0,
   documentEpoch: 0,
   // Runs inside the first goto — i.e. after the initializer has inserted the
-  // Session and started its watchdog, but before the initial observation.
+  // Session, but before the initial observation.
   onFirstGoto: null as null | (() => void),
   // Ordered record of the terminal-teardown steps the browser side observes.
   terminalOrder: [] as string[],
@@ -343,7 +343,7 @@ describe("characterization: Session construction", () => {
       startedAt: expect.any(Number),
       terminalTeardownOwner: null,
       userEmail: null,
-      watchdog: { kind: "object", ctor: "Timeout" },
+      watchdog: null,
     });
     // `api` is ABSENT (not present-and-undefined) when the tool layer passed none.
     expect(Object.keys(constructed!)).not.toContain("api");
@@ -414,7 +414,7 @@ describe("characterization: Session construction", () => {
       startedAt: expect.any(Number),
       terminalTeardownOwner: null,
       userEmail: null,
-      watchdog: { kind: "object", ctor: "Timeout" },
+      watchdog: null,
     });
     expect(Object.keys(constructed!)).not.toContain("api");
   });

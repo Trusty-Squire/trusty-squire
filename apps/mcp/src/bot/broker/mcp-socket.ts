@@ -5,7 +5,7 @@ import { dirname } from "node:path";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { ApiClient } from "../../api-client.js";
 import { buildServer, createServerCallAdmission, runBoundedServerCleanup } from "../../server.js";
-import { shutdownDeadlineMs } from "../../server-instance-registry.js";
+import { shutdownDeadlineMs } from "../../server.js";
 import { createSessionGuard } from "../../session-guard.js";
 import type { OperatorBroker } from "./operator.js";
 import { InProcessOperatorPrincipal } from "./mcp-principal.js";

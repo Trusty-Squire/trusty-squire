@@ -2,7 +2,11 @@
 
 > If you are an AI agent (Claude, Goose, Codex, Cursor, Cline, Continue, …) working in this repo, read this file fully before taking any action that publishes, deploys, or modifies external state. Re-read it before claiming any such action succeeded.
 
-**Browser model:** One broker per profile owns one Chrome. Multiple agents run
+**Browser model:** One broker per profile owns one Chrome and one MCP service.
+Every agent-facing `mcp server` is a relay onto that shared socket — not a
+server per session. A session belongs to the connection that opened it and
+closes when that connection dies (after a short grace for a socket blip).
+Multiple agents run
 concurrent sessions in separate tabs; only Google OAuth sign-in is serialized.
 The kernel-released SQLite lock elects the broker, never a session. A session overrun closes
 that session's tab, not shared Chrome. [Browser broker](docs/browser-broker.md)
@@ -471,7 +475,7 @@ The broker exclusively owns one Chrome per profile through a kernel-released
 SQLite exclusive lock;
 sessions own independent tab families and run concurrently. The lock elects
 brokers, never sessions. A broker-local mutex serializes only Google OAuth
-sign-in. A session timer closes only its own tab family; a wedged tab close may
+sign-in. The owning connection's death closes only its own tab family; a wedged tab close may
 require physical browser teardown. Linux uses a systemd user scope when the
 user manager and `setpriv` work; otherwise Chrome launches in its own process
 group with parent-death SIGINT when available. The process-group fallback has
@@ -549,7 +553,7 @@ See [`docs/browser-broker.md`](docs/browser-broker.md).
 Idle cleanup uses the provision-session call lease as its action boundary. Any new
 session-addressed operate/auth/payment surface must acquire that lease, and session
 teardown must clear its rolling observe snapshot before removing the live session.
-That lease, the session timer, and the whole terminal-teardown ordering live in
+That lease and the whole terminal-teardown ordering live in
 `apps/mcp/src/bot/session/lifecycle.ts` (`provision-session.ts` re-exports them);
 see CLAUDE.md's "Operator session model" for what may not be reordered.
 
@@ -946,12 +950,12 @@ socket or tab family. The authoritative busy-status contract and mapping are in
 The client wire is the frozen Contract B (`connect` / `open` / `command` /
 `close`), owned by `apps/mcp/src/bot/broker/protocol.ts`. A tool name crosses
 the wire only inside `command`; `close` finishes a session or ends the
-connection. The 512-entry retained-result replay guard and the reserved `abort`
-control frame (cancel exactly one in-flight request by its frame id, leaving the
-connection and its other sessions alive) stay internal policy behind the
-contract. Session ownership follows the agent identity, so an MCP connection
-retiring leaves its sessions available to that agent until finish, idle timeout,
-overrun, or broker shutdown. Do not re-add
+connection. The 512-entry retained-result replay guard, the 5 s
+connection-session grace, and the reserved `abort` control frame (cancel
+exactly one in-flight request by its frame id, leaving the connection and its
+other sessions alive) stay internal policy behind the contract. A session
+belongs to the connection that opened it and closes when that connection
+drops. Do not re-add
 `hello`/`tool`/`cancel`/`client_close`/`maintenance`/`resume`/`maintain` as
 wire operations.
 

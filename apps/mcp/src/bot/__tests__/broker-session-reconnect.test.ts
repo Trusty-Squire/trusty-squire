@@ -1,34 +1,15 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, expect, it, vi } from "vitest";
+import { expect, it } from "vitest";
 import type { SessionGuard } from "../../session-guard.js";
-import { BrokerAuthority } from "../broker/authority.js";
-import { brokerAgentIdentity } from "../broker/agent-identity.js";
+import { BrokerAuthority, CONNECTION_SESSION_GRACE_MS } from "../broker/authority.js";
 import { OperatorForwarder } from "../broker/forwarder.js";
 import { listenBroker } from "../broker/transport.js";
 
 const guard = { bind: async () => null } as unknown as SessionGuard;
-const beelineHome =
-  "/home/user/.local/state/beeline/agents/9c40fbbb2d1fd6b205e71d948875518bc5cb891de976323ca403892f2309f19b/rooms/7e52a91f-00ed-4a45-8b65-d7893a3f0f9f/agent-home/user";
 
-afterEach(() => vi.unstubAllEnvs());
-
-it("uses the Beeline room as the stable fallback identity without grouping other local processes", () => {
-  const first = brokerAgentIdentity({ HOME: beelineHome }, 101);
-  expect(first).toBe(brokerAgentIdentity({ HOME: beelineHome }, 202));
-  expect(first).not.toBe(
-    brokerAgentIdentity({ HOME: beelineHome.replace("7e52a91f", "8e52a91f") }, 303),
-  );
-  expect(brokerAgentIdentity({ HOME: "/home/user" }, 101)).not.toBe(
-    brokerAgentIdentity({ HOME: "/home/user" }, 202),
-  );
-  expect(
-    brokerAgentIdentity({ HOME: beelineHome, TRUSTY_SQUIRE_AGENT_IDENTITY: "named-agent" }, 101),
-  ).toBe("named-agent");
-});
-
-it("continues one agent's session from another broker client after the first process retires", async () => {
+it("refuses a second connection on the first connection's session and closes the tab when the owner drops", async () => {
   const root = await mkdtemp(join(tmpdir(), "ts-session-reconnect-"));
   const path = join(root, "broker.sock");
   const authority = new BrokerAuthority();
@@ -67,35 +48,23 @@ it("continues one agent's session from another broker client after the first pro
     },
     disconnect: async (principal, explicit) => await authority.disconnect(principal, explicit),
   });
-  const a = new OperatorForwarder(path, guard);
-  const b = new OperatorForwarder(path, guard);
+  const owner = new OperatorForwarder(path, guard);
   const other = new OperatorForwarder(path, guard);
   try {
-    vi.stubEnv("TRUSTY_SQUIRE_AGENT_IDENTITY", "");
-    vi.stubEnv("HOME", beelineHome);
-    const started = (await a.invoke("operate_start", { service_url: "https://service.test" })) as {
+    const started = (await owner.invoke("operate_start", { service_url: "https://service.test" })) as {
       session_id: string;
     };
-    await a.close();
-    expect(closed).toEqual([]);
-    expect(authority.inventory().sessions).toBe(1);
-
-    await expect(b.invoke("operate_observe", { session_id: started.session_id })).resolves.toEqual({
-      name: "operate_observe",
-    });
-
-    vi.stubEnv("HOME", beelineHome.replace("7e52a91f", "8e52a91f"));
     await expect(
       other.invoke("operate_observe", { session_id: started.session_id }),
     ).rejects.toMatchObject({ code: "stale_lease" });
-
-    await expect(b.invoke("operate_finish", { session_id: started.session_id })).resolves.toEqual({
-      name: "operate_finish",
-    });
+    await owner.close();
+    expect(closed).toEqual([]);
+    await new Promise((resolve) => setTimeout(resolve, CONNECTION_SESSION_GRACE_MS + 50));
     expect(closed).toEqual([started.session_id]);
+    expect(authority.inventory().sessions).toBe(0);
   } finally {
-    await Promise.all([a.close(), b.close(), other.close()]);
+    await Promise.all([owner.close(), other.close()]);
     await listener.close();
     await rm(root, { recursive: true, force: true });
   }
-});
+}, 15_000);

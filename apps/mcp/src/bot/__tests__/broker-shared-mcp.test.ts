@@ -127,6 +127,65 @@ it("relay sends the agent identity before MCP traffic and exits with its pipe", 
   await new Promise<void>((resolve) => relay.once("exit", () => resolve()));
 });
 
+it("`mcp server` proxies to the shared socket without starting a second operator stack", async () => {
+  const root = await mkdtemp(join(process.cwd(), ".server-relay-"));
+  cleanup.push(async () => await rm(root, { recursive: true, force: true }));
+  const operator = new OperatorBroker({ registryBaseUrl: "http://unused.test" });
+  const path = join(root, ".trusty-squire", "mcp.sock");
+  let stacks = 0;
+  const listener = await listenSharedMcp(operator, path, () => {
+    stacks += 1;
+    return {
+      bind: async () => null,
+      inspect: async () => ({ problem: null }),
+      boundAccountId: () => null,
+    };
+  });
+  cleanup.push(async () => await listener.close());
+  const bin = fileURLToPath(new URL("../../bin.ts", import.meta.url));
+  const child = spawn(process.execPath, ["--import", "tsx", bin, "server"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      HOME: root,
+      TRUSTY_SQUIRE_PROFILE_DIR: join(root, ".trusty-squire", "chrome-profile"),
+      TRUSTY_SQUIRE_AGENT_IDENTITY: "server-agent",
+    },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  cleanup.push(async () => {
+    child.kill();
+  });
+  let output = "";
+  const initialized = new Promise<Record<string, unknown>>((resolve, reject) => {
+    const deadline = setTimeout(() => reject(new Error("server did not answer initialize")), 5_000);
+    child.stdout.on("data", (chunk: Buffer) => {
+      output += chunk.toString("utf8");
+      const end = output.indexOf("\n");
+      if (end < 0) return;
+      clearTimeout(deadline);
+      resolve(JSON.parse(output.slice(0, end)));
+    });
+    child.once("exit", (code) => reject(new Error(`server exited ${code}`)));
+  });
+  child.stdin.write(
+    JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2025-03-26",
+        capabilities: {},
+        clientInfo: { name: "fixture", version: "1" },
+      },
+    }) + "\n",
+  );
+  expect((await initialized).id).toBe(1);
+  expect(stacks).toBe(1);
+  child.stdin.end();
+  await new Promise<void>((resolve) => child.once("exit", () => resolve()));
+});
+
 it("serves two profile brokers through their own relays at the same time", async () => {
   const root = await mkdtemp(join(process.cwd(), "../..", ".mp-"));
   cleanup.push(async () => await rm(root, { recursive: true, force: true }));
@@ -415,20 +474,15 @@ it("isolates concurrent socket principals, attributes vault calls, coexists with
   expect(operator.authority.inventory().sessions).toBe(3);
 
   alice.close();
-  await vi.waitFor(() => expect(operator.authority.inventory().sessions).toBe(3));
-  expect(closed).toHaveLength(0);
-  const aliceAgain = await connect("alice");
-  expect(text(await aliceAgain.tool("operate_observe", { session_id: aSession })).tab).toBeTruthy();
-  await aliceAgain.tool("operate_finish", { session_id: aSession, outcome: "none" });
-  aliceAgain.close();
   await vi.waitFor(() => expect(operator.authority.inventory().sessions).toBe(2));
   expect(closed).toHaveLength(1);
   expect(text(await bob.tool("operate_observe", { session_id: bSession })).tab).toBeTruthy();
+  const aliceAgain = await connect("alice");
+  expect(text(await aliceAgain.tool("operate_observe", { session_id: aSession })).error.code).toBe(
+    "stale_lease",
+  );
+  aliceAgain.close();
   bob.close();
-  await vi.waitFor(() => expect(operator.authority.inventory().sessions).toBe(2));
-  const bobAgain = await connect("bob");
-  await bobAgain.tool("operate_finish", { session_id: bSession, outcome: "none" });
-  bobAgain.close();
   await vi.waitFor(() => expect(operator.authority.inventory().sessions).toBe(1));
   await stdioClient.callTool({
     name: "operate_finish",
@@ -447,3 +501,159 @@ it("isolates concurrent socket principals, attributes vault calls, coexists with
   ).toBe(true);
   reconnected.close();
 });
+
+it("refuses a second connection on the first connection's session", async () => {
+  const root = await mkdtemp(join(process.cwd(), ".relay-grace-"));
+  cleanup.push(async () => await rm(root, { recursive: true, force: true }));
+  const operator = new OperatorBroker({ registryBaseUrl: "http://unused.test" });
+  const closed: string[] = [];
+  vi.spyOn(operator, "open").mockImplementation(async (principal) => {
+    const tab = randomUUID();
+    const sessionId = await operator.authority.open(principal, async () => ({
+      targetId: tab,
+      invoke: async (_name, args) => ({ session_id: args.session_id, tab }),
+      close: async () => {
+        closed.push(tab);
+        return true;
+      },
+      orphan: async () => undefined,
+    }));
+    return {
+      sessionId,
+      observation: { session_id: sessionId, tab } as unknown as OpenResult["observation"],
+    };
+  });
+  const path = join(root, "mcp.sock");
+  const shared = await listenSharedMcp(operator, path, () => ({
+    bind: async () =>
+      ({
+        account_id: "acct",
+        agent_session_token: "token",
+        api_base_url: "http://unused.test",
+      }) as SessionData,
+    inspect: async () => ({ problem: null }),
+    boundAccountId: () => "acct",
+  }));
+  cleanup.push(async () => await shared.close());
+  const connect = async (identity: string) => {
+    const socket = createConnection(path);
+    await new Promise<void>((resolve, reject) => {
+      socket.once("connect", resolve);
+      socket.once("error", reject);
+    });
+    const peer = new Peer(socket);
+    socket.write(`${identity}\n`);
+    await peer.ready();
+    return peer;
+  };
+
+  const alice = await connect("alice");
+  const bob = await connect("bob");
+  const aSession = text(await alice.tool("operate_start", { service_url: "https://example.test/a" }))
+    .session_id as string;
+  const bSession = text(await bob.tool("operate_start", { service_url: "https://example.test/b" }))
+    .session_id as string;
+  expect(aSession).not.toBe(bSession);
+  expect(text(await bob.tool("operate_observe", { session_id: aSession })).error.code).toBe(
+    "stale_lease",
+  );
+  expect(text(await alice.tool("operate_observe", { session_id: bSession })).error.code).toBe(
+    "stale_lease",
+  );
+
+  alice.close();
+  await vi.waitFor(() => expect(closed).toHaveLength(1));
+  expect(text(await bob.tool("operate_observe", { session_id: bSession })).tab).toBeTruthy();
+  const aliceAgain = await connect("alice");
+  expect(text(await aliceAgain.tool("operate_observe", { session_id: aSession })).error.code).toBe(
+    "stale_lease",
+  );
+  aliceAgain.close();
+  bob.close();
+});
+
+it("closes the agent's session when a `server` relay process is killed", async () => {
+  const root = await mkdtemp(join(process.cwd(), ".server-kill-"));
+  cleanup.push(async () => await rm(root, { recursive: true, force: true }));
+  const operator = new OperatorBroker({ registryBaseUrl: "http://unused.test" });
+  const closed: string[] = [];
+  vi.spyOn(operator, "open").mockImplementation(async (principal) => {
+    const tab = randomUUID();
+    const sessionId = await operator.authority.open(principal, async () => ({
+      targetId: tab,
+      invoke: async (_name, args) => ({ session_id: args.session_id, tab }),
+      close: async () => {
+        closed.push(tab);
+        return true;
+      },
+      orphan: async () => undefined,
+    }));
+    return {
+      sessionId,
+      observation: { session_id: sessionId, tab } as unknown as OpenResult["observation"],
+    };
+  });
+  const path = join(root, ".trusty-squire", "mcp.sock");
+  const shared = await listenSharedMcp(operator, path, () => ({
+    bind: async () =>
+      ({
+        account_id: "acct",
+        agent_session_token: "token",
+        api_base_url: "http://unused.test",
+      }) as SessionData,
+    inspect: async () => ({ problem: null }),
+    boundAccountId: () => "acct",
+  }));
+  cleanup.push(async () => await shared.close());
+  const bin = fileURLToPath(new URL("../../bin.ts", import.meta.url));
+  const child = spawn(process.execPath, ["--import", "tsx", bin, "server"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      HOME: root,
+      TRUSTY_SQUIRE_PROFILE_DIR: join(root, ".trusty-squire", "chrome-profile"),
+      TRUSTY_SQUIRE_AGENT_IDENTITY: "killed-agent",
+    },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  cleanup.push(async () => {
+    if (child.exitCode === null) child.kill("SIGKILL");
+  });
+  let buffer = "";
+  const replies = new Map<number, ReturnType<typeof JSON.parse>>();
+  child.stdout.on("data", (chunk: Buffer) => {
+    buffer += chunk.toString("utf8");
+    for (;;) {
+      const end = buffer.indexOf("\n");
+      if (end < 0) break;
+      const frame = JSON.parse(buffer.slice(0, end));
+      buffer = buffer.slice(end + 1);
+      if (typeof frame.id === "number") replies.set(frame.id, frame);
+    }
+  });
+  const call = async (id: number, method: string, params: Record<string, unknown> = {}) => {
+    child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
+    await vi.waitFor(() => expect(replies.has(id)).toBe(true));
+    const frame = replies.get(id)!;
+    if (frame.error) throw new Error(JSON.stringify(frame.error));
+    return frame.result;
+  };
+  await call(1, "initialize", {
+    protocolVersion: "2025-03-26",
+    capabilities: {},
+    clientInfo: { name: "killer", version: "1" },
+  });
+  child.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n");
+  const started = await call(2, "tools/call", {
+    name: "operate_start",
+    arguments: { service_url: "https://example.test" },
+  });
+  expect(text(started).session_id).toBeTruthy();
+  expect(operator.authority.inventory().sessions).toBe(1);
+  child.kill("SIGKILL");
+  await new Promise<void>((resolve) => child.once("exit", () => resolve()));
+  await vi.waitFor(() => {
+    expect(closed).toHaveLength(1);
+    expect(operator.authority.inventory().sessions).toBe(0);
+  });
+}, 15_000);

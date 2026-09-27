@@ -294,37 +294,9 @@ async function forceTerminateProvisionSessionOwned(
   return terminalError;
 }
 
-/** The broker owns this timer directly. Expiry is a terminal operation,
- * independent of request callbacks or process-marker discovery. */
-function startSessionWatchdog(session: Session): void {
-  if (session.watchdog !== null) return;
-  const maxLifetimeMs = positiveTimeout("TRUSTY_SQUIRE_OPERATOR_BROWSER_MAX_LIFETIME_MS", 30 * 60_000);
-  const idleTimeoutMs = positiveTimeout("TRUSTY_SQUIRE_SESSION_IDLE_TIMEOUT_MS", 60 * 60_000);
-  const tick = (): void => {
-    session.watchdog = null;
-    if (session.closing || sessions.get(session.id) !== session) return;
-    const now = Date.now();
-    const lifetimeMs = now - session.startedAt;
-    const idleMs = now - session.lastActivityAt;
-    if (lifetimeMs >= maxLifetimeMs || idleMs >= idleTimeoutMs) {
-      const reason = lifetimeMs >= maxLifetimeMs
-        ? { kind: "max_lifetime", lifetime_ms: lifetimeMs, timeout_ms: maxLifetimeMs }
-        : { kind: "idle_timeout", idle_ms: idleMs, timeout_ms: idleTimeoutMs };
-      void forceTerminateProvisionSession(session, "browser_watchdog_terminate", reason)
-        .catch((error) => console.error("[operator] session timer teardown failed", error));
-      return;
-    }
-    const remaining = Math.max(1, Math.min(maxLifetimeMs - lifetimeMs, idleTimeoutMs - idleMs));
-    session.watchdog = setTimeout(tick, remaining);
-    session.watchdog.unref();
-  };
-  const initial = Math.max(1, Math.min(
-    maxLifetimeMs - (Date.now() - session.startedAt),
-    idleTimeoutMs - (Date.now() - session.lastActivityAt),
-  ));
-  session.watchdog = setTimeout(tick, initial);
-  session.watchdog.unref();
-}
+/** Session cleanup is process death: the owning connection's last close.
+ * There is no idle or lifetime watchdog. */
+function startSessionWatchdog(_session: Session): void {}
 
 /** Thrown when a session-addressed call names a session this process does not own. */
 export class UnknownProvisionSessionError extends Error {
