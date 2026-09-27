@@ -233,6 +233,43 @@ afterEach(async () => {
   rmSync(profileDir, { recursive: true, force: true });
 });
 
+describe("Google identity within an operator session", () => {
+  it("keeps a successful identity through later transient reads", async () => {
+    const started = await startHarnessProvisionSession({
+      serviceUrl: "https://app.example.com/signup",
+      browser: new BrowserController({}),
+    });
+    expect(await sessionLifecycle.googleSessionGateForSession(started.session_id)).toEqual({
+      ok: true,
+    });
+
+    h.providers = [];
+    h.workerEmail = null;
+    expect(await sessionLifecycle.googleSessionGateForSession(started.session_id)).toEqual({
+      ok: true,
+    });
+  });
+
+  it("retries a missing identity on the same session after connect", async () => {
+    const started = await startHarnessProvisionSession({
+      serviceUrl: "https://app.example.com/signup",
+      browser: new BrowserController({}),
+    });
+    h.providers = [];
+    h.workerEmail = null;
+    expect(await sessionLifecycle.googleSessionGateForSession(started.session_id)).toMatchObject({
+      ok: false,
+      needs_user: { wall: "google_session", resume: "connect" },
+    });
+
+    h.providers = ["google"];
+    h.workerEmail = "operator@example.com";
+    expect(await sessionLifecycle.googleSessionGateForSession(started.session_id)).toEqual({
+      ok: true,
+    });
+  });
+});
+
 // ── 1. tool surface ───────────────────────────────────────────────────────
 
 describe("characterization: registered operator tool surface", () => {

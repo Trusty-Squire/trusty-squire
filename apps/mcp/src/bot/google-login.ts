@@ -5,9 +5,9 @@
 // every signup after it is fully automated.
 //
 // Connect ceremony custody, display exposure, and provider-probe contracts are
-// owned by docs/browser-broker.md. Completion is the install claim, which the
-// CLI polls out of band, never inferred from a live page; the nonce-scoped
-// Finish callback only closes the page early.
+// owned by docs/browser-broker.md. The CLI polls the install claim out of
+// band; the nonce-scoped Finish callback says when the user is done with the
+// visible browser window.
 
 import { createRequire } from "node:module";
 import { readFileSync, readdirSync } from "node:fs";
@@ -31,7 +31,7 @@ import { connectOrLaunchBroker, resolveBrokerSocket } from "./broker/discovery.j
 import { BrokerRefusal } from "./broker/refusal.js";
 import type { BrokerClient } from "./broker/transport.js";
 import { controlLabelV2, wireRoleToSafeRoleV2 } from "./compact-observation-v2.js";
-import { extractGoogleAccountEmail } from "./oauth-login.js";
+import { extractGoogleAccountEmail, googleAccountPageIsSignedIn } from "./oauth-login.js";
 export { extractGoogleAccountEmail };
 import {
   startInstallCompletionListener,
@@ -277,13 +277,10 @@ async function validateProviderSession(
  * the machines that were already connected.
  *
  * Chrome keeps the live cookie DB under an exclusive SQLite lock, so this reads
- * a byte copy: copying needs no lock, and a provider session cookie is
- * long-lived enough that a committed snapshot is the same answer. Presence is
- * all this proves — a cookie can outlive the session behind it, which is why
- * connect's "Already connected" says so and points at --force-relogin. The
- * liveness probe still runs where it is affordable (a profile this process
- * can take); on a busy profile probeProviderSessionsAfterCeremony falls back
- * to this snapshot and polls past Chrome's commit lag.
+ * a byte copy without taking the profile lease. Presence is only a hint: the
+ * caller must confirm a Google marker through the shared broker before it
+ * claims the session is live. The post-ceremony probe may use this snapshot
+ * while waiting for Chrome to commit fresh cookies.
  *
  * An ABSENT profile or cookie store is an answer, not a failure: there is no
  * provider session, so the caller must run the sign-in ceremony. Only a store
@@ -319,6 +316,47 @@ export async function detectProviderSessionsFromProfile(
   } finally {
     await rm(snapshotDir, { recursive: true, force: true });
   }
+}
+
+/** Check Google's server-side session through the browser that owns the
+ * profile. A ceremony tab is identity-neutral and closes without affecting
+ * sibling operator tabs. `null` means the check failed, never "signed out".
+ */
+export async function probeGoogleSessionInBroker(profileDir: string): Promise<boolean | null> {
+  let client: BrokerClient | undefined;
+  let sessionId: string | undefined;
+  try {
+    client = await connectOrLaunchBroker(resolveBrokerSocket(profileDir));
+    const opened = (await client.call("open", {
+      serviceUrl: "https://myaccount.google.com/",
+      ceremony: true,
+    })) as { sessionId?: string; observation?: { url?: string } };
+    sessionId = opened.sessionId;
+    if (sessionId === undefined) return null;
+    const observed = (await operateCommand(client, sessionId, "operate_observe", {})) as {
+      url?: string;
+    };
+    return typeof observed?.url === "string" ? googleAccountPageIsSignedIn(observed.url) : null;
+  } catch {
+    return null;
+  } finally {
+    if (sessionId !== undefined) await client?.call("close", { sessionId }).catch(() => undefined);
+    await client?.release().catch(() => undefined);
+  }
+}
+
+/** Turn a cookie snapshot into a Google-liveness answer. GitHub remains the
+ * snapshot's answer; an unreadable live Google probe is unknown, never a pass.
+ */
+export async function confirmLiveGoogleProviderSnapshot(
+  profileDir: string,
+  providers: OAuthProviderId[],
+  probe: typeof probeGoogleSessionInBroker = probeGoogleSessionInBroker,
+): Promise<OAuthProviderId[] | null> {
+  if (!providers.includes("google")) return providers;
+  const live = await probe(profileDir);
+  if (live === null) return null;
+  return live ? providers : providers.filter((provider) => provider !== "google");
 }
 
 interface ProfileCookieRow {
@@ -1085,10 +1123,8 @@ export function checkLoginStatusWithin(
 export async function openInstallConfirmInBotChrome(
   opts: {
     confirmUrl: string;
-    // Returns claimed only after the install ceremony succeeds. Completion is
-    // the account claim the caller polls; `wizardCompleted` carries the
-    // browser's courtesy Finish callback, which may close the page early but
-    // is never required (a single-use ceremony page can be unreachable).
+    // `wizardCompleted` carries the browser's Finish callback. The caller
+    // retains a claimed token even if Finish never arrives before the deadline.
     pollUntilClaimed: (wizardCompleted: boolean) => Promise<InstallClaimPollResult>;
     profileDir?: string;
     // Absolute local deadline (ms). The caller owns it because only the

@@ -271,7 +271,8 @@ export function extractGoogleAccountEmail(pageText: string): string | null {
   return null;
 }
 
-// Map a cookie jar to the OAuth providers that have a LIVE logged-in session.
+// Map a cookie jar to provider session CANDIDATES. Google needs a live account
+// page check before this marker is trusted; its cookies can outlive sign-in.
 // The auth cookies that mean "signed in": GitHub → `user_session`; Google →
 // a legacy *SID cookie. NID / CONSENT / 1P_JAR and the current account-chooser
 // family are set even when logged out, so they are deliberately NOT signals.
@@ -1318,13 +1319,30 @@ export function completeOAuthTransitionRecovery(browser: BrowserController): voi
   browser.oauthProviderPageClosed = false;
 }
 
-// Which OAuth providers have a live session in this profile's cookie jar.
+export function googleAccountPageIsSignedIn(url: string): boolean {
+  try {
+    return new URL(url).hostname === "myaccount.google.com";
+  } catch {
+    return false;
+  }
+}
+
+// Which OAuth providers have a live session in this browser. Google cookies
+// can outlive the session, so its account page must still accept the identity.
 export async function detectSessionProviders(
   browser: BrowserController,
+  knownGoogleIdentity?: { email: string | null },
 ): Promise<OAuthProviderId[]> {
   if (browser.context === null) return [];
   try {
-    return sessionProvidersFromCookies(await browser.context.cookies());
+    const providers: OAuthProviderId[] = sessionProvidersFromCookies(
+      await browser.context.cookies(),
+    ).filter((provider) => provider !== "google");
+    const email =
+      knownGoogleIdentity?.email ??
+      (knownGoogleIdentity === undefined ? await detectGoogleAccountEmail(browser) : null);
+    if (email !== null) providers.push("google");
+    return providers;
   } catch {
     return [];
   }
@@ -1349,7 +1367,7 @@ export async function detectGoogleAccountEmail(
       waitUntil: "domcontentloaded",
       timeout: 20_000,
     });
-    if (new URL(identityPage.url()).hostname !== "myaccount.google.com") return null;
+    if (!googleAccountPageIsSignedIn(identityPage.url())) return null;
     const identityTokens = await identityPage
       .locator("[aria-label]")
       .evaluateAll((elements) =>

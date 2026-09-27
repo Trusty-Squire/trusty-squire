@@ -140,22 +140,18 @@ describe("shouldCompleteInstallClaim (claim-only completion)", () => {
     }
   });
 
-  it("completes on the account claim alone, with no browser Finish signal", () => {
-    // The captain's stranding: the claim was observed and held, then thrown
-    // away when the ceremony deadline passed because the Finish callback —
-    // which only ever arrives from a control inside the single-use ceremony
-    // page — never did. The claim is the authoritative fact; Finish is a
-    // courtesy. It must never gate completion, in either direction.
+  it("keeps the sign-in window open after claim until Finish", () => {
     expect(shouldCompleteInstallClaim(false, false)).toBe(false);
     expect(shouldCompleteInstallClaim(false, true)).toBe(false);
-    expect(shouldCompleteInstallClaim(true, false)).toBe(true);
+    expect(shouldCompleteInstallClaim(true, false)).toBe(false);
     expect(shouldCompleteInstallClaim(true, true)).toBe(true);
   });
 
   it("keeps the explicit GitHub refresh open after Google claims the account", () => {
     expect(shouldCompleteInstallClaim(true, false, "github", ["google"])).toBe(false);
     expect(shouldCompleteInstallClaim(true, true, "github", ["google"])).toBe(false);
-    expect(shouldCompleteInstallClaim(true, false, "github", ["google", "github"])).toBe(true);
+    expect(shouldCompleteInstallClaim(true, false, "github", ["google", "github"])).toBe(false);
+    expect(shouldCompleteInstallClaim(true, true, "github", ["google", "github"])).toBe(true);
   });
 });
 
@@ -164,10 +160,10 @@ describe("claimHeartbeatMessage (ceremony phase copy)", () => {
     expect(claimHeartbeatMessage(false)).toMatch(/finish signing in/i);
   });
 
-  it("never makes the browser Finish control a requirement after the claim", () => {
+  it("asks the user to finish the browser step after the claim", () => {
     const message = claimHeartbeatMessage(true);
     expect(message).toMatch(/sign-in complete/i);
-    expect(message).not.toMatch(/click Finish/i);
+    expect(message).toMatch(/Finish/i);
     expect(message).not.toMatch(/waiting.*signing in/i);
   });
 

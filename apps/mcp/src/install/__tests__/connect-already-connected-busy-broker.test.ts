@@ -10,18 +10,18 @@
 // question was about, and answered `unverified` on exactly the machines that
 // were connected.
 //
-// Both halves of that contention are REAL here, not mocked:
+// The profile contention is real; the broker's temporary-tab response is
+// simulated so the test can distinguish a live Google identity from stale
+// cookies without a network sign-in.
 //
 //   * the profile's operation lease is held for the whole test by a lock record
 //     naming this live process, exactly as a resident broker holds it. Anything
 //     on connect's path that opens the profile throws ProfileBusyError.
 //   * a real `listenBroker` answers on the socket connect resolves, as the
-//     resident broker does (connect must settle from reads without ever
-//     touching the broker's custody).
+//     resident broker does. The live-identity check rides that socket.
 //
-// The provider probe is NOT stubbed: connect runs the real one against a real
-// Chrome-shaped cookie store. Only the network API is faked — a genuine process
-// boundary.
+// The cookie snapshot probe is not stubbed: connect reads a real Chrome-shaped
+// cookie store. Only the Google page result and network API are faked.
 
 import { promises as fs } from "node:fs";
 import os from "node:os";
@@ -105,6 +105,24 @@ let originalXdgConfigHome: string | undefined;
 let broker: { close: () => Promise<void> } | undefined;
 let profileLease: ProfileOperationLease | undefined;
 
+async function listenIdentityBroker(identityUrl: string) {
+  const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
+  const socket = path.join(socketRoot, "b.sock");
+  broker = await listenBroker(socket, {
+    connected: async () => undefined,
+    call: async (_principal, method, params) => {
+      calls.push({ method, params });
+      if (method === "open")
+        return { sessionId: "probe-session", observation: { url: identityUrl } };
+      if (method === "command") return { result: { url: identityUrl } };
+      return { closed: true };
+    },
+    disconnect: async () => undefined,
+  });
+  vi.stubEnv("TRUSTY_SQUIRE_BROKER_SOCKET", socket);
+  return calls;
+}
+
 beforeEach(async () => {
   originalHome = process.env.HOME;
   originalXdgConfigHome = process.env.XDG_CONFIG_HOME;
@@ -186,13 +204,7 @@ it("reports already connected while the broker owns the profile and its browser"
   // machinery reads. Opening the profile from here throws ProfileBusyError.
   profileLease = acquireProfileOperationGuard(profileDir);
 
-  const socket = path.join(socketRoot, "b.sock");
-  broker = await listenBroker(socket, {
-    connected: async () => undefined,
-    call: async () => ({ closed: true }),
-    disconnect: async () => undefined,
-  });
-  vi.stubEnv("TRUSTY_SQUIRE_BROKER_SOCKET", socket);
+  const calls = await listenIdentityBroker("https://myaccount.google.com/");
   vi.stubEnv("TRUSTY_SQUIRE_PROFILE_DIR", profileDir);
 
   const output: string[] = [];
@@ -221,6 +233,7 @@ it("reports already connected while the broker owns the profile and its browser"
   expect(output.join("\n")).not.toContain("couldn't verify");
   // Nothing waited on the profile: the old probe's pre-wait alone is 15s.
   expect(elapsed).toBeLessThan(5_000);
+  expect(calls.some((call) => call.method === "open")).toBe(true);
 });
 
 it("prints the same already-connected facts as JSON without changing the human line", async () => {
@@ -229,6 +242,7 @@ it("prints the same already-connected facts as JSON without changing the human l
     GOOGLE_SESSION_COOKIES.map((name) => ({ host: ".google.com", name })),
   );
   profileLease = acquireProfileOperationGuard(profileDir);
+  await listenIdentityBroker("https://myaccount.google.com/");
   vi.stubEnv("TRUSTY_SQUIRE_PROFILE_DIR", profileDir);
 
   const human: string[] = [];
@@ -266,6 +280,22 @@ it("prints the same already-connected facts as JSON without changing the human l
   expect(report.sign_in_url).toBeNull();
   expect(report.account).toEqual({ id: "account-id", providers: ["google"] });
   expect(report.browser_location).toEqual({ kind: "none" });
+});
+
+it("runs Google sign-in on plain connect when stored cookies are stale", async () => {
+  await writeProfileCookies(
+    profileDir,
+    GOOGLE_SESSION_COOKIES.map((name) => ({ host: ".google.com", name })),
+  );
+  profileLease = acquireProfileOperationGuard(profileDir);
+  const calls = await listenIdentityBroker("https://accounts.google.com/v3/signin/challenge/pwd");
+  vi.stubEnv("TRUSTY_SQUIRE_PROFILE_DIR", profileDir);
+
+  const output = await runConnect();
+
+  expect(output).not.toContain("Already connected");
+  expect(output).toContain("Opening the Trusty Squire install page");
+  expect(calls.some((call) => call.method === "open")).toBe(true);
 });
 
 // `JSON.parse(stdout)` is the whole machine contract, so a run that dies
@@ -372,6 +402,7 @@ async function recordConnectedProviders(providers: string[]): Promise<string> {
 // fewer providers than the profile proves must not demote the claim or fire a
 // bogus repair offer.
 it("claims what the cookie store proves even when an old record names less", async () => {
+  await listenIdentityBroker("https://myaccount.google.com/");
   const sessionPath = await recordConnectedProviders(["google"]);
   await writeProfileCookies(profileDir, [
     ...GOOGLE_SESSION_COOKIES.map((name) => ({ host: ".google.com", name })),
@@ -396,6 +427,7 @@ it("claims what the cookie store proves even when an old record names less", asy
 // profile as signed out — and interactively that answer walks a fully connected
 // machine into the ceremony, which is the reported failure.
 it("claims a GitHub session from the rows Chrome actually persists", async () => {
+  await listenIdentityBroker("https://myaccount.google.com/");
   await recordConnectedProviders(["google", "github"]);
   await writeProfileCookies(profileDir, [
     ...GOOGLE_SESSION_COOKIES.map((name) => ({ host: ".google.com", name })),
@@ -412,6 +444,7 @@ it("claims a GitHub session from the rows Chrome actually persists", async () =>
 
 // Signing out of GitHub removes those rows; the repair offer must come back.
 it("offers the GitHub repair once its persisted rows are gone", async () => {
+  await listenIdentityBroker("https://myaccount.google.com/");
   await recordConnectedProviders(["google", "github"]);
   await writeProfileCookies(
     profileDir,
@@ -427,6 +460,7 @@ it("offers the GitHub repair once its persisted rows are gone", async () => {
 
 // A cookie with no expiry is not a cookie that expired in 1601.
 it("accepts a persisted row that carries no expiry", async () => {
+  await listenIdentityBroker("https://myaccount.google.com/");
   await recordConnectedProviders(["google", "github"]);
   await writeProfileCookiesRaw(profileDir, [
     ...GOOGLE_SESSION_COOKIES.map((name) => ({

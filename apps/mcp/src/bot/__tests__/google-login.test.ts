@@ -16,7 +16,7 @@ import {
   terminateTrackedProfileChild,
   withChromeStartupLock,
 } from "../browser.js";
-import { detectGoogleAccountEmail } from "../oauth-login.js";
+import { detectGoogleAccountEmail, detectSessionProviders } from "../oauth-login.js";
 import {
   acquireProfileOperationGuard,
   launchWithProfileGate,
@@ -793,6 +793,18 @@ describe("claimed worker Google identity", () => {
 
     await expect(detectGoogleAccountEmail(controller)).resolves.toBeNull();
     expect(close).toHaveBeenCalledOnce();
+  });
+
+  it("rejects stale Google cookies when My Account redirects to sign-in", async () => {
+    const { controller } = controllerWithIdentityPage(
+      "https://accounts.google.com/v3/signin/challenge/pwd",
+      ["Google Account: Bento (bento@example.com)"],
+    );
+    (controller.context as unknown as { cookies(): Promise<unknown[]> }).cookies = vi.fn(
+      async () => [{ name: "SID", value: "stale-google-cookie-value", domain: ".google.com" }],
+    );
+
+    await expect(detectSessionProviders(controller)).resolves.toEqual([]);
   });
 
   it("does not mistake unrelated account-page text for the worker identity", async () => {

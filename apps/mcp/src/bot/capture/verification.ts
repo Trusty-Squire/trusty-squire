@@ -261,7 +261,9 @@ export function buildConsentRefusal(sessionId: string): VerificationResult {
 // An explicit sender request scopes Gmail's query as well as client-side
 // selection. Session-inferred hosts retain the broader query because a page
 // host can differ from the service's mail domain. Exported for unit tests.
-export function buildVerificationSearchQuery(opts: { recipient?: string; sender?: string } = {}): string {
+export function buildVerificationSearchQuery(
+  opts: { recipient?: string; sender?: string } = {},
+): string {
   const parts = [
     "newer_than:1d",
     '(verify OR verification OR confirm OR confirmation OR code OR otp OR passcode OR password OR login OR "log in" OR "sign in" OR "sign-in" OR signin OR "sign up" OR signup OR "magic link" OR activate OR activation OR welcome OR "link account" OR "link your" OR continue)',
@@ -1073,7 +1075,8 @@ export async function awaitVerification(
                     .filter(
                       (message) =>
                         mailRowMatchesRequestedFrom(message, requestedSender) &&
-                        (!scopedToRecipient || openedMailMatchesRecipient(message, search.recipient)),
+                        (!scopedToRecipient ||
+                          openedMailMatchesRecipient(message, search.recipient)),
                     )
                     .flatMap((message) => message.links)
                 : openedLinks;
@@ -1132,7 +1135,7 @@ export async function awaitVerification(
         wall: "google_session",
         message:
           "Gmail redirected to Google sign-in, so the verification email could not be checked. " +
-          "Reconnect with `npx @trusty-squire/mcp connect --force-relogin=google`, then retry " +
+          "Reconnect with `npx @trusty-squire/mcp connect`, then retry " +
           "the inbox read. Your signup page remains open.",
         resume: "connect",
       },

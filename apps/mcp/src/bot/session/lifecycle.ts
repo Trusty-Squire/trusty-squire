@@ -463,7 +463,7 @@ export function googleSessionGate(
       wall: "google_session",
       message:
         "No live Google session in your Chrome profile, so the operator cannot act " +
-        "as you yet. Reconnect with `npx @trusty-squire/mcp connect --force-relogin=google` " +
+        "as you yet. Reconnect with `npx @trusty-squire/mcp connect` " +
         "and retry " +
         "— the task has NOT started and nothing was changed.",
       resume: "connect",
@@ -474,29 +474,28 @@ export function googleSessionGate(
 async function detectProvisionPrimaryProviderSession(
   browser: BrowserController,
 ): Promise<{ providers: OAuthProviderId[]; userEmail: string | null }> {
-  // Chrome materializes the real profile's provider jar after the account
-  // surface is opened in this same context. Match the proven live-identity
-  // path before reading the markers. The account lookup warms the context; it
-  // is not itself the admission signal.
+  // The account lookup navigates Google's real identity page. Its result is
+  // the Google admission signal; cookie rows alone can survive sign-out.
   const userEmail = await detectGoogleAccountEmail(browser).catch(() => null);
   // Fail closed, but never SILENTLY: an empty list refuses the start with the
   // same `google_session` wall as a genuinely signed-out profile, so a throwing
   // probe used to be indistinguishable from "not signed in". Say which it was.
-  const providers = await detectSessionProviders(browser).catch((err: unknown) => {
-    console.error(
-      `[operate] provider-session detection failed: ${err instanceof Error ? err.message : String(err)}`,
-    );
-    return [] as OAuthProviderId[];
-  });
+  const providers = await detectSessionProviders(browser, { email: userEmail }).catch(
+    (err: unknown) => {
+      console.error(
+        `[operate] provider-session detection failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return [] as OAuthProviderId[];
+    },
+  );
   return { providers, userEmail };
 }
 
-/** A LIVE Google identity, held for the life of the session and shared by every
- * Google-dependent operation: the probe costs a navigation, and re-running it
- * per operation gave a mid-flight task several independent chances to be
- * refused by one transient read. Only a detection that found Google is kept — a
- * negative or failed one is exactly the answer that must not go stale, since
- * the wall's own remedy is to run `connect` and retry on this same session.
+/** A live Google identity is held for the session after its first successful
+ * Google-dependent operation. Repeating the navigation at every later action
+ * adds latency and gives a mid-flight task another chance to be refused by a
+ * transient read. A negative or failed detection is never cached, so connect
+ * can refresh the profile and the next action can retry the check.
  */
 const sessionGoogleIdentity = new WeakMap<
   Session,
