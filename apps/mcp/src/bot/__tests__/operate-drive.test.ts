@@ -11,6 +11,8 @@ import {
   DRIVE_MAX_CANDIDATES,
   DRIVE_MAX_CRITERIA,
   driveTargetSets,
+  resumeAnswerOptions,
+  resumeAction,
   elementState,
   DRIVE_MAX_JEV_CALLS,
   DRIVE_RULES,
@@ -1350,6 +1352,27 @@ describe("decideAfterJev stop reasons", () => {
         },
       }),
     ).toMatchObject({ kind: "low_confidence", confidence: 0.41 });
+  });
+
+  it("offers target keys, rather than operation names, for a drive resume", () => {
+    const options = resumeAnswerOptions([SUBMIT], {}, "Create account", false, "https://example.test/signup");
+    expect(options).toHaveProperty(slugFor(SUBMIT));
+    expect(options).not.toHaveProperty("CLICK");
+    expect(options).toHaveProperty("DONE");
+    expect(resumeAction("CLICK", [SUBMIT], {}, "Create account", undefined, "https://example.test/signup")).toMatchObject({
+      kind: "invalid_answer",
+      reason: "resume_not_current_option",
+      question: { options: expect.objectContaining({ [slugFor(SUBMIT)]: expect.any(String) }) },
+    });
+    const select: WireRow = ["@e:country", "s", "Country|f=country"];
+    const facts = { country: "US" };
+    const selectOptions = resumeAnswerOptions([select], facts, "Create account", false, "https://example.test/signup");
+    const optionKey = Object.keys(selectOptions).find((key) => key.includes(":"));
+    expect(optionKey).toBeDefined();
+    expect(resumeAction(optionKey!, [select], facts, "Create account", undefined, "https://example.test/signup")).toMatchObject({
+      kind: "act",
+      action: { kind: "select", target: "@e:country", text: "US" },
+    });
   });
 
   it("reports invalid_answer with the validation reason instead of low_confidence", () => {

@@ -5445,7 +5445,25 @@ async function actSafely(
   }
 }
 
-function resumeAction(
+export function resumeAnswerOptions(
+  rows: readonly WireRow[],
+  facts: Record<string, string>,
+  goal: string,
+  includePayment: boolean,
+  pageUrl: string,
+): Record<string, string> {
+  const sets = driveTargetSets(rows, facts, includePayment, [], pageUrl, new Map(), (text) => text, [], { goal });
+  return {
+    ...criteriaFromCandidates(sets.CLICK, "CLICK"),
+    ...criteriaFromCandidates(sets.TYPE_TEXT),
+    ...criteriaFromCandidates(sets.SELECT),
+    DONE: "The goal is complete",
+    BLOCKED: "No control can advance the goal",
+    WAIT: "Wait for the page to change",
+  };
+}
+
+export function resumeAction(
   answer: string,
   rows: readonly WireRow[],
   facts: Record<string, string>,
@@ -5473,13 +5491,16 @@ function resumeAction(
       goal,
     },
   );
-  const row = findRow(rows, answer, pageUrl);
+  const offered = [...sets.CLICK, ...sets.TYPE_TEXT, ...sets.SELECT].find(
+    (entry) => entry.slug === answer || entry.ref === answer,
+  );
+  const row = offered?.row ?? findRow(rows, answer, pageUrl);
   if (row === undefined) {
     return {
       kind: "invalid_answer",
       question: {
-        question: "Resume answer is not a current option",
-        options: questions.operation?.type === "choice" ? questions.operation.criteria : {},
+        question: "Choose one current target key, or DONE, BLOCKED, or WAIT. Operation names such as CLICK are not resume answers.",
+        options: resumeAnswerOptions(rows, facts, goal, includePayment, pageUrl),
       },
       reason: "resume_not_current_option",
       confidence: 0,
@@ -6258,9 +6279,12 @@ async function driveLoop(input: {
       return await noteProgress(beforeFingerprint, afterFingerprint, "GO_BACK");
     }
     if (decision.kind === "low_confidence") {
-      drive.lastQuestion = decision.question;
+      drive.lastQuestion = {
+        question: "Choose one current target key, or DONE, BLOCKED, or WAIT.",
+        options: resumeAnswerOptions(rows, drive.facts, drive.goal, drive.facts.card_ref !== undefined, observation.url),
+      };
       return finish("low_confidence", {
-        question: decision.question,
+        question: drive.lastQuestion,
         confidence: decision.confidence,
         reason: `model confidence is below the drive threshold on ${observation.url}`,
       });
