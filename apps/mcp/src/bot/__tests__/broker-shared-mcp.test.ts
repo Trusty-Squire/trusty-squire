@@ -520,7 +520,7 @@ it("refuses a second connection on the first connection's session", async () => 
     }));
     return {
       sessionId,
-      observation: { session_id: sessionId, tab } as OpenResult["observation"],
+      observation: { session_id: sessionId, tab } as unknown as OpenResult["observation"],
     };
   });
   const path = join(root, "mcp.sock");
@@ -590,7 +590,7 @@ it("closes the agent's session when a `server` relay process is killed", async (
     }));
     return {
       sessionId,
-      observation: { session_id: sessionId, tab } as OpenResult["observation"],
+      observation: { session_id: sessionId, tab } as unknown as OpenResult["observation"],
     };
   });
   const path = join(root, ".trusty-squire", "mcp.sock");
