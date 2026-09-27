@@ -75,6 +75,7 @@ import {
   DRIVE_WIDGET_UNREADY_WAITS,
   DRIVE_WIDGET_UNREADY_REASON,
   captchaSolveStillWorking,
+  driveWaitMs,
   widgetUnreadySolveReason,
   isRenderedCaptchaRow,
   pageHasRenderedCaptcha,
@@ -1813,6 +1814,10 @@ describe("form-fill assignment helpers", () => {
 
   it("never treats an already-settled solver as a submit blocker", () => {
     expect(DRIVE_IN_FLIGHT_MS).toBeGreaterThanOrEqual(6_000);
+    expect(driveWaitMs(45_000, 5_000)).toBe(5_000);
+    expect(driveWaitMs(3_000, 5_000)).toBe(3_000);
+    expect(driveWaitMs(0, 5_000)).toBe(0);
+    expect(driveWaitMs(-1, 5_000)).toBe(0);
     expect(solverOutcomeBlocksSubmit("already_settled")).toBe(false);
     expect(solverOutcomeBlocksSubmit("injected")).toBe(false);
     expect(solverOutcomeBlocksSubmit("cooldown")).toBe(true);

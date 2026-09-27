@@ -21,7 +21,6 @@ import {
   recaptchaEvidenceDiag,
   recaptchaPageReacted,
   injectRecaptchaTokenDetail,
-  extractHcaptchaResponseKeyFromToken,
   extractHcaptchaSitekey,
   extractRecaptchaSitekey,
   extractTurnstileSitekey,
@@ -29,7 +28,6 @@ import {
   findHcaptchaWidgetPageUrl,
   hasCaptchaResponseTokenForVariant,
   hasHcaptchaResponseTokenWithCompat,
-  hcaptchaInjectScript,
   injectHcaptchaToken,
   injectTurnstileToken,
   waitForCaptchaResponseToken,
@@ -213,9 +211,13 @@ export async function injectCaptchaToken(
     return { solved: false, outcome: "inject_failed" };
   }
   const tokenPresent = await waitForCaptchaResponseToken(browser, 2_000, page);
-  const pageReacted = recaptcha ? await recaptchaPageReacted(page, urlBefore) : false;
+  // hCaptcha / Turnstile: the minted response field is the success signal
+  // (see captcha-solve-token-signal). A leftover painted image grid is not a
+  // miss — re-detecting it here discarded a token that had already landed
+  // in a cross-origin gate frame (Bluesky).
+  const pageReacted = recaptcha ? await recaptchaPageReacted(page, urlBefore) : tokenPresent;
   const after =
-    tokenPresent && callbacksFired === 0 && !pageReacted
+    recaptcha && tokenPresent && callbacksFired === 0 && !pageReacted
       ? await detectCaptchaVariant(browser, page)
       : { challengeRendered: false };
   return captchaInjectSettled({
@@ -298,24 +300,11 @@ function expiryBackoffMs(consecutiveExpiries: number): number {
   return Math.min(raw, CAPTCHA_AUTOSOLVE_EXPIRY_BACKOFF_MAX_MS);
 }
 
-// A gate-style handoff mints the site's completion code and delivers it into
-// the live page's gate frame; from there the site itself decides whether the
-// code is acceptable. Measured live on Bluesky signup (release 1.1.15-rc.1,
-// sessions b7582464/64ee93d9): the handoff completes byte-identically to the
-// site's own widget path, yet the server rejects every code minted from an
-// out-of-band-solved token ("Invalid verification code" at first use, seconds
-// after minting, while the same code minutes later reports a distinct
-// expired-token error). The delivery succeeding is therefore not evidence the
-// flow can pass.
-//
-// The handoff itself is one-shot per page (gateHandoffAttempted): once it has
-// run, every later purchase on the same page can only reach the live-widget
-// injection — which on a gate page measurably fires the site's error callback,
-// reloads the frame, and destroys the token — so each cycle burns the funded
-// key on a result the page structurally refuses. Once a handoff has been
-// attempted on a page and the gate challenge renders again, stop buying for
-// that page and leave the challenge to the operator.
-const GATE_HANDOFF_MAX_DELIVERED_PER_PAGE = 1;
+// Live-widget injection is the delivery path, including on pages that embed
+// the widget in a /gate/ iframe (Bluesky). A standalone scratch-page handoff
+// bought a token and then never wrote it into the widget the page uses
+// (gauntlet 2026-09-27: token_purchased → gate_handoff_started →
+// autosolve_disabled delivered=0 → "Invalid verification code").
 
 interface AutoSolveState {
   inFlight: boolean;
@@ -401,7 +390,12 @@ export async function attemptOperateCaptchaAutoSolve(
   return fetch;
 }
 
-async function injectPendingCaptchaToken(
+export function captchaAutoSolveHasWork(session: Session): boolean {
+  const state = attemptState.get(session);
+  return state !== undefined && (state.inFlight || state.pending !== null);
+}
+
+export async function injectPendingCaptchaToken(
   session: Session,
   page?: Page,
 ): Promise<string | null> {
@@ -459,21 +453,6 @@ async function injectPendingCaptchaToken(
     // time, so a later expiry would be a fresh observation, not a streak.
     state.consecutiveExpiries = 0;
     state.expiryBackoffUntil = 0;
-    if (page !== undefined && !gateHandoffAttempted.has(page)) {
-      const gateUrl = findGateFrameUrl(page);
-      if (gateUrl !== null) {
-        gateHandoffAttempted.add(page);
-        audit(session.id, "captcha_autosolve", {
-          variant: pending.variant,
-          outcome: "gate_handoff_started",
-        });
-        console.error(
-          `[captcha-autosolve-diag] session=${session.id} variant=${pending.variant} outcome=gate_handoff_started`,
-        );
-        void runGateHandoffSolve(session, page, gateUrl, pending.token, pending.variant);
-        return "gate_handoff_started";
-      }
-    }
     const res = await injectCaptchaToken(session.browser, pending.variant, pending.token, page);
     // injectCaptchaToken's own settle check answers "does ANY provider hold a
     // token", which a co-resident widget can satisfy on its own. Confirm where
@@ -516,110 +495,8 @@ async function injectPendingCaptchaToken(
   }
 }
 
-/** One-shot per page: the handoff attempt is only meaningful once. */
+/** One-shot per page: post-inject frame-URL handoff is only meaningful once. */
 const gateHandoffAttempted = new WeakSet<object>();
-
-/** Delivered handoffs per page — bounds the spend once the site shows it will
- * not accept codes minted this way (see the GATE_HANDOFF_MAX_DELIVERED_PER_PAGE
- * comment). */
-const gateHandoffDeliveredCount = new WeakMap<object, number>();
-
-/** How long to wait for the standalone gate page to land on its redirect. */
-const GATE_HANDOFF_REDIRECT_TIMEOUT_MS = 20_000;
-
-function findGateFrameUrl(page: Page | undefined): string | null {
-  if (!page) return null;
-  for (const frame of page.frames()) {
-    if (frame === page.mainFrame()) continue;
-    const url = frame.url();
-    if (url.includes("/gate/")) return url;
-  }
-  return null;
-}
-
-/**
- * Detached gate-page handoff for hCaptcha gates like Bluesky's signup: the
- * live page embeds a cross-origin gate iframe (path contains '/gate/') that owns the response
- * textareas, and its widget SDK fires an error callback when the token is
- * filled under it, reloading the frame and destroying the token (measured
- * live: the gate frame URL gains an `error` param within seconds of a fill).
- * So instead of touching the live widget, load the gate URL as a STANDALONE
- * page in the same context (same cookies, same egress), fill and submit it
- * there, and read the gate's redirect off the page URL. The redirect carries
- * the completion code; pointing the live page's gate iframe at it replays the
- * handoff the embedding page's own onLoad handler expects.
- */
-async function runGateHandoffSolve(
-  session: Session,
-  page: Page,
-  gateUrl: string,
-  token: string,
-  variant: string,
-): Promise<void> {
-  let scratch: Page | null = null;
-  const auditHandoff = (outcome: string): void => {
-    audit(session.id, "captcha_autosolve", { variant, outcome });
-  };
-  try {
-    const context = page.context();
-    scratch = await context.newPage();
-    await scratch.goto(gateUrl, { waitUntil: "domcontentloaded", timeout: 15_000 });
-    await scratch
-      .waitForSelector('textarea[name="h-captcha-response"]', { timeout: 10_000 })
-      .catch(() => null);
-    const filled = await scratch.evaluate(hcaptchaInjectScript, {
-      tok: token,
-      key: extractHcaptchaResponseKeyFromToken(token),
-      submitMode: "top" as const,
-    });
-    console.error(
-      `[captcha-gate-handoff-diag] filled=${filled.ok} textareas=${filled.textareas} formSubmitted=${filled.formSubmitted}`,
-    );
-    const deadline = Date.now() + GATE_HANDOFF_REDIRECT_TIMEOUT_MS;
-    while (Date.now() < deadline) {
-      await new Promise((resolve) => setTimeout(resolve, 1_000));
-      const url = scratch.url();
-      let parsed: URL;
-      try {
-        parsed = new URL(url);
-      } catch {
-        continue;
-      }
-      if (parsed.searchParams.has("code")) {
-        const mainFrame = page.mainFrame();
-        const delivered = await mainFrame
-          .evaluate((src) => {
-            const el = document.querySelector<HTMLIFrameElement>(
-              `iframe#captcha-iframe, iframe[src*="gate/signup"]`,
-            );
-            if (!el) return false;
-            el.src = src;
-            return true;
-          }, url)
-          .catch(() => false);
-        console.error(`[captcha-gate-handoff-diag] code=1 delivered=${delivered}`);
-        if (delivered) {
-          gateHandoffDeliveredCount.set(page, (gateHandoffDeliveredCount.get(page) ?? 0) + 1);
-        }
-        auditHandoff(delivered ? "gate_handoff_delivered" : "gate_handoff_undelivered");
-        return;
-      }
-    }
-    const finalUrl = new URL(scratch.url());
-    const names = Array.from(finalUrl.searchParams.keys());
-    console.error(
-      `[captcha-gate-handoff-diag] code=0 final=${finalUrl.host}${finalUrl.pathname}?[${names.join(",")}]`,
-    );
-    auditHandoff("gate_handoff_no_code");
-  } catch (error) {
-    console.error(
-      `[captcha-gate-handoff-diag] failed=${error instanceof Error ? error.message : String(error)}`,
-    );
-    auditHandoff("gate_handoff_error");
-  } finally {
-    await scratch?.close().catch(() => {});
-  }
-}
 
 async function deliverGateHandoff(page: Page, variant: string): Promise<void> {
   if (variant !== "hcaptcha" || gateHandoffAttempted.has(page)) return;
@@ -730,28 +607,6 @@ async function runDetachedTokenFetch(session: Session, page?: Page): Promise<str
     if (await variantTokenPresent(session, det.variant, page)) {
       state.inFlight = false;
       return "already_settled";
-    }
-    // A gate challenge that renders again after this page's one-shot handoff
-    // can only be re-attempted through the destructive live-widget injection
-    // (the handoff is one-shot per page). Whether the delivered code was then
-    // rejected by the site or the handoff never produced one, further
-    // purchases are guaranteed waste — skip them and leave the challenge
-    // visible for the operator.
-    if (page !== undefined && findGateFrameUrl(page) !== null && gateHandoffAttempted.has(page)) {
-      const delivered = gateHandoffDeliveredCount.get(page) ?? 0;
-      audit(session.id, "captcha_autosolve", {
-        variant: det.variant,
-        outcome: "autosolve_disabled",
-        reason:
-          delivered >= GATE_HANDOFF_MAX_DELIVERED_PER_PAGE
-            ? "gate_handoff_delivered_but_rejected"
-            : "gate_handoff_already_attempted",
-      });
-      console.error(
-        `[captcha-autosolve-diag] session=${session.id} variant=${det.variant} outcome=autosolve_disabled reason=${delivered >= GATE_HANDOFF_MAX_DELIVERED_PER_PAGE ? "gate_handoff_delivered_but_rejected" : "gate_handoff_already_attempted"} delivered=${delivered}`,
-      );
-      state.inFlight = false;
-      return "autosolve_disabled";
     }
     variant = det.variant;
 

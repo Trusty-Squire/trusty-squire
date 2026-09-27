@@ -4,14 +4,10 @@
 // Measured live on Bluesky signup (release 1.1.15-rc.1, sessions b7582464 /
 // 64ee93d9, 2026-09):
 //
-// 1. A gate handoff that DELIVERS the site's completion code is not evidence
-//    the flow can pass — the site rejected every code minted from an
-//    out-of-band-solved token ("Invalid verification code" at first use,
-//    seconds after minting). Because the handoff is one-shot per page, every
-//    later purchase on that page could only reach the live-widget injection,
-//    which on a gate page fires the site's error callback and destroys the
-//    token. So once a gate handoff has been attempted on a page and the gate
-//    challenge renders again, purchases must stop for that page.
+// 1. A purchased token on a /gate/ page (Bluesky) must be written into the
+//    live widget the page uses, including its callback. Diverting to a
+//    scratch-page handoff left delivered=0 and the page showing
+//    "Invalid verification code" (gauntlet 2026-09-27).
 // 2. A token that dies unconsumed (the agent's observe cadence is slower than
 //    the ~2 min token shelf life) must not be re-purchased on the very next
 //    observation — that token dies the same way. Purchases back off
@@ -23,6 +19,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 const h = vi.hoisted(() => ({
   solveCalls: [] as string[],
+  injectCalls: 0,
   failSolve: false,
   variantTokenPresent: false,
   challengeRendered: true,
@@ -67,6 +64,7 @@ vi.mock("../captcha.js", async (importOriginal) => ({
   }),
   hasHcaptchaResponseTokenWithCompat: async () => h.variantTokenPresent,
   hasCaptchaResponseTokenForVariant: async () => h.variantTokenPresent,
+  waitForCaptchaResponseToken: async () => h.variantTokenPresent,
   extractHcaptchaSitekey: async () => "00000000-0000-0000-0000-000000000000",
   getHcaptchaSolveContext: async () => ({
     invisible: false,
@@ -74,7 +72,11 @@ vi.mock("../captcha.js", async (importOriginal) => ({
     rqdata: null,
   }),
   findHcaptchaWidgetPageUrl: async () => null,
-  injectHcaptchaToken: async () => true,
+  injectHcaptchaToken: async () => {
+    h.injectCalls += 1;
+    h.variantTokenPresent = true;
+    return true;
+  },
 }));
 
 const auditMock = vi.hoisted(() => ({ fn: vi.fn() }));
@@ -144,6 +146,7 @@ const outcomes = (): string[] =>
 
 beforeEach(() => {
   h.solveCalls = [];
+  h.injectCalls = 0;
   h.failSolve = false;
   h.variantTokenPresent = false;
   h.challengeRendered = true;
@@ -208,29 +211,40 @@ describe("attemptOperateCaptchaAutoSolve — bounded spend", () => {
     h.variantTokenPresent = false;
   });
 
-  it("stops purchasing once a gate handoff was attempted and the gate challenge renders again", async () => {
+  it("injects a purchased token into the live widget on a /gate/ page instead of diverting to handoff", async () => {
     const session = fakeSession();
     const page = fakePage(true);
 
-    // Observe 1: token purchased; the inject half dispatches the one-shot gate
-    // handoff (its scratch goto fails in the fixture, so the handoff errors
-    // out — the attempt flag is what matters).
     await attemptOperateCaptchaAutoSolve(session, page);
     await flushDetached();
     expect(h.solveCalls).toHaveLength(1);
+    expect(h.injectCalls).toBe(0);
 
-    // Observe 2: the gate challenge is still rendered, but the handoff is
-    // one-shot per page — a new token could only reach the destructive
-    // live-widget injection. No purchase.
-    await attemptOperateCaptchaAutoSolve(session, page);
+    const delivered = await attemptOperateCaptchaAutoSolve(session, page);
     await flushDetached();
-    expect(h.solveCalls).toHaveLength(1);
-    expect(outcomes()).toContain("autosolve_disabled");
+    expect(delivered).toBe("injected");
+    expect(h.injectCalls).toBe(1);
+    expect(outcomes()).toContain("ok");
+    expect(outcomes()).not.toContain("gate_handoff_started");
+    expect(outcomes()).not.toContain("autosolve_disabled");
+  });
 
-    // And still no purchase on later observations.
+  it("does not disable later purchases after a gate-page live-widget inject", async () => {
+    const session = fakeSession();
+    const page = fakePage(true);
+
     await attemptOperateCaptchaAutoSolve(session, page);
     await flushDetached();
-    expect(h.solveCalls).toHaveLength(1);
+    await attemptOperateCaptchaAutoSolve(session, page);
+    await flushDetached();
+    expect(outcomes()).toContain("ok");
+
+    h.variantTokenPresent = false;
+    h.challengeRendered = true;
+    const again = await attemptOperateCaptchaAutoSolve(session, page);
+    await flushDetached();
+    expect(again).not.toBe("autosolve_disabled");
+    expect(outcomes()).not.toContain("autosolve_disabled");
   });
 
   it("still purchases on a gate page while the handoff is untouched, and on non-gate pages", async () => {

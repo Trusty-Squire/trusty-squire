@@ -744,7 +744,14 @@ carry an internal id, not the wire session id.
 The auto-solve DOES engage on a plain drive (proven live on Kaggle,
 `data/ts-recaptcha-autosolve-not-engaging/findings.md`): detect
 `challenge_rendered:true` → detached 2Captcha fetch (25s–5min observed) →
-inject on the observe after purchase → `ok confirmed=true` → blockers clear.
+inject on the next observe **or drive snapshot** after purchase →
+`ok confirmed=true` → blockers clear. Drive snapshots bypass `observe()`,
+so `injectPendingCaptchaToken` in `snapshotDriveSession` is the lease-holding
+write; without it a token bought mid-drive sits unused until the call
+returns budget (Kaggle + Bluesky, 2026-09-27). Write the token into the
+widget the page actually uses, including a cross-origin `/gate/` frame and
+its callback — do not divert to a scratch-page handoff.
+`apps/mcp/src/bot/captcha-solve.ts` owns that path.
 The reported "never engages, no diag" was a stale shared daemon (npx-cached
 old release, stderr → /dev/null) blinding every lane sharing the profile.
 Check `ps -o args=` on the daemon pid before concluding "no diagnostics".

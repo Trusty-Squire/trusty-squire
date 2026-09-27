@@ -1416,18 +1416,25 @@ async function hasResponseTokenIn(
   turnstile: boolean,
 ): Promise<boolean> {
   if (!page) throw new Error("Browser not started");
-  return page
-    .evaluate(
-      ({ sels, cf }: { sels: string[]; cf: string | null }) => {
-        for (const sel of sels) {
-          const el = document.querySelector<HTMLInputElement | HTMLTextAreaElement>(sel);
-          if (el !== null && el.value.trim().length > 0) return true;
-        }
-        return cf !== null && document.querySelector(cf) !== null;
-      },
-      { sels: selectors, cf: turnstile ? TURNSTILE_SUCCESS_SELECTOR : null },
-    )
-    .catch(() => false);
+  // Widget response fields can live in a dedicated gate frame (Bluesky's
+  // bsky.social/gate/signup). A main-document-only read misses a token that
+  // already landed there and then reports the purchase as undelivered.
+  for (const frame of page.frames()) {
+    const present = await frame
+      .evaluate(
+        ({ sels, cf }: { sels: string[]; cf: string | null }) => {
+          for (const sel of sels) {
+            const el = document.querySelector<HTMLInputElement | HTMLTextAreaElement>(sel);
+            if (el !== null && el.value.trim().length > 0) return true;
+          }
+          return cf !== null && document.querySelector(cf) !== null;
+        },
+        { sels: selectors, cf: turnstile ? TURNSTILE_SUCCESS_SELECTOR : null },
+      )
+      .catch(() => false);
+    if (present) return true;
+  }
+  return false;
 }
 
 async function hasCaptchaResponseToken(page: Page | null): Promise<boolean> {
@@ -1694,17 +1701,52 @@ export async function injectHcaptchaToken(
   if (!page) throw new Error("Browser not started");
   try {
     const responseKey = extractHcaptchaResponseKeyFromToken(token);
+    const payload = { tok: token, key: responseKey };
     // The widget and its SDK can live in a dedicated gate frame (e.g. Bluesky
     // embeds a cross-origin bsky.social/gate/signup frame that owns the
     // response textareas), so the fill must run in EVERY frame — a
     // main-frame-only evaluate lands nothing.
+    //
+    // Patchright's frame.evaluate cannot see page JS globals (hcaptcha /
+    // ___hcaptcha_cfg / data-callback names). Fire the same script in each
+    // frame's MAIN world first so the page's own callback runs; fall back to
+    // isolated evaluate so the textarea still fills if CDP is unavailable.
     let ok = false;
+    try {
+      ok = await withRuntimeMainWorlds(page, async ({ client, mainWorlds }) => {
+        const expression = `(${hcaptchaInjectScript.toString()})(${JSON.stringify(payload)})`;
+        let any = false;
+        for (const contextId of mainWorlds.values()) {
+          try {
+            const res = await client.send("Runtime.evaluate", {
+              expression,
+              contextId,
+              returnByValue: true,
+            });
+            const value = res.result.value;
+            if (value !== null && typeof value === "object" && Reflect.get(value, "ok") === true) {
+              any = true;
+              const num = (key: string): number => {
+                const raw = Reflect.get(value, key);
+                return typeof raw === "number" ? raw : 0;
+              };
+              console.error(
+                `[captcha-inject-diag] world=main ok=true textareas=${num("textareas")} widgets=${num("widgets")} callbackFired=${Reflect.get(value, "callbackFired") === true} formSubmitted=${Reflect.get(value, "formSubmitted") === true}`,
+              );
+            }
+          } catch {
+            // A frame can detach mid-injection; the others still get the token.
+          }
+        }
+        return any;
+      });
+    } catch {
+      ok = false;
+    }
+    if (ok) return true;
     for (const frame of page.frames()) {
       try {
-        const diag = await frame.evaluate(hcaptchaInjectScript, {
-          tok: token,
-          key: responseKey,
-        });
+        const diag = await frame.evaluate(hcaptchaInjectScript, payload);
         console.error(
           `[captcha-inject-diag] frame=${frame.url().slice(0, 60)} ok=${diag.ok} textareas=${diag.textareas} widgets=${diag.widgets} callbackFired=${diag.callbackFired} formSubmitted=${diag.formSubmitted} dataCbHosts=${diag.dataCallbackHosts} globalFns=${diag.globalFnMatches} hasGlobal=${diag.hasHcaptchaGlobal}`,
         );
