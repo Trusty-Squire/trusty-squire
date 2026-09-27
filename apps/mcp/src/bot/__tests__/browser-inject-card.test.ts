@@ -54,6 +54,24 @@ function byName(elements: InteractiveElement[], name: string): InteractiveElemen
 }
 
 describe("direct card injection and masked observation", () => {
+  it.skipIf(!available)("reports a detected hosted-field remount with the filled result", async () => {
+    const isolated = await page();
+    try {
+      await isolated.page.setContent('<input name="number" aria-label="Card number">');
+      const controller = BrowserController.fromHarnessPage(isolated.page);
+      const element = byName(await controller.extractInteractiveElements(), "number");
+      const results = await controller.injectCardIntoTargets(
+        CARD,
+        { pan: {} },
+        isolated.page,
+        async () => ({ element, remounted: true }),
+      );
+      expect(results.pan).toEqual({ status: "filled", remounted: true });
+    } finally {
+      await isolated.context.close();
+    }
+  });
+
   it.skipIf(!available)(
     "requires the same approval id before re-injecting a released card",
     async () => {

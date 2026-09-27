@@ -89,7 +89,7 @@ export type { FrameTarget };
 
 export type InjectCardField = "pan" | "cvv";
 export type InjectCardFieldResult =
-  | { status: "filled" }
+  | { status: "filled"; remounted?: true }
   | { status: "not_found" | "detached" }
   // Written, then cleared again by the page before the call ended — the pass
   // verified inside the live frame and could not keep the value present.
@@ -99,6 +99,8 @@ export type InjectCardFieldResult =
 export interface InjectCardResolvedTarget {
   element?: InteractiveElement;
   missing?: "not_found" | "detached";
+  /** The observed hosted frame was replaced before this write resolved. */
+  remounted?: boolean;
   format?: string | undefined;
   driveAnchor?: DriveRefAnchor;
 }
@@ -6765,6 +6767,7 @@ export class BrowserController implements BrowserDriver {
     // The mask is session-persistent and must exist before the first field write.
     this.registerCardValueOutputMask(card);
     const results = {} as Record<InjectCardField, InjectCardFieldResult>;
+    const remountedFields = new Set<InjectCardField>();
     // The element each field actually resolved to at its write step. Later
     // verification reads THIS, not the caller's one-shot snapshot.
     const resolvedTargets: Partial<Record<InjectCardField, InjectCardResolvedTarget>> = {};
@@ -6832,6 +6835,7 @@ export class BrowserController implements BrowserDriver {
         }
       }
       resolvedTargets[field] = target;
+      if (target.remounted) remountedFields.add(field);
       if (target.element === undefined) {
         return { status: target.missing ?? "not_found" };
       }
@@ -6899,7 +6903,7 @@ export class BrowserController implements BrowserDriver {
             });
           }
         }
-        return { status: "filled" };
+        return remountedFields.has(field) ? { status: "filled", remounted: true } : { status: "filled" };
       } catch (error) {
         if (
           target.driveAnchor !== undefined &&

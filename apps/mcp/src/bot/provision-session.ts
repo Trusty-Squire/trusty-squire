@@ -539,16 +539,18 @@ export async function injectCardIntoSessionTargets(
               .map((candidate) => frameId(candidate.observationIdentity))
               .filter((id): id is string => id !== undefined),
           );
-          element =
+          const remounted =
             url !== undefined &&
             oldFrame !== undefined &&
             newFrame !== undefined &&
             oldFrame !== newFrame &&
             legacyMatch?.frameUrl === url &&
             observedFrames.size === 1 &&
-            liveFrames.size === 1
-              ? legacyMatch
-              : null;
+            liveFrames.size === 1;
+          element = remounted ? legacyMatch : null;
+          if (remounted && element !== null) {
+            return { element, format: target.format, remounted: true };
+          }
         }
       }
     }
