@@ -84,9 +84,12 @@ const LIST_FILLER =
   "Gmail: private and secure email at no cost, for work and life. ";
 
 const LIST_ROW =
-  '<div role="link" id="row-proton" style="cursor:pointer;padding:8px">' +
-  "Proton Mail — Verify your Proton Mail address — Tap to view the code and " +
-  "finish creating your new Proton Mail account. 8:04 PM</div>";
+  '<table><tbody><tr class="zA" role="row" id="row-proton" tabindex="-1">' +
+  '<td class="yX xY"><span class="zF" email="no-reply@proton.me" name="Proton Mail">Proton Mail</span></td>' +
+  '<td><div class="xS" role="link"><div class="y6">Verify your Proton Mail address</div>' +
+  '<span class="y2">Tap to view the code and finish creating your account.</span></div></td>' +
+  `<td class="xW"><span title="${new Date(Date.now() + 60_000).toString()}">8:04 PM</span></td>` +
+  "</tr></tbody></table>";
 
 const MESSAGE_CARD = `
 <div class="adn">
@@ -107,7 +110,7 @@ const MESSAGE_CARD = `
 const STALE_PROTON_CARD = `
 <div class="adn">
   <div class="gD">Proton &lt;no-reply@proton.me&gt;</div>
-  <div class="ii">Enter this code to finish the process: 934870. Stay secure,
+  <div class="ii">To: lunchboxfortwo@gmail.com. Enter this code to finish the process: 934870. Stay secure,
   the Proton Team.</div>
 </div>
 `;
@@ -115,7 +118,7 @@ const STALE_PROTON_CARD = `
 const CRAIGSLIST_CARD = `
 <div class="adn">
   <div class="gD">craigslist &lt;automail@craigslist.org&gt;</div>
-  <div class="ii">To complete your craigslist account, complete account
+  <div class="ii">To: lunchboxfortwo@gmail.com. To complete your craigslist account, complete account
   sign-up: <a href="https://accounts.craigslist.org/signup?tok=NEWACTIVATION7788">Complete
   sign-up</a>. Didn't request this link? Thanks for using craigslist.</div>
 </div>
@@ -303,6 +306,7 @@ async function readInbox(
   context: BrowserContext,
   opts: {
     sender?: string;
+    recipient?: string;
     breakRowExtraction?: boolean;
     // Backdate the session's start so the fixture mails (minutes old) POSTdate
     // the session floor. Models a task that began N minutes ago — the normal
@@ -491,7 +495,7 @@ describe("operate_read_inbox picks the NEWEST matching mail out of a real result
     }
   }, 90_000);
 
-  it("sender matching covers the subject when the From address lacks the hint", async () => {
+  it("an explicit sender never matches only the subject", async () => {
     if (!available) return;
     const { context } = await multiRowHarness();
     try {
@@ -501,8 +505,22 @@ describe("operate_read_inbox picks the NEWEST matching mail out of a real result
         sender: "sign-up",
         sessionStartsMinutesAgo: 30,
       });
+      expect(res.found).toBe(false);
+      expect(res.link).toBeNull();
+    } finally {
+      await context.close();
+    }
+  }, 90_000);
+
+  it("keeps the requested sender when another sender has newer mail", async () => {
+    if (!available) return;
+    const { context } = await multiRowHarness();
+    try {
+      const res = await readInbox(context, { sender: "proton.me", recipient: "lunchboxfortwo@gmail.com", sessionStartsMinutesAgo: 30 });
       expect(res.found).toBe(true);
-      expect(res.link).toBe("https://accounts.craigslist.org/signup?tok=NEWACTIVATION7788");
+      expect(res.source_from).toBe("no-reply@proton.me");
+      expect(res.code).toBe("934870");
+      expect(res.link).toBeNull();
     } finally {
       await context.close();
     }

@@ -258,12 +258,10 @@ export function buildConsentRefusal(sessionId: string): VerificationResult {
 // the mail sat unread in the inbox — `from:craigslist newer_than:1d` alone
 // found it fine, the keyword clause was the veto.
 //
-// There is deliberately NO `from:${sender}` here anymore. The sender filter is
-// applied client-side to the returned rows (mailRowMatchesSender matches the
-// From address, its display name, AND the subject), so one brittle Gmail
-// operator can never veto the search; a broad keyword query over the last day
-// stays within one results page. Exported for unit tests.
-export function buildVerificationSearchQuery(opts: { recipient?: string } = {}): string {
+// An explicit sender request scopes Gmail's query as well as client-side
+// selection. Session-inferred hosts retain the broader query because a page
+// host can differ from the service's mail domain. Exported for unit tests.
+export function buildVerificationSearchQuery(opts: { recipient?: string; sender?: string } = {}): string {
   const parts = [
     "newer_than:1d",
     '(verify OR verification OR confirm OR confirmation OR code OR otp OR passcode OR password OR login OR "log in" OR "sign in" OR "sign-in" OR signin OR "sign up" OR signup OR "magic link" OR activate OR activation OR welcome OR "link account" OR "link your" OR continue)',
@@ -272,6 +270,8 @@ export function buildVerificationSearchQuery(opts: { recipient?: string } = {}):
   if (recipient !== undefined && recipient.includes("@")) {
     parts.unshift(`to:${recipient}`);
   }
+  const sender = opts.sender?.trim();
+  if (sender) parts.unshift(`from:${sender}`);
   return parts.join(" ");
 }
 
@@ -291,7 +291,10 @@ export function resolveInboxSearch(
   const recipient = (opts.recipient ?? session.drive?.facts.email ?? "").trim() || undefined;
   const sender = (opts.sender ?? serviceHostFromUrl(session.startUrl) ?? "").trim() || undefined;
   return {
-    query: buildVerificationSearchQuery(recipient === undefined ? {} : { recipient }),
+    query: buildVerificationSearchQuery({
+      ...(recipient === undefined ? {} : { recipient }),
+      ...(opts.sender === undefined ? {} : { sender: opts.sender }),
+    }),
     ...(recipient === undefined ? {} : { recipient }),
     ...(sender === undefined ? {} : { sender }),
   };
@@ -511,6 +514,15 @@ export function mailRowMatchesSender(
   return tokens.length > 0 && tokens.every((t) => fields.includes(t));
 }
 
+/** Explicit sender requests are verified against From, never subject or To. */
+export function mailRowMatchesRequestedFrom(
+  row: Pick<MailResultRow, "fromEmail" | "fromName">,
+  sender: string,
+): boolean {
+  if (!row.fromEmail && !row.fromName) return false;
+  return mailRowMatchesSender({ ...row, subject: null }, sender);
+}
+
 // Pure: the full row date to an epoch ms, or null when absent/unparseable.
 // Exported for unit tests.
 export function parseMailRowDate(dateTitle: string | null): number | null {
@@ -673,6 +685,7 @@ async function readAllMailMatchingRows(
   sender: string | undefined,
   sessionStartMs: number,
   recipient?: string,
+  requestedSender?: string,
 ): Promise<{ rows: MailResultRow[]; staleMatchSeen: boolean }> {
   await browser.goto(GMAIL_ALL_MAIL_URL, page);
   let rows: MailResultRow[] = [];
@@ -688,7 +701,10 @@ async function readAllMailMatchingRows(
     listingScopedToRecipient: false,
   };
   const matching = rows.filter(
-    (r) => mailRowIsSessionCandidate(r, candidateOpts) && mailRowIsRecent(r, now),
+    (r) =>
+      mailRowIsSessionCandidate(r, candidateOpts) &&
+      (requestedSender === undefined || mailRowMatchesRequestedFrom(r, requestedSender)) &&
+      mailRowIsRecent(r, now),
   );
   const staleMatchSeen = matching.some(
     (r) => mailRowMatchedSession(r, candidateOpts) && mailRowPredatesSession(r, sessionStartMs),
@@ -808,6 +824,7 @@ export async function awaitVerification(
     ...(opts.recipient === undefined ? {} : { recipient: opts.recipient }),
     ...(opts.sender === undefined ? {} : { sender: opts.sender }),
   });
+  const requestedSender = opts.sender?.trim() || undefined;
   const scopedToRecipient = search.recipient !== undefined;
 
   const verification = await runDetachedGoogleIdentityOperation(session, async (browser) => {
@@ -873,7 +890,11 @@ export async function awaitVerification(
           ...(search.sender === undefined ? {} : { serviceHost: search.sender }),
           listingScopedToRecipient: scopedToRecipient,
         };
-        const searchRows = rows.filter((r) => mailRowIsSessionCandidate(r, searchCandidateOpts));
+        const searchRows = rows.filter(
+          (r) =>
+            mailRowIsSessionCandidate(r, searchCandidateOpts) &&
+            (requestedSender === undefined || mailRowMatchesRequestedFrom(r, requestedSender)),
+        );
         logInboxReaderListing(
           "search",
           rows,
@@ -919,6 +940,7 @@ export async function awaitVerification(
             search.sender,
             session.startedAt,
             search.recipient,
+            requestedSender,
           );
           if (allStale) staleMatchSeen = true;
           const allPick = allRows.length > 0 ? pickNewestMailRow(allRows) : null;
@@ -985,6 +1007,13 @@ export async function awaitVerification(
                   sessionStartMs: session.startedAt,
                 })
               : null;
+          if (
+            requestedSender !== undefined &&
+            (picked === null || !mailRowMatchesRequestedFrom(picked, requestedSender)) &&
+            (messages.length > 0 || chosen === null)
+          ) {
+            continue;
+          }
           logInboxReaderDiag(
             `opened_view messages=${messages.length} expanded=${expanded} ` +
               `picked=${picked === null ? "none" : "yes"} ` +
@@ -1011,10 +1040,31 @@ export async function awaitVerification(
           const openedText = body?.text ?? (await browser.extractVisibleText(chosenPage));
           const openedLinks = body?.links ?? (await rawLinksOf(chosenPage));
           sourceFrom = picked?.fromEmail ?? extractSenderEmail(openedText);
+          if (
+            requestedSender !== undefined &&
+            !mailRowMatchesRequestedFrom(
+              { fromEmail: sourceFrom, fromName: picked?.fromName ?? null },
+              requestedSender,
+            )
+          ) {
+            continue;
+          }
           const expectedDomains = expectedVerificationDomains(search.sender, sourceFrom);
+          const senderScopedLinks =
+            requestedSender === undefined
+              ? [...openedLinks, ...listLinks]
+              : messages.length > 0
+                ? messages
+                    .filter(
+                      (message) =>
+                        mailRowMatchesRequestedFrom(message, requestedSender) &&
+                        (!scopedToRecipient || openedMailMatchesRecipient(message, search.recipient)),
+                    )
+                    .flatMap((message) => message.links)
+                : openedLinks;
           ({ code, link } = parseVerification(
             openedText,
-            [...openedLinks, ...listLinks].filter((l) => !isGmailChromeLink(l.url)),
+            senderScopedLinks.filter((l) => !isGmailChromeLink(l.url)),
             expectedDomains,
           ));
           logInboxReaderDiag(
