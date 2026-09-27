@@ -2287,6 +2287,14 @@ describe("facts, fingerprint, compact merge", () => {
     expect(matchingFactKeys({ email: "a@b.test", first_name: "Ada" }, EMAIL)).toEqual(["email"]);
   });
 
+  it("keeps a Cal.com username field bound to the supplied username", () => {
+    const username: WireRow = ["@e:user", "t", "Username|f=username|n=lb2gauntlet0926a"];
+    const facts = { email: "lunchboxfortwo+calgauntlet20260926a@gmail.com", username: "lb2gauntlet0926a" };
+    expect(matchingFactKeys(facts, username)).toEqual(["username"]);
+    expect(requiredFactTypeAction([username], facts)).toBeUndefined();
+    expect(matchingFactKeys({ email: facts.email }, username)).toEqual([]);
+  });
+
   it("matches last_name onto a last-name label even when f=name", () => {
     const last: WireRow = ["@e:ln", "t", "@last-name|f=name|s=r"];
     expect(matchingFactKeys({ last_name: "Lovelace", first_name: "Ada" }, last)).toEqual([

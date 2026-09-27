@@ -101,6 +101,7 @@ type DriveInPageSnapshot = {
 
 const FIELD_FROM_LABEL: Array<{ test: RegExp; field: string }> = [
   { test: /e-?mail/, field: "email" },
+  { test: /\buser[\s_-]*name\b/, field: "username" },
   { test: /first\s*name|given\s*name/, field: "first_name" },
   { test: /last\s*name|surname|family\s*name/, field: "last_name" },
   { test: /company|organization|organisation/, field: "company" },

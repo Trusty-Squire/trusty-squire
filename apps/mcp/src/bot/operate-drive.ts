@@ -2592,7 +2592,8 @@ export function narrowsListedContent(
 }
 
 const FIELD_ALIASES: Record<string, readonly string[]> = {
-  email: ["email", "user_email", "login", "username"],
+  email: ["email", "user_email", "login"],
+  username: ["username", "user_name", "handle"],
   first_name: ["first_name", "firstname", "first", "given_name"],
   last_name: ["last_name", "lastname", "last", "family_name", "surname", "last-name"],
   name: ["name", "full_name", "fullname", "cardholder", "cardholder_name"],
