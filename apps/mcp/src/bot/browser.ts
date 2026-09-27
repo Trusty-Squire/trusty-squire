@@ -3907,7 +3907,9 @@ export class BrowserController implements BrowserDriver {
         if (frameElement === null) continue;
         try {
           const box = await frameElement.boundingBox();
-          if (box === null) throw new Error("card_mask_frame_not_visible");
+          // A hidden frame has no pixels in this capture. Its document may
+          // remain alive after checkout navigation or a hosted-field remount.
+          if (box === null) continue;
           offset = { x: box.x, y: box.y };
         } finally {
           await frameElement.dispose().catch(() => undefined);
