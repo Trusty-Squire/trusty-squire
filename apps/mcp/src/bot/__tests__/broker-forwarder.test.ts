@@ -79,13 +79,13 @@ describe("MCP broker forwarding over the Contract B wire", () => {
     );
   });
 
-  it("refuses a session this connection does not own without contacting the broker", async () => {
+  it("asks the broker to authorize an explicit session id", async () => {
     let calls = 0;
     await withBroker(
       "ts-forward-foreign-",
       async () => {
         calls += 1;
-        return { result: {} };
+        throw new BrokerRefusal("stale_lease", "Session does not name an owned live session");
       },
       async (path) => {
         const forwarder = new OperatorForwarder(path, guard);
@@ -93,7 +93,7 @@ describe("MCP broker forwarding over the Contract B wire", () => {
           await expect(
             forwarder.invoke("operate_click", { session_id: "not-mine" }, "click"),
           ).rejects.toMatchObject({ code: "stale_lease" });
-          expect(calls).toBe(0);
+          expect(calls).toBe(1);
         } finally {
           await forwarder.close();
         }
@@ -166,12 +166,20 @@ describe("MCP broker forwarding over the Contract B wire", () => {
   });
 
   it("drops a finished session and refuses to reuse it afterwards", async () => {
+    let finished = false;
     await withBroker(
       "ts-forward-finish-",
-      async (method) =>
-        method === "open"
-          ? { sessionId: "session-one", observation: { session_id: "session-one" } }
-          : { closed: true, result: { closed: true } },
+      async (method) => {
+        if (method === "open")
+          return { sessionId: "session-one", observation: { session_id: "session-one" } };
+        if (method === "close") {
+          finished = true;
+          return { closed: true, result: { closed: true } };
+        }
+        if (finished)
+          throw new BrokerRefusal("stale_lease", "Session does not name an owned live session");
+        return { result: {} };
+      },
       async (path) => {
         const forwarder = new OperatorForwarder(path, guard);
         try {
@@ -243,7 +251,7 @@ describe("MCP broker forwarding over the Contract B wire", () => {
               needs_user: wall,
             },
           };
-        return { result: params };
+        throw new BrokerRefusal("stale_lease", "Session does not name an owned live session");
       },
       async (path) => {
         const forwarder = new OperatorForwarder(path, guard);
@@ -298,7 +306,8 @@ describe("MCP broker forwarding over the Contract B wire", () => {
       "ts-drive-wall-",
       async (method) => {
         seen.push(method);
-        return { observation };
+        if (method === "open") return { observation };
+        throw new BrokerRefusal("stale_lease", "Session does not name an owned live session");
       },
       async (path) => {
         const forwarder = new OperatorForwarder(path, guard);
@@ -326,6 +335,7 @@ describe("MCP broker forwarding over the Contract B wire", () => {
           await expect(
             forwarder.invoke("operate_observe", { session_id: "drive-refused" }, "after-finish"),
           ).rejects.toMatchObject({ code: "stale_lease" });
+          expect(seen).toEqual(["open", "command"]);
         } finally {
           await forwarder.close();
         }

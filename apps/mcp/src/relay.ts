@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { createConnection, type Socket } from "node:net";
 import { sharedMcpSocketPath } from "./bot/broker/mcp-socket-path.js";
+import { brokerAgentIdentity } from "./bot/broker/agent-identity.js";
 
 type RpcFrame = { id?: string | number; method?: string; error?: unknown };
 
@@ -16,7 +17,7 @@ function frames(chunk: Buffer, buffered: Buffer, receive: (line: string) => void
 
 /** Keep the agent's stdio MCP connection alive across broker restarts. */
 export async function runRelay(): Promise<void> {
-  const agentId = (process.env.TRUSTY_SQUIRE_AGENT_IDENTITY ?? "unknown").trim();
+  const agentId = brokerAgentIdentity();
   if (!agentId || agentId.length > 128 || agentId.includes("\n") || agentId.includes("\r"))
     throw new Error("TRUSTY_SQUIRE_AGENT_IDENTITY must be a single line of at most 128 characters");
 

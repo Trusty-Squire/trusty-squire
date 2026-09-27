@@ -4,6 +4,7 @@ import { chmod, lstat, unlink } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { BrokerRefusal } from "./refusal.js";
+import { brokerAgentIdentity } from "./agent-identity.js";
 import type { BrokerPrincipal } from "./authority.js";
 import type { BrokerNotification, ConnectRequest, ConnectResult } from "./protocol.js";
 
@@ -45,8 +46,8 @@ const notificationSchema = z.object({
 });
 type Reply = { id: string; result?: unknown; error?: { code: string; message: string } };
 
-/** A socket is the client-liveness lease. There is deliberately no idle TTL:
- * a thinking agent with a live transport must not lose its browser session. */
+/** A socket owns its in-flight requests. Session lifetime is independent of
+ * connection lifetime and remains bounded by the operator's idle/overrun timers. */
 function frames(socket: Socket, receive: (value: unknown) => void): void {
   let buffered = Buffer.alloc(0);
   socket.on("data", (chunk: Buffer) => {
@@ -145,7 +146,7 @@ export async function brokerSpeaksLegacyWire(path: string, token: string): Promi
         method: "hello",
         params: {
           token,
-          agentId: process.env.TRUSTY_SQUIRE_AGENT_IDENTITY ?? "local-agent",
+          agentId: brokerAgentIdentity(),
         },
       }),
     );
@@ -380,7 +381,7 @@ export class BrokerClient {
         socket.once("error", reject);
       });
       const request: ConnectRequest = {
-        agentId: process.env.TRUSTY_SQUIRE_AGENT_IDENTITY ?? "local-agent",
+        agentId: brokerAgentIdentity(),
         ...(options.probe ? { probe: true } : {}),
       };
       const welcome = await client.call("connect", { ...request });

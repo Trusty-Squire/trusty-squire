@@ -415,10 +415,20 @@ it("isolates concurrent socket principals, attributes vault calls, coexists with
   expect(operator.authority.inventory().sessions).toBe(3);
 
   alice.close();
+  await vi.waitFor(() => expect(operator.authority.inventory().sessions).toBe(3));
+  expect(closed).toHaveLength(0);
+  const aliceAgain = await connect("alice");
+  expect(text(await aliceAgain.tool("operate_observe", { session_id: aSession })).tab).toBeTruthy();
+  await aliceAgain.tool("operate_finish", { session_id: aSession, outcome: "none" });
+  aliceAgain.close();
   await vi.waitFor(() => expect(operator.authority.inventory().sessions).toBe(2));
   expect(closed).toHaveLength(1);
   expect(text(await bob.tool("operate_observe", { session_id: bSession })).tab).toBeTruthy();
   bob.close();
+  await vi.waitFor(() => expect(operator.authority.inventory().sessions).toBe(2));
+  const bobAgain = await connect("bob");
+  await bobAgain.tool("operate_finish", { session_id: bSession, outcome: "none" });
+  bobAgain.close();
   await vi.waitFor(() => expect(operator.authority.inventory().sessions).toBe(1));
   await stdioClient.callTool({
     name: "operate_finish",

@@ -946,10 +946,12 @@ socket or tab family. The authoritative busy-status contract and mapping are in
 The client wire is the frozen Contract B (`connect` / `open` / `command` /
 `close`), owned by `apps/mcp/src/bot/broker/protocol.ts`. A tool name crosses
 the wire only inside `command`; `close` finishes a session or ends the
-connection. The 512-entry retained-result replay guard, the 5 s
-connection-session grace, and the reserved `abort` control frame (cancel
-exactly one in-flight request by its frame id, leaving the connection and its
-other sessions alive) stay internal policy behind the contract. Do not re-add
+connection. The 512-entry retained-result replay guard and the reserved `abort`
+control frame (cancel exactly one in-flight request by its frame id, leaving the
+connection and its other sessions alive) stay internal policy behind the
+contract. Session ownership follows the agent identity, so an MCP connection
+retiring leaves its sessions available to that agent until finish, idle timeout,
+overrun, or broker shutdown. Do not re-add
 `hello`/`tool`/`cancel`/`client_close`/`maintenance`/`resume`/`maintain` as
 wire operations.
 
