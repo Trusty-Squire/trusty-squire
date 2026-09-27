@@ -1,5 +1,14 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.18-rc.2 (2026-09-27)
+
+- Enforce the sender filter when reading the verification inbox (#975).
+- Allow screenshots after card release when hidden card frames cannot be captured (#975).
+- Compare phone and number fields using normalized values (#975).
+- Stop treating username as an alias of email (#975).
+- List valid resume answers in agent handoffs (#975).
+- Report when injected card fields have remounted (#975).
+
 ## 1.1.18-rc.1 (2026-09-26)
 
 - Fix dead broker lease refusal and ensure an overrun browser is terminated (#970).
