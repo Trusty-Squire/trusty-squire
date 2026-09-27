@@ -7,7 +7,7 @@
 // hCaptcha field IS populated so every later check reads "solved".
 //
 // Synthetic fixtures only; no network, no credentials.
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import { chromium, type Browser, type Page } from "playwright";
 import { BrowserController } from "../browser.js";
 import { hasHcaptchaResponseTokenWithCompat, injectHcaptchaToken } from "../captcha.js";
@@ -36,6 +36,39 @@ const valueOf = (page: Page, selector: string): Promise<string> =>
   page.$eval(selector, (el) => (el as HTMLTextAreaElement).value);
 
 describe("injectHcaptchaToken and a co-resident reCAPTCHA response field", () => {
+  it("fires the page callback inside a cross-origin gate iframe", async () => {
+    const page = await browser.newPage();
+    const ctrl = new BrowserController({ humanize: false });
+    (ctrl as unknown as { page: Page }).page = page;
+    await page.route("https://captcha-gate.test/widget", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: `<textarea name="h-captcha-response"></textarea>
+          <div class="h-captcha" data-callback="onCaptchaComplete"></div>
+          <script>window.onCaptchaComplete = () => {
+            document.body.setAttribute('data-callback-count',
+              String(Number(document.body.getAttribute('data-callback-count') || '0') + 1));
+          };</script>`,
+      }),
+    );
+    try {
+      await page.goto(dataUrl('<iframe src="https://captcha-gate.test/widget"></iframe>'));
+      const gate = page.frameLocator('iframe[src="https://captcha-gate.test/widget"]');
+      await expect.poll(() => gate.locator(".h-captcha").count()).toBe(1);
+      // A page CDP session cannot always reach an out-of-process gate frame.
+      // Force that branch so this proves the callback still reaches page JS.
+      const cdp = vi.spyOn(page.context(), "newCDPSession").mockRejectedValue(new Error("OOPIF"));
+      try {
+        expect(await injectHcaptchaToken(ctrl, "gate-token", page)).toBe(true);
+      } finally {
+        cdp.mockRestore();
+      }
+      await expect.poll(() => gate.locator("body").getAttribute("data-callback-count")).toBe("1");
+    } finally {
+      await page.close();
+    }
+  });
+
   it("leaves a reCAPTCHA response token that is already present alone", async () => {
     const { ctrl, page } = await pageFor(
       dataUrl(`

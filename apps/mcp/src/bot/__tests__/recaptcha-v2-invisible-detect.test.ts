@@ -14,7 +14,9 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   detectCaptchaVariant,
   grecaptchaClientCountInWorld,
+  hasCaptchaResponseTokenForVariant,
   injectRecaptchaToken,
+  injectRecaptchaTokenDetail,
 } from "../captcha.js";
 import { injectCaptchaToken } from "../captcha-solve.js";
 import { BrowserController } from "../browser.js";
@@ -70,6 +72,27 @@ const STRING_CALLBACK_HTML = `<!doctype html><html><body style="margin:0">
 </script>
 </body></html>`;
 
+const DUPLICATE_CALLBACK_HTML = `<!doctype html><html><body>
+<form><textarea name="g-recaptcha-response"></textarea></form>
+<script>
+  window.callbackCalls = 0;
+  const callback = () => { window.callbackCalls += 1; };
+  const other = () => { window.callbackCalls += 100; };
+  const shared = { callback };
+  window.___grecaptcha_cfg = { clients: { 0: { first: shared, alias: shared, second: { callback: other } } } };
+</script>
+</body></html>`;
+
+const SDK_RESPONSE_HTML = `<!doctype html><html><body>
+<form><textarea name="g-recaptcha-response"></textarea><button id="go" disabled>Next</button></form>
+<script>
+  window.grecaptcha = { getResponse: () => '' };
+  window.___grecaptcha_cfg = { clients: { 0: { callback: () => {
+    if (grecaptcha.getResponse(0) === 'bought-token') document.getElementById('go').disabled = false;
+  } } } };
+</script>
+</body></html>`;
+
 let available = false;
 try {
   available = existsSync(chromium.executablePath());
@@ -86,7 +109,15 @@ describe.skipIf(!available)("recaptcha v2-invisible image challenge (IPInfo shap
   beforeAll(async () => {
     server = createServer((req, res) => {
       res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-      res.end(req.url?.includes("string-callback") === true ? STRING_CALLBACK_HTML : PARENT_HTML);
+      res.end(
+        req.url?.includes("duplicate-callback") === true
+          ? DUPLICATE_CALLBACK_HTML
+          : req.url?.includes("sdk-response") === true
+            ? SDK_RESPONSE_HTML
+            : req.url?.includes("string-callback") === true
+              ? STRING_CALLBACK_HTML
+              : PARENT_HTML,
+      );
     });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}/signup`;
@@ -99,7 +130,10 @@ describe.skipIf(!available)("recaptcha v2-invisible image challenge (IPInfo shap
       route.fulfill({ contentType: "text/html; charset=utf-8", body: BFRAME_HTML }),
     );
     await context.route("**://www.google.com/recaptcha/api.js**", (route) =>
-      route.fulfill({ contentType: "application/javascript", body: "window.onloadcallback=function(){};" }),
+      route.fulfill({
+        contentType: "application/javascript",
+        body: "window.onloadcallback=function(){};",
+      }),
     );
   });
 
@@ -168,4 +202,58 @@ describe.skipIf(!available)("recaptcha v2-invisible image challenge (IPInfo shap
     expect(result).toEqual({ solved: true, outcome: "ok" });
     await page.close();
   }, 60_000);
+
+  it("fires a callback only once when reCAPTCHA exposes it through multiple aliases", async () => {
+    const page = await context.newPage();
+    try {
+      await page.goto(`${baseUrl.replace(/\/signup$/, "")}/duplicate-callback`);
+      const controller = BrowserController.fromHarnessPage(page);
+      const result = await injectRecaptchaTokenDetail(controller, "one-response-token", page);
+      expect(result.callbacksFired).toBe(1);
+      expect(
+        await page.evaluate(() => (window as unknown as { callbackCalls: number }).callbackCalls),
+      ).toBe(1);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it("makes a bought token visible through the explicit widget SDK response", async () => {
+    const page = await context.newPage();
+    try {
+      await page.goto(`${baseUrl.replace(/\/signup$/, "")}/sdk-response`);
+      const controller = BrowserController.fromHarnessPage(page);
+      expect(await injectRecaptchaToken(controller, "bought-token", page)).toBe(true);
+      expect(await page.locator("#go").isDisabled()).toBe(false);
+      expect(
+        await page.evaluate(() =>
+          (
+            window as unknown as { grecaptcha: { getResponse: (id: number) => string } }
+          ).grecaptcha.getResponse(0),
+        ),
+      ).toBe("bought-token");
+    } finally {
+      await page.close();
+    }
+  });
+
+  it("does not reuse a response after the checkbox reports challenge expiry", async () => {
+    const page = await context.newPage();
+    try {
+      await page.route("**://www.google.com/recaptcha/api2/anchor**", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: "Verification challenge expired. Check the checkbox again.",
+        }),
+      );
+      await page.goto(
+        `data:text/html,${encodeURIComponent(`<textarea name="g-recaptcha-response">old-token</textarea><iframe src="${ANCHOR_URL}"></iframe>`)}`,
+      );
+      await expect.poll(() => page.frames().length).toBe(2);
+      const controller = BrowserController.fromHarnessPage(page);
+      expect(await hasCaptchaResponseTokenForVariant(controller, "recaptcha_v2", page)).toBe(false);
+    } finally {
+      await page.close();
+    }
+  });
 });
