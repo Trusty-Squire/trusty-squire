@@ -6,6 +6,7 @@ import {
   connectOrLaunchBroker,
   defaultBrokerSocket,
   parseManagedBrokerShow,
+  unitDefersOnDemandLaunch,
 } from "../broker/discovery.js";
 import { listenBroker } from "../broker/transport.js";
 
@@ -53,9 +54,15 @@ describe("broker discovery", () => {
       "Id=beeline-agent@abc.service",
       "ActiveState=active",
       "",
+      "ExecStart={ path=/usr/bin/node ; argv[]=/usr/bin/node /opt/mcp/dist/bin.js broker ; ignore_errors=no }",
+      "Environment=TRUSTY_SQUIRE_PROFILE_DIR=/home/user/.trusty-squire/chrome-profile PATH=/usr/bin",
+      "Id=trusty-squire-broker-dead.service",
+      "ActiveState=failed",
+      "",
     ].join("\n");
     const units = parseManagedBrokerShow(show);
-    expect(units).toHaveLength(3);
+    const profile = "/home/user/.trusty-squire/chrome-profile";
+    expect(units).toHaveLength(4);
     expect(units[0]).toMatchObject({
       id: "trusty-squire-broker.service",
       activeState: "activating",
@@ -63,5 +70,11 @@ describe("broker discovery", () => {
     });
     expect(units[1]?.id).toBe("trusty-squire-broker-signup.service");
     expect(units[2]?.id).toBe("beeline-agent@abc.service");
+    expect(units[3]).toMatchObject({
+      id: "trusty-squire-broker-dead.service",
+      activeState: "failed",
+    });
+    expect(unitDefersOnDemandLaunch(units[0]!, profile)).toBe(true);
+    expect(unitDefersOnDemandLaunch(units[3]!, profile)).toBe(false);
   });
 });

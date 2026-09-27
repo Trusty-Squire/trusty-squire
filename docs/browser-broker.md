@@ -33,9 +33,10 @@ line from `TRUSTY_SQUIRE_AGENT_IDENTITY` (or `unknown`), then relays MCP stdio
 messages in both directions.
 If the shared socket is down, the proxy starts the elected broker the same
 way other clients do, then waits for the MCP listener. When a systemd user
-unit already owns that profile and is not cleanly inactive, the proxy waits
-for that unit instead of launching a detached competitor — otherwise the
-detached process takes the profile lock and the unit restart-loops.
+unit already owns that profile and is active, activating, or reloading, the
+proxy waits for that unit instead of launching a detached competitor —
+otherwise the detached process takes the profile lock and the unit
+restart-loops. A failed or inactive unit does not suppress on-demand launch.
 If the broker restarts, the proxy reconnects while the agent's pipe remains open,
 replays initialization, and returns an error for calls lost in flight. The
 connection owns the sessions it opened; dropping it closes those sessions after

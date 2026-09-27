@@ -156,7 +156,14 @@ function unitServesProfile(unit: ManagedBrokerUnit, profileDir: string): boolean
 }
 
 function unitIsLive(unit: ManagedBrokerUnit): boolean {
-  return unit.activeState !== "inactive";
+  return unit.activeState === "active" ||
+    unit.activeState === "activating" ||
+    unit.activeState === "reloading";
+}
+
+/** True when discovery must wait for this unit instead of launching on demand. */
+export function unitDefersOnDemandLaunch(unit: ManagedBrokerUnit, profileDir: string): boolean {
+  return unitServesProfile(unit, profileDir) && unitIsLive(unit);
 }
 
 /** Parse `systemctl --user show --type=service` property blocks. */
