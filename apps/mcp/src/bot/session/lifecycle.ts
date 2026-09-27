@@ -491,6 +491,17 @@ async function detectProvisionPrimaryProviderSession(
   return { providers, userEmail };
 }
 
+/** A live Google identity is held for the session after its first successful
+ * Google-dependent operation. Repeating the navigation at every later action
+ * adds latency and gives a mid-flight task another chance to be refused by a
+ * transient read. A negative or failed detection is never cached, so connect
+ * can refresh the profile and the next action can retry the check.
+ */
+const sessionGoogleIdentity = new WeakMap<
+  Session,
+  { providers: OAuthProviderId[]; userEmail: string | null }
+>();
+
 /** Check the live Google identity at the operation that needs it.
  * Successful detection supplies the session email for signup and inbox work;
  * a missing provider returns the long-standing google_session hand-back.
@@ -500,9 +511,12 @@ export async function googleSessionGateForSession(
 ): Promise<{ ok: true } | { ok: false; needs_user: NeedsUserLogin }> {
   const session = sessions.get(sessionId);
   if (session === undefined) throw new UnknownProvisionSessionError(sessionId);
-  const identity = await detectProvisionPrimaryProviderSession(session.browser);
+  const identity =
+    sessionGoogleIdentity.get(session) ??
+    (await detectProvisionPrimaryProviderSession(session.browser));
   const gate = googleSessionGate(identity.providers);
   if (gate.ok) {
+    sessionGoogleIdentity.set(session, identity);
     session.userEmail = identity.userEmail;
   } else {
     audit(sessionId, "connect_gate", { ok: false, wall: "google_session" });
