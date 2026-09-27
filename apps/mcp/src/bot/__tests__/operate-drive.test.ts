@@ -11,6 +11,8 @@ import {
   DRIVE_MAX_CANDIDATES,
   DRIVE_MAX_CRITERIA,
   driveTargetSets,
+  resumeAnswerOptions,
+  resumeAction,
   elementState,
   DRIVE_MAX_JEV_CALLS,
   DRIVE_RULES,
@@ -1352,6 +1354,27 @@ describe("decideAfterJev stop reasons", () => {
     ).toMatchObject({ kind: "low_confidence", confidence: 0.41 });
   });
 
+  it("offers target keys, rather than operation names, for a drive resume", () => {
+    const options = resumeAnswerOptions([SUBMIT], {}, "Create account", false, "https://example.test/signup");
+    expect(options).toHaveProperty(slugFor(SUBMIT));
+    expect(options).not.toHaveProperty("CLICK");
+    expect(options).toHaveProperty("DONE");
+    expect(resumeAction("CLICK", [SUBMIT], {}, "Create account", undefined, "https://example.test/signup")).toMatchObject({
+      kind: "invalid_answer",
+      reason: "resume_not_current_option",
+      question: { options: expect.objectContaining({ [slugFor(SUBMIT)]: expect.any(String) }) },
+    });
+    const select: WireRow = ["@e:country", "s", "Country|f=country"];
+    const facts = { country: "US" };
+    const selectOptions = resumeAnswerOptions([select], facts, "Create account", false, "https://example.test/signup");
+    const optionKey = Object.keys(selectOptions).find((key) => key.includes(":"));
+    expect(optionKey).toBeDefined();
+    expect(resumeAction(optionKey!, [select], facts, "Create account", undefined, "https://example.test/signup")).toMatchObject({
+      kind: "act",
+      action: { kind: "select", target: "@e:country", text: "US" },
+    });
+  });
+
   it("reports invalid_answer with the validation reason instead of low_confidence", () => {
     expect(
       decideAfterJev({
@@ -1723,6 +1746,14 @@ describe("form-fill assignment helpers", () => {
     expect(typedValueEquals("Squire", "Squire")).toBe(true);
     expect(typedValueEquals("Squir", "Squire")).toBe(false);
     expect(typedValueEquals(undefined, "Squire")).toBe(false);
+    expect(
+      typedValueEquals("(212) 555-0123", "2125550123", ["@e:phone", "t", "Phone (optional)|f=phone"]),
+    ).toBe(true);
+    expect(
+      typedValueEquals("(212) 555-0124", "2125550123", ["@e:phone", "t", "Phone|f=phone"]),
+    ).toBe(false);
+    expect(typedValueEquals("01", "1", ["@e:qty", "t", "Quantity|it=number"])).toBe(true);
+    expect(typedValueEquals("(212) 555-0123", "2125550123", ["@e:name", "t", "Name"])).toBe(false);
     expect(typedFieldMismatchReason("First name", "Squire", "Squir")).toBe(
       'typed First name as "Squire" but the field shows "Squir"',
     );
@@ -2277,6 +2308,14 @@ describe("facts, fingerprint, compact merge", () => {
 
   it("matches email facts onto an email field", () => {
     expect(matchingFactKeys({ email: "a@b.test", first_name: "Ada" }, EMAIL)).toEqual(["email"]);
+  });
+
+  it("keeps a Cal.com username field bound to the supplied username", () => {
+    const username: WireRow = ["@e:user", "t", "Username|f=username|n=lb2gauntlet0926a"];
+    const facts = { email: "lunchboxfortwo+calgauntlet20260926a@gmail.com", username: "lb2gauntlet0926a" };
+    expect(matchingFactKeys(facts, username)).toEqual(["username"]);
+    expect(requiredFactTypeAction([username], facts)).toBeUndefined();
+    expect(matchingFactKeys({ email: facts.email }, username)).toEqual([]);
   });
 
   it("matches last_name onto a last-name label even when f=name", () => {

@@ -2592,7 +2592,8 @@ export function narrowsListedContent(
 }
 
 const FIELD_ALIASES: Record<string, readonly string[]> = {
-  email: ["email", "user_email", "login", "username"],
+  email: ["email", "user_email", "login"],
+  username: ["username", "user_name", "handle"],
   first_name: ["first_name", "firstname", "first", "given_name"],
   last_name: ["last_name", "lastname", "last", "family_name", "surname", "last-name"],
   name: ["name", "full_name", "fullname", "cardholder", "cardholder_name"],
@@ -3330,9 +3331,23 @@ function rowCurrentValue(row: WireRow): string | undefined {
   return match?.[1];
 }
 
-export function typedValueEquals(actual: string | undefined, intended: string): boolean {
+export function typedValueEquals(
+  actual: string | undefined,
+  intended: string,
+  row?: WireRow,
+): boolean {
   if (actual === undefined) return false;
-  return actual.trim() === intended.trim();
+  if (actual.trim() === intended.trim()) return true;
+  if (row === undefined) return false;
+  if (rowField(row) === "phone" || /\b(?:phone|telephone|mobile|tel)\b/i.test(readableLabel(row))) {
+    const digits = (value: string) => value.replace(/\D/g, "");
+    return digits(actual).length > 0 && digits(actual) === digits(intended);
+  }
+  if (/(?:^|\|)it=number(?:\||$)/.test(row[2] ?? "")) {
+    return actual.trim().length > 0 && intended.trim().length > 0 &&
+      Number.isFinite(Number(actual)) && Number(actual) === Number(intended);
+  }
+  return false;
 }
 
 export function typedFieldMismatchReason(
@@ -5430,7 +5445,25 @@ async function actSafely(
   }
 }
 
-function resumeAction(
+export function resumeAnswerOptions(
+  rows: readonly WireRow[],
+  facts: Record<string, string>,
+  goal: string,
+  includePayment: boolean,
+  pageUrl: string,
+): Record<string, string> {
+  const sets = driveTargetSets(rows, facts, includePayment, [], pageUrl, new Map(), (text) => text, [], { goal });
+  return {
+    ...criteriaFromCandidates(sets.CLICK, "CLICK"),
+    ...criteriaFromCandidates(sets.TYPE_TEXT),
+    ...criteriaFromCandidates(sets.SELECT),
+    DONE: "The goal is complete",
+    BLOCKED: "No control can advance the goal",
+    WAIT: "Wait for the page to change",
+  };
+}
+
+export function resumeAction(
   answer: string,
   rows: readonly WireRow[],
   facts: Record<string, string>,
@@ -5458,13 +5491,16 @@ function resumeAction(
       goal,
     },
   );
-  const row = findRow(rows, answer, pageUrl);
+  const offered = [...sets.CLICK, ...sets.TYPE_TEXT, ...sets.SELECT].find(
+    (entry) => entry.slug === answer || entry.ref === answer,
+  );
+  const row = offered?.row ?? findRow(rows, answer, pageUrl);
   if (row === undefined) {
     return {
       kind: "invalid_answer",
       question: {
-        question: "Resume answer is not a current option",
-        options: questions.operation?.type === "choice" ? questions.operation.criteria : {},
+        question: "Choose one current target key, or DONE, BLOCKED, or WAIT. Operation names such as CLICK are not resume answers.",
+        options: resumeAnswerOptions(rows, facts, goal, includePayment, pageUrl),
       },
       reason: "resume_not_current_option",
       confidence: 0,
@@ -6243,9 +6279,12 @@ async function driveLoop(input: {
       return await noteProgress(beforeFingerprint, afterFingerprint, "GO_BACK");
     }
     if (decision.kind === "low_confidence") {
-      drive.lastQuestion = decision.question;
+      drive.lastQuestion = {
+        question: "Choose one current target key, or DONE, BLOCKED, or WAIT.",
+        options: resumeAnswerOptions(rows, drive.facts, drive.goal, drive.facts.card_ref !== undefined, observation.url),
+      };
       return finish("low_confidence", {
-        question: decision.question,
+        question: drive.lastQuestion,
         confidence: decision.confidence,
         reason: `model confidence is below the drive threshold on ${observation.url}`,
       });
@@ -6949,7 +6988,7 @@ async function driveLoop(input: {
         typedRow !== undefined &&
         !isPasswordRow(typedRow) &&
         shown !== undefined &&
-        !typedValueEquals(shown, intended)
+        !typedValueEquals(shown, intended, typedRow)
       ) {
         const pageForRetry = session.browser.page;
         if (pageForRetry !== null) {
@@ -6967,7 +7006,7 @@ async function driveLoop(input: {
         }
         const retried = findRow(rows, decision.actionKey, observation.url);
         const again = retried === undefined ? undefined : rowCurrentValue(retried);
-        if (!typedValueEquals(again, intended)) {
+        if (!typedValueEquals(again, intended, retried)) {
           return finish("stuck", {
             reason: typedFieldMismatchReason(readableLabel(typedRow), intended, again ?? shown),
           });

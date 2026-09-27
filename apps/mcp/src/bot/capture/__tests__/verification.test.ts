@@ -27,6 +27,7 @@ import {
   sessionCandidateReason,
   inboxReaderDiagEnabled,
   chooseMailRow,
+  mailRowMatchesRequestedFrom,
   type MailResultRow,
   type OpenedMailMessage,
 } from "../verification.js";
@@ -255,6 +256,11 @@ describe("buildVerificationSearchQuery (finds passwordless mail)", () => {
     expect(q).toContain("newer_than:1d");
     expect(buildVerificationSearchQuery().startsWith("to:")).toBe(false);
   });
+  it("constrains an explicit sender in the Gmail query", () => {
+    expect(buildVerificationSearchQuery({ recipient: "a@example.test", sender: "bsky" })).toContain(
+      "from:bsky",
+    );
+  });
   it("end-to-end: the real Loops login email now yields its magic link", () => {
     // The actual email body + the actual /api/auth/callback link (token redacted).
     const body =
@@ -340,6 +346,31 @@ describe("mailRowMatchesSender (From address + display name + subject, not one f
     expect(mailRowMatchesSender(craigslistRow, undefined)).toBe(true);
     expect(mailRowMatchesSender(craigslistRow, "   ")).toBe(true);
   });
+});
+
+it("never selects a newer unrelated sender for an explicit sender request", () => {
+  const matching = {
+    selector: "older",
+    fromEmail: "notify@bsky.app",
+    fromName: "Bluesky",
+    subject: "Reset code",
+    dateTitle: "Sep 26, 2026, 11:00 PM",
+    visibleText: "Reset code 123456",
+  };
+  const unrelated = {
+    ...matching,
+    selector: "newer",
+    fromEmail: "robot@craigslist.org",
+    fromName: "craigslist",
+    subject: "Bluesky reset code",
+    dateTitle: "Sep 26, 2026, 11:10 PM",
+  };
+  const candidates = [unrelated, matching].filter((row) =>
+    mailRowMatchesRequestedFrom(row, "bsky"),
+  );
+  expect(pickNewestMailRow(candidates)?.selector).toBe("older");
+  expect(mailRowMatchesRequestedFrom(unrelated, "bsky")).toBe(false);
+  expect(mailRowMatchesRequestedFrom({ fromEmail: null, fromName: null }, "bsky")).toBe(false);
 });
 
 describe("pickNewestMailRow (relevance order must not decide recency)", () => {

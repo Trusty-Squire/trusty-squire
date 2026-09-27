@@ -337,6 +337,25 @@ describe("operate_screenshot before card release (real browser)", () => {
 
 describe("operate_screenshot card-value output mask (real browser)", () => {
   it.skipIf(!chromiumAvailable)(
+    "captures after a card frame becomes hidden and after checkout navigation",
+    async () => {
+      const browser = await launchIsolatedTestBrowser();
+      try {
+        const page = await browser.newPage();
+        await page.setContent(`<iframe style="display:none" srcdoc='<input data-ts-card-mask="pan" value="${SYNTHETIC_CARD.pan}">'></iframe><main>Thank you</main>`);
+        const controller = BrowserController.fromHarnessPage(page);
+        controller.registerCardValueOutputMask(SYNTHETIC_CARD);
+        expect(isValidPngBase64((await controller.screenshotForOperator()).base64)).toBe(true);
+        expect(isValidPngBase64((await controller.screenshotForOperator({ fullPage: true })).base64)).toBe(true);
+        await page.setContent("<main>Order complete</main>");
+        expect(isValidPngBase64((await controller.screenshotForOperator()).base64)).toBe(true);
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
     "composites PAN/CVV controls and mirrored PAN text without changing the checkout DOM",
     async () => {
       const browser = await launchIsolatedTestBrowser();
