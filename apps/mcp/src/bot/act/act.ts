@@ -1205,6 +1205,16 @@ async function executeAct(
           if (actTarget.kind === "selector" && isRequiredShippingAddressLine1(el)) {
             await browser.commitRequiredShippingAddressLine1(el.selector, compactV2ActionPage);
           }
+          if (
+            typedText !== undefined &&
+            /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(typedText) &&
+            (el.type === "email" ||
+              /\b(?:email|e-mail|username|login)\b/i.test(
+                [el.name, el.placeholder, el.ariaLabel, el.labelText].filter(Boolean).join(" "),
+              ))
+          ) {
+            session.signupIdentifier = typedText;
+          }
         } else if (action.kind === "upload") {
           if (compactV2ActionPage !== undefined) {
             await browser.uploadFileOnPage(compactV2ActionPage, el.selector, action.path);

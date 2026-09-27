@@ -1,5 +1,5 @@
 import { expect, it, vi } from "vitest";
-import { BrokerClientRegistry } from "../broker/daemon.js";
+import { BrokerClientRegistry, retryableBrokerShutdown } from "../broker/daemon.js";
 import { brokerEnvironment } from "../broker/discovery.js";
 import { BrokerRuntime } from "../broker/runtime.js";
 
@@ -39,6 +39,19 @@ it("counts a client that first appears on a call, not a connect", () => {
   const clients = new BrokerClientRegistry();
   clients.touch("client-1");
   expect(clients.idle()).toBe(false);
+});
+
+it("allows a later signal to retry after cleanup cannot prove closure", async () => {
+  let attempts = 0;
+  const shutdown = retryableBrokerShutdown(async () => ++attempts === 2);
+  await shutdown.run();
+  expect(attempts).toBe(1);
+  expect(shutdown.closing()).toBe(false);
+  await shutdown.run();
+  expect(attempts).toBe(2);
+  expect(shutdown.closing()).toBe(true);
+  await shutdown.run();
+  expect(attempts).toBe(2);
 });
 
 it("a close that cannot drain leaves the identity cell serving", async () => {

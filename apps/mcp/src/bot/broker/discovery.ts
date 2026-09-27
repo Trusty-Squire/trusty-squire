@@ -51,7 +51,7 @@ const sleep = async (ms: number): Promise<void> =>
 function legacyBrokerPid(path: string): number | null {
   if (process.platform === "win32") return null;
   try {
-    const pids = execFileSync("lsof", ["-t", "-U", "--", path], { encoding: "utf8" })
+    const pids = execFileSync("lsof", ["-a", "-t", "-U", "--", path], { encoding: "utf8" })
       .trim().split(/\s+/).map(Number).filter((pid) => Number.isSafeInteger(pid) && pid > 0);
     for (const pid of pids) {
       if (pid === process.pid) continue;

@@ -211,6 +211,47 @@ describe.skipIf(!available)("recaptcha v2 checkbox frame click (Kaggle shape)", 
     await page.close();
   }, 120_000);
 
+  it("clicks an hCaptcha checkbox ref after its iframe remounts", async () => {
+    const page = await context.newPage();
+    const hcaptchaUrl = "https://newassets.hcaptcha.com/captcha/v1/checkbox.html?sitekey=fixture";
+    await context.route("**://newassets.hcaptcha.com/captcha/v1/checkbox.html**", (route) =>
+      route.fulfill({ contentType: "text/html", body: '<button id="checkbox" role="checkbox" aria-checked="false">Verify you are human</button><script>document.querySelector("button").onclick = () => document.querySelector("button").setAttribute("aria-checked", "true")</script>' }),
+    );
+    await page.setContent(`<iframe id="hc" title="hCaptcha checkbox" src="${hcaptchaUrl}"></iframe>`);
+    await expect.poll(async () => page.frames().some((frame) => frame.url() === hcaptchaUrl)).toBe(true);
+    const controller = BrowserController.fromHarnessPage(page);
+    const captured = await controller.extractBrowserUseObservation(page, false);
+    const checkbox = captured.elements.find((element) => element.id === "checkbox");
+    expect(checkbox?.framePath).toBeTruthy();
+    const internals = controller as unknown as {
+      resolveFrameElement: (...args: unknown[]) => Promise<unknown>;
+    };
+    const originalResolve = internals.resolveFrameElement.bind(controller);
+    let remounted = false;
+    internals.resolveFrameElement = async (...args) => {
+      const handle = await originalResolve(...args);
+      if (handle !== null && !remounted) {
+        remounted = true;
+        await page.locator("#hc").evaluate((frame) => frame.replaceWith(frame.cloneNode(true)));
+        await expect.poll(async () => {
+          const frame = page.frames().find((candidate) => candidate.url() === hcaptchaUrl);
+          return frame !== undefined && (await frame.locator("#checkbox").count()) > 0;
+        }).toBe(true);
+      }
+      return handle;
+    };
+    await controller.click({
+      kind: "frame",
+      frame: { framePath: checkbox!.framePath!, frameOrigin: checkbox!.frameOrigin!, frameUrl: checkbox!.frameUrl ?? "" },
+      selector: checkbox!.selector,
+      method: "click",
+    });
+    const liveFrame = page.frames().find((frame) => frame.url() === hcaptchaUrl)!;
+    expect(await liveFrame.locator("#checkbox").getAttribute("aria-checked")).toBe("true");
+    expect(remounted).toBe(true);
+    await page.close();
+  }, 30_000);
+
   it("still refuses challenge-frame clicks and synthetic js clicks into the checkbox frame", async () => {
     const page: Page = await context.newPage();
     await page.goto(baseUrl, { waitUntil: "domcontentloaded" });

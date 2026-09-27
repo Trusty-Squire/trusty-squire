@@ -264,6 +264,21 @@ export class BrokerAuthority {
     timer.unref();
   }
 
+  /** Signal shutdown fences every session, including clients whose sockets
+   * remain connected. Expiry teardown closes tabs without waiting for a
+   * browser call that may be wedged in navigation. */
+  async shutdown(): Promise<void> {
+    for (const admission of this.admissions.values())
+      admission.abort.abort(new BrokerRefusal("broker_lost", "Broker is shutting down"));
+    const actors = [...this.actors.values()];
+    for (const actor of actors)
+      actor.abort.abort(new BrokerRefusal("broker_lost", "Broker is shutting down"));
+    await Promise.all(actors.map(async (actor) => {
+      const closed = await actor.port.close("expiry").catch(() => false);
+      if (closed) this.actors.delete(actor.sessionId);
+    }));
+  }
+
   inventory(): { sessions: number; admitting: number; closing: number } {
     return {
       sessions: this.actors.size,

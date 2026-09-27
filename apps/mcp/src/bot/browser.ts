@@ -1,6 +1,6 @@
 import type { CheckoutCard } from "./checkout.js";
 import type { DriveRefAnchor } from "./drive-ref-bridge.js";
-import { isCaptchaFrameUrl, isRecaptchaCheckboxFrameUrl } from "./captcha.js";
+import { captchaWidgetKindForFrameUrl, isCaptchaFrameUrl } from "./captcha.js";
 import { captureBoundScreenshot, type ScreenshotBinding } from "./screenshot-click.js";
 import {
   captureBrowserUseDOM,
@@ -2244,7 +2244,7 @@ export class BrowserController implements BrowserDriver {
       if (
         frame !== page.mainFrame() &&
         this.frameWithinCaptcha(frame) &&
-        !(intent === "click" && isRecaptchaCheckboxFrameUrl(rawUrl))
+        !(intent === "click" && captchaWidgetKindForFrameUrl(rawUrl) !== null)
       ) {
         continue;
       }
@@ -2434,6 +2434,14 @@ export class BrowserController implements BrowserDriver {
         handle = await this.resolveFrameElement(target.frame, target.selector, 0, page, {
           allowCaptchaCheckboxFrame: target.method === "click",
         });
+        if (handle === null && target.method === "click") {
+          // A checkbox iframe can remount between observation and dispatch.
+          // Resolve the same frame URL/origin and selector once more before
+          // reporting a pre-dispatch detach.
+          handle = await this.resolveFrameElement(target.frame, target.selector, 0, page, {
+            allowCaptchaCheckboxFrame: true,
+          });
+        }
         dispose = true;
       } else {
         handle = await page.$(target.selector);
@@ -2453,18 +2461,35 @@ export class BrowserController implements BrowserDriver {
       try {
         labels = await this.clickTargetLabels(handle);
       } catch (error) {
-        throw new BrowserClickDispatchError("not_dispatched", error);
+        if (target.kind !== "frame" || target.method !== "click") {
+          throw new BrowserClickDispatchError("not_dispatched", error);
+        }
+        // The old iframe's handle died after resolution but before any input.
+        // Re-bind the same frame identity and selector once, at dispatch time.
+        await handle.dispose().catch(() => undefined);
+        handle = await this.resolveFrameElement(target.frame, target.selector, 0, page, {
+          allowCaptchaCheckboxFrame: true,
+        });
+        if (handle === null) {
+          throw new BrowserClickDispatchError("not_dispatched", new Error("click target detached before dispatch"));
+        }
+        try {
+          labels = await this.clickTargetLabels(handle);
+        } catch (retryError) {
+          throw new BrowserClickDispatchError("not_dispatched", retryError);
+        }
       }
       // Ordinary operator clicks retain their checkbox, modal and widget semantics.
+      const resolvedHandle = handle;
       const click =
         performClick ??
-        (() => (target.method === "click" ? this.clickHandle(handle) : this.jsClickHandle(handle)));
+        (() => (target.method === "click" ? this.clickHandle(resolvedHandle) : this.jsClickHandle(resolvedHandle)));
       await markOperatorMutationDispatchAttempted();
       if (!shouldTrack(labels)) {
         await click();
         return "dispatched";
       }
-      return await this.runTrackedClick(handle, click, page);
+      return await this.runTrackedClick(resolvedHandle, click, page);
     } finally {
       if (dispose) await handle.dispose().catch(() => undefined);
     }
@@ -6528,7 +6553,7 @@ export class BrowserController implements BrowserDriver {
     if (frame === null) return null;
     if (
       this.frameWithinCaptcha(frame) &&
-      !(allowCaptchaCheckboxFrame && isRecaptchaCheckboxFrameUrl(frame.url()))
+      !(allowCaptchaCheckboxFrame && captchaWidgetKindForFrameUrl(frame.url()) !== null)
     ) {
       return null;
     }
@@ -6574,9 +6599,14 @@ export class BrowserController implements BrowserDriver {
     selector: string,
     page: Page | null = this.page,
   ): Promise<void> {
-    const handle = await this.resolveFrameElement(target, selector, 0, page, {
+    let handle = await this.resolveFrameElement(target, selector, 0, page, {
       allowCaptchaCheckboxFrame: true,
     });
+    if (handle === null) {
+      handle = await this.resolveFrameElement(target, selector, 0, page, {
+        allowCaptchaCheckboxFrame: true,
+      });
+    }
     if (handle === null) {
       throw new Error(
         `click: the target's frame is no longer present (${this.frameLabel(target)})`,

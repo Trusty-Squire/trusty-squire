@@ -51,6 +51,27 @@ export class BrokerClientRegistry {
   }
 }
 
+/** A failed cleanup retains custody but must leave a later signal able to retry. */
+export function retryableBrokerShutdown(cleanup: () => Promise<boolean>): {
+  closing: () => boolean;
+  run: () => Promise<void>;
+} {
+  let closing = false;
+  return {
+    closing: () => closing,
+    run: async () => {
+      if (closing) return;
+      closing = true;
+      try {
+        if (!(await cleanup())) closing = false;
+      } catch (error) {
+        closing = false;
+        throw error;
+      }
+    },
+  };
+}
+
 /**
  * On-demand broker entrypoint; retains custody while clients own sessions.
  *
@@ -91,12 +112,10 @@ export async function runBrokerDaemon(): Promise<void> {
     registryBaseUrl: process.env.ADAPTER_REGISTRY_URL ?? "https://registry.trustysquire.ai",
   });
   const clients = new BrokerClientRegistry();
-  let closing = false;
+  // The wire listener can accept a connection before the MCP listener finishes
+  // starting and the shutdown runner is installed below.
+  let shutdown: ReturnType<typeof retryableBrokerShutdown> | undefined;
   let listenerClosed = false;
-  const drained = (): boolean => {
-    const inventory = operator.authority.inventory();
-    return inventory.sessions === 0 && inventory.admitting === 0 && inventory.closing === 0;
-  };
   // Only the elected SQLite lock holder may remove a dead predecessor's socket.
   // The transport itself simply binds and therefore respects live listeners.
   await unlink(path).catch((error: NodeJS.ErrnoException) => {
@@ -104,6 +123,7 @@ export async function runBrokerDaemon(): Promise<void> {
   });
   const listener = await listenBroker(path, {
     connected: async (principal, params) => {
+      if (shutdown?.closing()) throw new BrokerRefusal("broker_lost", "Broker is shutting down");
       const probe = params.probe === true;
       clients.admit(principal.clientId, probe);
       if (probe) return;
@@ -113,7 +133,7 @@ export async function runBrokerDaemon(): Promise<void> {
         if (clients.counts(principal.clientId)) {
           clients.touch(principal.clientId);
         }
-        if (closing)
+        if (shutdown?.closing())
           throw new BrokerRefusal(
             "broker_lost",
             "Broker is shutting down; no operator command was dispatched",
@@ -154,13 +174,14 @@ export async function runBrokerDaemon(): Promise<void> {
   // The MCP listener is a separate surface on the elected broker. It does not
   // participate in profile election, Chrome custody, or the broker wire.
   const mcpListener = await listenSharedMcp(operator);
-  const shutdown = async (): Promise<void> => {
-    if (closing || !clients.idle() || !drained()) return;
-    closing = true;
+  shutdown = retryableBrokerShutdown(async (): Promise<boolean> => {
+    // A signal is an explicit stop even with live relay clients. Let an
+    // in-flight call finish briefly, then abort the rest and close their tabs.
+    await new Promise((resolve) => setTimeout(resolve, 750));
+    await operator.shutdown();
     if (!(await runtime.close())) {
       process.stderr.write("[browser-broker] cleanup unproven; retaining physical custody\n");
-      closing = false;
-      return;
+      return false;
     }
     if (!listenerClosed) {
       listenerClosed = true;
@@ -169,12 +190,12 @@ export async function runBrokerDaemon(): Promise<void> {
     }
     profileElection.release();
     process.exit(0);
-  };
-  process.once("SIGINT", () => {
-    void shutdown();
   });
-  process.once("SIGTERM", () => {
-    void shutdown();
+  process.on("SIGINT", () => {
+    void shutdown.run();
+  });
+  process.on("SIGTERM", () => {
+    void shutdown.run();
   });
   process.stderr.write(`[browser-broker] listening cell=${cellId} pid=${process.pid}\n`);
 }

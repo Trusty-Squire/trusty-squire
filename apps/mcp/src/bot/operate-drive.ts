@@ -2465,6 +2465,27 @@ export function outstandingRequiredFill(
   return outstandingEmptyFill(rows, filledRefs);
 }
 
+/** Ordering signal for the drive's card step. It only postpones that step;
+ * inject_card and the human purchase approval remain unchanged. */
+export function checkoutWorkBeforeCard(
+  rows: readonly WireRow[],
+  blockers: readonly { kind?: string; text: string }[] = [],
+): boolean {
+  if (rows.some((row) =>
+    isRequiredRow(row) && isFillableRow(row) && !isPaymentRow(row) && !isCvvRow(row) &&
+    !isExpiryRow(row) && !isCardholderNameRow(row) &&
+    (isInvalidRow(row) || rowValueMissing(row))
+  )) return true;
+  const shippingChoices = rows.filter((row) =>
+    (row[1] === "r" || row[1] === "radio") &&
+    /\b(?:shipping|delivery|express|standard|free shipping)\b/i.test(readableLabel(row)),
+  );
+  if (shippingChoices.length > 0 && !shippingChoices.some((row) => rowChecked(row) === true))
+    return true;
+  return blockers.some((blocker) => blocker.kind === "validation" &&
+    /\b(?:address|shipping|delivery)\b/i.test(blocker.text));
+}
+
 export type DisabledSubmitKind = "in_flight" | "needs_fill" | "widget_unready" | "none";
 
 /** A rendered image/audio challenge in a cross-origin frame. */
@@ -5453,6 +5474,9 @@ export function resumeAnswerOptions(
   pageUrl: string,
 ): Record<string, string> {
   const sets = driveTargetSets(rows, facts, includePayment, [], pageUrl, new Map(), (text) => text, [], { goal });
+  // The question builder applies the decision-budget cap to these same sets.
+  // A handoff must offer exactly the target keys its resume validator accepts.
+  buildDriveQuestions(rows, facts, goal, includePayment, [], pageUrl, new Map(), sets);
   return {
     ...criteriaFromCandidates(sets.CLICK, "CLICK"),
     ...criteriaFromCandidates(sets.TYPE_TEXT),
@@ -5477,7 +5501,6 @@ export function resumeAction(
   }
   if (answer === "WAIT" || answer === "wait") return { kind: "wait", confidence: 1 };
   const includePayment = cardRef !== undefined;
-  const questions = buildDriveQuestions(rows, facts, goal, includePayment, [], pageUrl);
   const sets = driveTargetSets(
     rows,
     facts,
@@ -5491,6 +5514,8 @@ export function resumeAction(
       goal,
     },
   );
+  const questions = buildDriveQuestions(rows, facts, goal, includePayment, [], pageUrl, new Map(), sets);
+  const validKeys = Object.keys(resumeAnswerOptions(rows, facts, goal, includePayment, pageUrl));
   const offered = [...sets.CLICK, ...sets.TYPE_TEXT, ...sets.SELECT].find(
     (entry) => entry.slug === answer || entry.ref === answer,
   );
@@ -5499,7 +5524,7 @@ export function resumeAction(
     return {
       kind: "invalid_answer",
       question: {
-        question: "Choose one current target key, or DONE, BLOCKED, or WAIT. Operation names such as CLICK are not resume answers.",
+        question: `Choose one current target key: ${validKeys.join(", ")}. Operation names such as CLICK are not resume answers.`,
         options: resumeAnswerOptions(rows, facts, goal, includePayment, pageUrl),
       },
       reason: "resume_not_current_option",
@@ -5539,6 +5564,8 @@ export function resumeAction(
     fingerprint: "resume",
     goal,
     ...(cardRef === undefined ? {} : { cardRef }),
+    sets,
+    questions,
   });
 }
 
@@ -6436,6 +6463,10 @@ async function driveLoop(input: {
     }
 
     if (decision.special === "card") {
+      if (checkoutWorkBeforeCard(rows, observation.semantic?.blockers)) {
+        automaticDecisionRefused = true;
+        return "continue";
+      }
       if (api === null) {
         return finish("jev_unavailable", {
           jevRetried: "inject_card requires an active Trusty Squire session",
@@ -7603,6 +7634,7 @@ async function driveLoop(input: {
         (!alreadyCard || cardRetry) &&
         onCheckout &&
         remainingFills.length === 0 &&
+        !checkoutWorkBeforeCard(rows, observation.semantic?.blockers) &&
         (fields.pan !== undefined || fields.cvv !== undefined)
       ) {
         // Bind the automatic decision to the current snapshot before applying

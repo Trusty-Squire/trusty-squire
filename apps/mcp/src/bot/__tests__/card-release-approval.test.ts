@@ -42,6 +42,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApiClient } from "../../api-client.js";
 import { executeCardReleaseApproval, type CardReleaseBrowser, type PendingApprovalWait } from "../card-release-approval.js";
 import { sealToRecipient } from "../payment-hpke.js";
+import { generateOperatorKeypair } from "../payment-hpke.js";
 import type { CheckoutCard, CheckoutSummary } from "../checkout.js";
 
 const CHECKOUT: CheckoutSummary = {
@@ -65,6 +66,46 @@ const SYNTHETIC_CARD = {
     country: "US",
   },
 };
+
+it.each([
+  ["amount", { amount_cents: 2700 }],
+  ["merchant", { merchant: "New Merchant" }],
+  ["card", { card_ref: "new-card" }],
+])("replaces a pending approval when %s changes", async (_label, change) => {
+  const oldKeypair = await generateOperatorKeypair();
+  const pending: PendingApprovalWait = {
+    approval_id: "old", approval_url: "https://example.test/old", nonce: "old-nonce",
+    agent: "agent", account_binding: "account", checkout: { ...CHECKOUT, amount_cents: 1900 },
+    boundCardRef: "old-card", cardRef: "old-card", deadline: Date.now() + 60_000,
+    rejectedCandidates: [], keypair: oldKeypair, item: "item", reason: "reason",
+  };
+  const requested = { merchant: CHECKOUT.merchant, amount_cents: 1900, currency: "USD", card_ref: "old-card", item: "item", reason: "reason", ...change };
+  const created: Array<Record<string, unknown>> = [];
+  const api = {
+    createPaymentApproval: async (body: Record<string, unknown>) => {
+      created.push(body);
+      return { id: "new", nonce: "new-nonce", agent: "agent", account_binding: "account", expires_at: new Date(Date.now() + 60_000).toISOString() };
+    },
+    getPaymentApproval: async (id: string) => {
+      expect(id).toBe("new");
+      return { id, status: "pending", ...CHECKOUT, ...requested, card_ref: requested.card_ref, expires_at: new Date(Date.now() + 60_000).toISOString() };
+    },
+  } as unknown as ApiClient;
+  const next: PendingApprovalWait[] = [];
+  const result = await executeCardReleaseApproval(requested, api, {
+    currentUrl: () => `${CHECKOUT.checkout_origin}/checkout`,
+    injectCardFields: async () => { throw new Error("card must not release"); },
+  }, {
+    resumeFrom: pending, vouchflowExpectedAudience: "customer_test", pollBudgetMs: 0,
+    surfaceApprovalUrl: () => undefined,
+    onApprovalPending: (state) => next.push(state),
+  });
+  expect(result).toMatchObject({ status: "approval_pending", approval_id: "new" });
+  expect(created).toHaveLength(1);
+  expect(created[0]).toMatchObject({ merchant: requested.merchant, amount_cents: requested.amount_cents, card_ref: requested.card_ref });
+  expect(next[0]?.checkout.amount_cents).toBe(requested.amount_cents);
+  expect(pending.keypair.privateKey).toBe("");
+});
 
 // Mirrors the WEB page's base64url of SHA-256(operator pubkey bytes):
 //   apps/web/.../page.tsx:241-252  publicKeyHash = SHA-256(fromBase64Url(op_pk));

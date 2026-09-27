@@ -847,7 +847,7 @@ async function handlePrepareLogin(args: z.infer<typeof prepareLoginSchema>) {
   if (!googleGate.ok) {
     return { session_id: args.session_id, needs_user: googleGate.needs_user };
   }
-  const email = getSessionUserEmail(args.session_id);
+  const email = sessionForCall(args.session_id)?.signupIdentifier ?? getSessionUserEmail(args.session_id);
   if (email === null) {
     return {
       session_id: args.session_id,

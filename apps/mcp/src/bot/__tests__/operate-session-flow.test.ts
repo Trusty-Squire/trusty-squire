@@ -6332,6 +6332,27 @@ describe("operate session — PR3c username/password login (capture-at-login sou
     expect(consolidated.slots.password.length).toBeGreaterThanOrEqual(16);
   });
 
+  it("prepares and stores the plus alias actually typed into a signup field", async () => {
+    withEmail("ada@example.com");
+    const alias = "ada+cal-signup@example.com";
+    h.elements = [elem({ tag: "input", type: "email", role: "textbox", labelText: "Email", selector: "#email" })];
+    const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/signup", profileDir });
+    await act(obs.session_id, { kind: "type", target: domRefs(obs)[0]!, text: alias });
+    const prepared = (await operateLoginTool.handler(
+      { action: "prepare_signup", session_id: obs.session_id }, null,
+    )) as { slots: { login: { length: number } } };
+    expect(prepared.slots.login.length).toBe(alias.length);
+    const stored: string[] = [];
+    const api = { storeCredential: async (input: { fields: { login: string } }) => {
+      stored.push(input.fields.login);
+      return { reference: "vault://alias", service: "cal.com", field_names: ["login", "password"], login_hosts: ["app.example.com"], updated: false };
+    } } as unknown as ApiClient;
+    await operateLoginTool.handler(
+      { action: "store_signup", session_id: obs.session_id, service: "cal.com", login_hosts: ["app.example.com"] }, api,
+    );
+    expect(stored).toEqual([alias]);
+  });
+
   it("prepare_login returns the Google session wall when no live identity can be captured", async () => {
     h.providers = [];
     h.liveGoogleEmail = null;

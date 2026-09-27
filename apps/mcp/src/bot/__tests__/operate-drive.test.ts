@@ -68,6 +68,7 @@ import {
   solverOutcomeBlocksSubmit,
   DRIVE_IN_FLIGHT_MS,
   outstandingRequiredFill,
+  checkoutWorkBeforeCard,
   paymentArgs,
   driveApprovalPageTexts,
   DRIVE_EMPTY_SNAPSHOT_WAITS,
@@ -880,6 +881,22 @@ describe("decideAfterJev stop reasons", () => {
     expect(resolved).toEqual([]);
   });
 
+  it("orders card approval after required address and shipping selection", () => {
+    const address: WireRow = ["@e:line1", "combobox", "Address|f=address_line1|s=r"];
+    const shipping: WireRow = ["@e:rate", "r", "Standard shipping|s=u"];
+    const card: WireRow = ["@e:pan", "t", "Card number|f=payment|s=r"];
+    expect(checkoutWorkBeforeCard([address, shipping, card])).toBe(true);
+    expect(checkoutWorkBeforeCard([
+      ["@e:line1", "combobox", "Address|f=address_line1|s=r|n=1 Main St"],
+      shipping, card,
+    ])).toBe(true);
+    expect(checkoutWorkBeforeCard([
+      ["@e:line1", "combobox", "Address|f=address_line1|s=r|n=1 Main St"],
+      ["@e:rate", "r", "Standard shipping|s=c"], card,
+    ])).toBe(false);
+    expect(checkoutWorkBeforeCard([card], [{ kind: "validation", text: "Enter shipping address" }])).toBe(true);
+  });
+
   it("does not treat a Shopify geo-default state as already filled", () => {
     const country: WireRow = ["@e:country", "s", "Country/Region|f=state|s=r|a=picker|n=US"];
     const florida: WireRow = ["@e:state", "s", "State|f=state|s=r|a=picker|n=FL"];
@@ -1373,6 +1390,22 @@ describe("decideAfterJev stop reasons", () => {
       kind: "act",
       action: { kind: "select", target: "@e:country", text: "US" },
     });
+  });
+
+  it("accepts every handoff target key through the same capped decision space", () => {
+    const rows: WireRow[] = Array.from({ length: 75 }, (_, index) => [
+      `@e:cart${index}`, "b", `Cart ${index}|f=cart_${index}`,
+    ]);
+    const url = "https://example.test/cart";
+    const options = resumeAnswerOptions(rows, {}, "Open the cart", false, url);
+    const targetKeys = Object.keys(options).filter((key) => !["DONE", "BLOCKED", "WAIT"].includes(key));
+    expect(targetKeys.length).toBeGreaterThan(0);
+    for (const key of targetKeys) {
+      expect(resumeAction(key, rows, {}, "Open the cart", undefined, url), key).toMatchObject({ kind: "act" });
+    }
+    const invalid = resumeAction("missing_key", rows, {}, "Open the cart", undefined, url);
+    expect(invalid).toMatchObject({ kind: "invalid_answer" });
+    expect((invalid as { question: { question: string } }).question.question).toContain(targetKeys[0]);
   });
 
   it("reports invalid_answer with the validation reason instead of low_confidence", () => {
