@@ -5,6 +5,7 @@ import { createConnection } from "node:net";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { mkdirSync } from "node:fs";
+import { homedir } from "node:os";
 import { currentProfileDir, ProfileBusyError, profilePathIdentity } from "../profile.js";
 import { BrokerClient, brokerSpeaksLegacyWire } from "./transport.js";
 import { readBrokerAccountBinding } from "./account-binding.js";
@@ -114,6 +115,114 @@ export function brokerEnvironment(env: NodeJS.ProcessEnv, path: string): NodeJS.
   return { ...env, TRUSTY_SQUIRE_BROKER_SOCKET: path };
 }
 
+export interface ManagedBrokerUnit {
+  id: string;
+  activeState: string;
+  execStart: string;
+  environment: Record<string, string>;
+}
+
+function execStartArgv(execStart: string): string[] {
+  const listed = /argv\[\]=([^;]*)/.exec(execStart)?.[1] ?? "";
+  return listed.trim().split(/\s+/).filter(Boolean);
+}
+
+function parseEnvironment(line: string): Record<string, string> {
+  const body = line.startsWith("Environment=") ? line.slice("Environment=".length) : line;
+  const environment: Record<string, string> = {};
+  for (const part of body.split(" ")) {
+    const eq = part.indexOf("=");
+    if (eq <= 0) continue;
+    environment[part.slice(0, eq)] = part.slice(eq + 1);
+  }
+  return environment;
+}
+
+function isBrokerUnit(unit: ManagedBrokerUnit): boolean {
+  if (unit.id.replace(/\.service$/, "").startsWith("trusty-squire-broker")) return true;
+  return execStartArgv(unit.execStart).some((arg) => arg === "broker" || arg === "--squire-broker");
+}
+
+function unitProfileDir(unit: ManagedBrokerUnit): string {
+  const configured = unit.environment.TRUSTY_SQUIRE_PROFILE_DIR?.trim();
+  return configured && configured.length > 0
+    ? configured
+    : join(homedir(), ".trusty-squire", "chrome-profile");
+}
+
+function unitServesProfile(unit: ManagedBrokerUnit, profileDir: string): boolean {
+  return isBrokerUnit(unit) &&
+    profilePathIdentity(unitProfileDir(unit)) === profilePathIdentity(profileDir);
+}
+
+function unitIsLive(unit: ManagedBrokerUnit): boolean {
+  return unit.activeState === "active" ||
+    unit.activeState === "activating" ||
+    unit.activeState === "reloading";
+}
+
+/** True when discovery must wait for this unit instead of launching on demand. */
+export function unitDefersOnDemandLaunch(unit: ManagedBrokerUnit, profileDir: string): boolean {
+  return unitServesProfile(unit, profileDir) && unitIsLive(unit);
+}
+
+/** Parse `systemctl --user show --type=service` property blocks. */
+export function parseManagedBrokerShow(stdout: string): ManagedBrokerUnit[] {
+  const units: ManagedBrokerUnit[] = [];
+  let current: Partial<ManagedBrokerUnit> & { environment?: Record<string, string> } = {};
+  const take = () => {
+    if (current.id === undefined) return;
+    units.push({
+      id: current.id,
+      activeState: current.activeState ?? "inactive",
+      execStart: current.execStart ?? "",
+      environment: current.environment ?? {},
+    });
+    current = {};
+  };
+  for (const line of stdout.split("\n")) {
+    if (line.length === 0) {
+      take();
+      continue;
+    }
+    if (line.startsWith("Id=")) current.id = line.slice(3);
+    else if (line.startsWith("ActiveState=")) current.activeState = line.slice(12);
+    else if (line.startsWith("ExecStart=")) current.execStart = line.slice(10);
+    else if (line.startsWith("Environment=")) current.environment = parseEnvironment(line);
+  }
+  take();
+  return units;
+}
+
+export function managedBrokerUnitIsLive(profileDir = currentProfileDir()): boolean {
+  if (process.platform !== "linux") return false;
+  try {
+    const stdout = execFileSync("systemctl", [
+      "--user",
+      "show",
+      "--type=service",
+      "--all",
+      "--no-pager",
+      "-p", "Id",
+      "-p", "ActiveState",
+      "-p", "Environment",
+      "-p", "ExecStart",
+    ], { encoding: "utf8", timeout: 2_000, stdio: ["ignore", "pipe", "ignore"] });
+    return parseManagedBrokerShow(stdout).some((unit) =>
+      unitServesProfile(unit, profileDir) && unitIsLive(unit),
+    );
+  } catch {
+    return false;
+  }
+}
+
+function launchUnlessManaged(path: string): (() => Error | undefined) | undefined {
+  // A systemd user unit that already owns this profile will reclaim the socket
+  // itself. Launching a detached competitor wins the kernel lock and the unit
+  // restart-loops (relay reconnect after #982).
+  return managedBrokerUnitIsLive() ? undefined : launchBrokerDaemon(path);
+}
+
 export interface BrokerConnectOptions {
   accountId?: string | undefined;
   agentSessionToken?: string | undefined;
@@ -147,7 +256,7 @@ export async function connectOrLaunchBroker(path: string, options: BrokerConnect
   catch (error) {
     if (!isUnavailable(error) && !(await reclaimLegacyBroker(path, options, error))) throw error;
   }
-  const failure = launchBrokerDaemon(path);
+  const failure = launchUnlessManaged(path);
   try { return await waitForBroker(path, failure); }
   catch (error) {
     if (error instanceof ProfileBusyError) return await waitForBroker(path);
@@ -160,7 +269,7 @@ export async function connectOrLaunchBroker(path: string, options: BrokerConnect
 export async function ensureSharedMcp(path = sharedMcpSocketPath()): Promise<void> {
   if (await liveUnixSocket(path)) return;
   const wire = resolveBrokerSocket();
-  const failure = (await liveUnixSocket(wire)) ? undefined : launchBrokerDaemon(wire);
+  const failure = (await liveUnixSocket(wire)) ? undefined : launchUnlessManaged(wire);
   const deadline = Date.now() + BROKER_CONNECT_TIMEOUT_MS;
   while (Date.now() < deadline) {
     const launchFailure = failure?.();

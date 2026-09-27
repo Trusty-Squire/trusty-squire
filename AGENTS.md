@@ -483,8 +483,11 @@ weaker crash-orphan containment. Recent cookies may be lost on a crash; normal
 whole-browser stops flush them with SIGINT. In scope mode the next broker
 empties any surviving scope members. The broker is the
 only browser path, including `connect`, and starts without enrollment. Account
-identity is named by account-acting calls, never by `connect`. See
-[`docs/browser-broker.md`](docs/browser-broker.md) for the full contract.
+identity is named by account-acting calls, never by `connect`. A relay must
+not launch a detached broker when a systemd user unit already owns the
+profile and is restarting; wait for that unit's socket. See
+[`docs/browser-broker.md`](docs/browser-broker.md) and
+`managedBrokerUnitIsLive` in `apps/mcp/src/bot/broker/discovery.ts`.
 
 ### 13. OAuth identity uses the real profile and a broker-local mutex
 
