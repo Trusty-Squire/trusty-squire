@@ -19,6 +19,7 @@ import {
 import {
   DRIVE_CONFIDENCE_THRESHOLD,
   DRIVE_EMPTY_SNAPSHOT_WAITS,
+  DRIVE_FIXED_NONE,
   DRIVE_WAIT_MS,
   applyReleasedCardFacts,
   matchingFactKeys,
@@ -424,7 +425,9 @@ function jevFromQuestions(
             ? (selectKeys[0] ?? keys[0]!)
             : name === "CLICK_target"
               ? (clickKeys[0] ?? keys[0]!)
-              : keys[0]!;
+              : name === "email_code_field"
+                ? DRIVE_FIXED_NONE
+                : keys[0]!;
     answers[name] = {
       choice: pick,
       confidence: 0.93,

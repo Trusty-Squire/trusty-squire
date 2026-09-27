@@ -1290,6 +1290,7 @@ import {
   captureScreenshot,
   observeQuery,
 } from "../provision-session.js";
+import { sessionForCall } from "../session/lifecycle.js";
 import { actInternally } from "../act/act.js";
 import { OBSERVE_V2_MAX_WIRE_BYTES } from "../compact-observation-v2.js";
 import {
@@ -2053,7 +2054,14 @@ describe("operate session — OAuth lifecycle", () => {
     expect(h.currentUrl).toBe(h.oauthResultUrl);
     await vi.advanceTimersByTimeAsync(10);
     const pending = await login;
-    // Drain the completed handshake's lease release before restoring real timers.
+    // Drain the handshake lease without firing the session watchdog
+    // (a setTimeout since #971). runOnlyPendingTimersAsync would otherwise
+    // expire the session and finish would throw "unknown provision session".
+    const live = sessionForCall(started.session_id);
+    if (live !== undefined && live.watchdog !== null) {
+      clearTimeout(live.watchdog);
+      live.watchdog = null;
+    }
     await vi.runOnlyPendingTimersAsync();
     expect(pending.oauth).toMatchObject({
       state: "awaiting_human",
@@ -5026,11 +5034,9 @@ describe("operate session — await_verification into_slot (T3 fix: OTP never ro
     });
     // The operation page is mid-signup, dialog open, waiting for the code.
     h.currentUrl = "https://account.proton.me/signup";
-    h.visibleText = "Your verification code is 481920.";
-    // This mock controller lacks the row-extraction methods, so the read takes
-    // the legacy first-row open; with a sender hint set and no row ever
-    // chosen, the page-wide list parse never runs (the unfiltered query would
-    // leak a foreign sender's code).
+    // #975 verifies an explicit sender against From on the opened message.
+    // The mock has no row extractors, so From must be in the opened body.
+    h.visibleText = "From: Proton <noreply@proton.me>\nYour verification code is 481920.";
     h.openFirstMailResult = true;
     const res = await awaitVerification(obs.session_id, { sender: "proton.me" });
     expect(res.found).toBe(true);
@@ -5051,7 +5057,8 @@ describe("operate session — await_verification into_slot (T3 fix: OTP never ro
     });
     const longToken = "t".repeat(400) + "end";
     const longHref = `https://cal.com/api/auth/verify-email?token=${longToken}&callbackUrl=%2Fsignup`;
-    h.visibleText = "Verify your email address to finish creating your account.";
+    h.visibleText =
+      "From: Cal.com <hello@cal.com>\nVerify your email address to finish creating your account.";
     h.elements = [elem({ tag: "a", role: "link", href: longHref, visibleText: "Verify email" })];
     h.openFirstMailResult = true;
     const res = await awaitVerification(obs.session_id, { sender: "cal.com" });

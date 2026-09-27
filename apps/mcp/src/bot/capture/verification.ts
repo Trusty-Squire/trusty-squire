@@ -1007,10 +1007,13 @@ export async function awaitVerification(
                   sessionStartMs: session.startedAt,
                 })
               : null;
+          // A first-row open (no row extractors) has chosen === null even
+          // after the mail is open. Skip only when nothing was opened; the
+          // opened-body From check below still enforces the requested sender.
           if (
             requestedSender !== undefined &&
             (picked === null || !mailRowMatchesRequestedFrom(picked, requestedSender)) &&
-            (messages.length > 0 || chosen === null)
+            (messages.length > 0 || (chosen === null && !opened))
           ) {
             continue;
           }
