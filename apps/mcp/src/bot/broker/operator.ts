@@ -306,7 +306,7 @@ export class OperatorBroker implements BrokerTransportPort {
                 )
               : undefined;
           },
-          invoke: async (name, commandArgs, signal, commandId, prepared, callAccount) => {
+          invoke: async (name, commandArgs, signal, commandId, prepared, callAccount, caller) => {
             if (!session.browser.isConnected())
               throw new BrokerRefusal(
                 "browser_lost",
@@ -320,7 +320,7 @@ export class OperatorBroker implements BrokerTransportPort {
             // The account is resolved per command, from the account THIS call
             // named: a session that outlives a re-enrollment acts as the
             // freshly enrolled account on its next call.
-            const commandApi = this.apiFor(principal, callAccount);
+            const commandApi = this.apiFor(caller ?? principal, callAccount);
             const executeHandler = async () =>
               await command.handler(translated, commandApi, {
                 signal,

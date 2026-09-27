@@ -27,16 +27,19 @@ socket has the same local-user boundary as the existing broker connection.
 The MCP socket has no server-instance record, heartbeat, stale-server sweep,
 or idle exit. Its listener starts and stops with the elected broker.
 
-For each agent MCP connection, `mcp relay` sends one line from
-`TRUSTY_SQUIRE_AGENT_IDENTITY`, then relays MCP stdio messages in both directions.
+For each agent MCP connection, `mcp relay` sends one line with the agent identity,
+then relays MCP stdio messages in both directions. An explicit
+`TRUSTY_SQUIRE_AGENT_IDENTITY` wins; Beeline's private room `HOME` provides a
+stable fallback across its MCP process restarts. Other callers without an
+explicit identity get a process-scoped fallback.
 If the broker restarts, the relay reconnects while the agent's pipe remains open,
 replays initialization, and returns an error for calls lost in flight. Broker
-sessions and tabs end with the old connection. The relay exits when its pipe
+sessions and tabs end with the broker. The relay exits when its pipe
 closes.
 
 The broker creates a separate MCP Server, API client, and broker principal for that
-connection. Session IDs and tabs belong to that principal; closing one agent's
-connection closes its sessions without closing another agent's sessions.
+connection. Session IDs and tabs belong to its agent identity; retiring an MCP
+connection leaves sessions available to later connections from that agent.
 Vault requests use that connection's agent identity in
 `X-Squire-Agent-Identity`. As with stdio, the label is self-declared and grants
 no authority. Operator tools call the broker's existing ownership layer in
@@ -108,8 +111,7 @@ ordinary broker client and holds no separate identity.
 
 The first client starts `node apps/mcp/dist/bin.js broker` when necessary.
 Socket mode is 0600. No CDP endpoint or browser
-handle crosses IPC. `TRUSTY_SQUIRE_AGENT_IDENTITY` supplies a connection's agent
-label, which carries no authority.
+handle crosses IPC. The agent label is self-declared and carries no account authority.
 
 The client wire is the frozen Contract B — `connect`, `open`, `command`,
 `close` (`apps/mcp/src/bot/broker/protocol.ts`). A connection ends with
@@ -290,16 +292,16 @@ and its other sessions intact.
 - Each session owns a target family and a serialized command queue. A service
   URL does not reserve a site; one authenticated client drives the shared profile.
   Several connections to the same profile attach at once, one per client process,
-  and each connection owns the sessions it opened. The opaque session id is the
-  only capability: a connection presenting another connection's session id is
-  refused with `stale_lease`, and a dropped connection's sessions close after a
-  five-second grace. A reconnecting client starts fresh and does not adopt them.
+  and each agent identity owns the sessions it opened. A client presenting a
+  session id owned by a different agent is refused with `stale_lease`. A retired
+  connection's sessions remain available to the same agent and end through
+  `operate_finish`, idle timeout, lifetime overrun, or broker shutdown.
 - A start refused by a wall (`needs_user`, such as `google_session`) still reports
-  a `session_id`, but that id was never owned by any connection. The client
+  a `session_id`, but that id was never owned by any agent. The client
   remembers it and answers locally without dispatching: a follow-up operate call
   replays the same wall, and `operate_finish` returns the closed,
   `mutation: "not_dispatched"` receipt and forgets the id. So `stale_lease` keeps
-  one meaning — another connection owns a live session — and never stands in for
+  one meaning — the agent does not own a live session with that id — and never stands in for
   a session that was never created. `broker-forwarder.test.ts` pins the replay.
 - Browser egress is unrestricted for all targets. Session cleanup closes only that owned
   family. A close that cannot be proven drains the Chrome scope or process
@@ -310,9 +312,9 @@ and its other sessions intact.
   originating request's IPC connection to its MCP client before the tool completes;
   clients without notification support receive the approval link in the result.
   Observation output follows the [narrow released-card mask policy](observation-model.md#45-narrow-released-card-output-mask-final-owners-order-2026-09-12).
-- A live socket is the connection lease: dropping it aborts that connection's
-  in-flight starting sessions and queues no further work. There is no journal, no
-  reconnect grace for sessions, and no `recover`/`reclaim`/`acknowledge` RPC. A
+- A live socket owns its in-flight requests: dropping it aborts that connection's
+  in-flight starting sessions and queues no further work. There is no journal
+  or `recover`/`reclaim`/`acknowledge` RPC. A
   lost connection surfaces `broker_lost` with an explicit do-not-replay warning;
   an in-flight request whose outcome is unknown is reported in that call's own
   error and blocks nothing later.

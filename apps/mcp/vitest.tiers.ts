@@ -117,6 +117,7 @@ export const REQUIRED_BEHAVIOR_FILES = [
   "src/bot/__tests__/broker-daemon.test.ts",
   "src/bot/__tests__/broker-runtime.test.ts",
   "src/bot/__tests__/broker-forwarder.test.ts",
+  "src/bot/__tests__/broker-session-reconnect.test.ts",
   "src/bot/__tests__/broker-authority.test.ts",
   "src/bot/__tests__/broker-transport.test.ts",
   "src/bot/__tests__/broker-wire-protocol.test.ts",

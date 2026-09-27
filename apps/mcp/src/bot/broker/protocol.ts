@@ -14,8 +14,7 @@
 //   cancel                       -> the reserved `abort` control frame
 //
 // Framing, MAX_FRAME, the `{ id, error: { code, message } }` error shape, the
-// 512-entry retained-result replay guard, the 5 s connection-session grace
-// timer and the reserved `abort` control frame (per-request cancellation keyed
+// 512-entry retained-result replay guard and the reserved `abort` control frame (per-request cancellation keyed
 // on the request frame id) are transport/implementation policy, not part of
 // this contract. They stay behind it.
 //

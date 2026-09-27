@@ -153,7 +153,6 @@ export class OperatorForwarder {
         return refused;
       }
     }
-    let reconnecting = false;
     if (this.connection !== undefined) {
       const existing = await awaitOperatorPreparation(
         this.connection.catch(() => undefined),
@@ -163,14 +162,10 @@ export class OperatorForwarder {
       if (existing === undefined || !existing.isConnected()) {
         this.connection = undefined;
         this.client = undefined;
-        reconnecting = true;
       }
     }
     const client = await awaitOperatorPreparation(this.connect(), signal);
     checkCancelled();
-    // A fresh connection owns no sessions: its ids belong to the lost socket
-    // and the broker refuses them.
-    if (reconnecting) this.sessions.clear();
     const account = await this.callAccount();
     let args = originalArgs;
     if (
@@ -181,7 +176,7 @@ export class OperatorForwarder {
     )
       args = { ...args, session_id: this.sessions.values().next().value };
     const requested = typeof args.session_id === "string" ? args.session_id : undefined;
-    let sessionId = requested !== undefined && this.sessions.has(requested) ? requested : undefined;
+    let sessionId = requested;
     checkCancelled();
 
     // Cancellation is per request, keyed on the dispatched frame id: the broker
@@ -281,7 +276,7 @@ export class OperatorForwarder {
 
       if (name === "operate_finish") {
         if (sessionId === undefined)
-          throw new BrokerRefusal("stale_lease", "Session is not owned by this MCP connection");
+          throw new BrokerRefusal("stale_lease", "A session id is required");
         const closeRequest: CloseRequest = {
           sessionId,
           args,
@@ -306,7 +301,7 @@ export class OperatorForwarder {
       }
 
       if (sessionId === undefined)
-        throw new BrokerRefusal("stale_lease", "Session is not owned by this MCP connection");
+        throw new BrokerRefusal("stale_lease", "A session id is required");
       const commandRequest: CommandRequest = {
         sessionId,
         name,
