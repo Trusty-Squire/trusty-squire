@@ -93,6 +93,9 @@ export interface Session {
   // PR3 — the user's own email (Google identity captured at login), or null when
   // unknown. The authoritative signup email + the identity whose inbox is read.
   userEmail: string | null;
+  // Identifier entered in this session's signup form, which may be a plus alias
+  // of the enrolled Google address. Never replace the Google identity itself.
+  signupIdentifier: string | null;
   // The MCP api-client (when the tool layer passed one through). Lets the
   // provision captcha gate and the operate drive's auto-solve spend a VAULTED
   // 2Captcha key through the injecting proxy instead of a raw env key.
@@ -379,6 +382,7 @@ export function createSession(input: CreateSessionInput): Session {
     startUrl: input.startUrl,
     consentInboxRead: input.consentInboxRead,
     userEmail: input.userEmail,
+    signupIdentifier: null,
     // ABSENT, not present-and-undefined, when the tool layer passed no client.
     ...(input.api !== undefined ? { api: input.api } : {}),
   };
