@@ -1392,6 +1392,22 @@ describe("decideAfterJev stop reasons", () => {
     });
   });
 
+  it("accepts every handoff target key through the same capped decision space", () => {
+    const rows: WireRow[] = Array.from({ length: 75 }, (_, index) => [
+      `@e:cart${index}`, "b", `Cart ${index}|f=cart_${index}`,
+    ]);
+    const url = "https://example.test/cart";
+    const options = resumeAnswerOptions(rows, {}, "Open the cart", false, url);
+    const targetKeys = Object.keys(options).filter((key) => !["DONE", "BLOCKED", "WAIT"].includes(key));
+    expect(targetKeys.length).toBeGreaterThan(0);
+    for (const key of targetKeys) {
+      expect(resumeAction(key, rows, {}, "Open the cart", undefined, url), key).toMatchObject({ kind: "act" });
+    }
+    const invalid = resumeAction("missing_key", rows, {}, "Open the cart", undefined, url);
+    expect(invalid).toMatchObject({ kind: "invalid_answer" });
+    expect((invalid as { question: { question: string } }).question.question).toContain(targetKeys[0]);
+  });
+
   it("reports invalid_answer with the validation reason instead of low_confidence", () => {
     expect(
       decideAfterJev({

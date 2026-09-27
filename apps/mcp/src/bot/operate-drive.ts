@@ -5474,6 +5474,9 @@ export function resumeAnswerOptions(
   pageUrl: string,
 ): Record<string, string> {
   const sets = driveTargetSets(rows, facts, includePayment, [], pageUrl, new Map(), (text) => text, [], { goal });
+  // The question builder applies the decision-budget cap to these same sets.
+  // A handoff must offer exactly the target keys its resume validator accepts.
+  buildDriveQuestions(rows, facts, goal, includePayment, [], pageUrl, new Map(), sets);
   return {
     ...criteriaFromCandidates(sets.CLICK, "CLICK"),
     ...criteriaFromCandidates(sets.TYPE_TEXT),
@@ -5498,7 +5501,6 @@ export function resumeAction(
   }
   if (answer === "WAIT" || answer === "wait") return { kind: "wait", confidence: 1 };
   const includePayment = cardRef !== undefined;
-  const questions = buildDriveQuestions(rows, facts, goal, includePayment, [], pageUrl);
   const sets = driveTargetSets(
     rows,
     facts,
@@ -5512,6 +5514,8 @@ export function resumeAction(
       goal,
     },
   );
+  const questions = buildDriveQuestions(rows, facts, goal, includePayment, [], pageUrl, new Map(), sets);
+  const validKeys = Object.keys(resumeAnswerOptions(rows, facts, goal, includePayment, pageUrl));
   const offered = [...sets.CLICK, ...sets.TYPE_TEXT, ...sets.SELECT].find(
     (entry) => entry.slug === answer || entry.ref === answer,
   );
@@ -5520,7 +5524,7 @@ export function resumeAction(
     return {
       kind: "invalid_answer",
       question: {
-        question: "Choose one current target key, or DONE, BLOCKED, or WAIT. Operation names such as CLICK are not resume answers.",
+        question: `Choose one current target key: ${validKeys.join(", ")}. Operation names such as CLICK are not resume answers.`,
         options: resumeAnswerOptions(rows, facts, goal, includePayment, pageUrl),
       },
       reason: "resume_not_current_option",
@@ -5560,6 +5564,8 @@ export function resumeAction(
     fingerprint: "resume",
     goal,
     ...(cardRef === undefined ? {} : { cardRef }),
+    sets,
+    questions,
   });
 }
 
