@@ -53,6 +53,7 @@ type Stub = {
   clicks: Array<{ x: number; y: number }>;
   hitTestCalls: number;
   hitTestOutcomes: Array<"miss" | "hit" | Error>;
+  unrelatedFrameUrl: string;
 };
 
 function stubPage(): Stub {
@@ -60,6 +61,7 @@ function stubPage(): Stub {
     clicks: [],
     hitTestCalls: 0,
     hitTestOutcomes: [],
+    unrelatedFrameUrl: "https://captcha.example/one",
     page: undefined as unknown as Page,
   };
   const send = async (method: string): Promise<unknown> => {
@@ -70,7 +72,12 @@ function stubPage(): Stub {
           cssLayoutViewport: { clientWidth: 800, clientHeight: 600 },
         };
       case "Page.getFrameTree":
-        return { frameTree: { frame: { id: FRAME_ID, url: PAGE_URL } } };
+        return {
+          frameTree: {
+            frame: { id: FRAME_ID, url: PAGE_URL },
+            childFrames: [{ frame: { id: "UNRELATED", url: stub.unrelatedFrameUrl } }],
+          },
+        };
       case "DOMSnapshot.captureSnapshot":
         return snapshotResponse();
       case "DOM.getNodeForLocation": {
@@ -92,10 +99,17 @@ function stubPage(): Stub {
     }
   };
   const cdp = { send, detach: async () => undefined } as unknown as CDPSession;
-  const mainFrame = { url: () => PAGE_URL, childFrames: () => [] };
+  const childFrame = {
+    url: () => stub.unrelatedFrameUrl,
+    frameElement: async () => ({
+      boundingBox: async () => ({ x: 300, y: 300, width: 100, height: 100 }),
+      dispose: async () => undefined,
+    }),
+  };
+  const mainFrame = { url: () => PAGE_URL, childFrames: () => [childFrame] };
   stub.page = {
     context: () => ({ newCDPSession: async () => cdp }),
-    frames: () => [mainFrame],
+    frames: () => [mainFrame, childFrame],
     mainFrame: () => mainFrame,
     mouse: {
       click: async (x: number, y: number) => {
@@ -119,6 +133,17 @@ async function arm(stub: Stub): Promise<string> {
 }
 
 describe("screenshot click hit-test readiness race", () => {
+  it("dispatches on the same main-frame control when an unrelated iframe navigates", async () => {
+    const stub = stubPage();
+    const screenshot_id = await arm(stub);
+    stub.unrelatedFrameUrl = "https://captcha.example/two";
+
+    await expect(
+      clickScreenshot(stub.page, { screenshot_id, x: 40, y: 40 }, () => {}),
+    ).resolves.toBe("dispatched");
+    expect(stub.clicks).toHaveLength(1);
+  });
+
   it("dispatches on the same image after transient no-node misses", async () => {
     const stub = stubPage();
     const screenshot_id = await arm(stub);

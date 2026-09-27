@@ -198,15 +198,25 @@ async function geometry(page: Page, cdp: CDPSession) {
       if (frame === page.mainFrame()) return null;
       const handle = await frame.frameElement();
       try {
-        return { url: frame.url(), box: await handle.boundingBox() };
+        return { box: await handle.boundingBox() };
       } finally {
         await handle.dispose();
       }
     }),
   );
   const viewport = metrics.cssVisualViewport;
+  const mainFrame = tree.frameTree.frame;
   return {
-    state: JSON.stringify({ tree, viewport, layout: metrics.cssLayoutViewport, boxes }),
+    // A child frame can navigate while a main-page control and every pixel
+    // around it remain unchanged (for example a verification widget polling).
+    // Keep frame geometry, and let the clicked node/occlusion checks below
+    // establish whether the target's own frame changed.
+    state: JSON.stringify({
+      mainFrame: { id: mainFrame.id, url: mainFrame.url, fragment: mainFrame.urlFragment },
+      viewport,
+      layout: metrics.cssLayoutViewport,
+      boxes,
+    }),
     viewport,
     nodes,
     occlusion,

@@ -1412,6 +1412,59 @@ describe("decideAfterJev stop reasons", () => {
     });
   });
 
+  it("offers White Jade navigation when only product links have local overlays", () => {
+    const rows: WireRow[] = [
+      ["@e:shop", "l", "Shop|u=https://whitejade.xyz/collections/the-ritual"],
+      [
+        "@e:mask",
+        "l",
+        "Red Light Face Mask|u=https://whitejade.xyz/products/red-light-face-mask|oc=overlay",
+      ],
+      [
+        "@e:collagen",
+        "l",
+        "Collagen Glow Sheet Mask|u=https://whitejade.xyz/products/collagen-glow-sheet-mask|oc=overlay",
+      ],
+      ["@e:cart", "b", "Cart"],
+    ];
+    const options = resumeAnswerOptions(
+      rows,
+      {},
+      "Buy the cheapest item in the store",
+      false,
+      "https://whitejade.xyz/",
+    );
+    const shop = Object.entries(options).find(([, label]) => label === "Shop");
+    expect(shop).toBeDefined();
+    expect(Object.values(options)).toContain("Collagen Glow Sheet Mask");
+    expect(
+      resumeAction(
+        shop![0],
+        rows,
+        {},
+        "Buy the cheapest item in the store",
+        undefined,
+        "https://whitejade.xyz/",
+      ),
+    ).toMatchObject({
+      kind: "act",
+      action: { kind: "click", target: "@e:shop" },
+    });
+    expect(Object.keys(options)).toContain("DONE");
+  });
+
+  it("does not offer an already selected fact-backed State option", () => {
+    const rows: WireRow[] = [["@e:state", "s", "State|f=state|s=r|a=picker|n=CA|fm=1"]];
+    const sets = driveTargetSets(
+      rows,
+      { state: "CA" },
+      false,
+      [],
+      "https://whitejade.xyz/checkouts/cn/test/en-us",
+    );
+    expect(sets.SELECT).toEqual([]);
+  });
+
   it("accepts every handoff target key through the same capped decision space", () => {
     const rows: WireRow[] = Array.from({ length: 75 }, (_, index) => [
       `@e:cart${index}`, "b", `Cart ${index}|f=cart_${index}`,
@@ -3892,6 +3945,28 @@ describe("dialog overlay secret and oauth bounce rules", () => {
       { goal: "create an account" },
     );
     expect(sets.CLICK.map((entry) => entry.ref)).toEqual(["@e:ok"]);
+  });
+
+  it("offers an unoccluded checkout button inside a cart dialog", () => {
+    const rows: WireRow[] = [
+      ["@e:cart", "b", "Cart|oc=dialog"],
+      ["@e:checkout", "b", "Check out|fm=1"],
+      ["@e:close", "b", "Close dialog"],
+    ];
+    const sets = driveTargetSets(
+      rows,
+      {},
+      false,
+      [],
+      "https://whitejade.xyz/collections/the-ritual",
+      new Map(),
+      (text) => text,
+      [],
+      {
+        goal: "Reach checkout for the item in the cart",
+      },
+    );
+    expect(sets.CLICK.map((entry) => entry.ref)).toContain("@e:checkout");
   });
 
   it("records an undelivered decision and removes that control next time", () => {
