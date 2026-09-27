@@ -3330,9 +3330,23 @@ function rowCurrentValue(row: WireRow): string | undefined {
   return match?.[1];
 }
 
-export function typedValueEquals(actual: string | undefined, intended: string): boolean {
+export function typedValueEquals(
+  actual: string | undefined,
+  intended: string,
+  row?: WireRow,
+): boolean {
   if (actual === undefined) return false;
-  return actual.trim() === intended.trim();
+  if (actual.trim() === intended.trim()) return true;
+  if (row === undefined) return false;
+  if (rowField(row) === "phone" || /\b(?:phone|telephone|mobile|tel)\b/i.test(readableLabel(row))) {
+    const digits = (value: string) => value.replace(/\D/g, "");
+    return digits(actual).length > 0 && digits(actual) === digits(intended);
+  }
+  if (/(?:^|\|)it=number(?:\||$)/.test(row[2] ?? "")) {
+    return actual.trim().length > 0 && intended.trim().length > 0 &&
+      Number.isFinite(Number(actual)) && Number(actual) === Number(intended);
+  }
+  return false;
 }
 
 export function typedFieldMismatchReason(
@@ -6949,7 +6963,7 @@ async function driveLoop(input: {
         typedRow !== undefined &&
         !isPasswordRow(typedRow) &&
         shown !== undefined &&
-        !typedValueEquals(shown, intended)
+        !typedValueEquals(shown, intended, typedRow)
       ) {
         const pageForRetry = session.browser.page;
         if (pageForRetry !== null) {
@@ -6967,7 +6981,7 @@ async function driveLoop(input: {
         }
         const retried = findRow(rows, decision.actionKey, observation.url);
         const again = retried === undefined ? undefined : rowCurrentValue(retried);
-        if (!typedValueEquals(again, intended)) {
+        if (!typedValueEquals(again, intended, retried)) {
           return finish("stuck", {
             reason: typedFieldMismatchReason(readableLabel(typedRow), intended, again ?? shown),
           });

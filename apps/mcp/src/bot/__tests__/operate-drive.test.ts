@@ -1723,6 +1723,14 @@ describe("form-fill assignment helpers", () => {
     expect(typedValueEquals("Squire", "Squire")).toBe(true);
     expect(typedValueEquals("Squir", "Squire")).toBe(false);
     expect(typedValueEquals(undefined, "Squire")).toBe(false);
+    expect(
+      typedValueEquals("(212) 555-0123", "2125550123", ["@e:phone", "t", "Phone (optional)|f=phone"]),
+    ).toBe(true);
+    expect(
+      typedValueEquals("(212) 555-0124", "2125550123", ["@e:phone", "t", "Phone|f=phone"]),
+    ).toBe(false);
+    expect(typedValueEquals("01", "1", ["@e:qty", "t", "Quantity|it=number"])).toBe(true);
+    expect(typedValueEquals("(212) 555-0123", "2125550123", ["@e:name", "t", "Name"])).toBe(false);
     expect(typedFieldMismatchReason("First name", "Squire", "Squir")).toBe(
       'typed First name as "Squire" but the field shows "Squir"',
     );

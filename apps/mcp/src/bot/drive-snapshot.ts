@@ -192,6 +192,7 @@ export function driveRowsFromSnapshot(snapshot: DriveSnapshot): SnapshotRow[] {
       ...(element.inputType === undefined ? {} : { inputType: element.inputType }),
     });
     if (field !== undefined) facts.push(`f=${field}`);
+    if (element.inputType === "number") facts.push("it=number");
     const states: string[] = [];
     if (element.required === true) states.push("r");
     if (element.disabled === true) states.push("d");
