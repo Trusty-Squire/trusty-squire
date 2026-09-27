@@ -75,10 +75,10 @@ async function signal(unit: string, value: "SIGINT" | "SIGKILL"): Promise<void> 
   await run("systemctl", ["--user", "kill", "--kill-whom=all", `--signal=${value}`, unit]).catch(() => undefined);
 }
 
-/** SIGINT flushes Chrome's cookie store. Any remaining process after the
- * bounded grace is killed through cgroup membership, including reparented
- * renderers. This is also the new broker's crash recovery step. */
-export async function stopBrowserScope(profileDir: string, graceMs = 2_000): Promise<void> {
+/** SIGINT flushes Chrome's cookie store. Give it the same 10s grace as the
+ * portable owner quit before killing remaining cgroup members, including
+ * reparented renderers. This is also the new broker's crash recovery step. */
+export async function stopBrowserScope(profileDir: string, graceMs = 10_000): Promise<void> {
   if (!linuxBrowserUsesScope()) return;
   const unit = browserScopeUnit(profileDir);
   if (!(await scopePopulated(unit))) return;
