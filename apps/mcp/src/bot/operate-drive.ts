@@ -831,7 +831,10 @@ const LAYER_CONTROL_LABEL =
 
 export function pageOcclusionLayer(rows: readonly WireRow[]): "dialog" | "overlay" | undefined {
   if (rows.some((row) => rowOccluder(row) === "dialog")) return "dialog";
-  if (rows.some((row) => rowOccluder(row) === "overlay")) return "overlay";
+  // A local decoration can cover one control without covering the page.
+  // Treat an overlay as a page layer only when it offers a way through it.
+  const hasOverlay = rows.some((row) => rowOccluder(row) === "overlay");
+  if (hasOverlay && rows.some((row) => isLayerControlRow(row, "overlay"))) return "overlay";
   return undefined;
 }
 
@@ -843,13 +846,14 @@ export function isLayerControlRow(row: WireRow, layer: "dialog" | "overlay"): bo
 
 export function isLayerCandidateRow(
   row: WireRow,
-  rows: readonly WireRow[],
+  _rows: readonly WireRow[],
   layer: "dialog" | "overlay",
 ): boolean {
   const occluder = rowOccluder(row);
   if (isLayerControlRow(row, layer)) return true;
-  if (occluder === layer) return false;
-  return rows.some((other) => other[0] !== row[0] && rowOccluder(other) === row[0]);
+  // The snapshot names covered controls, not the complete contents of a
+  // dialog. Its own forward controls can have no occlusion marker at all.
+  return occluder === undefined;
 }
 
 export function pagePathKey(url: string): string {
@@ -3244,7 +3248,7 @@ export function typeableCandidates(
 
 export function selectCandidates(
   rows: readonly WireRow[],
-  _facts: Record<string, string>,
+  facts: Record<string, string>,
   includePayment: boolean,
   filledRefs: readonly string[] = [],
   pageUrl: string = "",
@@ -3256,6 +3260,7 @@ export function selectCandidates(
   for (const row of rows) {
     if (!isFillableRow(row) || !isSelectRow(row) || isDisabledRow(row) || isActedRow(row)) continue;
     if (filled.has(row[0])) continue;
+    if (rowAlreadyShowsFact(row, facts, matchingFactKeys(facts, row))) continue;
     if (isOffscreenRow(row) && !allowOffscreen) continue;
     if (isPaymentRow(row) || isCvvRow(row)) continue;
     const role = ROLE_LETTERS[row[1]] ?? row[1];

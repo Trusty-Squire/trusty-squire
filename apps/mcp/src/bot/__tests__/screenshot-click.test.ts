@@ -87,6 +87,31 @@ function point(
 }
 
 describe("screenshot-bound native pointer dispatch", () => {
+  it("clicks a main-page control after an unrelated child frame navigates", async () => {
+    const f = await fixture(
+      1,
+      false,
+      browser,
+      '<button id="next" style="position:absolute;left:20px;top:30px;width:100px;height:40px">Next</button>',
+    );
+    try {
+      await f.page.evaluate(() => {
+        (window as unknown as { clicks: number }).clicks = 0;
+        document.querySelector("#next")!.addEventListener("click", () => {
+          (window as unknown as { clicks: number }).clicks += 1;
+        });
+      });
+      const shot = await f.controller.captureOperatorScreenshot();
+      await f.frame.goto("http://child.test/next");
+      await expect(clickScreenshot(f.page, point(shot, 40, 50), () => {})).resolves.toBe(
+        "dispatched",
+      );
+      expect(await f.page.evaluate("window.clicks")).toBe(1);
+    } finally {
+      await f.close();
+    }
+  });
+
   it.each(["button", "descendant", "unrelated"] as const)(
     "binds control text while allowing %s text changes",
     async (change) => {
