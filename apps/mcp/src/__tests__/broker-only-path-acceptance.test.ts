@@ -29,6 +29,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { SessionStore } from "../session.js";
 import { defaultBrokerSocket } from "../bot/broker/discovery.js";
 import { BrokerClient } from "../bot/broker/transport.js";
+import { linuxBrowserUsesScope } from "../bot/browser-scope.js";
 import { profilePathIdentity } from "../bot/profile.js";
 
 const require = createRequire(import.meta.url);
@@ -36,6 +37,7 @@ const DIST_BIN = fileURLToPath(new URL("../bin.js", import.meta.url));
 
 const canRun = process.platform === "linux" && existsSync(chromium.executablePath());
 const describeReal = canRun ? describe : describe.skip;
+const canRunScope = canRun && linuxBrowserUsesScope();
 
 const ACCOUNT_ID = "acceptance-account";
 const FIRST_TOKEN = "acceptance-token-1";
@@ -45,6 +47,7 @@ interface RecordedCall {
   method: string;
   url: string;
   authorization: string | undefined;
+  cookie: string | undefined;
 }
 
 /** A local stand-in for the product API: a few pages to drive and a JSON
@@ -64,9 +67,23 @@ async function startApiStub(): Promise<{
       method: request.method ?? "GET",
       url,
       authorization: request.headers.authorization as string | undefined,
+      cookie: request.headers.cookie,
     });
     if (url === "/slow") {
       markSlowStarted();
+      return;
+    }
+    if (url === "/login") {
+      response.setHeader("Set-Cookie", "broker_login=fresh-session; HttpOnly; Max-Age=86400; Path=/");
+      response.end("signed in");
+      return;
+    }
+    if (url === "/account") {
+      response.end(
+        request.headers.cookie?.includes("broker_login=fresh-session")
+          ? "authenticated"
+          : "signed out",
+      );
       return;
     }
     if (url.startsWith("/v1/")) {
@@ -96,19 +113,23 @@ async function startApiStub(): Promise<{
 
 /** Processes actually holding this profile (Chrome's own root, never a
  * renderer/GPU child). */
-async function chromeRoots(profile: string): Promise<number> {
+async function chromeRootPids(profile: string): Promise<number[]> {
   const pids = (await readdir("/proc")).filter((entry) => /^\d+$/.test(entry));
   const matches = await Promise.all(
     pids.map(async (pid) => {
       const argv = await readFile(`/proc/${pid}/cmdline`, "utf8").catch(() => "");
       const words = argv.replaceAll("\0", " ").split(" ");
-      return (
+      const root =
         words.includes(`--user-data-dir=${profile}`) &&
-        !words.some((word) => word.startsWith("--type="))
-      );
+        !words.some((word) => word.startsWith("--type="));
+      return root ? Number(pid) : null;
     }),
   );
-  return matches.filter(Boolean).length;
+  return matches.filter((pid): pid is number => pid !== null);
+}
+
+async function chromeRoots(profile: string): Promise<number> {
+  return (await chromeRootPids(profile)).length;
 }
 
 interface Stack {
@@ -123,6 +144,7 @@ interface Stack {
   /** Launch the daemon the way `connect` does — with the caller's isolated
    * environment — so a test can reach the broker with no enrollment at all. */
   startBroker: () => Promise<void>;
+  competeBroker: () => Promise<{ code: number | null; stderr: string }>;
   stop: () => Promise<void>;
 }
 
@@ -269,13 +291,27 @@ async function startStack(
   };
 
   const startBroker = async (): Promise<void> => {
-    broker ??= spawn(process.execPath, [DIST_BIN, "broker"], {
-      detached: true,
-      stdio: "ignore",
-      env,
-    });
-    broker.unref();
+    if (broker === undefined || !alive(broker.pid!)) {
+      broker = spawn(process.execPath, [DIST_BIN, "broker"], {
+        detached: true,
+        stdio: "ignore",
+        env,
+      });
+      broker.unref();
+    }
     await waitForBrokerSocket(socket);
+  };
+  const competeBroker = async (): Promise<{ code: number | null; stderr: string }> => {
+    const contender = spawn(process.execPath, [DIST_BIN, "broker"], {
+      env,
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    let stderr = "";
+    contender.stderr.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString("utf8");
+    });
+    const code = await new Promise<number | null>((resolve) => contender.once("exit", resolve));
+    return { code, stderr };
   };
 
   return {
@@ -287,6 +323,7 @@ async function startStack(
     startServer,
     startRelay,
     startBroker,
+    competeBroker,
     stop: async () => {
       await Promise.all(clients.map(async (client) => await client.close().catch(() => undefined)));
       await stopBroker(profile);
@@ -425,6 +462,77 @@ describeReal("broker-only path acceptance", () => {
     expect(error).toBeInstanceOf(Error);
     expect(String(error)).not.toContain("navigation did not settle");
     await expect.poll(() => chromeRoots(stack.profile), { timeout: 12_000, interval: 100 }).toBe(0);
+  });
+
+  it("preserves a fresh cookie across SIGTERM and immediate broker restart", { timeout: 120_000 }, async () => {
+    const { stack } = await fixture(true);
+    await stack.startBroker();
+    const first = await BrokerClient.connect(stack.socket);
+    try {
+      await first.call("open", { serviceUrl: `${stack.baseUrl}/login`, ceremony: true });
+      await first.call("open", { serviceUrl: `${stack.baseUrl}/account`, ceremony: true });
+      expect(stack.calls.filter((call) => call.url === "/account").pop()?.cookie).toContain("broker_login=fresh-session");
+      const pid = await brokerPid(stack.profile);
+      expect(pid).not.toBeNull();
+      process.kill(pid!, "SIGTERM");
+      await expect.poll(() => alive(pid!), { timeout: 20_000, interval: 100 }).toBe(false);
+      await stack.startBroker();
+      const second = await BrokerClient.connect(stack.socket);
+      try {
+        await second.call("open", { serviceUrl: `${stack.baseUrl}/account`, ceremony: true });
+        expect(stack.calls.filter((call) => call.url === "/account").pop()?.cookie).toContain("broker_login=fresh-session");
+      } finally {
+        await second.release().catch(() => undefined);
+      }
+    } finally {
+      await first.release().catch(() => undefined);
+    }
+  });
+
+  it.skipIf(!canRunScope)("waits for a delayed Chrome graceful exit before replacement broker launch", { timeout: 120_000 }, async () => {
+    const { stack } = await fixture(true);
+    await stack.startBroker();
+    const first = await BrokerClient.connect(stack.socket);
+    let chromePid: number | undefined;
+    let resume: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const login = await first.call("open", { serviceUrl: `${stack.baseUrl}/login`, ceremony: true }) as { sessionId: string };
+      const before = await first.call("open", { serviceUrl: `${stack.baseUrl}/account`, ceremony: true }) as { sessionId: string };
+      expect(stack.calls.filter((call) => call.url === "/account").pop()?.cookie).toContain("broker_login=fresh-session");
+      await first.call("close", { sessionId: login.sessionId, args: { session_id: login.sessionId } });
+      await first.call("close", { sessionId: before.sessionId, args: { session_id: before.sessionId } });
+      const roots = await chromeRootPids(stack.profile);
+      expect(roots).toHaveLength(1);
+      chromePid = roots[0]!;
+      const pid = await brokerPid(stack.profile);
+      expect(pid).not.toBeNull();
+      // Keep Chrome from handling SIGINT until after the old 2s scope grace.
+      // A real shutdown under load can take the same time. SIGKILL at that
+      // point discards a cookie Chrome has not yet committed to disk.
+      process.kill(chromePid, "SIGSTOP");
+      process.kill(pid!, "SIGTERM");
+      resume = setTimeout(() => {
+        try { process.kill(chromePid!, "SIGCONT"); } catch { /* already gone */ }
+      }, 6_000);
+      const contender = await stack.competeBroker();
+      expect(contender.code).not.toBe(0);
+      expect(contender.stderr).toContain("another Trusty Squire session is already using the browser");
+      await expect.poll(() => alive(pid!), { timeout: 20_000, interval: 100 }).toBe(false);
+      await stack.startBroker();
+      const second = await BrokerClient.connect(stack.socket);
+      try {
+        await second.call("open", { serviceUrl: `${stack.baseUrl}/account`, ceremony: true });
+        expect(stack.calls.filter((call) => call.url === "/account").pop()?.cookie).toContain("broker_login=fresh-session");
+      } finally {
+        await second.release().catch(() => undefined);
+      }
+    } finally {
+      if (resume !== undefined) clearTimeout(resume);
+      if (chromePid !== undefined) {
+        try { process.kill(chromePid, "SIGCONT"); } catch { /* already gone */ }
+      }
+      await first.release().catch(() => undefined);
+    }
   });
 
   it("an enrollment completes while a session is already live", { timeout: 180_000 }, async () => {
