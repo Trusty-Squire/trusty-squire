@@ -8,7 +8,7 @@ import type { ApiClient } from "../../api-client.js";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
-import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
+import { chromium, type Browser, type BrowserContext, type Page, type Route } from "playwright";
 import { BrowserController } from "../browser.js";
 import {
   advanceOAuthConsent,
@@ -84,13 +84,36 @@ async function signedInGoogleContext(): Promise<BrowserContext> {
   await context.addCookies([
     { name: "SID", value: "live-google-session-cookie", domain: ".google.com", path: "/" },
   ]);
-  await context.route("https://myaccount.google.com/**", (route) =>
+  await context.route("https://myaccount.google.com/**", async (route) =>
     route.fulfill({
       contentType: "text/html",
-      body: '<button aria-label="Google Account: Operator (operator@example.com)"></button>',
+      body: await googleIdentityFixtureBody(context),
     }),
   );
   return context;
+}
+
+async function googleIdentityFixtureBody(context: BrowserContext): Promise<string> {
+  const cookies = await context.cookies("https://myaccount.google.com/");
+  return cookies.some((cookie) => cookie.name === "SID")
+    ? '<button aria-label="Google Account: Operator (operator@example.com)"></button>'
+    : "<main>Sign in</main>";
+}
+
+// A later catch-all route wins over the account route installed by
+// signedInGoogleContext. Keep the live-identity fixture visible to the
+// operation-scoped gate in tests that route every OAuth navigation.
+async function routeSignedInGoogleFixture(
+  context: BrowserContext,
+  handler: (route: Route) => Promise<void> | void,
+): Promise<void> {
+  await context.route("**/*", async (route) => {
+    if (new URL(route.request().url()).hostname === "myaccount.google.com") {
+      await route.fulfill({ contentType: "text/html", body: await googleIdentityFixtureBody(context) });
+      return;
+    }
+    await handler(route);
+  });
 }
 
 async function controllerForProduct(): Promise<{ controller: BrowserController; product: Page }> {
@@ -164,7 +187,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
           ? `${callback}?error=access_denied&error_description=The+user+denied+access`
           : callback;
       const provider = `https://accounts.google.com/pending?redirect_uri=${encodeURIComponent(callback)}`;
-      await context.route("**/*", (route) =>
+      await routeSignedInGoogleFixture(context, (route) =>
         route.fulfill({
           contentType: "text/html",
           body:
@@ -1986,7 +2009,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
       const productUrl = `https://${name}.queue.test/login`;
       const returnUrl = `https://${name}.queue.test/dashboard`;
       const providerUrl = `https://accounts.google.com/${name}?redirect_uri=${encodeURIComponent(returnUrl)}`;
-      await context.route("**/*", (route) => {
+      await routeSignedInGoogleFixture(context, (route) => {
         const url = route.request().url();
         return route.fulfill({
           contentType: "text/html",
@@ -2056,7 +2079,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
       "https://setup-gap.test/dashboard",
     )}`;
     let sessionId: string | undefined;
-    await context.route("**/*", (route) => {
+    await routeSignedInGoogleFixture(context, (route) => {
       const url = route.request().url();
       if (url === productUrl) {
         return route.fulfill({
@@ -2109,7 +2132,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
       "https://dispatch-gap.test/dashboard",
     )}`;
     let sessionId: string | undefined;
-    await context.route("**/*", (route) => {
+    await routeSignedInGoogleFixture(context, (route) => {
       const url = route.request().url();
       if (url === productUrl) {
         return route.fulfill({
@@ -2163,7 +2186,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
       "https://intent-gap.test/dashboard",
     )}`;
     let sessionId: string | undefined;
-    await context.route("**/*", (route) =>
+    await routeSignedInGoogleFixture(context, (route) =>
       route.fulfill({
         contentType: "text/html",
         body:
