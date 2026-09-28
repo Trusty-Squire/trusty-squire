@@ -502,6 +502,29 @@ const sessionGoogleIdentity = new WeakMap<
   { providers: OAuthProviderId[]; userEmail: string | null }
 >();
 
+async function providerIdentityForSession(session: Session): Promise<{
+  providers: OAuthProviderId[];
+  userEmail: string | null;
+}> {
+  const identity =
+    sessionGoogleIdentity.get(session) ??
+    (await detectProvisionPrimaryProviderSession(session.browser));
+  if (identity.providers.includes("google")) {
+    sessionGoogleIdentity.set(session, identity);
+    session.userEmail = identity.userEmail;
+  }
+  return identity;
+}
+
+/** Share the operation-scoped live provider probe with drive's OAuth choices. */
+export async function liveProviderSessionsForSession(
+  sessionId: string,
+): Promise<OAuthProviderId[]> {
+  const session = sessions.get(sessionId);
+  if (session === undefined) throw new UnknownProvisionSessionError(sessionId);
+  return (await providerIdentityForSession(session)).providers;
+}
+
 /** Check the live Google identity at the operation that needs it.
  * Successful detection supplies the session email for signup and inbox work;
  * a missing provider returns the long-standing google_session hand-back.
@@ -511,14 +534,9 @@ export async function googleSessionGateForSession(
 ): Promise<{ ok: true } | { ok: false; needs_user: NeedsUserLogin }> {
   const session = sessions.get(sessionId);
   if (session === undefined) throw new UnknownProvisionSessionError(sessionId);
-  const identity =
-    sessionGoogleIdentity.get(session) ??
-    (await detectProvisionPrimaryProviderSession(session.browser));
+  const identity = await providerIdentityForSession(session);
   const gate = googleSessionGate(identity.providers);
-  if (gate.ok) {
-    sessionGoogleIdentity.set(session, identity);
-    session.userEmail = identity.userEmail;
-  } else {
+  if (!gate.ok) {
     audit(sessionId, "connect_gate", { ok: false, wall: "google_session" });
   }
   return gate;

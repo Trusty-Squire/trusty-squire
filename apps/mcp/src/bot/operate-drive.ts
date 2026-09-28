@@ -28,7 +28,6 @@ import {
 import {
   act,
   awaitVerification,
-  generatePassword,
   observe,
   startProvisionSession,
   TargetStaleError,
@@ -37,7 +36,8 @@ import {
   type ProvisionAction,
 } from "./provision-session.js";
 import { resolveInboxSearch } from "./capture/verification.js";
-import { sessionForCall } from "./session/lifecycle.js";
+import { liveProviderSessionsForSession, sessionForCall } from "./session/lifecycle.js";
+import type { OAuthProviderId } from "./oauth-providers.js";
 import {
   compactV2EpochDoc,
   compactV2RefAllocator,
@@ -364,6 +364,11 @@ export interface DriveHandoff {
   options?: Record<string, string>;
   probabilities?: Record<string, number>;
   field?: string;
+  needs_user?: NeedsUserLogin | {
+    wall: "oauth_sign_in";
+    message: string;
+    resume: "connect";
+  };
   observation?: Observation;
   trajectory: DriveTrajectoryStep[];
   done: string;
@@ -929,6 +934,7 @@ export interface DriveAimContext {
   goal?: string;
   submittedThisDrive?: boolean;
   visitedSectionKeys?: readonly string[];
+  liveProviders?: readonly OAuthProviderId[];
 }
 
 export function rowFormId(row: WireRow): string | undefined {
@@ -2381,8 +2387,10 @@ export function isGoogleAuthRow(row: WireRow): boolean {
 
 export function isOauthChromeRow(row: WireRow): boolean {
   if (oauthProviderForRow(row) !== undefined) return true;
+  if (!OAUTH_CONTROL_ROLES.has(row[1])) return false;
   const label = readableLabel(row).toLowerCase();
-  return /github|sso|\boauth\b/.test(label);
+  return /\b(?:microsoft|hasura|sso|oauth)\b/.test(label) ||
+    /\/broker\/[^/]+\/login\b/i.test(row[2] ?? "");
 }
 
 /** Goal text that rules out third-party sign-in as the path to take. */
@@ -2847,7 +2855,7 @@ export function applyReleasedCardFacts(
 }
 
 export function ensureGeneratedFacts(
-  rows: readonly WireRow[],
+  _rows: readonly WireRow[],
   facts: Record<string, string>,
 ): Record<string, string> {
   const next = { ...facts };
@@ -2855,12 +2863,6 @@ export function ensureGeneratedFacts(
   const last = next.last_name?.trim() ?? "";
   if (next.name === undefined && first.length > 0 && last.length > 0) {
     next.name = `${first} ${last}`;
-  }
-  for (const row of rows) {
-    if (!isFillableRow(row) || isActedRow(row) || isPaymentRow(row) || isCvvRow(row)) continue;
-    if (isPasswordRow(row) && matchingFactKeys(next, row).length === 0) {
-      next.password = generatePassword();
-    }
   }
   return next;
 }
@@ -3964,6 +3966,10 @@ export function driveTargetSets(
 ): DriveTargetSets {
   const remaining = { n: DRIVE_MAX_CANDIDATES };
   const skipped = new Set(skippedClickRefs);
+  const offeredProviders = new Set(rows.map(oauthProviderForRow).filter((provider) => provider !== undefined));
+  const liveProviders = new Set(
+    [...offeredProviders].filter((provider) => aim.liveProviders?.includes(provider)),
+  );
   const hideFilters = goalSeeksKey(aim.goal ?? "");
   const hasInAppWork = rows.some(
     (row) =>
@@ -3977,6 +3983,11 @@ export function driveTargetSets(
   const layer = pageOcclusionLayer(rows);
   const failed = new Set(aim.failedKeys ?? []);
   const keepRow = (row: WireRow): boolean => {
+    const provider = oauthProviderForRow(row);
+    if (
+      offeredProviders.size > 1 && liveProviders.size > 0 && isOauthChromeRow(row) &&
+      (provider === undefined || !liveProviders.has(provider))
+    ) return false;
     if (isCodeSampleRow(row)) return false;
     if (isKeyGoal(aim.goal ?? "") && isExistingCredentialMutationRow(row)) return false;
     if (failed.has(actionFailureKey(row, pageUrl)) || failed.has(row[0])) return false;
@@ -4902,6 +4913,7 @@ export function buildHandoff(input: {
   jevCalls: number;
   question?: DriveHandoffQuestion;
   field?: string;
+  needsUser?: DriveHandoff["needs_user"];
   jevRetried?: string;
   approvalUrl?: string;
   payment?: Record<string, unknown>;
@@ -4931,6 +4943,7 @@ export function buildHandoff(input: {
             : { probabilities: input.question.probabilities }),
         }),
     ...(input.field === undefined ? {} : { field: input.field }),
+    ...(input.needsUser === undefined ? {} : { needs_user: input.needsUser }),
     ...(input.observation === undefined ? {} : { observation: input.observation }),
     trajectory: input.trajectory.slice(-DRIVE_HISTORY_CAP),
     done,
@@ -5513,8 +5526,12 @@ export function resumeAnswerOptions(
   goal: string,
   includePayment: boolean,
   pageUrl: string,
+  liveProviders?: readonly OAuthProviderId[],
 ): Record<string, string> {
-  const sets = driveTargetSets(rows, facts, includePayment, [], pageUrl, new Map(), (text) => text, [], { goal });
+  const sets = driveTargetSets(rows, facts, includePayment, [], pageUrl, new Map(), (text) => text, [], {
+    goal,
+    ...(liveProviders === undefined ? {} : { liveProviders }),
+  });
   // The question builder applies the decision-budget cap to these same sets.
   // A handoff must offer exactly the target keys its resume validator accepts.
   buildDriveQuestions(rows, facts, goal, includePayment, [], pageUrl, new Map(), sets);
@@ -5535,6 +5552,7 @@ export function resumeAction(
   goal: string,
   cardRef: string | undefined,
   pageUrl: string,
+  liveProviders?: readonly OAuthProviderId[],
 ): DriveDecision {
   if (answer === DRIVE_FIXED_DONE || answer === "done") return { kind: "complete", confidence: 1 };
   if (answer === DRIVE_FIXED_STUCK || answer === "stuck") {
@@ -5553,20 +5571,30 @@ export function resumeAction(
     [],
     {
       goal,
+      ...(liveProviders === undefined ? {} : { liveProviders }),
     },
   );
   const questions = buildDriveQuestions(rows, facts, goal, includePayment, [], pageUrl, new Map(), sets);
-  const validKeys = Object.keys(resumeAnswerOptions(rows, facts, goal, includePayment, pageUrl));
+  const validKeys = Object.keys(resumeAnswerOptions(rows, facts, goal, includePayment, pageUrl, liveProviders));
   const offered = [...sets.CLICK, ...sets.TYPE_TEXT, ...sets.SELECT].find(
     (entry) => entry.slug === answer || entry.ref === answer,
   );
-  const row = offered?.row ?? findRow(rows, answer, pageUrl);
+  const fallbackRow = findRow(rows, answer, pageUrl);
+  const provider = fallbackRow === undefined ? undefined : oauthProviderForRow(fallbackRow);
+  const liveProviderOffered = rows.some((row) => {
+    const offeredProvider = oauthProviderForRow(row);
+    return offeredProvider !== undefined && liveProviders?.includes(offeredProvider) === true;
+  });
+  const row = offered?.row ?? (
+    fallbackRow !== undefined && isOauthChromeRow(fallbackRow) && liveProviderOffered &&
+    (provider === undefined || !liveProviders?.includes(provider)) ? undefined : fallbackRow
+  );
   if (row === undefined) {
     return {
       kind: "invalid_answer",
       question: {
         question: `Choose one current target key: ${validKeys.join(", ")}. Operation names such as CLICK are not resume answers.`,
-        options: resumeAnswerOptions(rows, facts, goal, includePayment, pageUrl),
+        options: resumeAnswerOptions(rows, facts, goal, includePayment, pageUrl, liveProviders),
       },
       reason: "resume_not_current_option",
       confidence: 0,
@@ -5659,6 +5687,7 @@ export async function runOperateDrive(
         seconds: elapsed(),
         jevCalls: 0,
         field: observation.needs_user?.wall ?? "session",
+        ...(observation.needs_user === undefined ? {} : { needsUser: observation.needs_user }),
         ...(observation.needs_user === undefined
           ? {}
           : { question: { question: observation.needs_user.message, options: {} } }),
@@ -5815,6 +5844,15 @@ async function driveLoop(input: {
   let dispatchedActs = 0;
   let countedJevCalls = drive.jevCalls;
   let countedDispatchedActs = 0;
+  let liveProviders: readonly OAuthProviderId[] | undefined;
+  const detectOfferedProviderSessions = async (): Promise<void> => {
+    if (
+      liveProviders === undefined &&
+      new Set(rows.map(oauthProviderForRow).filter((provider) => provider !== undefined)).size > 1
+    ) {
+      liveProviders = await liveProviderSessionsForSession(sessionId);
+    }
+  };
   const spendStep = (branch: string): void => {
     if (drive.jevCalls === countedJevCalls && dispatchedActs === countedDispatchedActs) {
       appendDriveTrace(session, {
@@ -5871,6 +5909,7 @@ async function driveLoop(input: {
     finish("needs_value", {
       field: wall.wall,
       question: { question: wall.message, options: {} },
+      needsUser: wall,
     });
 
   const solveCaptcha = async (): Promise<string> =>
@@ -6349,7 +6388,7 @@ async function driveLoop(input: {
     if (decision.kind === "low_confidence") {
       drive.lastQuestion = {
         question: "Choose one current target key, or DONE, BLOCKED, or WAIT.",
-        options: resumeAnswerOptions(rows, drive.facts, drive.goal, drive.facts.card_ref !== undefined, observation.url),
+        options: resumeAnswerOptions(rows, drive.facts, drive.goal, drive.facts.card_ref !== undefined, observation.url, liveProviders),
       };
       return finish("low_confidence", {
         question: drive.lastQuestion,
@@ -6931,6 +6970,28 @@ async function driveLoop(input: {
         }
         return finishOnWall(acted.needsUser);
       }
+      let onProviderPage = false;
+      if (acted.oauth?.state === "awaiting_human") {
+        try {
+          const host = new URL(session.browser.currentUrl()).hostname;
+          onProviderPage = host === "accounts.google.com" || host === "github.com";
+        } catch {
+          // An unreadable URL is no evidence that a person can sign in here.
+        }
+      }
+      if (acted.oauth?.state === "awaiting_human" && onProviderPage) {
+        const wall = {
+          wall: "oauth_sign_in",
+          message:
+            `${acted.oauth.reason} Run \`npx @trusty-squire/mcp connect --json\` to get the shared-browser sign_in_url for the person, then resume observing this session.`,
+          resume: "connect",
+        } as const;
+        return finish("needs_value", {
+          field: wall.wall,
+          question: { question: wall.message, options: {} },
+          needsUser: wall,
+        });
+      }
       if (page !== null) {
         settleMs = await settleDriveStep(page, acted.combobox);
         const afterEpoch = await documentEpochOf(page);
@@ -7207,6 +7268,7 @@ async function driveLoop(input: {
   };
 
   if (args.answer !== undefined) {
+    await detectOfferedProviderSessions();
     const compactRows = drive.resumeCompactRows ?? mergeCompactTable([], priorCompact ?? {});
     const answer = resolveResumeAnswer(args.answer, rows, compactRows, observation.url);
     // Resume binds to the fresh snapshot: the pending operation (e.g. an
@@ -7216,7 +7278,7 @@ async function driveLoop(input: {
     drive.boundFingerprint = driveProgressFingerprint(observation, rows, drive, session);
     drive.consumedActionKey = null;
     const resumed = await applyDecision(
-      resumeAction(answer, rows, drive.facts, drive.goal, drive.facts.card_ref, observation.url),
+      resumeAction(answer, rows, drive.facts, drive.goal, drive.facts.card_ref, observation.url, liveProviders),
     );
     if (resumed !== "continue") return resumed;
     spendStep("resume");
@@ -7797,6 +7859,7 @@ async function driveLoop(input: {
     const skippedActions = [
       ...new Set([...(drive.exhaustedActionKeys ?? []), ...(drive.staleClickRefs ?? [])]),
     ];
+    await detectOfferedProviderSessions();
     const sets = driveTargetSets(
       rows,
       drive.facts,
@@ -7812,6 +7875,7 @@ async function driveLoop(input: {
         goal: drive.goal,
         submittedThisDrive: drive.submittedThisDrive === true,
         visitedSectionKeys: drive.visitedSectionKeys ?? [],
+        ...(liveProviders === undefined ? {} : { liveProviders }),
       },
     );
     const actionable = sets.operations.filter(
