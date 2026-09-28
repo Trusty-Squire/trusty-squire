@@ -6,7 +6,7 @@ import { chromium, type Browser } from "playwright";
 import type { ApiClient } from "../../api-client.js";
 import { BrowserController } from "../browser.js";
 import { OAUTH_PROVIDERS } from "../oauth-providers.js";
-import { peakedProbabilities, resumeAction, resumeAnswerOptions, runOperateDrive, type DriveDependencies, type WireRow } from "../operate-drive.js";
+import { ensureGeneratedFacts, peakedProbabilities, resumeAction, resumeAnswerOptions, runOperateDrive, type DriveDependencies, type WireRow } from "../operate-drive.js";
 import {
   act,
   awaitVerification,
@@ -301,6 +301,70 @@ describe("drive OAuth trace", () => {
         deps,
       );
       expect(await page.locator('input[type="password"]').inputValue()).toBe("");
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
+  it("still generates and types a password on a new-account form", async () => {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await page.goto(`data:text/html,${encodeURIComponent('<main><h1>Create an account</h1><label>Password <input type="password" name="password" required></label><button>Create account</button></main>')}`);
+    const started = await startHarnessProvisionSession({
+      browser: BrowserController.fromHarnessPage(page),
+      serviceUrl: page.url(),
+      format: "compact",
+      initialObservation: "drive",
+    });
+    try {
+      const deps: DriveDependencies = {
+        askJev: async (_api, _state, questions) => {
+          const operation = questions.operation;
+          const type = questions.TYPE_TEXT_target;
+          if (operation?.type !== "choice" || type?.type !== "choice") throw new Error("No password choice");
+          const target = Object.keys(type.criteria)[0]!;
+          return {
+            attempts: 1,
+            elapsedMs: 1,
+            result: {
+              answers: {
+                operation: {
+                  choice: "TYPE_TEXT",
+                  confidence: 0.95,
+                  probabilities: peakedProbabilities(Object.keys(operation.criteria), "TYPE_TEXT"),
+                },
+                TYPE_TEXT_target: {
+                  choice: target,
+                  confidence: 0.95,
+                  probabilities: peakedProbabilities(Object.keys(type.criteria), target),
+                },
+              },
+            },
+          };
+        },
+        act,
+        observe,
+        startSession: async () => { throw new Error("existing session"); },
+        awaitVerification,
+        injectCard: async () => ({ status: "unused" }),
+      };
+      await runOperateDrive(
+        { session_id: started.session_id, goal: "Sign up for Neon", max_steps: 1 },
+        {} as ApiClient,
+        undefined,
+        deps,
+      );
+      expect(await page.locator('input[type="password"]').inputValue()).not.toBe("");
+      const loginRows: WireRow[] = [
+        ["@password", "t", "Password|f=password"],
+        ["@signup", "l", "Sign up for an account"],
+        ["@login", "b", "Log in"],
+      ];
+      expect(ensureGeneratedFacts(loginRows, {}, {
+        pageUrl: "https://console.neon.tech/login",
+        goal: "Sign up for Neon",
+      }).password).toBeUndefined();
     } finally {
       await finishProvisionSession(started.session_id);
       await context.close();

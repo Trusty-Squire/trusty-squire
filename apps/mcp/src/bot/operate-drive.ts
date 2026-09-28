@@ -28,6 +28,7 @@ import {
 import {
   act,
   awaitVerification,
+  generatePassword,
   observe,
   startProvisionSession,
   TargetStaleError,
@@ -2855,14 +2856,36 @@ export function applyReleasedCardFacts(
 }
 
 export function ensureGeneratedFacts(
-  _rows: readonly WireRow[],
+  rows: readonly WireRow[],
   facts: Record<string, string>,
+  context: { pageUrl?: string; headings?: readonly string[]; goal?: string } = {},
 ): Record<string, string> {
   const next = { ...facts };
   const first = next.first_name?.trim() ?? "";
   const last = next.last_name?.trim() ?? "";
   if (next.name === undefined && first.length > 0 && last.length > 0) {
     next.name = `${first} ${last}`;
+  }
+  const phase = inferPagePhase(context.pageUrl ?? "", context.headings);
+  const hasLoginAction = rows.some((row) => isButtonLikeRow(row) && isLoginRow(row));
+  const hasLoginHeading = context.headings?.some((heading) => /\b(?:log|sign)\s*in\b/i.test(heading)) === true;
+  const hasSignupAction = rows.some((row) => isButtonLikeRow(row) && isCreateAccountRow(row));
+  const hasConfirmPassword = rows.some((row) =>
+    isFillableRow(row) && isPasswordRow(row) &&
+    /(?:^|[_ ])(?:confirm|confirmation|repeat|reenter|verify)(?:[_ ]|$)/.test(
+      `${normalizeKey(fieldNameForRow(row))} ${normalizeKey(readableLabel(row))}`,
+    ),
+  );
+  if (
+    phase !== "login" && (phase === "signup" || (!hasLoginAction && !hasLoginHeading)) &&
+    (phase === "signup" || hasSignupAction || hasConfirmPassword || goalWantsSignup(context.goal))
+  ) {
+    if (next.password === undefined && rows.some((row) =>
+      isFillableRow(row) && !isActedRow(row) && !isPaymentRow(row) && !isCvvRow(row) &&
+      isPasswordRow(row) && matchingFactKeys(next, row).length === 0
+    )) {
+      next.password = generatePassword();
+    }
   }
   return next;
 }
@@ -7321,6 +7344,7 @@ async function driveLoop(input: {
     drive.facts = ensureGeneratedFacts(
       rows,
       applyReleasedCardFacts(drive.facts, session.releasedPaymentCard?.card),
+      { pageUrl: observation.url, headings: observation.semantic?.headings ?? [], goal: drive.goal },
     );
     let pageUrl = observation.url;
     let missing = requiredFillableMissingFact(
