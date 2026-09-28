@@ -721,6 +721,15 @@ async function compactV2Observation(
     sameDocument &&
     previous.compactMapEmitted === true;
   const currentRefs = new Set(safe.rows.map((row) => row.ref));
+  // A crowded page may never deliver its whole baseline map, so its next
+  // action cannot use a delta. Keep the acted control on the first page of
+  // that full-map response, with its newly observed state.
+  const actedRow =
+    actedRef === undefined ? undefined : safe.rows.find((row) => row.ref === actedRef);
+  const fullActionRows =
+    outputFormat === "compact" && actedRow !== undefined
+      ? [{ ...actedRow, acted: true as const }, ...safe.rows.filter((row) => row.ref !== actedRef)]
+      : safe.rows;
   const compactRows = canCompactActionDelta
     ? safe.rows.flatMap((row) => {
         // E4: the acted control's current row always travels in the action
@@ -734,7 +743,14 @@ async function compactV2Observation(
         const prior = previous.byRef.get(row.ref);
         return prior === undefined || !sameCompactV2Control(prior, row) ? [row] : [];
       })
-    : safe.rows;
+    : fullActionRows;
+  const responseRows =
+    actedRef === undefined
+      ? compactRows
+      : [
+          ...compactRows.filter((row) => row.ref === actedRef),
+          ...compactRows.filter((row) => row.ref !== actedRef),
+        ];
   const compactRemoved = canCompactActionDelta
     ? [...previous.byRef.keys()].filter((ref) => !currentRefs.has(ref))
     : [];
@@ -743,7 +759,7 @@ async function compactV2Observation(
     session.compactV2Index,
     compactV2ControlCursorScope(session),
     pageUrl,
-    compactRows,
+    responseRows,
   );
   const hintSnapshot =
     session.compactV2HintPages.length > 1
@@ -799,7 +815,7 @@ async function compactV2Observation(
         stage,
         pageUrl,
         semantics,
-        rows: delta ? compactRows : safe.rows,
+        rows: delta ? responseRows : fullActionRows,
         ...(delta ? { delta: true as const, removed: compactRemoved } : {}),
         cursorFor: (next) => compactV2Cursor(session, controlSnapshot, next),
         ...(startPayloadMetadata === undefined ? {} : { startMetadata: startPayloadMetadata }),
@@ -819,7 +835,7 @@ async function compactV2Observation(
         session.compactV2Index,
         compactV2ControlCursorScope(session),
         pageUrl,
-        safe.rows,
+        fullActionRows,
       );
       page = encodePage(false);
     }

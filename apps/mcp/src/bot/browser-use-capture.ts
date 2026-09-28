@@ -1349,13 +1349,25 @@ export async function captureBrowserUseDOM(
         if (proxyTarget !== undefined) {
           el.type = proxyTarget.attributes.type ?? null;
           el.role = proxyTarget.attributes.role ?? proxyTarget.attributes.type ?? "button";
-          el.checked = proxyTarget.attributes.checked === "true";
           el.disabled =
             "disabled" in proxyTarget.attributes ||
             proxyTarget.attributes["aria-disabled"] === "true";
           el.required =
             "required" in proxyTarget.attributes ||
             proxyTarget.attributes["aria-required"] === "true";
+        }
+        const checkable =
+          ["checkbox", "radio"].includes(el.type ?? "") ||
+          ["checkbox", "radio", "switch", "menuitemcheckbox", "menuitemradio"].includes(
+            el.role ?? "",
+          );
+        if (checkable) {
+          const aria = semanticNode.attributes["aria-checked"];
+          const ax = semanticNode.axProperties.find((p) => p.name === "checked")?.value;
+          if (aria === "true" || aria === "false") el.checked = aria === "true";
+          else if (typeof el.checked !== "boolean" && semanticNode.nodeName === "INPUT")
+            el.checked = semanticNode.attributes.checked === "true";
+          else if (typeof el.checked !== "boolean" && typeof ax === "boolean") el.checked = ax;
         }
         const ownedLabel = ownedLabels.get(n.id);
         if (ownedLabel && !el.ariaLabel && !n.attributes["aria-labelledby"]) {
