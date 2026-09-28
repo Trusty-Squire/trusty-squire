@@ -5691,7 +5691,7 @@ export class BrowserController implements BrowserDriver {
         // post-extraction by assignCardRadioGroups using bounding-box
         // similarity, so this addition is just for the semantically-
         // tagged case.
-        'input,textarea,select,button,a,label,[role="button"],[role="link"],[role="checkbox"],[role="radio"],[role="menuitem"],[role="menuitemradio"],[role="menuitemcheckbox"],[role="option"],[role="combobox"],[contenteditable=""],[contenteditable="true"]';
+        'input,textarea,select,button,a,label,md-checkbox,md-radio,[role="button"],[role="link"],[role="checkbox"],[role="radio"],[role="menuitem"],[role="menuitemradio"],[role="menuitemcheckbox"],[role="option"],[role="combobox"],[contenteditable=""],[contenteditable="true"]';
 
       // Collect candidates across the document and every open shadow
       // root. Closed shadow roots are unreachable — accepted.
@@ -5702,7 +5702,9 @@ export class BrowserController implements BrowserDriver {
       )?.get;
       const shadowRootFor = (element: Element): ShadowRoot | null =>
         getNativeShadowRoot?.call(element) ?? null;
-      const walk = (root: Document | ShadowRoot): void => {
+      const queryRoots: Array<Document | ShadowRoot> = [document];
+      for (let i = 0; i < queryRoots.length; i++) {
+        const root = queryRoots[i];
         // Defensive: a root with no querySelectorAll (a detached/closed
         // node surfaced mid-render by Descope-style web components on
         // app.redislabs.com / console.weaviate.cloud) used to crash the
@@ -5718,14 +5720,13 @@ export class BrowserController implements BrowserDriver {
         // THROWS before the typeof guard can fire — exactly the #59
         // redis-cloud crash, which recurred 2026-06-03 even with the
         // null-only guard in place. The loose check covers both.
-        if (root == null || typeof root.querySelectorAll !== "function") return;
+        if (root == null || typeof root.querySelectorAll !== "function") continue;
         root.querySelectorAll(SELECTOR).forEach((n) => collected.push(n));
         root.querySelectorAll("*").forEach((el) => {
           const shadowRoot = shadowRootFor(el);
-          if (shadowRoot !== null) walk(shadowRoot);
+          if (shadowRoot !== null) queryRoots.push(shadowRoot);
         });
-      };
-      walk(document);
+      }
 
       // 0.8.3-rc.1 — also collect OAuth-affordance iframes. Modern
       // signup pages (Mixpanel, many Next.js sites) render "Continue
@@ -5868,6 +5869,7 @@ export class BrowserController implements BrowserDriver {
         return null;
       };
 
+      const selectorMatches = new Map<string, Element[]>();
       const selectorFor = (el: Element): string => {
         const tag = el.tagName.toLowerCase();
         let base: string;
@@ -5913,17 +5915,18 @@ export class BrowserController implements BrowserDriver {
           }
           base = parts.join(" > ");
         }
-        // Guarantee the selector resolves to exactly this element. A
-        // 4-level path (or a stray duplicate id) can be ambiguous —
-        // Back4App's "Continue with email" path also matched a
-        // "Flexibility" tab, and Playwright strict mode then refuses
-        // to act. `>> nth=` is Playwright syntax that pins the exact
-        // match. (querySelectorAll can't see into shadow roots, so a
-        // shadow element's count reads 0 — fine, it returns base.)
+        // Playwright pierces open shadow roots, so uniqueness must count those
+        // roots too. Colab repeats inner #button and accelerator input selectors
+        // in separate Material hosts; a light-DOM-only count bound both refs
+        // to the first (sometimes hidden) shadow control.
         try {
-          const matches = document.querySelectorAll(base);
+          let matches = selectorMatches.get(base);
+          if (!matches) {
+            matches = queryRoots.flatMap((root) => Array.from(root.querySelectorAll(base)));
+            selectorMatches.set(base, matches);
+          }
           if (matches.length <= 1) return base;
-          const idx = Array.prototype.indexOf.call(matches, el);
+          const idx = matches.indexOf(el);
           return idx >= 0 ? `${base} >> nth=${idx}` : base;
         } catch {
           return base;
@@ -6359,10 +6362,20 @@ export class BrowserController implements BrowserDriver {
           // caller wanting to find UNCHECKED checkboxes needs `checked`
           // explicitly. The submit-disabled re-plan hint uses this to
           // surface concrete unticked candidates to the planner.
-          checked:
-            el instanceof HTMLInputElement && (el.type === "checkbox" || el.type === "radio")
-              ? el.checked
-              : null,
+          checked: (() => {
+            if (el instanceof HTMLInputElement && (el.type === "checkbox" || el.type === "radio"))
+              return el.checked;
+            const aria = el.getAttribute("aria-checked");
+            if (aria === "true" || aria === "false") return aria === "true";
+            if (
+              ["checkbox", "radio"].includes(roleAttr ?? "") ||
+              ["md-checkbox", "md-radio"].includes(tagLower)
+            ) {
+              const value = (el as Element & { checked?: unknown }).checked;
+              if (typeof value === "boolean") return value;
+            }
+            return null;
+          })(),
           disabled:
             el.matches(":disabled") || el.getAttribute("aria-disabled") === "true" ? true : null,
           required:
