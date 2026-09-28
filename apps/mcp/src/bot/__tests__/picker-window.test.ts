@@ -1,7 +1,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { chromium, type Browser, type Page } from "playwright";
-import { afterAll, beforeAll, expect, it } from "vitest";
+import { afterAll, beforeAll, expect, it, vi } from "vitest";
 import { BrowserController } from "../browser.js";
 import {
   captureScreenshot,
@@ -57,13 +57,19 @@ function ref(response: unknown, name: string): string {
 }
 
 it.each([
-  { mode: "popup", screenshot: false },
-  { mode: "modal", screenshot: false },
-  { mode: "popup", screenshot: true },
-  { mode: "modal", screenshot: true },
+  { mode: "popup", screenshot: false, caseName: "popup picker (screenshot=false)" },
+  { mode: "modal", screenshot: false, caseName: "modal picker (screenshot=false)" },
+  { mode: "popup", screenshot: true, caseName: "popup picker (screenshot=true)" },
+  { mode: "modal", screenshot: true, caseName: "modal picker (screenshot=true)" },
+  {
+    mode: "popup",
+    screenshot: true,
+    lostAck: true,
+    caseName: "popup lost ack (screenshot=true)",
+  },
 ])(
-  "sets a readonly country through $mode picker (screenshot=$screenshot)",
-  async ({ mode, screenshot }) => {
+  "sets a readonly country through $caseName",
+  async ({ mode, screenshot, lostAck }) => {
     const context = await browser.newContext();
     let sessionId: string | undefined;
     try {
@@ -122,6 +128,13 @@ it.each([
       if (pickerPage === null) throw new Error("No picker page");
       const box = await pickerPage.locator("#country").boundingBox();
       if (box === null || !shot.click_binding) throw new Error("Missing screenshot target");
+      if (lostAck) {
+        const click = pickerPage.mouse.click.bind(pickerPage.mouse);
+        vi.spyOn(pickerPage.mouse, "click").mockImplementation(async (x, y, options) => {
+          await click(x, y, options);
+          throw new Error("lost acknowledgement after pointer dispatch");
+        });
+      }
       const selected = await operateClickTool.handler(
         {
           session_id: sessionId,
@@ -138,11 +151,33 @@ it.each([
         },
         null,
       );
-      expect(selected).toMatchObject({ url: "https://picker.test/form" });
-      expect(selected).toHaveProperty("dom", expect.stringContaining("Canada"));
-      expect(await page.locator("#select_country_name_pc").inputValue()).toBe("Canada");
+      if (lostAck) expect(selected).toMatchObject({ status: "screenshot_click_uncertain" });
+      if (
+        mode === "popup" &&
+        screenshot &&
+        typeof selected === "object" &&
+        selected !== null &&
+        "status" in selected &&
+        selected.status === "screenshot_click_uncertain"
+      ) {
+        // The picker may close between mouse dispatch and its acknowledgement.
+        // Screenshot clicks report that lost acknowledgement as uncertain; the
+        // next observation, rather than a repeated click, confirms the result.
+        expect(selected).toMatchObject({
+          screenshot_click: {
+            dispatch: "unknown",
+            outcome: "unknown",
+            retry_policy: "observe_before_new_action",
+          },
+        });
+      } else {
+        expect(selected).toMatchObject({ url: "https://picker.test/form" });
+        expect(selected).toHaveProperty("dom", expect.stringContaining("Canada"));
+      }
       const returned = await observe(sessionId, "full");
       expect(returned.url).toBe("https://picker.test/form");
+      expect(returned).toHaveProperty("dom", expect.stringContaining("Canada"));
+      expect(await page.locator("#select_country_name_pc").inputValue()).toBe("Canada");
       expect(controller.activePage()).toBe(page);
       expect((await captureScreenshot(sessionId)).url).toBe("https://picker.test/form");
       if (evidenceDir) {
@@ -177,6 +212,7 @@ it.each([
       expect(sibling.isClosed()).toBe(false);
       await owner.close();
     } finally {
+      vi.restoreAllMocks();
       if (sessionId) await finishProvisionSession(sessionId);
       await context.close();
     }
