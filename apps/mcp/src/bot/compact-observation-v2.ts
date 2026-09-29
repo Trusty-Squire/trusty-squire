@@ -1213,7 +1213,7 @@ const CHALLENGE_SIGNAL_RE =
   /\b(?:captcha|turnstile|verification challenge|security challenge|security verification|verify (?:that )?you are human|human verification|not a robot)\b/i;
 const CHALLENGE_MARKER_RE = /(?:captcha|turnstile|challenges?\.cloudflare\.com|cf[-_]challenge)/i;
 const VALIDATION_SIGNAL_RE =
-  /\b(?:error|failed|invalid|required|incorrect|missing|must|cannot|can't|couldn't|not valid|not found|please (?:complete|enter|select|choose|provide)|try again)\b/i;
+  /\b(?:error|failed|invalid|required|incorrect|missing|must|cannot|can't|couldn't|not valid|not found|please (?:complete|enter|select|choose|provide)|try again)\b|エラー|必須|入力.{0,20}(?:確認|してください)|同意.{0,20}(?:必要|してください)/i;
 const TURNSTILE_RESPONSE_NAME_RE = /^(?:cf-turnstile-response|cf-chl-widget-\S+_response)$/;
 const TURNSTILE_WIDGET_ID_RE = /^cf-chl-widget-\S+_response$/;
 const RESPONSE_FIELD_NAME_RE =
@@ -1735,7 +1735,7 @@ export function safeBlockersV2(
     // A control-bound message is handled below and needs no assertive surface.
     const assertiveSurface =
       role === "alert" || role === "alertdialog" || node.attributes["aria-live"] === "assertive";
-    if (visibleFor.get(node) === true && assertiveSurface) {
+    if ((visibleFor.get(node) === true || node.rendered === true) && assertiveSurface) {
       const text = blockerTextV2(node);
       if (
         text !== undefined &&
@@ -1748,7 +1748,7 @@ export function safeBlockersV2(
     const invalid = [node.attributes["aria-invalid"], node.attributes.invalid].some(
       (value) => value?.toLowerCase() === "true",
     );
-    if (!invalid || visibleFor.get(node) !== true) continue;
+    if (!invalid || (visibleFor.get(node) !== true && node.rendered !== true)) continue;
     const ids = idsByScope.get(scopeFor.get(node)!);
     for (const [relation, explicitError] of [
       [node.attributes["aria-errormessage"], true],
@@ -1759,7 +1759,7 @@ export function safeBlockersV2(
         const relatedText = related === undefined ? undefined : blockerTextV2(related);
         if (
           related !== undefined &&
-          visibleFor.get(related) === true &&
+          (visibleFor.get(related) === true || related.rendered === true) &&
           relatedText !== undefined &&
           (explicitError || VALIDATION_SIGNAL_RE.test(relatedText))
         ) {
@@ -1773,6 +1773,36 @@ export function safeBlockersV2(
     const text = blockerTextV2(node);
     if (text === undefined || blockers.some((blocker) => blocker.text === text)) continue;
     blockers.push({ kind: "validation", text });
+  }
+  // Required consent controls can sit below the fold. A failed form submit
+  // may reset an earlier select without rendering any assertive error, so the
+  // unchecked controls themselves are the concrete validation evidence.
+  for (const node of nodes) {
+    if (blockers.length >= BLOCKER_MAX_ITEMS) break;
+    const role = (node.attributes.role ?? node.axRole ?? "").toLowerCase();
+    const nativeCheckbox = nodeTagV2(node) === "input" && node.attributes.type === "checkbox";
+    if (!nativeCheckbox && role !== "checkbox") continue;
+    if (node.rendered !== true) continue;
+    if (!("required" in node.attributes || node.attributes["aria-required"] === "true")) continue;
+    const checked = nativeCheckbox
+      ? node.attributes.checked === "true"
+      : node.attributes["aria-checked"] === "true";
+    if (checked) continue;
+    let label: BrowserUseNode | undefined = node;
+    while (label !== undefined && nodeTagV2(label) !== "label") label = parentFor.get(label);
+    if (label === undefined && node.attributes.id) {
+      label = nodes.find(
+        (candidate) =>
+          nodeTagV2(candidate) === "label" &&
+          candidate.attributes.for === node.attributes.id &&
+          scopeFor.get(candidate) === scopeFor.get(node),
+      );
+    }
+    const name = blockerTextV2(label ?? node);
+    const text = boundedBlockerTextV2(`Required checkbox unchecked: ${name ?? "checkbox"}`);
+    if (text !== undefined && !blockers.some((blocker) => blocker.text === text)) {
+      blockers.push({ kind: "validation", text });
+    }
   }
   // Open modal dialogs (role dialog/alertdialog or aria-modal) make the page
   // inert; surface them so the compact observation reports the blocked state.
@@ -2098,11 +2128,12 @@ function roleOf(el: InteractiveElement): SafeRoleV2 | null {
 }
 
 function stateOf(el: InteractiveElement): string | undefined {
-  // A compact code-owned bitset: c=checked, u=unchecked, d=disabled,
-  // r=required, i=invalid.  It is deliberately not a page-provided string.
+  // A compact code-owned bitset: c=checked, u=unchecked, s=selected,
+  // d=disabled, r=required, i=invalid. It is not a page-provided string.
   let state = "";
   if (el.checked === true) state += "c";
   else if (el.checked === false) state += "u";
+  if (el.selected === true) state += "s";
   if (el.disabled === true) state += "d";
   if (el.required === true) state += "r";
   if (el.invalid === true) state += "i";

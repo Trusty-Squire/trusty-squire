@@ -1430,6 +1430,12 @@ export class BrowserController implements BrowserDriver {
     opts: { timeoutMs?: number } = {},
   ): Promise<void> {
     const timeout = opts.timeoutMs === undefined ? undefined : { timeout: opts.timeoutMs };
+    // Native date inputs are segmented locale controls: typing an ISO string
+    // as keys can leave the submitted value empty even when segments display.
+    if ((await locator.getAttribute("type"))?.toLowerCase() === "date") {
+      await locator.fill(text, timeout);
+      return;
+    }
     await locator.fill("", timeout).catch(() => undefined);
     const [keyMin, keyMax] = this.dispatchPacing.keyDelayMs;
     await locator.pressSequentially(text, { delay: rand(keyMin, keyMax), ...timeout });
@@ -2569,6 +2575,10 @@ export class BrowserController implements BrowserDriver {
       await handle.evaluate((el) => el.setAttribute("data-ts-sealed-payment", "1"));
     }
     if (!this.humanize) {
+      await handle.fill(text);
+      return;
+    }
+    if ((await handle.getAttribute("type"))?.toLowerCase() === "date") {
       await handle.fill(text);
       return;
     }
@@ -7495,6 +7505,8 @@ export interface InteractiveElement {
   checked?: boolean | null;
   /** Native or ARIA disabled state captured with the interactive DOM record. */
   disabled?: boolean | null;
+  /** Authored selected state of a custom option or calendar cell. */
+  selected?: boolean | null;
   /** Native or ARIA required state captured with the interactive DOM record. */
   required?: boolean | null;
   /**

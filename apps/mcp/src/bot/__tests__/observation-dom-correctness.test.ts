@@ -153,6 +153,99 @@ it("reports a settled account error independently of challenge presence", async 
   }
 });
 
+it("reports Japanese calendar days with their actionable, disabled, and selected states", async () => {
+  const page = await browser.newPage({ locale: "ja-JP" });
+  try {
+    await page.setContent(`<main><p>保険始期日: 2026-09-28 ～ 2026-11-01</p>
+      <div id="calendar" role="grid" aria-label="2026年10月">
+        <div role="gridcell" aria-label="2026年10月1日" aria-selected="true" tabindex="0" class="selected" onclick="void 0">1</div>
+        <div role="gridcell" aria-label="2026年10月2日" aria-disabled="true" class="disabled" onclick="void 0">2</div>
+        <button aria-label="2026年10月3日" disabled>3</button>
+        <button aria-label="2026年10月4日">4</button>
+        <div role="gridcell" aria-label="2026年10月5日" class="disabled" onclick="void 0">5</div>
+      </div><div id="overlay-host"></div></main>
+      <script>document.querySelector('#overlay-host').attachShadow({mode:'open'}).innerHTML =
+        '<div role="gridcell" aria-label="2026年10月6日" class="selected" onclick="void 0">6</div>';</script>`);
+    const result = await observe(page);
+    const day = (date: string) => result.rows.find((row) => row.label?.includes(date));
+    expect(day("10月1日")?.ref).toMatch(/^@e:/);
+    expect(day("10月1日")?.state).toContain("s");
+    expect(day("10月2日")?.state).toContain("d");
+    expect(day("10月3日")?.state).toContain("d");
+    expect(day("10月4日")?.state).toBeUndefined();
+    expect(day("10月5日")?.state).toContain("d");
+    expect(day("10月6日")?.state).toContain("s");
+    expect(result.full).toContain("aria-selected=true");
+    expect(result.full).toContain("disabled=true");
+  } finally {
+    await page.close();
+  }
+});
+
+it("types an in-range ISO date into native and custom Japanese controls", async () => {
+  const page = await browser.newPage({ locale: "ja-JP", timezoneId: "Asia/Tokyo" });
+  try {
+    await page.setContent(`<label>保険始期日 <input id="native" type="date" min="2026-09-28" max="2026-11-01"></label>
+      <label>保険始期日 (custom) <input id="custom" type="text" placeholder="YYYY-MM-DD" inputmode="numeric"></label>
+      <script>document.querySelector('#custom').addEventListener('input', e => {
+        e.target.setAttribute('aria-invalid', !/^2026-10-01$/.test(e.target.value));
+      });</script>`);
+    const controller = new BrowserController({ humanize: true });
+    await controller.type({ kind: "selector", selector: "#native" }, "2026-10-01", false, page);
+    await controller.type({ kind: "selector", selector: "#custom" }, "2026-10-01", false, page);
+    expect(await page.locator("#native").inputValue()).toBe("2026-10-01");
+    expect(await page.locator("#native").evaluate((el) => (el as HTMLInputElement).checkValidity())).toBe(true);
+    expect(await page.locator("#custom").inputValue()).toBe("2026-10-01");
+    expect(await page.locator("#custom").getAttribute("aria-invalid")).toBe("false");
+    const result = await observe(page);
+    expect(result.capture.elements.find((element) => element.id === "native")?.invalid).not.toBe(true);
+    expect(result.capture.elements.find((element) => element.id === "custom")?.invalid).not.toBe(true);
+  } finally {
+    await page.close();
+  }
+});
+
+it("names offscreen required consents after a failed callback submit resets the car choice", async () => {
+  const page = await browser.newPage({ viewport: { width: 900, height: 600 }, locale: "ja-JP" });
+  try {
+    await page.setContent(`<form novalidate><label>車種 <select id="model"><option value="">選択してください</option><option value="rwd">Model Y RWD</option></select></label>
+      <div style="height:1200px"></div>
+      <label><input id="privacy" type="checkbox" required>個人情報の取扱いに同意する</label>
+      <label><input id="contact" type="checkbox" required>連絡に同意する</label>
+      <p id="error" role="alert" hidden>入力内容を確認してください</p>
+      <button id="submit" type="button">次へ</button></form>
+      <script>document.querySelector('#submit').onclick = () => {
+        if (!document.querySelector('#privacy').checked || !document.querySelector('#contact').checked) {
+          document.querySelector('#model').value = '';
+          document.querySelector('#error').hidden = false;
+        } else {
+          document.body.dataset.advanced = 'true';
+        }
+      };</script>`);
+    await page.selectOption("#model", "rwd");
+    await page.click("#submit");
+    expect(await page.locator("#model").inputValue()).toBe("");
+    const result = await observe(page);
+    expect(result.rows.find((row) => row.label?.includes("個人情報"))?.state).toContain("ur");
+    expect(result.rows.find((row) => row.label?.includes("連絡"))?.state).toContain("ur");
+    expect(result.blockers.map((blocker) => blocker.text)).toEqual(expect.arrayContaining([
+      expect.stringContaining("個人情報"), expect.stringContaining("連絡"),
+      expect.stringContaining("入力内容を確認してください"),
+    ]));
+    await page.check("#privacy");
+    await page.check("#contact");
+    await page.selectOption("#model", "rwd");
+    await page.click("#submit");
+    expect(await page.locator("body").getAttribute("data-advanced")).toBe("true");
+    const accepted = await observe(page);
+    expect(accepted.rows.find((row) => row.label?.includes("個人情報"))?.state).toContain("c");
+    expect(accepted.rows.find((row) => row.label?.includes("連絡"))?.state).toContain("c");
+    expect(accepted.blockers.some((blocker) => blocker.text.startsWith("Required checkbox"))).toBe(false);
+  } finally {
+    await page.close();
+  }
+});
+
 it("keeps scrollable offscreen controls reachable with the same identity after scrolling", async () => {
   const page = await browser.newPage();
   try {
