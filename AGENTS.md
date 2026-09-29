@@ -973,8 +973,12 @@ wire operations.
 
 Runtime profile resolution must use `currentProfileDir()` after connect selects
 its target environment. Connect joins the browser's broker instead of competing
-for its profile. The authoritative discovery, preflight, ceremony, and recovery
-contracts and their regression tests are in
+for its profile. A live systemd user unit may serve the profile on a configured
+`TRUSTY_SQUIRE_BROKER_SOCKET` (Beeline's unit does), which is not the
+profile-derived default `/tmp` path; `connectOrLaunchBroker` must wait on the
+unit's configured endpoint or it times out against a socket nobody binds. The
+authoritative discovery, preflight, ceremony, and recovery contracts and their
+regression tests are in
 [`docs/browser-broker.md`](docs/browser-broker.md).
 
 ## Maintaining this file

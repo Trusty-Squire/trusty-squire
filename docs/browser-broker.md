@@ -259,6 +259,15 @@ endpoint, the election root, the profile lock — reads the environment live
 `CHROME_PROFILE_DIR` addresses a different profile's broker and then collides
 with the live broker that owns the real profile.
 
+A profile-derived endpoint is not always the endpoint the owner bound. When a
+live systemd user unit serves the caller's profile, `connectOrLaunchBroker`
+takes that unit's configured `TRUSTY_SQUIRE_BROKER_SOCKET` (Beeline's unit
+binds `~/.trusty-squire/broker.sock`) as the wait target and never launches a
+detached competitor. `npx connect` runs without that env, so without this it
+waited out the connection timeout on the empty `/tmp` default while the unit's
+browser held the profile — the ceremony never opened in the profile that owns
+it.
+
 The Google OAuth hypothesis and live-validation evidence are owned by
 [STATE.md](../STATE.md#connect-ceremony-on-the-shared-broker-browser--new-hypothesis-falsification-pending-2026-09-06-fmsquire-connect-browser-claim).
 Do not infer live sign-in success from fixture acceptance.

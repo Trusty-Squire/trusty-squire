@@ -194,8 +194,11 @@ export function parseManagedBrokerShow(stdout: string): ManagedBrokerUnit[] {
   return units;
 }
 
-export function managedBrokerUnitIsLive(profileDir = currentProfileDir()): boolean {
-  if (process.platform !== "linux") return false;
+/** The live managed unit serving this profile, or null when none does. */
+export function liveManagedBrokerUnit(
+  profileDir = currentProfileDir(),
+): ManagedBrokerUnit | null {
+  if (process.platform !== "linux") return null;
   try {
     const stdout = execFileSync("systemctl", [
       "--user",
@@ -208,19 +211,37 @@ export function managedBrokerUnitIsLive(profileDir = currentProfileDir()): boole
       "-p", "Environment",
       "-p", "ExecStart",
     ], { encoding: "utf8", timeout: 2_000, stdio: ["ignore", "pipe", "ignore"] });
-    return parseManagedBrokerShow(stdout).some((unit) =>
-      unitServesProfile(unit, profileDir) && unitIsLive(unit),
+    return (
+      parseManagedBrokerShow(stdout).find(
+        (unit) => unitServesProfile(unit, profileDir) && unitIsLive(unit),
+      ) ?? null
     );
   } catch {
-    return false;
+    return null;
   }
 }
 
-function launchUnlessManaged(path: string): (() => Error | undefined) | undefined {
+/** The socket a live managed unit bound, when it configured one explicitly.
+ * A unit may serve this profile on a non-default endpoint (Beeline sets
+ * `TRUSTY_SQUIRE_BROKER_SOCKET`); clients deriving the profile's default path
+ * must reach the owner's actual listener instead of waiting on a stranger. */
+export function managedBrokerUnitSocketPath(unit: ManagedBrokerUnit | null): string | null {
+  const configured = unit?.environment.TRUSTY_SQUIRE_BROKER_SOCKET?.trim();
+  return configured !== undefined && configured.length > 0 ? configured : null;
+}
+
+export function managedBrokerUnitIsLive(profileDir = currentProfileDir()): boolean {
+  return liveManagedBrokerUnit(profileDir) !== null;
+}
+
+function launchUnlessManaged(
+  path: string,
+  unit: ManagedBrokerUnit | null = liveManagedBrokerUnit(),
+): (() => Error | undefined) | undefined {
   // A systemd user unit that already owns this profile will reclaim the socket
   // itself. Launching a detached competitor wins the kernel lock and the unit
   // restart-loops (relay reconnect after #982).
-  return managedBrokerUnitIsLive() ? undefined : launchBrokerDaemon(path);
+  return unit !== null ? undefined : launchBrokerDaemon(path);
 }
 
 export interface BrokerConnectOptions {
@@ -256,10 +277,16 @@ export async function connectOrLaunchBroker(path: string, options: BrokerConnect
   catch (error) {
     if (!isUnavailable(error) && !(await reclaimLegacyBroker(path, options, error))) throw error;
   }
-  const failure = launchUnlessManaged(path);
-  try { return await waitForBroker(path, failure); }
+  // A live managed unit that owns this profile may listen on a configured
+  // endpoint other than the profile-derived default (`TRUSTY_SQUIRE_BROKER_SOCKET`).
+  // `connect` runs without that env, so reach the unit's actual listener rather
+  // than waiting on a socket nobody binds.
+  const unit = liveManagedBrokerUnit();
+  const waitPath = managedBrokerUnitSocketPath(unit) ?? path;
+  const failure = launchUnlessManaged(path, unit);
+  try { return await waitForBroker(waitPath, failure); }
   catch (error) {
-    if (error instanceof ProfileBusyError) return await waitForBroker(path);
+    if (error instanceof ProfileBusyError) return await waitForBroker(waitPath);
     throw error;
   }
 }
