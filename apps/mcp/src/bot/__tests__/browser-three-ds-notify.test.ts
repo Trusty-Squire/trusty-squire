@@ -99,6 +99,12 @@ describe("3-D Secure detection and notification", () => {
 
         const first = await observe(sessionId);
         expect(first.three_ds).toMatchObject({ state: "challenge_detected", notified: true });
+        expect(first.three_ds?.state === "challenge_detected" && first.three_ds.hint).toContain(
+          "Do not click, type, navigate, reload, resubmit, or trigger another verification",
+        );
+        expect(first.three_ds?.state === "challenge_detected" && first.three_ds.hint).toContain(
+          "operate_screenshot or operate_observe (short, non-blocking checks)",
+        );
         expect(released.notifyThreeDs).toHaveBeenCalledTimes(1);
         expect(released.notifyThreeDs).toHaveBeenCalledWith("approval_3ds", "detected_challenge");
 

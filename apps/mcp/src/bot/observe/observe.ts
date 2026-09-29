@@ -1037,6 +1037,11 @@ export async function observedThreeDsChallenge(
     state: "challenge_detected",
     url: challenge.url,
     ...(notified === undefined ? {} : { notified }),
+    hint:
+      "3-D Secure in progress: the cardholder may be approving with their bank. " +
+      "Do not click, type, navigate, reload, resubmit, or trigger another verification. " +
+      "Only watch with operate_screenshot or operate_observe (short, non-blocking checks) " +
+      "until checkout resolves.",
   };
 }
 
