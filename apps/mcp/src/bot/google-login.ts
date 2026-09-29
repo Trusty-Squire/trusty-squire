@@ -1123,8 +1123,9 @@ export function checkLoginStatusWithin(
 export async function openInstallConfirmInBotChrome(
   opts: {
     confirmUrl: string;
-    // `wizardCompleted` carries the browser's Finish callback. The caller
-    // retains a claimed token even if Finish never arrives before the deadline.
+    // `wizardCompleted` carries the browser's Finish callback, a courtesy that
+    // closes the page early. The caller's completion gate is the polled install
+    // claim, not this signal, so it still completes when Finish never arrives.
     pollUntilClaimed: (wizardCompleted: boolean) => Promise<InstallClaimPollResult>;
     profileDir?: string;
     // Absolute local deadline (ms). The caller owns it because only the
