@@ -11,6 +11,7 @@
 import { describe, expect, it } from "vitest";
 import {
   OPERATE_TOOLS,
+  operateClickTool,
   operateLoginTool,
   provisionScreenshotTool,
   operateFillCredentialTool,
@@ -119,10 +120,15 @@ describe("still-true contracts survive the cleanup", () => {
     expect(injectCardTool.description).toContain("competing saved-card control");
     expect(injectCardTool.jsonInputSchema.required).toContain("session_id");
     expect(provisionStartTool.description).toContain("inject_card");
-    // The operator detects a rendered challenge and nudges the cardholder; the
-    // agent is told not to solve or wait on it (see observedThreeDsChallenge).
-    expect(injectCardTool.description).toContain("detects a rendered 3-D Secure challenge");
-    expect(injectCardTool.description).toContain("do not solve or wait on the challenge");
+    expect(injectCardTool.description).toContain("operator notifies the cardholder once");
+    for (const description of [injectCardTool.description, operateClickTool.description]) {
+      expect(description).toContain(
+        "do not click, type, navigate, reload, resubmit, or trigger another verification",
+      );
+      expect(description).toContain(
+        "operate_screenshot or operate_observe (short, non-blocking checks)",
+      );
+    }
   });
 
   it("inject_card accepts only pan/cvv targets and steers expiry/name to ordinary tools", () => {
