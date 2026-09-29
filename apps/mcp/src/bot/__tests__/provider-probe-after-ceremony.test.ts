@@ -10,6 +10,8 @@ import { describe, expect, it, vi } from "vitest";
 import { ProfileBusyError } from "../profile.js";
 import {
   confirmLiveGoogleProviderSnapshot,
+  gmailFeedAccountEmail,
+  googleSessionFromFeed,
   probeProviderSessionsAfterCeremony,
 } from "../google-login.js";
 import type { OAuthProviderId } from "../oauth-providers.js";
@@ -181,5 +183,35 @@ describe("confirmLiveGoogleProviderSnapshot", () => {
   it("treats an unreadable live Google check as unknown", async () => {
     const result = await confirmLiveGoogleProviderSnapshot("/unused", ["google"], async () => null);
     expect(result).toBeNull();
+  });
+});
+
+// The Gmail atom feed is the probe's answer, not a URL. Only a live Google
+// session gets HTTP 200 and a title of `Gmail - Inbox for <email>`; a stale
+// session that still serves myaccount.google.com before its page-script
+// redirect gets 401 here, which is exactly the false positive this replaced.
+describe("googleSessionFromFeed", () => {
+  const feed = (email: string): string =>
+    `<?xml version="1.0" encoding="UTF-8"?><feed><title>Gmail - Inbox for ${email}</title></feed>`;
+
+  it("names the account a signed-in feed proves", () => {
+    expect(gmailFeedAccountEmail(200, feed("user@example.com"))).toBe("user@example.com");
+    expect(googleSessionFromFeed(200, feed("user@example.com"))).toBe(true);
+  });
+
+  it("reads an auth refusal as a definitively stale session", () => {
+    expect(googleSessionFromFeed(401, "<HTML><TITLE>Unauthorized</TITLE></HTML>")).toBe(false);
+    expect(googleSessionFromFeed(403, "")).toBe(false);
+  });
+
+  it("reads a 200 without a feed title as signed out, not signed in", () => {
+    expect(googleSessionFromFeed(200, "<HTML>sign in</HTML>")).toBe(false);
+    expect(gmailFeedAccountEmail(200, "<HTML>sign in</HTML>")).toBeNull();
+  });
+
+  it("keeps an unreadable or non-auth response as unknown, never signed in", () => {
+    expect(googleSessionFromFeed(null, null)).toBeNull();
+    expect(googleSessionFromFeed(500, "server error")).toBeNull();
+    expect(googleSessionFromFeed(302, "")).toBeNull();
   });
 });

@@ -31,7 +31,7 @@ import { connectOrLaunchBroker, resolveBrokerSocket } from "./broker/discovery.j
 import { BrokerRefusal } from "./broker/refusal.js";
 import type { BrokerClient } from "./broker/transport.js";
 import { controlLabelV2, wireRoleToSafeRoleV2 } from "./compact-observation-v2.js";
-import { extractGoogleAccountEmail, googleAccountPageIsSignedIn } from "./oauth-login.js";
+import { extractGoogleAccountEmail } from "./oauth-login.js";
 export { extractGoogleAccountEmail };
 import {
   startInstallCompletionListener,
@@ -318,9 +318,40 @@ export async function detectProviderSessionsFromProfile(
   }
 }
 
+/** Gmail's per-account atom feed. Google serves it ONLY to a live session:
+ * signed in is HTTP 200 with a title of `Gmail - Inbox for <email>`; a stale or
+ * signed-out profile gets 401 (or a redirect to the sign-in page). Unlike
+ * `myaccount.google.com`, the endpoint cannot be mistaken for the signed-in
+ * state by a URL read that lands before a page-script redirect: it answers
+ * server-side, so the response IS the answer. */
+const GMAIL_FEED_URL = "https://mail.google.com/mail/u/0/feed/atom";
+const GMAIL_FEED_TITLE = /<title>\s*Gmail\s*-\s*Inbox for\s+([^<\s]+@[^<\s]+)\s*<\/title>/i;
+
+/** The account email a Gmail atom feed proves, or null when the response is not
+ * a signed-in feed. */
+export function gmailFeedAccountEmail(status: number | null, body: string | null): string | null {
+  if (status !== 200 || body === null) return null;
+  return GMAIL_FEED_TITLE.exec(body)?.[1] ?? null;
+}
+
+/** The live-session answer a feed response proves: true signed in, false
+ * definitively stale/signed out, null when the check could not be made. A
+ * non-200 that is not an auth refusal (a 5xx, a redirect off the feed) is
+ * unknown, never a pass and never a re-pair trigger. */
+export function googleSessionFromFeed(status: number | null, body: string | null): boolean | null {
+  if (status === null) return null;
+  if (status === 401 || status === 403) return false;
+  if (status !== 200) return null;
+  return gmailFeedAccountEmail(status, body) !== null;
+}
+
 /** Check Google's server-side session through the browser that owns the
- * profile. A ceremony tab is identity-neutral and closes without affecting
- * sibling operator tabs. `null` means the check failed, never "signed out".
+ * profile. An identity-neutral `about:blank` ceremony tab gives us the shared
+ * browser and closes without affecting sibling operator tabs; the answer then
+ * comes from a plain request made through that browser's own cookie jar (not a
+ * rendered page, and not a navigation to Google), so a stale session that
+ * merely serves `myaccount.google.com` before its page-script redirect cannot
+ * be read as signed in. `null` means the check failed, never "signed out".
  */
 export async function probeGoogleSessionInBroker(profileDir: string): Promise<boolean | null> {
   let client: BrokerClient | undefined;
@@ -328,15 +359,18 @@ export async function probeGoogleSessionInBroker(profileDir: string): Promise<bo
   try {
     client = await connectOrLaunchBroker(resolveBrokerSocket(profileDir));
     const opened = (await client.call("open", {
-      serviceUrl: "https://myaccount.google.com/",
+      serviceUrl: "about:blank",
       ceremony: true,
-    })) as { sessionId?: string; observation?: { url?: string } };
+    })) as { sessionId?: string };
     sessionId = opened.sessionId;
     if (sessionId === undefined) return null;
-    const observed = (await operateCommand(client, sessionId, "operate_observe", {})) as {
-      url?: string;
-    };
-    return typeof observed?.url === "string" ? googleAccountPageIsSignedIn(observed.url) : null;
+    const fetched = (await operateCommand(client, sessionId, "operate_fetch_text", {
+      url: GMAIL_FEED_URL,
+    })) as { status?: number | null; body_text?: string | null } | null;
+    if (fetched === null || typeof fetched !== "object") return null;
+    const status = typeof fetched.status === "number" ? fetched.status : null;
+    const body = typeof fetched.body_text === "string" ? fetched.body_text : null;
+    return googleSessionFromFeed(status, body);
   } catch {
     return null;
   } finally {

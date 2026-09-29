@@ -4,7 +4,7 @@ import { brokerBrowserCustody } from "./custody.js";
 import { z } from "zod";
 import { ApiClient, type ApiClientConfig } from "../../api-client.js";
 import { setServingAccountId } from "../../session-guard.js";
-import { buildToolRegistry, findTool } from "../../tools/index.js";
+import { buildBrokerToolRegistry, findTool } from "../../tools/index.js";
 import {
   finishProvisionSession,
   forceFinishProvisionSession,
@@ -140,7 +140,7 @@ function closedResult(value: unknown): boolean {
 export class OperatorBroker implements BrokerTransportPort {
   readonly authority: BrokerAuthority;
   private readonly apis = new Map<string, Map<string, ApiClient>>();
-  private readonly tools = buildToolRegistry();
+  private readonly tools = buildBrokerToolRegistry();
   private readonly requestControllers = new Map<
     string,
     { principalId: string; controller: AbortController }

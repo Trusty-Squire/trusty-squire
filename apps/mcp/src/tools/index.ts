@@ -23,6 +23,7 @@ import { injectCardTool } from "./inject-card-schema.js";
 import { deleteCredentialTool, editCredentialTool } from "./credential-mutations.js";
 import { editPaymentCardTool } from "./card-mutations.js";
 import { fetchCredentialTool } from "./fetch-credential.js";
+import { operateFetchTextTool } from "./operate-fetch-text.js";
 
 export interface Tool<TArgs extends Record<string, unknown> = Record<string, unknown>> {
   name: string;
@@ -108,6 +109,14 @@ export function buildToolRegistry(env: NodeJS.ProcessEnv = process.env): Tool[] 
 // The stable default surface used by direct integrations and registry tests.
 // buildServer() resolves the environment-aware registry once at startup.
 export const TOOLS: Tool[] = buildToolRegistry({});
+
+// The broker accepts one command the agent-facing registry does not carry:
+// `operate_fetch_text`, an internal read the connect preflight's Google probe
+// rides to ask the profile's own browser context. It is deliberately absent
+// from buildToolRegistry so no host agent can call it through the MCP server.
+export function buildBrokerToolRegistry(env: NodeJS.ProcessEnv = process.env): Tool[] {
+  return [...buildToolRegistry(env), operateFetchTextTool as Tool];
+}
 
 export function findTool(name: string, tools: readonly Tool[] = TOOLS): Tool | null {
   return tools.find((t) => t.name === name) ?? null;
