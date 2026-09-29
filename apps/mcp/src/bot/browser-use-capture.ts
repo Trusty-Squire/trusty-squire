@@ -1346,10 +1346,20 @@ export async function captureBrowserUseDOM(
           if (axName) n.attributes.ax_name ??= axName;
         }
         const semanticNode = proxyTarget ?? n;
+        const stateClass = semanticNode.attributes.class ?? "";
+        el.disabled =
+          el.disabled === true ||
+          "disabled" in semanticNode.attributes ||
+          semanticNode.attributes["aria-disabled"] === "true" ||
+          /(?:^|[-_\s])disabled(?:$|[-_\s])/i.test(stateClass);
+        el.selected =
+          semanticNode.attributes["aria-selected"] === "true" ||
+          /(?:^|[-_\s])selected(?:$|[-_\s])/i.test(stateClass);
         if (proxyTarget !== undefined) {
           el.type = proxyTarget.attributes.type ?? null;
           el.role = proxyTarget.attributes.role ?? proxyTarget.attributes.type ?? "button";
           el.disabled =
+            el.disabled === true ||
             "disabled" in proxyTarget.attributes ||
             proxyTarget.attributes["aria-disabled"] === "true";
           el.required =
