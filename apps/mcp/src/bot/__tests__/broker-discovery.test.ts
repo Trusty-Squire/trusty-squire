@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   connectOrLaunchBroker,
   defaultBrokerSocket,
+  findLiveManagedBrokerUnit,
   parseManagedBrokerShow,
   unitDefersOnDemandLaunch,
 } from "../broker/discovery.js";
@@ -76,5 +77,24 @@ describe("broker discovery", () => {
     });
     expect(unitDefersOnDemandLaunch(units[0]!, profile)).toBe(true);
     expect(unitDefersOnDemandLaunch(units[3]!, profile)).toBe(false);
+  });
+
+  it("finds the live unit's configured broker socket for its profile", () => {
+    const show = [
+      "ExecStart={ path=/usr/bin/beeline ; argv[]=/usr/bin/beeline --squire-broker ; ignore_errors=no }",
+      "Environment=TRUSTY_SQUIRE_PROFILE_DIR=/home/user/.trusty-squire/chrome-profile TRUSTY_SQUIRE_BROKER_SOCKET=/home/user/.trusty-squire/broker.sock",
+      "Id=trusty-squire-broker.service",
+      "ActiveState=active",
+      "",
+    ].join("\n");
+    const units = parseManagedBrokerShow(show);
+    expect(
+      findLiveManagedBrokerUnit(units, "/home/user/.trusty-squire/chrome-profile")?.environment
+        .TRUSTY_SQUIRE_BROKER_SOCKET,
+    ).toBe("/home/user/.trusty-squire/broker.sock");
+    expect(findLiveManagedBrokerUnit(units, "/home/user/.trusty-squire/other-profile")).toBeUndefined();
+    expect(
+      findLiveManagedBrokerUnit([{ ...units[0]!, activeState: "failed" }], "/home/user/.trusty-squire/chrome-profile"),
+    ).toBeUndefined();
   });
 });
