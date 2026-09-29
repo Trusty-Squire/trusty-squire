@@ -105,7 +105,14 @@ let originalXdgConfigHome: string | undefined;
 let broker: { close: () => Promise<void> } | undefined;
 let profileLease: ProfileOperationLease | undefined;
 
-async function listenIdentityBroker(identityUrl: string) {
+async function listenIdentityBroker(
+  feed: { status: number; body: string } | null,
+  // The URL the ceremony tab still shows. The stale-then-page-script-redirect
+  // profile serves myaccount.google.com before it redirects away, which the
+  // old URL-name check read as "signed in"; the feed answer below is what a
+  // live check must use instead.
+  signInPage = "https://myaccount.google.com/",
+) {
   const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
   const socket = path.join(socketRoot, "b.sock");
   broker = await listenBroker(socket, {
@@ -113,14 +120,29 @@ async function listenIdentityBroker(identityUrl: string) {
     call: async (_principal, method, params) => {
       calls.push({ method, params });
       if (method === "open")
-        return { sessionId: "probe-session", observation: { url: identityUrl } };
-      if (method === "command") return { result: { url: identityUrl } };
+        return { sessionId: "probe-session", observation: { url: signInPage } };
+      if (method === "command") {
+        if (params.name === "operate_fetch_text") {
+          return {
+            result:
+              feed === null
+                ? { status: null, final_url: null, body_text: null }
+                : { status: feed.status, final_url: GMAIL_FEED_URL, body_text: feed.body },
+          };
+        }
+        return { result: { url: signInPage } };
+      }
       return { closed: true };
     },
     disconnect: async () => undefined,
   });
   vi.stubEnv("TRUSTY_SQUIRE_BROKER_SOCKET", socket);
   return calls;
+}
+
+const GMAIL_FEED_URL = "https://mail.google.com/mail/u/0/feed/atom";
+function gmailFeedFor(email: string): string {
+  return `<?xml version="1.0" encoding="UTF-8"?><feed xmlns="http://www.w3.org/2005/Atom"><title>Gmail - Inbox for ${email}</title></feed>`;
 }
 
 beforeEach(async () => {
@@ -204,7 +226,7 @@ it("reports already connected while the broker owns the profile and its browser"
   // machinery reads. Opening the profile from here throws ProfileBusyError.
   profileLease = acquireProfileOperationGuard(profileDir);
 
-  const calls = await listenIdentityBroker("https://myaccount.google.com/");
+  const calls = await listenIdentityBroker({ status: 200, body: gmailFeedFor("user@example.com") });
   vi.stubEnv("TRUSTY_SQUIRE_PROFILE_DIR", profileDir);
 
   const output: string[] = [];
@@ -242,7 +264,7 @@ it("prints the same already-connected facts as JSON without changing the human l
     GOOGLE_SESSION_COOKIES.map((name) => ({ host: ".google.com", name })),
   );
   profileLease = acquireProfileOperationGuard(profileDir);
-  await listenIdentityBroker("https://myaccount.google.com/");
+  await listenIdentityBroker({ status: 200, body: gmailFeedFor("user@example.com") });
   vi.stubEnv("TRUSTY_SQUIRE_PROFILE_DIR", profileDir);
 
   const human: string[] = [];
@@ -288,7 +310,10 @@ it("runs Google sign-in on plain connect when stored cookies are stale", async (
     GOOGLE_SESSION_COOKIES.map((name) => ({ host: ".google.com", name })),
   );
   profileLease = acquireProfileOperationGuard(profileDir);
-  const calls = await listenIdentityBroker("https://accounts.google.com/v3/signin/challenge/pwd");
+  const calls = await listenIdentityBroker({
+    status: 401,
+    body: "<HTML><TITLE>Unauthorized</TITLE></HTML>",
+  });
   vi.stubEnv("TRUSTY_SQUIRE_PROFILE_DIR", profileDir);
 
   const output = await runConnect();
@@ -296,6 +321,31 @@ it("runs Google sign-in on plain connect when stored cookies are stale", async (
   expect(output).not.toContain("Already connected");
   expect(output).toContain("Opening the Trusty Squire install page");
   expect(calls.some((call) => call.method === "open")).toBe(true);
+});
+
+// Regression: a stale Google session can still serve myaccount.google.com
+// before its page-script redirect lands, so the old URL-NAME check read the
+// ceremony tab as "signed in" while a Beeline operator on the same profile was
+// told there was no live Google session. The Gmail atom feed answers
+// server-side, so a stale session gets 401 even while the tab still shows
+// myaccount.google.com. A signed-in profile's feed still claims connected.
+it("does not claim connected when myaccount still answers but the Gmail feed refuses", async () => {
+  await writeProfileCookies(
+    profileDir,
+    GOOGLE_SESSION_COOKIES.map((name) => ({ host: ".google.com", name })),
+  );
+  profileLease = acquireProfileOperationGuard(profileDir);
+  await listenIdentityBroker(
+    { status: 401, body: "<HTML><TITLE>Unauthorized</TITLE></HTML>" },
+    // The stale page the old check was fooled by.
+    "https://myaccount.google.com/",
+  );
+  vi.stubEnv("TRUSTY_SQUIRE_PROFILE_DIR", profileDir);
+
+  const output = await runConnect();
+
+  expect(output).not.toContain("Already connected");
+  expect(output).toContain("Opening the Trusty Squire install page");
 });
 
 // `JSON.parse(stdout)` is the whole machine contract, so a run that dies
@@ -402,7 +452,7 @@ async function recordConnectedProviders(providers: string[]): Promise<string> {
 // fewer providers than the profile proves must not demote the claim or fire a
 // bogus repair offer.
 it("claims what the cookie store proves even when an old record names less", async () => {
-  await listenIdentityBroker("https://myaccount.google.com/");
+  await listenIdentityBroker({ status: 200, body: gmailFeedFor("user@example.com") });
   const sessionPath = await recordConnectedProviders(["google"]);
   await writeProfileCookies(profileDir, [
     ...GOOGLE_SESSION_COOKIES.map((name) => ({ host: ".google.com", name })),
@@ -427,7 +477,7 @@ it("claims what the cookie store proves even when an old record names less", asy
 // profile as signed out — and interactively that answer walks a fully connected
 // machine into the ceremony, which is the reported failure.
 it("claims a GitHub session from the rows Chrome actually persists", async () => {
-  await listenIdentityBroker("https://myaccount.google.com/");
+  await listenIdentityBroker({ status: 200, body: gmailFeedFor("user@example.com") });
   await recordConnectedProviders(["google", "github"]);
   await writeProfileCookies(profileDir, [
     ...GOOGLE_SESSION_COOKIES.map((name) => ({ host: ".google.com", name })),
@@ -444,7 +494,7 @@ it("claims a GitHub session from the rows Chrome actually persists", async () =>
 
 // Signing out of GitHub removes those rows; the repair offer must come back.
 it("offers the GitHub repair once its persisted rows are gone", async () => {
-  await listenIdentityBroker("https://myaccount.google.com/");
+  await listenIdentityBroker({ status: 200, body: gmailFeedFor("user@example.com") });
   await recordConnectedProviders(["google", "github"]);
   await writeProfileCookies(
     profileDir,
@@ -460,7 +510,7 @@ it("offers the GitHub repair once its persisted rows are gone", async () => {
 
 // A cookie with no expiry is not a cookie that expired in 1601.
 it("accepts a persisted row that carries no expiry", async () => {
-  await listenIdentityBroker("https://myaccount.google.com/");
+  await listenIdentityBroker({ status: 200, body: gmailFeedFor("user@example.com") });
   await recordConnectedProviders(["google", "github"]);
   await writeProfileCookiesRaw(profileDir, [
     ...GOOGLE_SESSION_COOKIES.map((name) => ({

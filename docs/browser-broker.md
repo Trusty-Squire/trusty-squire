@@ -146,9 +146,13 @@ broker, real Chrome, and real MCP stdio servers.
 Connect's already-provisioned preflight first reads the stored session and a
 byte copy of the profile's cookie store (`detectProviderSessionsFromProfile`).
 That read takes no profile SQLite lock. An absent Google marker goes straight
-to the ceremony. A present marker is checked in a temporary tab through the
-shared broker: Google My Account must still accept the session. The tab closes
-without taking the profile from its broker or touching sibling operator tabs.
+to the ceremony. A present marker is confirmed through the shared broker by a
+plain request, made with the profile browser's own cookie jar, for Gmail's
+atom feed: only a live session gets HTTP 200 and a `Gmail - Inbox for <email>`
+title, so a stale session that still serves `myaccount.google.com` before its
+page-script redirect cannot be read as signed in. The request rides an
+identity-neutral ceremony tab that closes without taking the profile from its
+broker or touching sibling operator tabs.
 An unreadable snapshot or failed live check reports `unverified`; a rejected
 Google session enters the ordinary Google refresh ceremony on plain `connect`.
 

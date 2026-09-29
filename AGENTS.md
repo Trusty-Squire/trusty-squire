@@ -809,6 +809,28 @@ null and nothing prints — there is deliberately no shortened variant. The
 noVNC banner still carries the URL and password. Regression:
 `apps/mcp/src/bot/__tests__/shared-ceremony-exposure.test.ts`.
 
+### 24. Google liveness is a server-side answer, not the My Account URL
+
+`connect`'s preflight asks whether the profile's Google session is still live
+before it claims "Already connected". It must NOT read the URL of a
+`myaccount.google.com` tab: on a stale session Google serves My Account first
+and redirects to `www.google.com/account/about` in page script shortly after,
+so a probe that reads the URL right after load sees `myaccount.google.com` and
+reports a dead session as signed in (a Beeline operator on the same profile was
+told "No live Google session" while `connect` said "Google connected"). The
+answer comes from a plain request through the profile browser's own cookie jar
+for Gmail's atom feed — HTTP 200 with a `Gmail - Inbox for <email>` title is the
+only signed-in answer; 401/403 is definitively stale; anything else is "could
+not check", never a pass (`probeGoogleSessionInBroker`, `googleSessionFromFeed`
+in `apps/mcp/src/bot/google-login.ts`). That request rides the broker-only
+`operate_fetch_text` command, deliberately absent from the agent-facing tool
+registry (`buildBrokerToolRegistry` vs `buildToolRegistry` in
+`apps/mcp/src/tools/index.ts`), and opens an inert `about:blank` ceremony tab —
+navigating the tab to the feed itself hangs on Google's sign-in redirect.
+Regressions:
+`apps/mcp/src/install/__tests__/connect-already-connected-busy-broker.test.ts`,
+`apps/mcp/src/bot/__tests__/provider-probe-after-ceremony.test.ts`.
+
 ## Final note
 
 You are reading this file because a prior agent burned four version numbers, confused users, and forced a human to intervene. The agent was not malicious. It was not lazy. It was pattern-matching on its own prose instead of on tool output.

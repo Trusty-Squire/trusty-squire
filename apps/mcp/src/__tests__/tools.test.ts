@@ -14,6 +14,7 @@ import {
   listCredentialsTool,
   listPaymentCardsTool,
   revokeAppAccessTool,
+  buildBrokerToolRegistry,
   buildToolRegistry,
   findTool,
   TOOLS,
@@ -411,6 +412,15 @@ describe("TOOLS registry", () => {
     const names = TOOLS.map((t) => t.name);
     expect(names).not.toContain("provision");
     expect(names).not.toContain("check_provision_status");
+  });
+
+  // The connect preflight's Google probe needs one plain request through the
+  // profile browser's own cookie jar. That read rides the broker as an internal
+  // operator command, and must stay invisible to host agents: the broker
+  // registry carries it, the agent-facing one does not.
+  it("keeps operate_fetch_text broker-only", () => {
+    expect(buildToolRegistry().map((t) => t.name)).not.toContain("operate_fetch_text");
+    expect(buildBrokerToolRegistry().map((t) => t.name)).toContain("operate_fetch_text");
   });
 
   it("exports only the registered operator tool definitions, without duplicates", () => {
