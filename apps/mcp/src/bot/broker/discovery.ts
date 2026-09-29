@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { spawn, execFileSync } from "node:child_process";
-import { closeSync, lstatSync, openSync, readFileSync } from "node:fs";
+import { closeSync, existsSync, lstatSync, openSync, readFileSync } from "node:fs";
 import { createConnection } from "node:net";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -21,7 +21,14 @@ export function defaultBrokerSocket(profileDir = currentProfileDir()): string {
 }
 
 export function brokerSocketPath(profileDir = currentProfileDir()): string {
-  return process.env.TRUSTY_SQUIRE_BROKER_SOCKET?.trim() || defaultBrokerSocket(profileDir);
+  const configured = process.env.TRUSTY_SQUIRE_BROKER_SOCKET?.trim();
+  if (configured) return configured;
+  const fallback = defaultBrokerSocket(profileDir);
+  // A broker run as a systemd user unit (Beeline's trusty-squire-broker.service)
+  // may listen on its own configured socket. A caller without that env, such as
+  // `connect` from a shell, must still reach the broker that owns the profile.
+  if (existsSync(fallback)) return fallback;
+  return managedBrokerUnitSocket(profileDir) ?? fallback;
 }
 
 export function resolveBrokerSocket(profileDir = currentProfileDir()): string {
@@ -166,6 +173,14 @@ export function unitDefersOnDemandLaunch(unit: ManagedBrokerUnit, profileDir: st
   return unitServesProfile(unit, profileDir) && unitIsLive(unit);
 }
 
+/** The live broker unit that owns this profile, if any. */
+export function findLiveManagedBrokerUnit(
+  units: readonly ManagedBrokerUnit[],
+  profileDir: string,
+): ManagedBrokerUnit | undefined {
+  return units.find((unit) => unitDefersOnDemandLaunch(unit, profileDir));
+}
+
 /** Parse `systemctl --user show --type=service` property blocks. */
 export function parseManagedBrokerShow(stdout: string): ManagedBrokerUnit[] {
   const units: ManagedBrokerUnit[] = [];
@@ -195,7 +210,16 @@ export function parseManagedBrokerShow(stdout: string): ManagedBrokerUnit[] {
 }
 
 export function managedBrokerUnitIsLive(profileDir = currentProfileDir()): boolean {
-  if (process.platform !== "linux") return false;
+  return liveManagedBrokerUnit(profileDir) !== undefined;
+}
+
+/** The socket a live managed broker unit for this profile was configured with. */
+export function managedBrokerUnitSocket(profileDir = currentProfileDir()): string | undefined {
+  return liveManagedBrokerUnit(profileDir)?.environment.TRUSTY_SQUIRE_BROKER_SOCKET?.trim() || undefined;
+}
+
+function liveManagedBrokerUnit(profileDir: string): ManagedBrokerUnit | undefined {
+  if (process.platform !== "linux") return undefined;
   try {
     const stdout = execFileSync("systemctl", [
       "--user",
@@ -208,11 +232,9 @@ export function managedBrokerUnitIsLive(profileDir = currentProfileDir()): boole
       "-p", "Environment",
       "-p", "ExecStart",
     ], { encoding: "utf8", timeout: 2_000, stdio: ["ignore", "pipe", "ignore"] });
-    return parseManagedBrokerShow(stdout).some((unit) =>
-      unitServesProfile(unit, profileDir) && unitIsLive(unit),
-    );
+    return findLiveManagedBrokerUnit(parseManagedBrokerShow(stdout), profileDir);
   } catch {
-    return false;
+    return undefined;
   }
 }
 
