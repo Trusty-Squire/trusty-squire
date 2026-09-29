@@ -157,11 +157,12 @@ probe. If the broker still holds the profile, it polls committed-cookie
 snapshots for up to 45 seconds, awaiting Google and any explicitly requested
 provider before accepting early. The Google marker is then confirmed through
 the broker. Unreadable snapshots are unknown, not proof of sign-out; no
-provider list is persisted in the account session file. The account claim is
-recorded as soon as the server reports it, while the ceremony keeps its tab
-and noVNC exposure open until the browser's nonce-scoped Finish callback or
-the existing deadline. A scoped GitHub refresh also waits for its provider
-session to appear before Finish can close the ceremony. The post-ceremony
+provider list is persisted in the account session file. The ceremony
+completes as soon as the server claims the install (and any explicitly
+requested provider session is observed), closing its tab and noVNC exposure;
+the browser's nonce-scoped Finish callback is a courtesy that closes the page
+early, never a completion gate. A scoped GitHub refresh waits for its provider
+session to appear before the claim completes the ceremony. The post-ceremony
 provider gate reports any missing session.
 
 When an install does need the login ceremony, the ceremony opens the confirm

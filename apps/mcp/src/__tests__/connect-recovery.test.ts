@@ -140,17 +140,21 @@ describe("shouldCompleteInstallClaim (claim-only completion)", () => {
     }
   });
 
-  it("keeps the sign-in window open after claim until Finish", () => {
+  it("completes on the account claim alone, with no browser Finish signal", () => {
+    // The busy-profile hang: the claim was observed but the wizard's Finish
+    // navigation never reached the CLI's loopback listener, so gating on it
+    // held connect on "press Finish" until the pairing token expired. The
+    // claim is the authoritative fact; Finish only closes the page early.
     expect(shouldCompleteInstallClaim(false, false)).toBe(false);
     expect(shouldCompleteInstallClaim(false, true)).toBe(false);
-    expect(shouldCompleteInstallClaim(true, false)).toBe(false);
+    expect(shouldCompleteInstallClaim(true, false)).toBe(true);
     expect(shouldCompleteInstallClaim(true, true)).toBe(true);
   });
 
   it("keeps the explicit GitHub refresh open after Google claims the account", () => {
     expect(shouldCompleteInstallClaim(true, false, "github", ["google"])).toBe(false);
     expect(shouldCompleteInstallClaim(true, true, "github", ["google"])).toBe(false);
-    expect(shouldCompleteInstallClaim(true, false, "github", ["google", "github"])).toBe(false);
+    expect(shouldCompleteInstallClaim(true, false, "github", ["google", "github"])).toBe(true);
     expect(shouldCompleteInstallClaim(true, true, "github", ["google", "github"])).toBe(true);
   });
 });
@@ -160,10 +164,10 @@ describe("claimHeartbeatMessage (ceremony phase copy)", () => {
     expect(claimHeartbeatMessage(false)).toMatch(/finish signing in/i);
   });
 
-  it("asks the user to finish the browser step after the claim", () => {
+  it("never makes the browser Finish control a requirement after the claim", () => {
     const message = claimHeartbeatMessage(true);
     expect(message).toMatch(/sign-in complete/i);
-    expect(message).toMatch(/Finish/i);
+    expect(message).not.toMatch(/click Finish/i);
     expect(message).not.toMatch(/waiting.*signing in/i);
   });
 

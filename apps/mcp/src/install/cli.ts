@@ -1348,29 +1348,35 @@ async function writeAgentConfig(
   }
 }
 
-// The claim records the account binding, while Finish records that the human
-// is done using the sign-in window. Keep the window visible until Finish or
-// the ceremony deadline. A claimed token is retained even if Finish never
-// arrives before that deadline.
+// A claimed enrollment is complete for the account. The claim is the authoritative fact: the
+// server has bound this machine to the account and handed back its agent
+// token, and the CLI polls that same fact independently of the browser. A
+// scoped GitHub refresh additionally keeps the ceremony visible until its
+// session reaches the profile; the account claim alone cannot prove that step.
+// The browser's Finish control is a courtesy that closes the page early, not a
+// second completion gate. Gating on it stranded every install whose wizard
+// never delivered the nonce-scoped loopback callback (the page's own Finish
+// navigation never reached 127.0.0.1 from the shared browser), so connect sat
+// on "press Finish" until the pairing token expired even though the server had
+// already claimed the install.
 export function shouldCompleteInstallClaim(
   claimed: boolean,
-  wizardCompleted = false,
+  _wizardCompleted = false,
   requestedProvider?: OAuthProviderId,
   observedProviders: readonly OAuthProviderId[] = [],
 ): boolean {
   return (
-    claimed &&
-    wizardCompleted &&
-    (requestedProvider === undefined || observedProviders.includes(requestedProvider))
+    claimed && (requestedProvider === undefined || observedProviders.includes(requestedProvider))
   );
 }
 
-// The heartbeat names the remaining action while the ceremony stays open.
+// Once the required session is observed the ceremony returns; Finish remains
+// a courtesy rather than a requirement.
 export function claimHeartbeatMessage(claimed: boolean, waitingForGithub = false): string {
   return claimed
     ? waitingForGithub
-      ? "Account connected — finish the requested GitHub sign-in, then press Finish in this window."
-      : "Sign-in complete — press Finish in the sign-in window when you're done."
+      ? "Account connected — finish the requested GitHub sign-in in this window."
+      : "Sign-in complete — the account is claimed, closing the sign-in window."
     : "Still waiting for you to finish signing in — the URL/window above stays live until you do.";
 }
 
@@ -1446,9 +1452,11 @@ async function runInstallClaim(
   // Wrapper object so TS can narrow `state.value` after a `=== null`
   // check at the call site — bare closure-captured `let` doesn't.
   const state: { value: ClaimResult | null } = { value: null };
-  // The normal wizard's Finish button invokes the nonce-scoped loopback
-  // callback. Every install path waits for it. Plain login deliberately has no
-  // CDP attach, so this callback is the sole browser-completion authority.
+  // The wizard's Finish button invokes the nonce-scoped loopback callback,
+  // which closes the page early. It is a courtesy, not the completion gate:
+  // the claim polled from the API is authoritative, so an install completes as
+  // soon as the server claims it (and any requested provider session is
+  // observed) even when that callback never arrives.
   const pollOnce = async (wizardCompleted: boolean): Promise<InstallClaimPollResult> => {
     let claimedThisPoll = false;
     // Keep state.value warm — the install moves to "claimed" the instant the
