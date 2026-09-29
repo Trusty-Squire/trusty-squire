@@ -97,6 +97,7 @@ export interface Observation {
         state: "challenge_detected";
         url: string;
         notified?: boolean;
+        hint: string;
       }
     | {
         state: "sdk_error_retryable";
