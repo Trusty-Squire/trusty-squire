@@ -534,10 +534,11 @@ export interface RunInBotChromeOpts {
   profileDir: string;
   url: string;
   deadline: number;
-  // Returns true once the ceremony has completed. Re-polled every ~3s. It
-  // takes no BrowserContext on purpose: completion is out of band (the
-  // install claim `connect` polls), never a read off the live page.
-  pollUntilDone: () => Promise<boolean>;
+  // Returns true once the ceremony has completed. Re-polled every ~3s.
+  // Completion is out of band (the install claim `connect` polls); the only
+  // page fact passed in is whether the ceremony tab reached the install done
+  // page, which is where the wizard's Finish always lands.
+  pollUntilDone: (tabFinished: boolean) => Promise<boolean>;
   // Short label shown after the local Chrome window opens.
   bannerLabel: string;
   // The install flow has a sign-in phase; the claim ends it and the Finish
@@ -1005,9 +1006,17 @@ export async function runCeremonyInSharedBroker(opts: RunInBotChromeOpts): Promi
       if (warning !== null) console.error(`${warning}\n`);
     }
     stopExposure = exposure.kind === "exposed" ? exposure.stop : null;
+    // Finish reaches connect through its loopback callback when the page still
+    // holds it; either way the wizard ends on /install/done, so the tab's own
+    // URL is the reliable Finish signal.
+    let tabFinished = false;
     const ok = await pollUntil(
       opts.deadline,
-      () => opts.pollUntilDone(),
+      async () => {
+        if (!tabFinished && sessionId !== undefined)
+          tabFinished = await ceremonyTabFinished(client, sessionId);
+        return opts.pollUntilDone(tabFinished);
+      },
       opts.heartbeatMessage,
       () => {
         if (!client.isConnected()) throw new Error(LOGIN_BROWSER_CLOSED_ERROR);
@@ -1023,6 +1032,25 @@ export async function runCeremonyInSharedBroker(opts: RunInBotChromeOpts): Promi
       await stopExposure().catch(() => undefined);
     if (sessionId !== undefined) await client.call("close", { sessionId }).catch(() => undefined);
     await client.release().catch(() => undefined);
+  }
+}
+
+async function ceremonyTabFinished(client: BrokerClient, sessionId: string): Promise<boolean> {
+  try {
+    const observed = (await operateCommand(client, sessionId, "operate_observe", {})) as {
+      url?: string;
+    };
+    return typeof observed?.url === "string" && installDonePage(observed.url);
+  } catch {
+    return false;
+  }
+}
+
+export function installDonePage(url: string): boolean {
+  try {
+    return new URL(url).pathname.replace(/\/+$/, "") === "/install/done";
+  } catch {
+    return false;
   }
 }
 
@@ -1166,8 +1194,10 @@ export async function openInstallConfirmInBotChrome(
       bannerLabel:
         `You'll see a Chrome window with the Trusty Squire install page. ` +
         `Sign in there to connect this machine — you only sign in once.`,
-      pollUntilDone: async () =>
-        installClaimPollCompleted(await opts.pollUntilClaimed(completion?.isCompleted() === true)),
+      pollUntilDone: async (tabFinished) =>
+        installClaimPollCompleted(
+          await opts.pollUntilClaimed(completion?.isCompleted() === true || tabFinished),
+        ),
       ...(opts.heartbeatMessage !== undefined ? { heartbeatMessage: opts.heartbeatMessage } : {}),
       ...(opts.onBrowserPlacement !== undefined
         ? { onBrowserPlacement: opts.onBrowserPlacement }
