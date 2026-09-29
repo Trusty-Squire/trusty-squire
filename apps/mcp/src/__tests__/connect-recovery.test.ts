@@ -114,7 +114,7 @@ describe("decideProvisioned (fast-path gate: write config without a re-claim)", 
   });
 });
 
-describe("shouldCompleteInstallClaim (claim-only completion)", () => {
+describe("shouldCompleteInstallClaim (claim plus Finish)", () => {
   it("canonicalizes a symlinked profile before touching it", async () => {
     // connect resolves the target profile's realpath identity BEFORE any
     // browser or lease work, so a reset through the alias clears the same
@@ -140,21 +140,18 @@ describe("shouldCompleteInstallClaim (claim-only completion)", () => {
     }
   });
 
-  it("completes on the account claim alone, with no browser Finish signal", () => {
-    // The busy-profile hang: the claim was observed but the wizard's Finish
-    // navigation never reached the CLI's loopback listener, so gating on it
-    // held connect on "press Finish" until the pairing token expired. The
-    // claim is the authoritative fact; Finish only closes the page early.
+  it("completes once the account is claimed and Finish has happened", () => {
+    // Finish reaches the gate either as the loopback callback or as the ceremony
+    // tab reaching /install/done, so a claim waits for the person to press Finish.
     expect(shouldCompleteInstallClaim(false, false)).toBe(false);
     expect(shouldCompleteInstallClaim(false, true)).toBe(false);
-    expect(shouldCompleteInstallClaim(true, false)).toBe(true);
+    expect(shouldCompleteInstallClaim(true, false)).toBe(false);
     expect(shouldCompleteInstallClaim(true, true)).toBe(true);
   });
 
   it("keeps the explicit GitHub refresh open after Google claims the account", () => {
-    expect(shouldCompleteInstallClaim(true, false, "github", ["google"])).toBe(false);
     expect(shouldCompleteInstallClaim(true, true, "github", ["google"])).toBe(false);
-    expect(shouldCompleteInstallClaim(true, false, "github", ["google", "github"])).toBe(true);
+    expect(shouldCompleteInstallClaim(true, false, "github", ["google", "github"])).toBe(false);
     expect(shouldCompleteInstallClaim(true, true, "github", ["google", "github"])).toBe(true);
   });
 });
@@ -164,10 +161,10 @@ describe("claimHeartbeatMessage (ceremony phase copy)", () => {
     expect(claimHeartbeatMessage(false)).toMatch(/finish signing in/i);
   });
 
-  it("never makes the browser Finish control a requirement after the claim", () => {
+  it("asks the person to press Finish once the account is claimed", () => {
     const message = claimHeartbeatMessage(true);
     expect(message).toMatch(/sign-in complete/i);
-    expect(message).not.toMatch(/click Finish/i);
+    expect(message).toMatch(/press Finish/i);
     expect(message).not.toMatch(/waiting.*signing in/i);
   });
 

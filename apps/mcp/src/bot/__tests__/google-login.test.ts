@@ -24,6 +24,7 @@ import {
 } from "../profile.js";
 import { OPERATOR_BROWSER_MARKER_ENV } from "../browser-launch-marker.js";
 import {
+  installDonePage,
   openInstallConfirmInBotChrome,
   classifyGoogleAuthState,
   extractGoogleHumanChallenge,
@@ -112,7 +113,7 @@ describe("install completion callback", () => {
       );
       expect(callback).not.toBeNull();
       await fetch(`${callback!}?provider=google`, { redirect: "manual" });
-      await expect(opts.pollUntilDone()).resolves.toBe(true);
+      await expect(opts.pollUntilDone(false)).resolves.toBe(true);
       return { status: "satisfied" as const, closeState: "closed" as const };
     });
 
@@ -128,6 +129,34 @@ describe("install completion callback", () => {
       ),
     ).resolves.toEqual({ status: "claimed" });
     expect(pollUntilClaimed).toHaveBeenCalledWith(true);
+  });
+
+  it("counts the ceremony tab reaching /install/done as Finish when the callback never arrives", async () => {
+    // The page can lose its loopback callback across the Google sign-in round
+    // trip; its Finish then only navigates to /install/done. Before this, the
+    // claim waited on a callback that never came and connect hung.
+    const pollUntilClaimed = vi.fn(
+      async (wizardCompleted: boolean) =>
+        wizardCompleted ? ({ status: "claimed", provider: "google" } as const) : ("pending" as const),
+    );
+    const runChrome = vi.fn(async (opts: RunInBotChromeOpts) => {
+      await expect(opts.pollUntilDone(false)).resolves.toBe(false);
+      await expect(opts.pollUntilDone(true)).resolves.toBe(true);
+      return { status: "satisfied" as const, closeState: "closed" as const };
+    });
+
+    await expect(
+      openInstallConfirmInBotChrome(
+        {
+          confirmUrl: "https://example.test/install",
+          pollUntilClaimed,
+          profileDir: "/unused/profile",
+          deadline: Date.now() + 60_000,
+        },
+        runChrome,
+      ),
+    ).resolves.toEqual({ status: "claimed" });
+    expect(pollUntilClaimed).toHaveBeenLastCalledWith(true);
   });
 });
 
@@ -1024,5 +1053,15 @@ describe("scopesAreBasic (T7)", () => {
 
   it("rejects an empty scope list — absence is not confirmation", () => {
     expect(scopesAreBasic([])).toBe(false);
+  });
+});
+
+describe("installDonePage", () => {
+  it("recognizes the wizard's Finish landing page and nothing else", () => {
+    expect(installDonePage("https://trustysquire.ai/install/done")).toBe(true);
+    expect(installDonePage("https://trustysquire.ai/install/done/")).toBe(true);
+    expect(installDonePage("https://trustysquire.ai/install?token=abc&claim=1")).toBe(false);
+    expect(installDonePage("http://127.0.0.1:46165/.well-known/trusty-squire/install-complete/x")).toBe(false);
+    expect(installDonePage("not a url")).toBe(false);
   });
 });

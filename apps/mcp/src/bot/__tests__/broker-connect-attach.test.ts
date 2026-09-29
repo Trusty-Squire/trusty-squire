@@ -411,6 +411,8 @@ describe("connect attaches to the live broker for the profile it is connecting",
           args: { ref: SIGN_OUT_LABEL, session_id: "tab-1" },
         },
         { name: "operate_navigate", args: { url: CONFIRM_URL, session_id: "tab-1" } },
+        // The Finish check reads the ceremony tab's URL while polling.
+        { name: "operate_observe", args: { session_id: "tab-1" } },
       ]);
       expect(outcome.lockNeverReleased).toBe(true);
     },

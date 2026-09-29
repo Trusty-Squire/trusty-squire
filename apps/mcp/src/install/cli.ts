@@ -1348,25 +1348,22 @@ async function writeAgentConfig(
   }
 }
 
-// A claimed enrollment is complete for the account. The claim is the authoritative fact: the
-// server has bound this machine to the account and handed back its agent
-// token, and the CLI polls that same fact independently of the browser. A
-// scoped GitHub refresh additionally keeps the ceremony visible until its
-// session reaches the profile; the account claim alone cannot prove that step.
-// The browser's Finish control is a courtesy that closes the page early, not a
-// second completion gate. Gating on it stranded every install whose wizard
-// never delivered the nonce-scoped loopback callback (the page's own Finish
-// navigation never reached 127.0.0.1 from the shared browser), so connect sat
-// on "press Finish" until the pairing token expired even though the server had
-// already claimed the install.
+// The claim records the account binding; Finish records that the person is done
+// with the sign-in window, so the window stays up until then. Finish counts when
+// the loopback callback arrives OR the ceremony tab reaches /install/done, where
+// the wizard's Finish always lands: the page can lose its callback across the
+// sign-in round trip, and gating on the callback alone hung connect after a
+// completed sign-in. A claimed token is still retained at the ceremony deadline.
 export function shouldCompleteInstallClaim(
   claimed: boolean,
-  _wizardCompleted = false,
+  wizardCompleted = false,
   requestedProvider?: OAuthProviderId,
   observedProviders: readonly OAuthProviderId[] = [],
 ): boolean {
   return (
-    claimed && (requestedProvider === undefined || observedProviders.includes(requestedProvider))
+    claimed &&
+    wizardCompleted &&
+    (requestedProvider === undefined || observedProviders.includes(requestedProvider))
   );
 }
 
@@ -1375,8 +1372,8 @@ export function shouldCompleteInstallClaim(
 export function claimHeartbeatMessage(claimed: boolean, waitingForGithub = false): string {
   return claimed
     ? waitingForGithub
-      ? "Account connected — finish the requested GitHub sign-in in this window."
-      : "Sign-in complete — the account is claimed, closing the sign-in window."
+      ? "Account connected — finish the requested GitHub sign-in, then press Finish in this window."
+      : "Sign-in complete — press Finish in the sign-in window when you're done."
     : "Still waiting for you to finish signing in — the URL/window above stays live until you do.";
 }
 
