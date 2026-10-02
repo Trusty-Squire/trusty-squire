@@ -1,5 +1,9 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.24-rc.1 (2026-10-02)
+
+- fix(mcp): one broker per physical profile with a marker-gated launch (#1007)
+
 ## Unreleased
 
 - Make `mcp server` a stdio proxy onto the host broker's shared MCP socket.
