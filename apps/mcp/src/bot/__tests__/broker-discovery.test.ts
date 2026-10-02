@@ -1,6 +1,6 @@
-import { mkdtemp, mkdir, rm, symlink } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { writeFileSync, mkdirSync, existsSync, statSync } from "node:fs";
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { basename, dirname, join } from "node:path";
@@ -30,6 +30,7 @@ import {
   writeBrokerUnitMarker,
   removeBrokerUnitMarker,
 } from "../broker/managed-marker.js";
+import { brokerAccountBindingPath } from "../broker/account-binding.js";
 import { sharedMcpSocketPath } from "../broker/mcp-socket-path.js";
 
 const roots: string[] = [];
@@ -290,6 +291,88 @@ describe("managed-broker spawn gate", () => {
       expect(decision.kind).toBe("wait");
     });
   });
+
+  it("refuses to join a live managed unit whose profile is bound to a different account", async () => {
+    const profile = sandboxProfile();
+    ensureProfile(profile);
+    await removeBrokerUnitMarker(profile);
+    const unitSocket = join("/tmp", `ts-broker-unit-account-${randomUUID()}.sock`);
+    // The profile this live unit serves is bound to account-a.
+    writeFileSync(
+      brokerAccountBindingPath(profile),
+      JSON.stringify({ version: 1, accountId: "account-a" }) + "\n",
+      { mode: 0o600 },
+    );
+    const listener = await listenBroker(unitSocket, {
+      call: async () => ({ live: true }),
+      disconnect: async () => undefined,
+    });
+    try {
+      await withSystemctlShim(liveUnitShim(profile, unitSocket), async () => {
+        await expect(
+          connectOrLaunchBroker(defaultBrokerSocket(profile), { accountId: "account-b" }),
+        ).rejects.toThrow(/account_mismatch|bound to account/);
+      });
+    } finally {
+      await listener.close();
+      await rm(brokerAccountBindingPath(profile), { force: true });
+    }
+  });
+
+  it("recognizes a live unit through a bind-mount alias by device identity", async () => {
+    // A bind mount is the case realpath cannot resolve, so profilePathIdentity
+    // sees two paths where profileDeviceIdentity sees one profile. Creating one
+    // needs an unprivileged user namespace; without it the case cannot be
+    // reproduced here and the test stands aside.
+    const probe = spawnSync("unshare", ["-Ur", "-m", "true"], { stdio: "ignore" });
+    if (probe.status !== 0) {
+      console.warn("skipping bind-mount alias test: unprivileged user namespaces unavailable");
+      return;
+    }
+    const root = await mkdtemp(join(tmpdir(), "ts-broker-bindmount-")); roots.push(root);
+    const realParent = join(root, "real-parent");
+    const aliasParent = join(root, "mnt");
+    await mkdir(join(realParent, "chrome-profile"), { recursive: true });
+    await mkdir(aliasParent, { recursive: true });
+    const real = join(realParent, "chrome-profile");
+    const alias = join(aliasParent, "chrome-profile");
+    const discoveryUrl = new URL("../broker/discovery.ts", import.meta.url).href;
+    const profileUrl = new URL("../profile-path.ts", import.meta.url).href;
+    const probePath = join(root, "alias-probe.mjs");
+    await writeFile(
+      probePath,
+      [
+        `import { unitDefersOnDemandLaunch } from ${JSON.stringify(discoveryUrl)};`,
+        `import { profileDeviceIdentity } from ${JSON.stringify(profileUrl)};`,
+        `const unit = {`,
+        `  id: "trusty-squire-broker.service",`,
+        `  activeState: "active",`,
+        `  execStart: "{ path=/usr/bin/node ; argv[]=/usr/bin/node /opt/mcp/dist/bin.js broker ; ignore_errors=no }",`,
+        `  environment: { TRUSTY_SQUIRE_PROFILE_DIR: ${JSON.stringify(real)} },`,
+        `};`,
+        `process.stdout.write(JSON.stringify({`,
+        `  defers: unitDefersOnDemandLaunch(unit, ${JSON.stringify(alias)}),`,
+        `  real: profileDeviceIdentity(${JSON.stringify(real)}),`,
+        `  alias: profileDeviceIdentity(${JSON.stringify(alias)}),`,
+        `}));`,
+        ``,
+      ].join("\n"),
+    );
+    const shell = [
+      `mount --bind ${JSON.stringify(realParent)} ${JSON.stringify(aliasParent)}`,
+      `cd ${JSON.stringify(process.cwd())}`,
+      `node --import tsx ${JSON.stringify(probePath)}`,
+    ].join(" && ");
+    const result = spawnSync("unshare", ["-Ur", "-m", "--propagation", "private", "sh", "-c", shell], {
+      encoding: "utf8",
+    });
+    expect(result.status, result.stderr).toBe(0);
+    const parsed = JSON.parse(result.stdout) as { defers: boolean; real: string; alias: string };
+    // Same physical profile, two path strings: device identity must agree and
+    // the live unit must be recognised rather than a competitor spawned.
+    expect(parsed.real).toBe(parsed.alias);
+    expect(parsed.defers).toBe(true);
+  }, 30_000);
 
   it("refuses to join a managed socket declaring a different profile", async () => {
     const profile = sandboxProfile();

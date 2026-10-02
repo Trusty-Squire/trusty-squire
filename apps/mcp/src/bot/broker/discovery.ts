@@ -182,8 +182,12 @@ function unitProfileDir(unit: ManagedBrokerUnit): string {
 }
 
 function unitServesProfile(unit: ManagedBrokerUnit, profileDir: string): boolean {
+  // Compare the DEVICE identity (parent dev/ino plus name), never the path
+  // string: a client that reaches the profile through an alias must still
+  // recognise the live unit, or it would spawn a competitor it cannot win
+  // against and end in broker_unavailable.
   return isBrokerUnit(unit) &&
-    profilePathIdentity(unitProfileDir(unit)) === profilePathIdentity(profileDir);
+    profileDeviceIdentity(unitProfileDir(unit)) === profileDeviceIdentity(profileDir);
 }
 
 function unitIsLive(unit: ManagedBrokerUnit): boolean {
@@ -248,7 +252,7 @@ export function managedBrokerUnitSocket(profileDir = currentProfileDir()): strin
  * client that mistakes that for "no unit" spawns a competitor (the bug this
  * module exists to prevent). The spawn gate evaluates it marker-aware. */
 export type ManagedUnitState =
-  | { state: "live"; socket?: string | undefined }
+  | { state: "live"; socket?: string | undefined; unit: ManagedBrokerUnit }
   | { state: "absent" }
   | { state: "unknown" };
 
@@ -272,19 +276,22 @@ export function readSystemctlUnits(profileDir: string): ManagedUnitState {
     return {
       state: "live",
       socket: socket !== undefined && socket.length > 0 ? socket : undefined,
+      unit,
     };
   } catch {
     return { state: "unknown" };
   }
 }
 
-/** Refuse to join a managed socket that declares a different physical profile
- * or a different account binding (Required change 3): never join, never
- * launch. The marker IS the declared identity; the client compares it against
- * its own derived device anchor and its own account claim. */
-async function verifyManagedBrokerJoin(profileDir: string, marker: ManagedBrokerMarker, options: BrokerConnectOptions): Promise<void> {
+/** Refuse to join a socket that declares a different physical profile
+ * (Required change 3): never join, never launch. The declared anchor is
+ * compared against the client's own derived device anchor. */
+function assertJoinProfile(
+  profileDir: string,
+  declared: { dev: number; ino: number; name: string },
+  what: string,
+): void {
   const anchor = profileDeviceAnchor(profileDir);
-  const declared = marker.profile;
   if (
     anchor === null ||
     anchor.dev !== declared.dev ||
@@ -293,22 +300,60 @@ async function verifyManagedBrokerJoin(profileDir: string, marker: ManagedBroker
   ) {
     throw new BrokerRefusal(
       "profile_mismatch",
-      `Refusing to join the managed broker socket: it serves profile ${declared.name} (` +
+      `Refusing to join the ${what}: it serves profile ${declared.name} (` +
         `${declared.dev}:${declared.ino}), not this profile (${anchor === null ? "unknown" : `${anchor.dev}:${anchor.ino}:${anchor.name}`})`,
     );
   }
-  const clientBinding = options.accountId ?? (await readBrokerAccountBinding(profileDir));
-  // Strict equality, fail-closed: a client that cannot show the marker's own
-  // binding is refused. A marker bound to an account and a silent client is a
-  // mismatch, not a pass.
-  if (clientBinding !== marker.accountBinding) {
+}
+
+/** Refuse to join a socket bound to a different account. Strict equality,
+ * fail-closed: a socket bound to an account and a silent client is a
+ * mismatch, not a pass. */
+async function assertJoinAccount(
+  profileDir: string,
+  declared: string | null,
+  options: BrokerConnectOptions,
+  what: string,
+): Promise<void> {
+  const clientBinding = options.accountId ?? (await readBrokerAccountBinding(profilePathIdentity(profileDir)));
+  if (clientBinding !== declared) {
     throw new BrokerRefusal(
       "account_mismatch",
-      `Refusing to join the managed broker socket: it is bound to account ` +
-        `${marker.accountBinding ?? "none"}, but this client acts for ` +
+      `Refusing to join the ${what}: it is bound to account ` +
+        `${declared ?? "none"}, but this client acts for ` +
         `${clientBinding ?? "none"}`,
     );
   }
+}
+
+/** The marker IS the declared identity; verify it before joining (Required
+ * change 3). */
+async function verifyManagedBrokerJoin(profileDir: string, marker: ManagedBrokerMarker, options: BrokerConnectOptions): Promise<void> {
+  assertJoinProfile(profileDir, marker.profile, "managed broker socket");
+  await assertJoinAccount(profileDir, marker.accountBinding, options, "managed broker socket");
+}
+
+/** A live managed unit's socket is not the client's own: verify its declared
+ * profile and the profile's account binding before joining (Required change 3).
+ * The unit declares no account itself, so the binding is the profile's own
+ * record, read through the unit's profile directory. */
+async function verifyManagedBrokerUnitJoin(
+  profileDir: string,
+  unit: ManagedBrokerUnit,
+  options: BrokerConnectOptions,
+): Promise<void> {
+  const unitProfile = unitProfileDir(unit);
+  assertJoinProfile(
+    profileDir,
+    profileDeviceAnchor(unitProfile) ?? { dev: -1, ino: -1, name: "" },
+    "managed broker unit",
+  );
+  await assertJoinAccount(
+    profileDir,
+    await readBrokerAccountBinding(profilePathIdentity(unitProfile)),
+    options,
+    "managed broker unit",
+  );
 }
 
 /** The spawn gate, marker-aware. Decides what a client may do when the target
@@ -340,7 +385,13 @@ export async function brokerLaunchDecision(
     return { kind: "wait", socket: path };
   }
   const unit = readSystemctlUnits(profileDir);
-  if (unit.state === "live") return { kind: "wait", socket: unit.socket ?? path };
+  if (unit.state === "live") {
+    // The unit's socket is not the client's own: verify the declared profile
+    // and account binding before waiting on it, so a foreign unit is refused
+    // (never joined, never launched).
+    await verifyManagedBrokerUnitJoin(profileDir, unit.unit, options);
+    return { kind: "wait", socket: unit.socket ?? path };
+  }
   return { kind: "spawn" };
 }
 
