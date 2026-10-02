@@ -34,12 +34,14 @@ export function profilePathIdentity(profileDir: string): string {
 }
 
 /** The dev/ino + name of the profile's membership anchor for locking and
- * socket derivation. The anchor is the canonical parent directory (the deepest
- * existing ancestor), and the profile's own directory name travels as a suffix,
- * so a profile directory that is REPLACED on --force-relogin keeps one
- * identity (its parent inode is untouched) and two paths to one physical
- * profile (bind mount, symlink, HOME override) resolve to one anchor. Returns
- * null when no ancestor exists at all (nothing to stat). */
+ * socket derivation. The anchor is the canonical parent directory plus the
+ * profile directory's own name, so a profile directory that is REPLACED on
+ * --force-relogin keeps one identity (its parent inode is untouched) and two
+ * paths to one physical profile (bind mount, symlink, HOME override) resolve
+ * to one anchor. The parent is created when missing, because the nearest
+ * existing ancestor MOVES once an intermediate directory is created and the
+ * identity must not drift between a first reader and a later one. Returns null
+ * when no ancestor can be stat'd at all. */
 export interface ProfileDeviceAnchor {
   dev: number;
   ino: number;
@@ -48,15 +50,31 @@ export interface ProfileDeviceAnchor {
 
 export function profileDeviceAnchor(profileDir: string): ProfileDeviceAnchor | null {
   const absolute = resolve(profileDir);
-  let resolvedProfile: string;
+  // Make the canonical parent exist before reading its dev/ino. The nearest
+  // existing ancestor MOVES once an intermediate directory is created, so a
+  // caller that derives the identity before the profile's parent exists and a
+  // caller that derives it after would disagree — two endpoints for one
+  // profile. Best effort: a parent this process cannot create falls back to
+  // the nearest existing ancestor below.
   try {
-    resolvedProfile = realpathSync.native(absolute);
+    mkdirSync(dirname(profilePathIdentity(absolute)), { recursive: true, mode: 0o700 });
   } catch {
-    // The profile directory does not exist (fresh machine, or replaced path
-    // not yet recreated). Anchor on the nearest existing ancestor, keeping the
-    // missing suffix so a name still reads anchor → profile. Callers that
-    // provision the parent first (ensureProfileDeviceAnchor) take the main
-    // path below and never drift.
+    /* read-only or inaccessible parent: fall through to the nearest ancestor */
+  }
+  try {
+    // The anchor is the canonical PARENT's dev/ino plus the profile
+    // directory's own resolved name: symlinked aliases and bind-mounted paths
+    // collapse to one anchor, and a --force-relogin REPLACEMENT of the profile
+    // directory (a new inode at the same path) keeps this identity because the
+    // parent is untouched.
+    const resolvedProfile = realpathSync.native(absolute);
+    const parent = dirname(resolvedProfile);
+    const st = statSync(parent);
+    return { dev: st.dev, ino: st.ino, name: basename(resolvedProfile) };
+  } catch {
+    // Neither the profile directory nor its newly canonical parent exists.
+    // Anchor on the nearest existing ancestor, keeping the missing suffix so a
+    // name still reads anchor → profile.
     const suffix: string[] = [basename(absolute)];
     let candidate = dirname(absolute);
     for (;;) {
@@ -72,14 +90,6 @@ export function profileDeviceAnchor(profileDir: string): ProfileDeviceAnchor | n
       }
     }
   }
-  // The anchor is the canonical PARENT's dev/ino plus the profile directory's
-  // own resolved name: symlinked aliases and bind-mounted paths collapse to
-  // one anchor, and a --force-relogin REPLACEMENT of the profile directory
-  // (a new inode at the same path) keeps this identity because the parent is
-  // untouched.
-  const parent = dirname(resolvedProfile);
-  const st = statSync(parent);
-  return { dev: st.dev, ino: st.ino, name: basename(resolvedProfile) };
 }
 
 /** Create the parent of the canonical profile path if missing, so the device

@@ -146,6 +146,21 @@ describe("broker discovery", () => {
     expect(profileOperationLockPath(profile)).toBe(lockBefore);
   });
 
+  it("keeps one identity and one endpoint when the profile parent is created after the first read", async () => {
+    const root = await mkdtemp(join(tmpdir(), "ts-broker-discovery-")); roots.push(root);
+    const profile = join(root, ".trusty-squire", "signup-test-profile");
+    // The first read happens before anything exists under root. Creating the
+    // parent later (daemon startup, an MCP listener) must not move the anchor
+    // from the nearest ancestor to the new parent.
+    const identityBefore = profileDeviceIdentity(profile);
+    const wireBefore = defaultBrokerSocket(profile);
+    const mcpBefore = sharedMcpSocketPath(root, profile);
+    await mkdir(join(root, ".trusty-squire"), { recursive: true, mode: 0o700 });
+    expect(profileDeviceIdentity(profile)).toBe(identityBefore);
+    expect(defaultBrokerSocket(profile)).toBe(wireBefore);
+    expect(sharedMcpSocketPath(root, profile)).toBe(mcpBefore);
+  });
+
   it("attaches to the live broker without launching a second one", async () => {
     const root = await mkdtemp(join(tmpdir(), "ts-broker-discovery-")); roots.push(root);
     const socket = join(root, "broker.sock");
