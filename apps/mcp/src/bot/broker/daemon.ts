@@ -6,6 +6,7 @@ import { createSessionGuard, setServingAccountId } from "../../session-guard.js"
 import { setSelfManagedChromeTerminationSignalExitEnabled } from "../browser.js";
 import {
   acquireProfileOperationGuard,
+  ensureProfileDeviceAnchor,
   profilePathIdentity,
   CHROME_PROFILE_DIR,
   readLockHolder,
@@ -18,6 +19,7 @@ import { OperatorBroker } from "./operator.js";
 import { BrokerRefusal } from "./refusal.js";
 import { listenBroker } from "./transport.js";
 import { listenSharedMcp } from "./mcp-socket.js";
+import { readBrokerUnitMarkerSync } from "./managed-marker.js";
 
 /**
  * Wire connections that hold a claim on the browser. Status probes are reads
@@ -81,7 +83,36 @@ export function retryableBrokerShutdown(cleanup: () => Promise<boolean>): {
  * have yet. Account identity arrives with the individual calls that act as an
  * account, so a bare broker serves the ceremony and the operator alike.
  */
+/** A broker may start when (a) no managed marker exists, or (b) it was started
+ * by the unit that owns the marker (INVOCATION_ID is set by systemd for every
+ * unit process; the unit additionally sets TRUSTY_SQUIRE_BROKER_UNIT=1 as an
+ * explicit, scrubbed-away-proof flag). Older or foreign clients that exec the
+ * new bin have neither and fail closed. */
+export function brokerMayStartForMarker(
+  markerPresent: boolean,
+  env: NodeJS.ProcessEnv,
+): boolean {
+  if (!markerPresent) return true;
+  const startedByUnit =
+    (env.INVOCATION_ID ?? "").trim().length > 0 || env.TRUSTY_SQUIRE_BROKER_UNIT === "1";
+  return startedByUnit;
+}
+
 export async function runBrokerDaemon(): Promise<void> {
+  // A managed-broker marker means a systemd unit owns this profile. Refuse
+  // before touching the socket, the profile lock, or Chrome when this process
+  // was not started by that unit.
+  const managedMarkerRead = readBrokerUnitMarkerSync(CHROME_PROFILE_DIR);
+  if (managedMarkerRead.kind !== "absent" && !brokerMayStartForMarker(true, process.env)) {
+    throw new BrokerRefusal(
+      "broker_unavailable",
+      "A managed broker unit owns this profile; refusing to start a foreign broker",
+    );
+  }
+  // Provision the profile's private parent before anything derives the
+  // device identity, so the daemon's socket and lock names are stable from
+  // the very first start on a fresh machine.
+  ensureProfileDeviceAnchor(CHROME_PROFILE_DIR);
   const path = resolveBrokerSocket();
   const parent = await lstat(dirname(path));
   if (!parent.isDirectory() || (parent.mode & 0o077) !== 0 || parent.uid !== process.getuid?.()) {

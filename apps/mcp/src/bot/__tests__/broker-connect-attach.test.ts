@@ -183,6 +183,13 @@ const server = net.createServer((socket) => {
     }
   });
 });
+// Like runBrokerDaemon, remove a dead predecessor's socket after claiming the
+// profile lock: the kernel-released lock proves any prior listener is gone, and
+// the profile's device identity can repeat across recreations (so a stale
+// socket path must not block this fixture's bind).
+try {
+  fs.rmSync(socketPath, { force: true });
+} catch {}
 server.listen(socketPath);
 fs.writeFileSync(lockPath + ".seen", JSON.stringify(seen), { mode: 0o600 });
 const persist = () => fs.writeFileSync(lockPath + ".seen", JSON.stringify(seen), { mode: 0o600 });

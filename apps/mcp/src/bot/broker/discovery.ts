@@ -6,23 +6,47 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
-import { currentProfileDir, ProfileBusyError, profilePathIdentity } from "../profile.js";
+import {
+  currentProfileDir,
+  ensureProfileDeviceAnchor,
+  ProfileBusyError,
+  profileDeviceAnchor,
+  profileDeviceIdentity,
+  profilePathIdentity,
+} from "../profile.js";
 import { BrokerClient, brokerSpeaksLegacyWire } from "./transport.js";
 import { readBrokerAccountBinding } from "./account-binding.js";
 import { BrokerRefusal } from "./refusal.js";
 import { sharedMcpSocketPath } from "./mcp-socket-path.js";
+import {
+  readBrokerUnitMarkerAsync,
+  readBrokerUnitMarkerSync,
+  type ManagedBrokerMarker,
+} from "./managed-marker.js";
 
 const BROKER_CONNECT_TIMEOUT_MS = 10_000;
 const BROKER_CONNECT_POLL_MS = 100;
 
 export function defaultBrokerSocket(profileDir = currentProfileDir()): string {
-  const key = createHash("sha256").update(profilePathIdentity(profileDir)).digest("hex").slice(0, 32);
-  return join("/tmp", `trusty-squire-broker-${process.getuid?.() ?? "local"}-${key}`, "broker.sock");
+  // Socket names derive from the profile DEVICE identity (parent dev/ino plus
+  // the profile directory name), never the path string: two paths to one
+  // physical profile yield one endpoint, and a replaced profile directory
+  // keeps the same endpoint.
+  const identity = createHash("sha256")
+    .update(profileDeviceIdentity(profileDir))
+    .digest("hex")
+    .slice(0, 32);
+  return join("/tmp", `trusty-squire-broker-${process.getuid?.() ?? "local"}-${identity}`, "broker.sock");
 }
 
 export function brokerSocketPath(profileDir = currentProfileDir()): string {
   const configured = process.env.TRUSTY_SQUIRE_BROKER_SOCKET?.trim();
   if (configured) return configured;
+  // A managed-broker marker is authoritative: the unit's declared socket wins
+  // even over a live own-path socket, so a stray on-demand broker is never
+  // joined while the unit owns the profile.
+  const marker = readBrokerUnitMarkerSync(profileDir);
+  if (marker.kind === "valid") return marker.marker.socket;
   const fallback = defaultBrokerSocket(profileDir);
   // A broker run as a systemd user unit (Beeline's trusty-squire-broker.service)
   // may listen on its own configured socket. A caller without that env, such as
@@ -158,8 +182,12 @@ function unitProfileDir(unit: ManagedBrokerUnit): string {
 }
 
 function unitServesProfile(unit: ManagedBrokerUnit, profileDir: string): boolean {
+  // Compare the DEVICE identity (parent dev/ino plus name), never the path
+  // string: a client that reaches the profile through an alias must still
+  // recognise the live unit, or it would spawn a competitor it cannot win
+  // against and end in broker_unavailable.
   return isBrokerUnit(unit) &&
-    profilePathIdentity(unitProfileDir(unit)) === profilePathIdentity(profileDir);
+    profileDeviceIdentity(unitProfileDir(unit)) === profileDeviceIdentity(profileDir);
 }
 
 function unitIsLive(unit: ManagedBrokerUnit): boolean {
@@ -210,16 +238,26 @@ export function parseManagedBrokerShow(stdout: string): ManagedBrokerUnit[] {
 }
 
 export function managedBrokerUnitIsLive(profileDir = currentProfileDir()): boolean {
-  return liveManagedBrokerUnit(profileDir) !== undefined;
+  return readSystemctlUnits(profileDir).state === "live";
 }
 
 /** The socket a live managed broker unit for this profile was configured with. */
 export function managedBrokerUnitSocket(profileDir = currentProfileDir()): string | undefined {
-  return liveManagedBrokerUnit(profileDir)?.environment.TRUSTY_SQUIRE_BROKER_SOCKET?.trim() || undefined;
+  const unit = readSystemctlUnits(profileDir);
+  return unit.state === "live" ? unit.socket : undefined;
 }
 
-function liveManagedBrokerUnit(profileDir: string): ManagedBrokerUnit | undefined {
-  if (process.platform !== "linux") return undefined;
+/** systemctl answer for this profile. A failure is deliberately "unknown",
+ * NOT "no unit": inside bwrap sandboxes `systemctl --user` fails, and a
+ * client that mistakes that for "no unit" spawns a competitor (the bug this
+ * module exists to prevent). The spawn gate evaluates it marker-aware. */
+export type ManagedUnitState =
+  | { state: "live"; socket?: string | undefined; unit: ManagedBrokerUnit }
+  | { state: "absent" }
+  | { state: "unknown" };
+
+export function readSystemctlUnits(profileDir: string): ManagedUnitState {
+  if (process.platform !== "linux") return { state: "absent" };
   try {
     const stdout = execFileSync("systemctl", [
       "--user",
@@ -232,17 +270,132 @@ function liveManagedBrokerUnit(profileDir: string): ManagedBrokerUnit | undefine
       "-p", "Environment",
       "-p", "ExecStart",
     ], { encoding: "utf8", timeout: 2_000, stdio: ["ignore", "pipe", "ignore"] });
-    return findLiveManagedBrokerUnit(parseManagedBrokerShow(stdout), profileDir);
+    const unit = findLiveManagedBrokerUnit(parseManagedBrokerShow(stdout), profileDir);
+    if (unit === undefined) return { state: "absent" };
+    const socket = unit.environment.TRUSTY_SQUIRE_BROKER_SOCKET?.trim();
+    return {
+      state: "live",
+      socket: socket !== undefined && socket.length > 0 ? socket : undefined,
+      unit,
+    };
   } catch {
-    return undefined;
+    return { state: "unknown" };
   }
 }
 
-function launchUnlessManaged(path: string): (() => Error | undefined) | undefined {
-  // A systemd user unit that already owns this profile will reclaim the socket
-  // itself. Launching a detached competitor wins the kernel lock and the unit
-  // restart-loops (relay reconnect after #982).
-  return managedBrokerUnitIsLive() ? undefined : launchBrokerDaemon(path);
+/** Refuse to join a socket that declares a different physical profile
+ * (Required change 3): never join, never launch. The declared anchor is
+ * compared against the client's own derived device anchor. */
+function assertJoinProfile(
+  profileDir: string,
+  declared: { dev: number; ino: number; name: string },
+  what: string,
+): void {
+  const anchor = profileDeviceAnchor(profileDir);
+  if (
+    anchor === null ||
+    anchor.dev !== declared.dev ||
+    anchor.ino !== declared.ino ||
+    anchor.name !== declared.name
+  ) {
+    throw new BrokerRefusal(
+      "profile_mismatch",
+      `Refusing to join the ${what}: it serves profile ${declared.name} (` +
+        `${declared.dev}:${declared.ino}), not this profile (${anchor === null ? "unknown" : `${anchor.dev}:${anchor.ino}:${anchor.name}`})`,
+    );
+  }
+}
+
+/** Refuse to join a socket bound to a DIFFERENT account. An unbound profile
+ * (declared `null`) is unclaimed, not foreign: the first account-acting
+ * acquire claims it (`runtime.ts` bindAccount), so refusing an enrolled client
+ * there would make a fresh unit or a --force-relogin profile unjoinable. Only
+ * a declared, different binding is a mismatch. */
+async function assertJoinAccount(
+  profileDir: string,
+  declared: string | null,
+  options: BrokerConnectOptions,
+  what: string,
+): Promise<void> {
+  if (declared === null) return;
+  const clientBinding = options.accountId ?? (await readBrokerAccountBinding(profilePathIdentity(profileDir)));
+  if (clientBinding !== declared) {
+    throw new BrokerRefusal(
+      "account_mismatch",
+      `Refusing to join the ${what}: it is bound to account ` +
+        `${declared ?? "none"}, but this client acts for ` +
+        `${clientBinding ?? "none"}`,
+    );
+  }
+}
+
+/** The marker IS the declared identity; verify it before joining (Required
+ * change 3). */
+async function verifyManagedBrokerJoin(profileDir: string, marker: ManagedBrokerMarker, options: BrokerConnectOptions): Promise<void> {
+  assertJoinProfile(profileDir, marker.profile, "managed broker socket");
+  await assertJoinAccount(profileDir, marker.accountBinding, options, "managed broker socket");
+}
+
+/** A live managed unit's socket is not the client's own: verify its declared
+ * profile and the profile's account binding before joining (Required change 3).
+ * The unit declares no account itself, so the binding is the profile's own
+ * record, read through the unit's profile directory. */
+async function verifyManagedBrokerUnitJoin(
+  profileDir: string,
+  unit: ManagedBrokerUnit,
+  options: BrokerConnectOptions,
+): Promise<void> {
+  const unitProfile = unitProfileDir(unit);
+  assertJoinProfile(
+    profileDir,
+    profileDeviceAnchor(unitProfile) ?? { dev: -1, ino: -1, name: "" },
+    "managed broker unit",
+  );
+  await assertJoinAccount(
+    profileDir,
+    await readBrokerAccountBinding(profilePathIdentity(unitProfile)),
+    options,
+    "managed broker unit",
+  );
+}
+
+/** The spawn gate, marker-aware. Decides what a client may do when the target
+ * broker is not reachable:
+ *   - a marker file EXISTS (valid or not): never spawn. Wait for the marker's
+ *     declared socket (bounded) and broker_unavailable on timeout; a marker
+ *     with no socket never reopens spawning.
+ *   - no marker: a live managed unit defers (wait, no spawn); systemctl
+ *     failure ("unknown") and "no unit" both may spawn on demand. */
+export type BrokerLaunchDecision =
+  | { kind: "spawn" }
+  | { kind: "wait"; socket: string };
+
+export async function brokerLaunchDecision(
+  profileDir: string,
+  path: string,
+  options: BrokerConnectOptions = {},
+): Promise<BrokerLaunchDecision> {
+  const markerRead = await readBrokerUnitMarkerAsync(profileDir);
+  if (markerRead.kind !== "absent") {
+    if (markerRead.kind === "valid") {
+      const target = markerRead.marker.socket;
+      if (target !== defaultBrokerSocket(profileDir)) {
+        await verifyManagedBrokerJoin(profileDir, markerRead.marker, options);
+      }
+      return { kind: "wait", socket: target };
+    }
+    // Present but invalid marker: fail closed, wait bounded, never spawn.
+    return { kind: "wait", socket: path };
+  }
+  const unit = readSystemctlUnits(profileDir);
+  if (unit.state === "live") {
+    // The unit's socket is not the client's own: verify the declared profile
+    // and account binding before waiting on it, so a foreign unit is refused
+    // (never joined, never launched).
+    await verifyManagedBrokerUnitJoin(profileDir, unit.unit, options);
+    return { kind: "wait", socket: unit.socket ?? path };
+  }
+  return { kind: "spawn" };
 }
 
 export interface BrokerConnectOptions {
@@ -274,14 +427,23 @@ function launchBrokerDaemon(path: string): () => Error | undefined {
 }
 
 export async function connectOrLaunchBroker(path: string, options: BrokerConnectOptions = {}): Promise<BrokerClient> {
-  try { return await BrokerClient.connect(path); }
+  // Provision the profile's private parent so the device identity used to
+  // derive the own socket is stable from the very first call.
+  const profileDir = currentProfileDir();
+  ensureProfileDeviceAnchor(profileDir);
+  // The spawn/join gate runs BEFORE any connect: it decides whether a client
+  // may launch at all (marker/unit/systemctl state) and refuses a foreign
+  // managed socket before it is joined.
+  const decision = await brokerLaunchDecision(profileDir, path, options);
+  const target = decision.kind === "wait" ? decision.socket : path;
+  try { return await BrokerClient.connect(target); }
   catch (error) {
-    if (!isUnavailable(error) && !(await reclaimLegacyBroker(path, options, error))) throw error;
+    if (!isUnavailable(error) && !(await reclaimLegacyBroker(target, options, error))) throw error;
   }
-  const failure = launchUnlessManaged(path);
-  try { return await waitForBroker(path, failure); }
+  const failure = decision.kind === "spawn" ? launchBrokerDaemon(path) : undefined;
+  try { return await waitForBroker(target, failure); }
   catch (error) {
-    if (error instanceof ProfileBusyError) return await waitForBroker(path);
+    if (error instanceof ProfileBusyError) return await waitForBroker(target);
     throw error;
   }
 }
@@ -290,8 +452,15 @@ export async function connectOrLaunchBroker(path: string, options: BrokerConnect
  * Does not open a wire session — a probe connection would start last-close grace. */
 export async function ensureSharedMcp(path = sharedMcpSocketPath()): Promise<void> {
   if (await liveUnixSocket(path)) return;
-  const wire = resolveBrokerSocket();
-  const failure = (await liveUnixSocket(wire)) ? undefined : launchUnlessManaged(wire);
+  const profileDir = currentProfileDir();
+  ensureProfileDeviceAnchor(profileDir);
+  const wire = resolveBrokerSocket(profileDir);
+  const decision = await brokerLaunchDecision(profileDir, wire);
+  const target = decision.kind === "wait" ? decision.socket : wire;
+  const failure =
+    decision.kind === "spawn" && !(await liveUnixSocket(target))
+      ? launchBrokerDaemon(target)
+      : undefined;
   const deadline = Date.now() + BROKER_CONNECT_TIMEOUT_MS;
   while (Date.now() < deadline) {
     const launchFailure = failure?.();
