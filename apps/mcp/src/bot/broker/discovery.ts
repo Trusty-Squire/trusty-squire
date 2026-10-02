@@ -306,15 +306,18 @@ function assertJoinProfile(
   }
 }
 
-/** Refuse to join a socket bound to a different account. Strict equality,
- * fail-closed: a socket bound to an account and a silent client is a
- * mismatch, not a pass. */
+/** Refuse to join a socket bound to a DIFFERENT account. An unbound profile
+ * (declared `null`) is unclaimed, not foreign: the first account-acting
+ * acquire claims it (`runtime.ts` bindAccount), so refusing an enrolled client
+ * there would make a fresh unit or a --force-relogin profile unjoinable. Only
+ * a declared, different binding is a mismatch. */
 async function assertJoinAccount(
   profileDir: string,
   declared: string | null,
   options: BrokerConnectOptions,
   what: string,
 ): Promise<void> {
+  if (declared === null) return;
   const clientBinding = options.accountId ?? (await readBrokerAccountBinding(profilePathIdentity(profileDir)));
   if (clientBinding !== declared) {
     throw new BrokerRefusal(

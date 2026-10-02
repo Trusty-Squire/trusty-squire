@@ -292,6 +292,34 @@ describe("managed-broker spawn gate", () => {
     });
   });
 
+  it("an enrolled client joins a live unit whose profile is not yet bound", async () => {
+    const profile = sandboxProfile();
+    ensureProfile(profile);
+    await removeBrokerUnitMarker(profile);
+    // Fresh unit or --force-relogin profile: no binding file yet. The client's
+    // first account-acting acquire claims it, so joining must be allowed.
+    await rm(brokerAccountBindingPath(profile), { force: true });
+    const unitSocket = join("/tmp", `ts-broker-unit-unbound-${randomUUID()}.sock`);
+    const listener = await listenBroker(unitSocket, {
+      call: async () => ({ live: true }),
+      disconnect: async () => undefined,
+    });
+    try {
+      await withSystemctlShim(liveUnitShim(profile, unitSocket), async () => {
+        const client = await connectOrLaunchBroker(defaultBrokerSocket(profile), {
+          accountId: "account-a",
+        });
+        try {
+          expect(await client.call("status", {})).toEqual({ live: true });
+        } finally {
+          await client.close();
+        }
+      });
+    } finally {
+      await listener.close();
+    }
+  });
+
   it("refuses to join a live managed unit whose profile is bound to a different account", async () => {
     const profile = sandboxProfile();
     ensureProfile(profile);
@@ -427,6 +455,34 @@ describe("managed-broker spawn gate", () => {
         await expect(
           connectOrLaunchBroker(defaultBrokerSocket(profile), { accountId: "account-a" }),
         ).rejects.toThrow(/account_mismatch|different account|bound to account/);
+      } finally {
+        await listener.close();
+      }
+    } finally {
+      await removeBrokerUnitMarker(profile);
+    }
+  });
+
+  it("an enrolled client joins a marker whose profile is not yet bound", async () => {
+    const profile = sandboxProfile();
+    ensureProfile(profile);
+    await rm(brokerAccountBindingPath(profile), { force: true });
+    const socket = join("/tmp", `ts-broker-marker-unbound-${randomUUID()}.sock`);
+    await writeProfileMarker(profile, socket, null);
+    try {
+      const listener = await listenBroker(socket, {
+        call: async () => ({ live: true }),
+        disconnect: async () => undefined,
+      });
+      try {
+        const client = await connectOrLaunchBroker(defaultBrokerSocket(profile), {
+          accountId: "account-a",
+        });
+        try {
+          expect(await client.call("status", {})).toEqual({ live: true });
+        } finally {
+          await client.close();
+        }
       } finally {
         await listener.close();
       }
