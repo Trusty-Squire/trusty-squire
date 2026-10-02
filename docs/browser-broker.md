@@ -19,7 +19,8 @@ Start one resident `mcp broker` per browser profile. The canonical default
 profile (`~/.trusty-squire/chrome-profile`) listens for MCP at
 `~/.trusty-squire/mcp.sock`. Any other profile listens at
 `~/.trusty-squire/mcp-<digest>.sock`, where the digest comes from the same
-canonical profile path identity used for broker discovery. Both sockets live
+profile device identity used for broker discovery (see
+[Profile identity and the managed-broker marker](#profile-identity-and-the-managed-broker-marker)). Both sockets live
 in the existing 0700 private Squire directory (socket mode 0600). The path is
 under the host home, so an agent with `PrivateTmp` or a separate `/tmp` can
 still reach it when that home path is
@@ -78,10 +79,10 @@ Build with `pnpm --filter @trusty-squire/mcp build`, then run
 `node apps/mcp/dist/bin.js server` with the enrolled profile and account.
 That process is the stdio proxy; it does not start a second operator stack.
 No broker-specific environment is required. Discovery derives a private local
-socket from the canonical profile path and user ID, independent of cwd and TMPDIR,
-and starts or attaches the elected broker. `TRUSTY_SQUIRE_BROKER_SOCKET` optionally
-overrides that endpoint; its parent must exist, belong to the current user, and
-have mode 0700. The default private parent is created automatically.
+socket from the profile device identity and user ID, independent of cwd and
+TMPDIR, and starts or attaches the elected broker. `TRUSTY_SQUIRE_BROKER_SOCKET`
+optionally overrides that endpoint; its parent must exist, belong to the current
+user, and have mode 0700. The default private parent is created automatically.
 
 The broker holds one exclusive SQLite transaction on a stable file beside the
 canonical profile. SQLite's OS byte-range lock is released by the kernel when
@@ -89,6 +90,61 @@ the broker dies, including on SIGKILL. It claims the lock before binding its
 socket or launching Chrome. The next broker removes the old
 socket path after claiming the lock, then binds its own listener; the socket
 file itself is never an ownership record.
+
+### Profile identity and the managed-broker marker
+
+The operation lock file, the default broker socket, and the shared MCP socket
+all key on the profile's **device identity**, never on the path string:
+`<dev>:<ino>:<basename>` of the profile directory's canonical **parent** (its
+nearest existing ancestor when the directory does not exist yet) plus the
+profile directory's own name. The parent is the stable anchor, so a profile
+directory replaced by `--force-relogin` keeps one identity, and two paths to
+one physical profile (symlink, bind mount, `HOME`/`TRUSTY_SQUIRE_PROFILE_DIR`
+override) collapse to one lock and one socket — one broker wins the election.
+`profileDeviceIdentity` in `apps/mcp/src/bot/profile-path.ts` is the single
+derivation; `profileOperationLockPath`, `defaultBrokerSocket`, and
+`sharedMcpSocketPath` all consume it.
+
+A marker file next to the profile declares that a systemd unit owns it. The
+unit installer writes it; the uninstall path removes it. The contract is fixed
+so a client can implement the strict read side against it:
+
+- **Path:** `<canonical profile parent>/.trusty-squire-broker-unit.json`, mode
+  0600 — BESIDE the profile directory, never inside it, so a replaced profile
+  directory does not destroy it.
+- **Shape (version 1):**
+  ```json
+  {
+    "version": 1,
+    "socket": "/abs/path/to/broker.sock",
+    "profile": { "dev": 123, "ino": 456, "name": "chrome-profile" },
+    "accountBinding": "account-id"
+  }
+  ```
+  `profile` is exactly the anchor a client derives; `accountBinding` is the
+  bound account id, or `null` when the unit serves an unenrolled profile.
+- **Write:** once the unit is up. **Remove:** on unit uninstall
+  (`writeBrokerUnitMarker` / `removeBrokerUnitMarker` in
+  `apps/mcp/src/bot/broker/managed-marker.ts`).
+
+While the marker file exists — valid or not — a client **never spawns a
+broker**. It waits (bounded, 10 s) for the declared `socket` and returns
+`broker_unavailable` on timeout. A marker with no socket, unparsable content,
+or a wrong version still fails closed: it never reopens spawning. A client
+joining a socket that is not its own derived socket first verifies the declared
+identity — same profile anchor and same account binding — and on either
+mismatch refuses with `profile_mismatch` / `account_mismatch`, neither joining
+nor launching.
+
+`systemctl` failure is **unknown**, never "no unit". The spawn gate is
+marker-aware: unknown plus no marker may launch on demand (today's behavior);
+unknown plus a marker may not; a live managed unit always defers. Inside a
+sandbox where `systemctl --user` cannot reach the bus, the marker is what
+prevents a competitor. The daemon itself refuses to start when a marker exists
+and it was not started by that unit: it requires `INVOCATION_ID` (set by
+systemd for every unit process) or the unit's own `TRUSTY_SQUIRE_BROKER_UNIT=1`
+flag. An older or foreign client that execs the new bin has neither and exits
+non-zero before touching the lock, the socket, or Chrome.
 
 `operate_start` accepts `proxy` as an HTTP or HTTPS URL (optional credentials)
 or an unauthenticated SOCKS5 URL. It configures the shared browser at launch,
@@ -278,8 +334,9 @@ and its other sessions intact.
 ## Ownership and contracts
 
 - One profile-scoped kernel-released SQLite lock elects the broker, including when clients
-  choose different socket paths. The lock file contains no owner record and is
-  never unlinked. On first start the new daemon deletes the four legacy lease
+  choose different socket paths. Its name derives from the profile device
+  identity, so aliases of one physical profile share one lock. The lock file
+  contains no owner record and is never unlinked. On first start the new daemon deletes the four legacy lease
   roots. The account binding is separate from ownership: the first
   account-acting open pins the account, while a ceremony open names none.
 - Linux probes one disposable systemd user scope at broker start. When the

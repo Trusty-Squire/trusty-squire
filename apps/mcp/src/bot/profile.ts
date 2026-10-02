@@ -13,9 +13,24 @@ import { createRequire } from "node:module";
 import { lstatSync, mkdirSync, readFileSync, readlinkSync, readdirSync } from "node:fs";
 import { hostname } from "node:os";
 import { dirname, join } from "node:path";
-import { CHROME_PROFILE_DIR, currentProfileDir, profilePathIdentity } from "./profile-path.js";
+import {
+  CHROME_PROFILE_DIR,
+  currentProfileDir,
+  ensureProfileDeviceAnchor,
+  profileDeviceAnchor,
+  profileDeviceIdentity,
+  profilePathIdentity,
+} from "./profile-path.js";
 
-export { CHROME_PROFILE_DIR, currentProfileDir, profilePathIdentity };
+export {
+  CHROME_PROFILE_DIR,
+  currentProfileDir,
+  ensureProfileDeviceAnchor,
+  profileDeviceAnchor,
+  profileDeviceIdentity,
+  profilePathIdentity,
+};
+export type { ProfileDeviceAnchor } from "./profile-path.js";
 
 // Chrome's SingletonLock is a symlink whose target is "<hostname>-<pid>".
 // It belongs to Chrome; Squire reads it for diagnostics and never unlinks it.
@@ -421,11 +436,19 @@ const profileOperationContext = new AsyncLocalStorage<ReadonlySet<string>>();
 
 /** A stable SQLite file is only the lock's inode; it contains no owner record. It
  * must stay outside the profile directory because --force-relogin may replace
- * that directory while custody is held. */
+ * that directory while custody is held. Its NAME derives from the profile's
+ * device identity (parent dev/ino + profile name), so two paths to one physical
+ * profile share a lock and a replaced profile directory keeps the same lock. */
 export function profileOperationLockPath(profileDir: string): string {
-  const identity = profilePathIdentity(profileDir);
-  const digest = createHash("sha256").update(identity).digest("hex").slice(0, 24);
-  return join(dirname(identity), `.trusty-squire-profile-${digest}.lock.sqlite`);
+  // Provision the parent first so the device anchor is stable from the very
+  // first call (a fresh machine gets the same name as a machine in use).
+  ensureProfileDeviceAnchor(profileDir);
+  const parent = dirname(profilePathIdentity(profileDir));
+  const digest = createHash("sha256")
+    .update(profileDeviceIdentity(profileDir))
+    .digest("hex")
+    .slice(0, 24);
+  return join(parent, `.trusty-squire-profile-${digest}.lock.sqlite`);
 }
 
 /** BEGIN EXCLUSIVE holds SQLite's OS byte-range lock on the open connection.
