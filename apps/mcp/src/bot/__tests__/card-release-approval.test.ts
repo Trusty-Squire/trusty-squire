@@ -125,7 +125,7 @@ it("returns a new approval link before polling, then waits on the resumed call",
 
   const second = await executeCardReleaseApproval(requested, api, browser, {
     ...shared,
-    resumeFrom: pending[0],
+    resumeFrom: pending[0]!,
   });
   expect(second).toMatchObject({ status: "approval_pending", approval_id: "new-approval" });
   expect(api.createPaymentApproval).toHaveBeenCalledTimes(1);
