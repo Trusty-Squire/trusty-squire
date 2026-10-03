@@ -280,20 +280,6 @@ function isAgentTarget(s: string): s is AgentTarget {
   return s in AGENTS;
 }
 
-// The MCP-config command that launches the server. Three cases:
-//
-// 1. Non-ephemeral — running from a checkout or a `node` invocation
-//    that points at a permanent path. Use the absolute bin.js path
-//    directly. Deterministic, offline, fast.
-//
-// 2. Ephemeral — the CLI was invoked via npx, which copies the package into
-//    npx's throwaway cache. The cache CAN get swept, so never pin the cache
-//    path into a host agent config. Instead write
-//    `npx -y @trusty-squire/mcp@<version> server`, which re-resolves the exact
-//    published version on each agent launch. This matters for RCs: prerelease
-//    versions are published to npm on the `next` tag, so treating every
-//    prerelease as a non-registry tarball leaves Goose pointing at dead npx
-//    cache paths and stale tool schemas.
 /**
  * Copy an npx-style node_modules tree to a stable location.
  *

@@ -9,7 +9,7 @@ import {
   renameSync,
   rmSync,
 } from "node:fs";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -85,6 +85,8 @@ export interface BrokerServiceConfig {
   environment: Record<string, string>;
 }
 
+const INSTALLER_OWNER = "Managed by @trusty-squire/mcp connect";
+
 function systemdQuote(value: string): string {
   return (
     '"' +
@@ -99,7 +101,7 @@ function systemdQuote(value: string): string {
 }
 
 export function renderSystemdBroker(config: BrokerServiceConfig): string {
-  return `[Unit]\nDescription=Trusty Squire browser broker\n\n[Service]\nType=simple\nExecStart=${systemdQuote(config.node).replace(/\$/g, () => "$$")} ${systemdQuote(config.entry).replace(/\$/g, () => "$$")} broker\n${Object.entries(
+  return `# ${INSTALLER_OWNER}\n[Unit]\nDescription=Trusty Squire browser broker\n\n[Service]\nType=simple\nExecStart=${systemdQuote(config.node).replace(/\$/g, () => "$$")} ${systemdQuote(config.entry).replace(/\$/g, () => "$$")} broker\n${Object.entries(
     config.environment,
   )
     .map(([key, value]) => `Environment=${systemdQuote(`${key}=${value}`)}`)
@@ -119,7 +121,7 @@ function xml(value: string): string {
 
 export function renderLaunchdBroker(config: BrokerServiceConfig): string {
   const home = config.environment.HOME!;
-  return `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict>\n<key>Label</key><string>ai.trustysquire.${xml(config.name)}</string>\n<key>ProgramArguments</key><array>${[config.node, config.entry, "broker"].map((arg) => `<string>${xml(arg)}</string>`).join("")}</array>\n<key>EnvironmentVariables</key><dict>${Object.entries(
+  return `<?xml version="1.0" encoding="UTF-8"?>\n<!-- ${INSTALLER_OWNER} -->\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict>\n<key>Label</key><string>ai.trustysquire.${xml(config.name)}</string>\n<key>ProgramArguments</key><array>${[config.node, config.entry, "broker"].map((arg) => `<string>${xml(arg)}</string>`).join("")}</array>\n<key>EnvironmentVariables</key><dict>${Object.entries(
     config.environment,
   )
     .map(([key, value]) => `<key>${xml(key)}</key><string>${xml(value)}</string>`)
@@ -233,10 +235,25 @@ export async function installBrokerService(profileDir: string): Promise<void> {
     const value = process.env[key];
     if (value !== undefined) environment[key] = value;
   }
+  const registration =
+    process.platform === "linux"
+      ? join(
+          process.env.XDG_CONFIG_HOME ?? join(home, ".config"),
+          "systemd",
+          "user",
+          `${name}.service`,
+        )
+      : join(home, "Library", "LaunchAgents", `ai.trustysquire.${name}.plist`);
+  const prior = await readFile(registration, "utf8").catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  });
+  const owned = prior?.includes(INSTALLER_OWNER) ?? false;
+  const external = (existing || prior !== null) && !owned;
   const config: BrokerServiceConfig = {
     name,
     node: realpathSync(process.execPath),
-    entry: existing ? "" : durableBrokerEntry(),
+    entry: external ? "" : durableBrokerEntry(),
     environment,
   };
   await writeBrokerUnitMarker(profile, {
@@ -246,24 +263,24 @@ export async function installBrokerService(profileDir: string): Promise<void> {
     accountBinding: await readBrokerAccountBinding(profile),
   });
   if (process.platform === "linux") {
-    if (!existing) {
-      const unitsDir = join(
-        process.env.XDG_CONFIG_HOME ?? join(home, ".config"),
-        "systemd",
-        "user",
-      );
-      await mkdir(unitsDir, { recursive: true, mode: 0o700 });
-      await writeFile(join(unitsDir, `${name}.service`), renderSystemdBroker(config), {
+    const rendered = external ? prior : renderSystemdBroker(config);
+    const changed = !external && rendered !== prior;
+    if (changed) {
+      await mkdir(dirname(registration), { recursive: true, mode: 0o700 });
+      await writeFile(registration, rendered!, {
         mode: 0o600,
       });
       run("systemctl", ["--user", "daemon-reload"]);
     }
     run("systemctl", ["--user", "enable", "--now", `${name}.service`]);
+    if (owned && changed) run("systemctl", ["--user", "restart", `${name}.service`]);
   } else {
-    const agents = join(home, "Library", "LaunchAgents");
-    await mkdir(agents, { recursive: true, mode: 0o700 });
-    const plist = join(agents, `ai.trustysquire.${name}.plist`);
-    await writeFile(plist, renderLaunchdBroker(config), { mode: 0o600 });
+    const rendered = external ? prior : renderLaunchdBroker(config);
+    const changed = !external && rendered !== prior;
+    if (changed) {
+      await mkdir(dirname(registration), { recursive: true, mode: 0o700 });
+      await writeFile(registration, rendered!, { mode: 0o600 });
+    }
     const domain = `gui/${process.getuid?.()}`;
     const target = `${domain}/ai.trustysquire.${name}`;
     let loaded = false;
@@ -273,9 +290,14 @@ export async function installBrokerService(profileDir: string): Promise<void> {
     } catch {
       /* bootstrap reports manager errors */
     }
-    if (!loaded) run("launchctl", ["bootstrap", domain, plist]);
+    // launchd keeps the loaded definition until it is booted out and reloaded.
+    if (loaded && owned && changed) {
+      run("launchctl", ["bootout", target]);
+      loaded = false;
+    }
+    if (!loaded) run("launchctl", ["bootstrap", domain, registration]);
     run("launchctl", ["enable", target]);
-    run("launchctl", ["kickstart", target]);
+    run("launchctl", owned && changed ? ["kickstart", "-k", target] : ["kickstart", target]);
   }
   const deadline = Date.now() + 10_000;
   let delay = 100;

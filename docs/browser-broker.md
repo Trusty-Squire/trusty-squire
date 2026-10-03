@@ -115,27 +115,40 @@ On Linux the default is `trusty-squire-broker.service` under
 `$XDG_CONFIG_HOME/systemd/user` (or `~/.config/systemd/user`). Additional physical
 profiles get deterministic `trusty-squire-broker-<digest>.service` units. The
 installer reuses an existing unit serving that profile, including its configured
-socket, rather than overwriting it or creating a parallel service. New units use
+socket. Units marked as installer-owned are rewritten and restarted when their
+entry or environment changes; externally maintained units, including Beeline's,
+retain their configuration. New units use
 `Restart=always`, `RestartSec=1`, `KillSignal=SIGINT`, and bounded graceful shutdown;
 registration runs `daemon-reload` then `enable --now`.
 
 On macOS the corresponding label is `ai.trustysquire.trusty-squire-broker` (with the
 profile digest for additional profiles), under `~/Library/LaunchAgents`. The plist
 sets `RunAtLoad`, `KeepAlive`, and a bounded exit timeout. Installation uses
-`launchctl bootstrap`, `enable`, and `kickstart`; a loaded label is not bootstrapped
-again. Both platforms carry the profile, HOME, PATH, intended display environment,
+`launchctl bootstrap`, `enable`, and `kickstart`. An installer-owned agent whose
+definition changes is booted out, bootstrapped with the new plist, and started
+with `kickstart -k`; an unchanged loaded label is left running.
+Both platforms carry the profile, HOME, PATH, intended display environment,
 and `TRUSTY_SQUIRE_BROKER_UNIT=1`. The installer independently probes both listeners
 before proceeding. Manager stdout alone never establishes readiness.
 
 Services execute a durable Node `dist/bin.js broker` entry. If connect runs from an
 npx cache, it first preserves the whole package/dependency tree under
 `~/.trusty-squire/broker/<version>/node_modules`; no service points into `_npx`.
-Client versions use the latest tag; service upgrades/restarts remain service
-maintenance. Existing manually managed units retain their entry and configuration.
+Client versions use the latest tag; rerunning connect upgrades installer-owned
+services to its durable entry. Existing manually managed units retain their entry
+and configuration and require their owner's service maintenance.
 Use `systemctl --user restart <unit>` on Linux or
 `launchctl kickstart -k gui/$(id -u)/<label>` on macOS after updating the service's
 package/entry. Restart creates fresh connections; sessions and dispatched mutations
 are never restored or replayed.
+
+`.github/workflows/broker-service-acceptance.yml` runs native systemd and launchd
+acceptance on Linux and macOS using isolated homes/profiles. The harness installs
+from two versioned package caches, removes each cache, checks the manager's PID
+and registered entry, reconnects two built stdio clients across an upgrade and
+manager restart, and proves a stopped service produces no client-spawned broker.
+It fails when the native manager is unavailable; it does not substitute mocks or
+skip that acceptance.
 
 ### Service endpoint markers
 
