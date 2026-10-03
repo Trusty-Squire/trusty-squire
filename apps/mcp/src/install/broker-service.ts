@@ -116,13 +116,13 @@ function systemdQuote(value: string): string {
 }
 
 export function renderSystemdBroker(config: BrokerServiceConfig): string {
-  return `# ${INSTALLER_OWNER}\n[Unit]\nDescription=Trusty Squire browser broker\n\n[Service]\nType=simple\nExecStart=${systemdQuote(config.node).replace(/\$/g, () => "$$")} ${systemdQuote(config.entry).replace(/\$/g, () => "$$")} broker\n${Object.entries(
+  return `# ${INSTALLER_OWNER}\n[Unit]\nDescription=Trusty Squire browser broker\nStartLimitIntervalSec=60\nStartLimitBurst=6\n\n[Service]\nType=simple\nExecStart=${systemdQuote(config.node).replace(/\$/g, () => "$$")} ${systemdQuote(config.entry).replace(/\$/g, () => "$$")} broker\n${Object.entries(
     config.environment,
   )
     .map(([key, value]) => `Environment=${systemdQuote(`${key}=${value}`)}`)
     .join(
       "\n",
-    )}\nRestart=always\nRestartSec=1\nKillSignal=SIGINT\nKillMode=mixed\nTimeoutStopSec=30\n\n[Install]\nWantedBy=default.target\n`;
+    )}\nRestart=on-failure\nRestartSec=5\nKillSignal=SIGINT\nKillMode=mixed\nTimeoutStopSec=30\n\n[Install]\nWantedBy=default.target\n`;
 }
 
 function xml(value: string): string {
@@ -142,7 +142,7 @@ export function renderLaunchdBroker(config: BrokerServiceConfig): string {
     .map(([key, value]) => `<key>${xml(key)}</key><string>${xml(value)}</string>`)
     .join(
       "",
-    )}</dict>\n<key>RunAtLoad</key><true/>\n<key>KeepAlive</key><true/>\n<key>ExitTimeOut</key><integer>30</integer>\n<key>StandardOutPath</key><string>${xml(join(home, ".trusty-squire", `${config.name}.log`))}</string>\n<key>StandardErrorPath</key><string>${xml(join(home, ".trusty-squire", `${config.name}.log`))}</string>\n</dict></plist>\n`;
+    )}</dict>\n<key>RunAtLoad</key><true/>\n<key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>\n<key>ThrottleInterval</key><integer>5</integer>\n<key>ExitTimeOut</key><integer>30</integer>\n<key>StandardOutPath</key><string>${xml(join(home, ".trusty-squire", `${config.name}.log`))}</string>\n<key>StandardErrorPath</key><string>${xml(join(home, ".trusty-squire", `${config.name}.log`))}</string>\n</dict></plist>\n`;
 }
 
 /** Register/start through the OS manager, then independently read both listeners. */

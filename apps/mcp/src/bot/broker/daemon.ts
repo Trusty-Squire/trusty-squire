@@ -1,13 +1,21 @@
 import { resolveBrokerSocket } from "./discovery.js";
+import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { lstat, rm, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { createHash } from "node:crypto";
+import { homedir, hostname } from "node:os";
 import { createSessionGuard, setServingAccountId } from "../../session-guard.js";
 import { setSelfManagedChromeTerminationSignalExitEnabled } from "../browser.js";
 import {
   acquireProfileOperationGuard,
   ensureProfileDeviceAnchor,
   profilePathIdentity,
+  profileOperationLockPath,
+  processBirthIdentity,
+  processBirthIdentityState,
+  profileProcessIdentity,
+  ProfileBusyError,
   CHROME_PROFILE_DIR,
   readLockHolder,
 } from "../profile.js";
@@ -20,6 +28,7 @@ import { BrokerRefusal } from "./refusal.js";
 import { listenBroker } from "./transport.js";
 import { listenSharedMcp } from "./mcp-socket.js";
 import { readBrokerUnitMarkerSync } from "./managed-marker.js";
+import { sharedMcpSocketPath } from "./mcp-socket-path.js";
 
 /**
  * Wire connections that hold a claim on the browser. Status probes are reads
@@ -88,14 +97,198 @@ export function retryableBrokerShutdown(cleanup: () => Promise<boolean>): {
  * unit process; the unit additionally sets TRUSTY_SQUIRE_BROKER_UNIT=1 as an
  * explicit, scrubbed-away-proof flag). Older or foreign clients that exec the
  * new bin have neither and fail closed. */
-export function brokerMayStartForMarker(
-  markerPresent: boolean,
-  env: NodeJS.ProcessEnv,
-): boolean {
+export function brokerMayStartForMarker(markerPresent: boolean, env: NodeJS.ProcessEnv): boolean {
   if (!markerPresent) return true;
   const startedByUnit =
     (env.INVOCATION_ID ?? "").trim().length > 0 || env.TRUSTY_SQUIRE_BROKER_UNIT === "1";
   return startedByUnit;
+}
+
+const TAKEOVER_WAIT_MS = 10_000;
+
+function startedByBrokerService(env: NodeJS.ProcessEnv): boolean {
+  return (env.INVOCATION_ID ?? "").trim().length > 0 || env.TRUSTY_SQUIRE_BROKER_UNIT === "1";
+}
+
+/** lsof's `l` field must report the SQLite write lock, not merely an open fd. */
+function lockedBrokerPid(profileDir: string): number | null {
+  const uid = process.getuid?.();
+  if (uid === undefined) return null;
+  let output: string;
+  try {
+    output = execFileSync(
+      "lsof",
+      ["-w", "-a", "-Fpl", "-u", String(uid), "--", profileOperationLockPath(profileDir)],
+      { encoding: "utf8", timeout: 3_000, stdio: ["ignore", "pipe", "ignore"] },
+    );
+  } catch {
+    return null;
+  }
+  let pid = 0;
+  const holders = new Set<number>();
+  for (const line of output.split("\n")) {
+    if (line.startsWith("p")) pid = Number(line.slice(1));
+    if (line.startsWith("l") && /[wW]/.test(line.slice(1)) && Number.isSafeInteger(pid) && pid > 0)
+      holders.add(pid);
+  }
+  return holders.size === 1 ? [...holders][0]! : null;
+}
+
+function brokerCommandMatches(pid: number): boolean {
+  try {
+    const command =
+      process.platform === "linux"
+        ? readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0").join(" ")
+        : execFileSync("ps", ["-ww", "-p", String(pid), "-o", "command="], {
+            encoding: "utf8",
+            timeout: 3_000,
+          });
+    return (
+      /(?:^|\s)(?:broker|--squire-broker)(?:\s|$)/.test(command) ||
+      /broker[^\s]*daemon\.(?:ts|js)(?:\s|$)/.test(command)
+    );
+  } catch {
+    return false;
+  }
+}
+
+function brokerServesProfile(pid: number, profileDir: string): boolean {
+  if (process.platform !== "linux") return true; // Socket ownership is the profile proof on macOS.
+  try {
+    const entries = readFileSync(`/proc/${pid}/environ`, "utf8").split("\0");
+    const value = (key: string) =>
+      entries.find((entry) => entry.startsWith(`${key}=`))?.slice(key.length + 1);
+    const home = value("HOME") || homedir();
+    const claimedProfile =
+      value("TRUSTY_SQUIRE_PROFILE_DIR") || join(home, ".trusty-squire", "chrome-profile");
+    return profilePathIdentity(claimedProfile) === profilePathIdentity(profileDir);
+  } catch {
+    return false;
+  }
+}
+
+function socketBrokerPid(socket: string): number | null {
+  let output: string;
+  try {
+    output = execFileSync("lsof", ["-w", "-a", "-t", "-U", "--", socket], {
+      encoding: "utf8",
+      timeout: 3_000,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+  } catch {
+    return null;
+  }
+  const pids = [
+    ...new Set(
+      output
+        .trim()
+        .split(/\s+/)
+        .map(Number)
+        .filter((pid) => Number.isSafeInteger(pid) && pid > 0 && pid !== process.pid),
+    ),
+  ];
+  return pids.length === 1 ? pids[0]! : null;
+}
+
+function chromeCommandMatches(pid: number, profileDir: string): boolean {
+  if (process.platform === "linux") return profileProcessIdentity(pid, profileDir) !== null;
+  try {
+    const command = execFileSync("ps", ["-ww", "-p", String(pid), "-o", "command="], {
+      encoding: "utf8",
+      timeout: 3_000,
+    });
+    const profile = profilePathIdentity(profileDir);
+    return (
+      [
+        `--user-data-dir=${profile}`,
+        `--user-data-dir="${profile}"`,
+        `--user-data-dir='${profile}'`,
+      ].some((argument) => {
+        const offset = command.indexOf(argument);
+        return (
+          offset >= 0 &&
+          (offset === 0 || /\s/.test(command[offset - 1]!)) &&
+          (offset + argument.length === command.length ||
+            /\s/.test(command[offset + argument.length]!))
+        );
+      }) && /(?:Chrome|Chromium|chrome|chromium)/.test(command)
+    );
+  } catch {
+    return false;
+  }
+}
+
+async function waitUntil(released: () => boolean): Promise<boolean> {
+  const deadline = Date.now() + TAKEOVER_WAIT_MS;
+  while (Date.now() < deadline) {
+    if (released()) return true;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  return released();
+}
+
+async function takeOverOldBroker(profileDir: string): Promise<void> {
+  const pid = lockedBrokerPid(profileDir);
+  if (
+    pid === null ||
+    pid === process.pid ||
+    !brokerCommandMatches(pid) ||
+    !brokerServesProfile(pid, profileDir)
+  )
+    throw new ProfileBusyError("Could not identify the broker holding this profile lock");
+  const identity = processBirthIdentity(pid);
+  if (identity === null || lockedBrokerPid(profileDir) !== pid) {
+    throw new ProfileBusyError("Broker profile lock holder changed during takeover");
+  }
+  process.kill(pid, "SIGTERM");
+  const released = () => lockedBrokerPid(profileDir) !== pid;
+  if (await waitUntil(released)) return;
+  if (processBirthIdentityState(identity) === "matching" && lockedBrokerPid(profileDir) === pid)
+    process.kill(pid, "SIGKILL");
+  if (!(await waitUntil(released)))
+    throw new ProfileBusyError("Old broker did not release the profile lock");
+}
+
+async function takeOverSocketBroker(profileDir: string, socket: string): Promise<void> {
+  const pid = socketBrokerPid(socket);
+  if (pid === null) return;
+  if (!brokerCommandMatches(pid) || !brokerServesProfile(pid, profileDir))
+    throw new ProfileBusyError("Profile socket is held by an unidentified process");
+  const identity = processBirthIdentity(pid);
+  if (identity === null || socketBrokerPid(socket) !== pid)
+    throw new ProfileBusyError("Broker socket holder changed during takeover");
+  process.kill(pid, "SIGTERM");
+  const released = () => socketBrokerPid(socket) !== pid;
+  if (await waitUntil(released)) return;
+  if (processBirthIdentityState(identity) === "matching" && socketBrokerPid(socket) === pid)
+    process.kill(pid, "SIGKILL");
+  if (!(await waitUntil(released)))
+    throw new ProfileBusyError("Old broker did not release its profile socket");
+}
+
+/** A dead broker can leave Chrome alive without holding the SQLite lock. */
+async function takeOverOldChrome(profileDir: string): Promise<void> {
+  const holder = readLockHolder(profileDir);
+  if (holder === null || holder.host !== hostname() || holder.stale) return;
+  const identity = processBirthIdentity(holder.pid);
+  if (identity === null) throw new ProfileBusyError("Cannot identify the old Chrome process");
+  if (!chromeCommandMatches(holder.pid, profileDir))
+    throw new ProfileBusyError("Profile lock does not identify Chrome for this profile");
+  const stillOwned = () => {
+    const current = readLockHolder(profileDir);
+    return (
+      current?.host === hostname() &&
+      current.pid === holder.pid &&
+      !current.stale &&
+      processBirthIdentityState(identity) === "matching"
+    );
+  };
+  if (!stillOwned()) return;
+  process.kill(holder.pid, "SIGINT"); // Chrome flushes profile state on SIGINT.
+  if (await waitUntil(() => !stillOwned())) return;
+  if (stillOwned()) process.kill(holder.pid, "SIGKILL");
+  if (!(await waitUntil(() => !stillOwned())))
+    throw new ProfileBusyError("Old Chrome did not release this profile");
 }
 
 export async function runBrokerDaemon(): Promise<void> {
@@ -129,11 +322,24 @@ export async function runBrokerDaemon(): Promise<void> {
     .digest("hex");
   // The fd is the broker's sole profile authority. A crash releases it in the
   // kernel; the remaining inode carries no owner record.
-  const profileElection = acquireProfileOperationGuard(CHROME_PROFILE_DIR);
+  let profileElection;
+  try {
+    profileElection = acquireProfileOperationGuard(CHROME_PROFILE_DIR);
+  } catch (error) {
+    if (!(error instanceof ProfileBusyError) || !startedByBrokerService(process.env)) throw error;
+    await takeOverOldBroker(CHROME_PROFILE_DIR);
+    profileElection = acquireProfileOperationGuard(CHROME_PROFILE_DIR);
+  }
+  if (startedByBrokerService(process.env)) {
+    await takeOverSocketBroker(CHROME_PROFILE_DIR, path);
+    await takeOverSocketBroker(CHROME_PROFILE_DIR, sharedMcpSocketPath());
+  }
   await stopBrowserScope(CHROME_PROFILE_DIR);
+  if (startedByBrokerService(process.env)) await takeOverOldChrome(CHROME_PROFILE_DIR);
   // One-time upgrade cleanup. Old file leases are not consulted by this broker.
   await rm(join(dirname(profilePathIdentity(CHROME_PROFILE_DIR)), ".trusty-squire-broker-leases"), {
-    recursive: true, force: true,
+    recursive: true,
+    force: true,
   });
   const runtime = new BrokerRuntime();
   installBrokerBrowserCustody(runtime);
