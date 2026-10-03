@@ -85,16 +85,13 @@ interface CardReleaseDependencies {
   // Resume only while the requested purchase terms still match. Changed terms
   // start a new approval; an old approval can never authorize the new terms.
   resumeFrom?: PendingApprovalWait;
-  // [P0] How long (ms, from this call's start) THIS invocation will actively
-  // wait for approval before giving up and returning approval_pending,
-  // bounded by the overall approval deadline. Undefined = the legacy
-  // behavior of waiting for the full approval/JIT timeout (used by direct
-  // executeCardReleaseApproval callers, e.g. unit tests). The MCP tool layer passes a
-  // bounded human-response window so approval detection belongs to the system,
-  // while an exhausted client call can resume this same approval cleanly.
+  // [P0] A defined budget makes a newly minted approval return immediately
+  // with its URL. On a resumed call, this bounds the active wait by the
+  // overall approval deadline. Undefined preserves the full approval/JIT
+  // timeout for direct executeCardReleaseApproval callers.
   pollBudgetMs?: number;
-  // [P0] Fired when a call ends still-pending (poll budget exhausted or the
-  // client cancelled) so the session layer can persist resumable state.
+  // [P0] Fired when a call ends still-pending (new link, poll budget
+  // exhausted, or client cancelled) so the session can resume it.
   onApprovalPending: (state: PendingApprovalWait) => void;
   // Fired on a terminal outcome so the session drops its resumable state and
   // a later call mints a fresh approval instead of replaying this one.
@@ -629,7 +626,7 @@ export async function executeCardReleaseApproval(
       boundCardRef = args.card_ref;
     }
 
-    resumableState = () => ({
+    const currentResumableState = (): PendingApprovalWait => ({
       approval_id: approvalId,
       approval_url: approvalUrl,
       nonce,
@@ -644,7 +641,37 @@ export async function executeCardReleaseApproval(
       reason,
       ...(cardRefArg !== undefined ? { cardRef: cardRefArg } : {}),
     });
+    resumableState = currentResumableState;
     await deps.surfaceApprovalUrl(approvalUrl);
+
+    const pendingApprovalResult = (): Record<string, unknown> => {
+      const state = currentResumableState();
+      keypairHandedOff = true;
+      deps.onApprovalPending(state);
+      return {
+        status: "approval_pending",
+        approval_id: approvalId,
+        approval_url: approvalUrl,
+        expires_at: new Date(deadline).toISOString(),
+        approved_amount_cents: checkout.amount_cents,
+        currency: checkout.currency,
+        merchant: checkout.merchant,
+        candidate_kind: "none",
+        ready_to_charge: false,
+        next: {
+          tool: "inject_card",
+          message:
+            "Show the approval link now, then call inject_card again with the same arguments " +
+            "to wait for the human. It resumes this approval without creating another.",
+        },
+      };
+    };
+
+    // The tool call must hand the new link back to the agent before any
+    // long-poll. A later call resumes this state and takes the bounded wait.
+    if (resume === undefined && deps.pollBudgetMs !== undefined) {
+      return pendingApprovalResult();
+    }
 
     // This call's wait is bounded by both its client budget and server expiry.
     const callDeadline =
@@ -891,27 +918,7 @@ export async function executeCardReleaseApproval(
     }
     if (approved === undefined) {
       if (budgetExhausted) {
-        const state = resumableState();
-        keypairHandedOff = true;
-        deps.onApprovalPending(state);
-        return {
-          status: "approval_pending",
-          approval_id: approvalId,
-          approval_url: approvalUrl,
-          expires_at: new Date(deadline).toISOString(),
-          approved_amount_cents: checkout.amount_cents,
-          currency: checkout.currency,
-          merchant: checkout.merchant,
-          candidate_kind: "none",
-          ready_to_charge: false,
-          next: {
-            tool: "inject_card",
-            message:
-              "The bounded server wait ended before the human responded. Call inject_card again " +
-              "with the same arguments; it resumes this approval and continues waiting without " +
-              "creating another approval.",
-          },
-        };
+        return pendingApprovalResult();
       }
       return expiredApprovalResult();
     }
