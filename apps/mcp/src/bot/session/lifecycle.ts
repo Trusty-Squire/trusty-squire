@@ -82,7 +82,26 @@ export function audit(
   detail: Record<string, unknown> = {},
 ): void {
   const sealedDetail = Object.fromEntries(
-    Object.entries(detail).map(([key, value]) => [key, compactV2AuditValue(key, value)]),
+    Object.entries(detail).map(([key, value]) => [
+      key,
+      key === "operation_id" && typeof value === "string" && /^[0-9a-f-]{36}$/i.test(value)
+        ? value
+        : key === "phase" &&
+            typeof value === "string" &&
+            [
+              "preparation",
+              "target_resolution",
+              "browser_action",
+              "settle",
+              "captcha_probe",
+              "observation",
+              "reply",
+            ].includes(value)
+          ? value
+          : key === "recovery_action" && value === "retain_session_and_observe_before_retry"
+            ? value
+            : compactV2AuditValue(key, value),
+    ]),
   );
   process.stderr.write(
     `${JSON.stringify({ marker: "provision-audit", surface: "operate", session_id: sessionId, event, ...sealedDetail })}\n`,

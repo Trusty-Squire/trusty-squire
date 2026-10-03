@@ -10,6 +10,7 @@
 // as type-only imports (the tool layer keeps importing `act` from
 // provision-session, which re-exports it).
 import type { Frame, Page } from "playwright";
+import { randomUUID } from "node:crypto";
 import {
   BrowserClickDispatchError,
   DRIVE_DISPATCH_PACING,
@@ -65,6 +66,7 @@ import { clickScreenshot, ScreenshotClickError } from "../screenshot-click.js";
 import {
   composeOperatorSignals,
   currentOperatorRequestSignal,
+  currentOperatorOperationId,
   operatorMutationDispatchPhase,
 } from "../request-cancellation.js";
 import {
@@ -116,6 +118,100 @@ export type ActExecutorOptions = {
 };
 
 const DRIVE_DISPATCH: ActExecutorOptions = { drive: true };
+
+type ActPhase =
+  | "preparation"
+  | "target_resolution"
+  | "browser_action"
+  | "settle"
+  | "captcha_probe"
+  | "observation"
+  | "reply";
+
+// One companion audit line per public act, plus a live signal when a phase
+// stays active for five seconds. Durations are monotonic offsets from act
+// entry; the broker command audit carries the earlier transport receipt.
+// No target, typed value, or page text enters this trail.
+class ActStepTiming {
+  readonly operationId = currentOperatorOperationId() ?? randomUUID();
+  readonly receivedAtMs = Date.now();
+  private readonly started = performance.now();
+  private phase: ActPhase = "preparation";
+  private phaseStarted = this.started;
+  private readonly phaseMs: Record<ActPhase, number> = {
+    preparation: 0,
+    target_resolution: 0,
+    browser_action: 0,
+    settle: 0,
+    captcha_probe: 0,
+    observation: 0,
+    reply: 0,
+  };
+  private slowTimer: ReturnType<typeof setTimeout> | undefined;
+  private actionStarted: number | undefined;
+  private actionEnded: number | undefined;
+  private finished = false;
+
+  constructor(private readonly sessionId: string) {
+    this.armSlowSignal();
+  }
+
+  private armSlowSignal(): void {
+    this.slowTimer = setTimeout(() => {
+      audit(this.sessionId, "act_phase_slow", {
+        operation_id: this.operationId,
+        phase: this.phase,
+        elapsed_ms: Math.round(performance.now() - this.phaseStarted),
+        recovery_action: "retain_session_and_observe_before_retry",
+      });
+      this.armSlowSignal();
+    }, 5_000);
+    this.slowTimer.unref?.();
+  }
+
+  enter(phase: ActPhase): void {
+    if (this.finished) return;
+    const now = performance.now();
+    this.phaseMs[this.phase] += now - this.phaseStarted;
+    if (this.slowTimer !== undefined) clearTimeout(this.slowTimer);
+    this.phase = phase;
+    this.phaseStarted = now;
+    this.armSlowSignal();
+  }
+
+  startAction(): void {
+    this.actionStarted = performance.now();
+    this.enter("browser_action");
+  }
+
+  endAction(): void {
+    this.actionEnded = performance.now();
+    this.enter("observation");
+  }
+
+  finish(): void {
+    if (this.finished) return;
+    const now = performance.now();
+    this.phaseMs[this.phase] += now - this.phaseStarted;
+    if (this.slowTimer !== undefined) clearTimeout(this.slowTimer);
+    this.finished = true;
+    audit(this.sessionId, "act_timing", {
+      operation_id: this.operationId,
+      received_at_ms: this.receivedAtMs,
+      action_start_ms: Math.round((this.actionStarted ?? now) - this.started),
+      action_end_ms: Math.round((this.actionEnded ?? now) - this.started),
+      reply_at_ms: Math.round(now - this.started),
+      action_ms: Math.round((this.actionEnded ?? now) - (this.actionStarted ?? now)),
+      ...Object.fromEntries(
+        Object.entries(this.phaseMs).map(([phase, duration]) => [
+          `${phase}_ms`,
+          Math.round(duration),
+        ]),
+      ),
+      total_ms: Math.round(now - this.started),
+    });
+  }
+}
 
 export type DriveActResult =
   | {
@@ -501,6 +597,7 @@ export async function act(
   outputFormat: "compact" | "full" = "full",
   compactMapEmitted = true,
 ): Promise<Observation> {
+  const timing = new ActStepTiming(sessionId);
   const session = sessionForCall(sessionId);
   const capturedOperationPage =
     session === undefined ? undefined : operationPageForSession(session);
@@ -542,6 +639,8 @@ export async function act(
           },
           outputFormat,
           compactMapEmitted,
+          undefined,
+          timing,
         );
       return (action.kind === "click" ||
         action.kind === "js_click" ||
@@ -555,11 +654,13 @@ export async function act(
       session !== undefined && (action.kind === "oauth_login" || action.kind === "oauth_click")
         ? await withOAuthActionBoundary(session, oauthProvider, execute, outputFormat)
         : await execute(undefined);
+    timing.enter("reply");
     const threeDs = await observedThreeDsChallenge(sessionId);
     return threeDs === undefined
       ? result.observation
       : { ...result.observation, three_ds: threeDs };
   } catch (error) {
+    timing.enter("reply");
     if (action.kind === "click" && action.screenshot) {
       if (error instanceof ScreenshotClickError) throw error;
       if (screenshotDispatched)
@@ -603,6 +704,8 @@ export async function act(
       throw new Error(compactV2ActionFailureReason(error, action.kind));
     }
     throw error;
+  } finally {
+    timing.finish();
   }
 }
 
@@ -792,6 +895,7 @@ async function executeAct(
   outputFormat: "compact" | "full" = "full",
   compactMapEmitted = true,
   options?: ActExecutorOptions,
+  timing?: ActStepTiming,
 ): Promise<InternalActResult> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
@@ -804,11 +908,16 @@ async function executeAct(
   const settle = async (combobox = false) => {
     if (skipToolSettle) return;
     const started = Date.now();
-    await settleAfterStateChange(browser, compactV2ActionPage, {
-      drive: driveSettle,
-      combobox: driveSettle && combobox,
-    });
-    settleMs += Date.now() - started;
+    timing?.enter("settle");
+    try {
+      await settleAfterStateChange(browser, compactV2ActionPage, {
+        drive: driveSettle,
+        combobox: driveSettle && combobox,
+      });
+    } finally {
+      settleMs += Date.now() - started;
+      timing?.enter("browser_action");
+    }
   };
   const actStarted = Date.now();
   let actedCombobox = false;
@@ -855,7 +964,9 @@ async function executeAct(
       retry_policy: "do_not_retry_old_ref",
     });
   }
+  timing?.startAction();
   audit(sessionId, "act", {
+    ...(timing === undefined ? {} : { operation_id: timing.operationId }),
     kind: action.kind,
     ...(auditTarget !== undefined ? { target: auditTarget } : {}),
     ...("url" in action
@@ -1104,6 +1215,7 @@ async function executeAct(
           break;
         }
         // Re-resolve against FRESH elements every act — never trust a stale index.
+        timing?.enter("target_resolution");
         const { el, fresh, driveIdentity } = await resolveFreshActTarget(
           session,
           browser,
@@ -1116,6 +1228,7 @@ async function executeAct(
           action.target,
           true,
         );
+        timing?.enter("browser_action");
         actedCombobox = actsThroughOverlay(el, driveIdentity?.picker === true);
         const ariaLabelAttribute =
           driveIdentity === undefined ? (el.ariaLabel ?? "") : (driveIdentity.ariaLabel ?? "");
@@ -1344,6 +1457,7 @@ async function executeAct(
       }
     }
   } finally {
+    timing?.endAction();
     // An act no longer retires the action map. Refs are node-bound and
     // re-resolved live against the observed epoch on every act, so the agent can
     // fill a whole form from one observation. Only LEAVING the observed document
@@ -1391,6 +1505,7 @@ async function executeAct(
             // E4: echo the acted control's current row (w=acted) in the delta
             // so a write is confirmable from its own result.
             compactV2Authorization?.row?.ref,
+            timing === undefined ? undefined : (phase) => timing.enter(phase),
           );
   if (session.drive !== null) {
     const observeMs = Date.now() - observeStarted;
