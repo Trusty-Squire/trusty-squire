@@ -1113,6 +1113,7 @@ export async function observeSession(
   compactMapEmitted = true,
   forceFullDOM = false,
   actedRef?: string,
+  onActPhase?: (phase: "captcha_probe" | "observation") => void,
 ): Promise<Observation> {
   if (sourcePage === undefined) {
     const hadOAuthCompletionSource =
@@ -1169,7 +1170,12 @@ export async function observeSession(
     // detached — a 2Captcha solve runs for tens of seconds and this observation
     // holds the lease — so the first observation to see a challenge still
     // surfaces the blocker exactly as it does today.
-    await attemptOperateCaptchaAutoSolve(session, sourcePage);
+    onActPhase?.("captcha_probe");
+    try {
+      await attemptOperateCaptchaAutoSolve(session, sourcePage);
+    } finally {
+      onActPhase?.("observation");
+    }
     session.generation += 1;
     const generation = session.generation;
     const capture = await session.browser.extractBrowserUseObservation(sourcePage, true);

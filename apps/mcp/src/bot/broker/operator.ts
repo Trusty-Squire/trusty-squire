@@ -6,6 +6,7 @@ import { ApiClient, type ApiClientConfig } from "../../api-client.js";
 import { setServingAccountId } from "../../session-guard.js";
 import { buildBrokerToolRegistry, findTool } from "../../tools/index.js";
 import {
+  audit,
   finishProvisionSession,
   forceFinishProvisionSession,
   sessionForCall,
@@ -424,28 +425,43 @@ export class OperatorBroker implements BrokerTransportPort {
     requestSignal?: AbortSignal,
   ): Promise<CommandResult> {
     const input = commandSchema.parse(params);
-    const tool = findTool(input.name, this.tools);
-    if (tool === null || !isOperatorCommand(tool.name))
-      throw new BrokerRefusal("unknown_tool", "Tool is not an operator command");
-    if (tool.name === "operate_start")
-      throw new BrokerRefusal("unknown_tool", "Start is the open operation");
-    if (tool.name === "operate_finish")
-      throw new BrokerRefusal("unknown_tool", "Finish is the close operation");
-    const args = tool.inputSchema.parse(input.args) as Record<string, unknown>;
-    if (args.session_id !== input.sessionId)
-      throw new BrokerRefusal("stale_lease", "An owned session is required");
-    const result = await this.authority.invoke(
-      principal,
-      input.sessionId,
-      requestId,
-      tool.name,
-      args,
-      requestSignal,
-      input.account,
-    );
-    if (result instanceof DeliveredPreDispatchFailure)
-      return { preDispatchFailure: { error: result.error, dispatch: "not_dispatched" } };
-    return { result };
+    const receivedAtMs = Date.now();
+    const received = performance.now();
+    audit(input.sessionId, "command_received", {
+      operation_id: requestId,
+      received_at_ms: receivedAtMs,
+    });
+    try {
+      const tool = findTool(input.name, this.tools);
+      if (tool === null || !isOperatorCommand(tool.name))
+        throw new BrokerRefusal("unknown_tool", "Tool is not an operator command");
+      if (tool.name === "operate_start")
+        throw new BrokerRefusal("unknown_tool", "Start is the open operation");
+      if (tool.name === "operate_finish")
+        throw new BrokerRefusal("unknown_tool", "Finish is the close operation");
+      const args = tool.inputSchema.parse(input.args) as Record<string, unknown>;
+      if (args.session_id !== input.sessionId)
+        throw new BrokerRefusal("stale_lease", "An owned session is required");
+      const result = await this.authority.invoke(
+        principal,
+        input.sessionId,
+        requestId,
+        tool.name,
+        args,
+        requestSignal,
+        input.account,
+      );
+      if (result instanceof DeliveredPreDispatchFailure)
+        return { preDispatchFailure: { error: result.error, dispatch: "not_dispatched" } };
+      return { result };
+    } finally {
+      audit(input.sessionId, "command_reply", {
+        operation_id: requestId,
+        received_at_ms: receivedAtMs,
+        reply_at_ms: Date.now(),
+        total_ms: Math.round(performance.now() - received),
+      });
+    }
   }
 
   /** close: finish an owned session (the `operate_finish` operation). */

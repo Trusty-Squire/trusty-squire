@@ -59,6 +59,8 @@ const h = vi.hoisted(() => ({
   oauthRecoveryCalls: 0,
   typed: [] as Array<{ selector: string; text: string; sealed?: true }>,
   typeError: null as Error | null,
+  typeGate: null as Promise<void> | null,
+  typeEntered: null as (() => void) | null,
   uploads: [] as Array<{ selector: string; filePath: string }>,
   selected: [] as Array<{ selector: string; matcher: string | undefined }>,
   selectError: null as Error | null,
@@ -656,6 +658,8 @@ vi.mock("../browser.js", async (importOriginal) => ({
     }
     async typeSelector(selector: string, text: string, sealed = false): Promise<string[]> {
       h.typed.push({ selector, text, ...(sealed ? { sealed: true as const } : {}) });
+      h.typeEntered?.();
+      if (h.typeGate !== null) await h.typeGate;
       if (h.typeError !== null) throw h.typeError;
       for (const element of h.elements as Array<Record<string, unknown>>) {
         if (element.selector === selector) element.value = text;
@@ -1399,6 +1403,8 @@ beforeEach(() => {
   h.oauthRecoveryCalls = 0;
   h.typed = [];
   h.typeError = null;
+  h.typeGate = null;
+  h.typeEntered = null;
   h.uploads = [];
   h.selected = [];
   h.selectError = null;
@@ -1546,6 +1552,65 @@ afterEach(async () => {
 // any other text field — the page's own suggestion popup, if any, is just
 // part of the next observation, and the agent can click it if it wants.
 describe("typing into a combobox/autocomplete field (no commit-or-stop gate)", () => {
+  it("reports the active phase and operation id while a type call is stalled", async () => {
+    h.elements = [
+      elem({
+        tag: "input",
+        type: "email",
+        role: "textbox",
+        name: "email",
+        labelText: "Contact email",
+        selector: "#contact",
+        value: "",
+      }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
+    const rows = (await observeQuery(started.session_id, "")).safe_table as Array<
+      [string, string, string?]
+    >;
+    const ref = rows.find((row) => row[2]?.includes("f=email"))?.[0];
+    expect(ref).toBeDefined();
+
+    let release!: () => void;
+    h.typeGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let entered!: () => void;
+    const typing = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    h.typeEntered = entered;
+    const operationId = "11111111-1111-4111-8111-111111111111";
+    const stderrWrite = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      const call = withOperatorRequestContext(
+        new AbortController().signal,
+        () => act(started.session_id, { kind: "type", target: ref!, text: "private contact" }),
+        undefined,
+        { operationId },
+      );
+      await typing;
+      await new Promise((resolve) => setTimeout(resolve, 5_100));
+      const lines = stderrWrite.mock.calls.map(([line]) => String(line));
+      const slow = lines.find((line) => line.includes('"event":"act_phase_slow"'));
+      expect(slow).toContain(`"operation_id":"${operationId}"`);
+      expect(slow).toContain('"phase":"browser_action"');
+      expect(slow).toContain('"recovery_action":"retain_session_and_observe_before_retry"');
+      expect(slow).not.toContain("private contact");
+      release();
+      await call;
+      const timing = stderrWrite.mock.calls
+        .map(([line]) => String(line))
+        .find((line) => line.includes('"event":"act_timing"'));
+      expect(timing).toContain(`"operation_id":"${operationId}"`);
+      expect(JSON.parse(timing!).browser_action_ms).toBeGreaterThanOrEqual(5_000);
+      expect(JSON.parse(timing!).reply_at_ms).toBeGreaterThanOrEqual(5_000);
+    } finally {
+      release();
+      stderrWrite.mockRestore();
+    }
+  }, 10_000);
+
   it("types Shopify's required address line as plain text and still runs the #635 commit", async () => {
     h.elements = [
       elem({
