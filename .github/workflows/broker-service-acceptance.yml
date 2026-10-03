@@ -43,6 +43,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          umask 022
           acceptance_root=$(mktemp -d /tmp/ts-native-XXXXXX)
           acceptance_user=ts-broker-acceptance
           cleanup() {
@@ -66,4 +67,6 @@ jobs:
             "$(command -v node)" apps/mcp/scripts/broker-service-acceptance.mjs
       - name: Fresh launchd install, upgrade, reconnect, and stopped-service acceptance
         if: runner.os == 'macOS'
-        run: node apps/mcp/scripts/broker-service-acceptance.mjs
+        run: |
+          umask 022
+          node apps/mcp/scripts/broker-service-acceptance.mjs

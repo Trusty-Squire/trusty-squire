@@ -27,7 +27,7 @@ const env = {
 delete env.TRUSTY_SQUIRE_BROKER_SOCKET;
 delete env.TRUSTY_SQUIRE_BROKER_UNIT;
 delete env.INVOCATION_ID;
-await mkdir(profile, { recursive: true });
+await mkdir(profile, { recursive: true, mode: 0o700 });
 const run = (command, args) =>
   execFileSync(command, args, {
     env,
@@ -258,6 +258,14 @@ try {
   console.log(
     `BBC-1 native ${process.platform} stopped: exit=1; broker not running; broker PIDs=[]; listeners=[]`,
   );
+} catch (error) {
+  // Preserve this isolated broker's startup evidence before cleanup removes it.
+  console.error(error);
+  const log = await readFile(join(home, ".trusty-squire", `${name}.log`), "utf8").catch(
+    () => "Broker log unavailable",
+  );
+  console.error(log);
+  throw error;
 } finally {
   for (const peer of clients) {
     if (peer.child.exitCode === null && peer.child.signalCode === null) {
