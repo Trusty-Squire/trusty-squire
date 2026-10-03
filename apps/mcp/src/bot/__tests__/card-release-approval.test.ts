@@ -67,6 +67,72 @@ const SYNTHETIC_CARD = {
   },
 };
 
+it("returns a new approval link before polling, then waits on the resumed call", async () => {
+  const requested = {
+    merchant: CHECKOUT.merchant,
+    amount_cents: CHECKOUT.amount_cents,
+    currency: CHECKOUT.currency,
+    card_ref: "saved-card",
+    item: "item",
+    reason: "reason",
+  };
+  let now = 0;
+  const sleep = vi.fn(async (ms: number) => { now += ms; });
+  const getPaymentApproval = vi.fn(async (id: string) => ({
+    id,
+    status: "pending" as const,
+    card_ref: requested.card_ref,
+    expires_at: new Date(60_000).toISOString(),
+    jws: null,
+    sealed_card: null,
+  }));
+  const api = {
+    createPaymentApproval: vi.fn(async () => ({
+      id: "new-approval",
+      nonce: "nonce",
+      agent: "agent",
+      account_binding: "account",
+      expires_at: new Date(60_000).toISOString(),
+    })),
+    getPaymentApproval,
+  } as unknown as ApiClient;
+  const browser: CardReleaseBrowser = {
+    currentUrl: () => `${CHECKOUT.checkout_origin}/checkout`,
+    injectCardFields: async () => { throw new Error("card must not release"); },
+  };
+  const pending: PendingApprovalWait[] = [];
+  const shared = {
+    now: () => now,
+    sleep,
+    pollIntervalMs: 1_000,
+    pollBudgetMs: 2_000,
+    vouchflowExpectedAudience: "customer_test",
+    surfaceApprovalUrl: vi.fn(),
+    onApprovalPending: (state: PendingApprovalWait) => pending.push(state),
+  };
+
+  const first = await executeCardReleaseApproval(requested, api, browser, shared);
+  expect(first).toMatchObject({
+    status: "approval_pending",
+    approval_id: "new-approval",
+    approval_url: "https://trustysquire.ai/vault/pay/new-approval",
+  });
+  expect(first.next).toMatchObject({ message: expect.stringContaining("Show the approval link now") });
+  expect(getPaymentApproval).not.toHaveBeenCalled();
+  expect(sleep).not.toHaveBeenCalled();
+  expect(shared.surfaceApprovalUrl).toHaveBeenCalledWith(first.approval_url);
+  expect(pending).toHaveLength(1);
+
+  const second = await executeCardReleaseApproval(requested, api, browser, {
+    ...shared,
+    resumeFrom: pending[0]!,
+  });
+  expect(second).toMatchObject({ status: "approval_pending", approval_id: "new-approval" });
+  expect(api.createPaymentApproval).toHaveBeenCalledTimes(1);
+  expect(getPaymentApproval).toHaveBeenCalled();
+  expect(sleep).toHaveBeenCalled();
+});
+
 it.each([
   ["amount", { amount_cents: 2700 }],
   ["merchant", { merchant: "New Merchant" }],

@@ -116,6 +116,7 @@ describe("still-true contracts survive the cleanup", () => {
 
   it("inject_card guidance is present in its tool and the operator surface", () => {
     expect(injectCardTool.description).toContain("single human purchase approval");
+    expect(injectCardTool.description).toContain("show the link now, then call inject_card again");
     expect(injectCardTool.description).toContain("fill only the supplied observation refs");
     expect(injectCardTool.description).toContain("competing saved-card control");
     expect(injectCardTool.jsonInputSchema.required).toContain("session_id");
