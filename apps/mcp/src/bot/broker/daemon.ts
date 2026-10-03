@@ -93,22 +93,39 @@ export function retryableBrokerShutdown(cleanup: () => Promise<boolean>): {
  * account, so a bare broker serves the ceremony and the operator alike.
  */
 /** A broker may start when (a) no managed marker exists, or (b) it was started
- * by the unit that owns the marker (INVOCATION_ID is set by systemd for every
- * unit process; the unit additionally sets TRUSTY_SQUIRE_BROKER_UNIT=1 as an
- * explicit, scrubbed-away-proof flag). Older or foreign clients that exec the
- * new bin have neither and fail closed. */
-export function brokerMayStartForMarker(markerPresent: boolean, env: NodeJS.ProcessEnv): boolean {
+ * by the broker service that owns the profile. Older or foreign clients that
+ * exec the new bin are not that service and fail closed. */
+export function brokerMayStartForMarker(
+  markerPresent: boolean,
+  env: NodeJS.ProcessEnv,
+  cgroup = readOwnCgroup(),
+): boolean {
   if (!markerPresent) return true;
-  const startedByUnit =
-    (env.INVOCATION_ID ?? "").trim().length > 0 || env.TRUSTY_SQUIRE_BROKER_UNIT === "1";
-  return startedByUnit;
+  return startedByBrokerService(env, cgroup);
+}
+
+/** True only for the broker service's own process: the installer's unit sets
+ * TRUSTY_SQUIRE_BROKER_UNIT=1, and an existing broker unit (e.g. Beeline's
+ * trusty-squire-broker.service) is recognized by its own systemd cgroup.
+ * INVOCATION_ID alone is not enough: systemd gives it to every process of every
+ * unit, so a CI runner or an agent service would otherwise count as the broker
+ * service and take over a profile it does not own. */
+export function startedByBrokerService(env: NodeJS.ProcessEnv, cgroup = readOwnCgroup()): boolean {
+  if (env.TRUSTY_SQUIRE_BROKER_UNIT === "1") return true;
+  if ((env.INVOCATION_ID ?? "").trim().length === 0) return false;
+  return /\/trusty-squire-broker[^/\n]*\.service\s*$/m.test(cgroup);
+}
+
+function readOwnCgroup(): string {
+  try {
+    return readFileSync("/proc/self/cgroup", "utf8");
+  } catch {
+    return "";
+  }
 }
 
 const TAKEOVER_WAIT_MS = 10_000;
 
-function startedByBrokerService(env: NodeJS.ProcessEnv): boolean {
-  return (env.INVOCATION_ID ?? "").trim().length > 0 || env.TRUSTY_SQUIRE_BROKER_UNIT === "1";
-}
 
 /** lsof's `l` field must report the SQLite write lock, not merely an open fd. */
 function lockedBrokerPid(profileDir: string): number | null {

@@ -88,11 +88,17 @@ describe("broker daemon marker gate", () => {
   });
 
   it("refuses start with a marker unless the unit started it", () => {
-    expect(brokerMayStartForMarker(true, {})).toBe(false);
-    // INVOCATION_ID (set by systemd for every unit process) authorizes.
-    expect(brokerMayStartForMarker(true, { INVOCATION_ID: "some-invocation-id" })).toBe(true);
-    // The unit's own explicit env flag authorizes too.
-    expect(brokerMayStartForMarker(true, { TRUSTY_SQUIRE_BROKER_UNIT: "1" })).toBe(true);
+    const brokerUnit = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/trusty-squire-broker.service\n";
+    const otherUnit = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/beeline-agent@abc.service\n";
+    expect(brokerMayStartForMarker(true, {}, brokerUnit)).toBe(false);
+    // A broker unit's own process authorizes.
+    expect(brokerMayStartForMarker(true, { INVOCATION_ID: "id" }, brokerUnit)).toBe(true);
+    // INVOCATION_ID is inherited by every process of every unit (CI runners,
+    // agent services): it does not authorize outside a broker unit.
+    expect(brokerMayStartForMarker(true, { INVOCATION_ID: "id" }, otherUnit)).toBe(false);
+    expect(brokerMayStartForMarker(true, { INVOCATION_ID: "id" }, "")).toBe(false);
+    // The installer unit's explicit env flag authorizes too.
+    expect(brokerMayStartForMarker(true, { TRUSTY_SQUIRE_BROKER_UNIT: "1" }, otherUnit)).toBe(true);
   });
 
   it("a foreign exec of the broker bin with a marker present exits non-zero with the refusal", async () => {
