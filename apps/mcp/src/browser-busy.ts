@@ -14,7 +14,7 @@
 import { randomUUID } from "node:crypto";
 import {
   brokerSocketPath,
-  connectOrLaunchBroker,
+  connectBroker,
   resolveBrokerSocket,
 } from "./bot/broker/discovery.js";
 import { BrokerRefusal } from "./bot/broker/refusal.js";
@@ -330,7 +330,7 @@ export async function openTab(options: OpenTabOptions): Promise<TabHandle> {
   const purpose = options.purpose;
   let client: BrokerClient;
   try {
-    client = await connectOrLaunchBroker(resolveBrokerSocket());
+    client = await connectBroker(resolveBrokerSocket());
   } catch (error) {
     throw mapBrokerRefusal(error) ?? error;
   }

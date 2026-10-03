@@ -1,0 +1,72 @@
+name: Broker user service acceptance
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - apps/mcp/**
+      - packages/skill-schema/**
+      - pnpm-lock.yaml
+      - .github/workflows/broker-service-acceptance.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: broker-service-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native-service:
+    name: Native broker service (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 8.15.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @trusty-squire/skill-schema build
+      - run: pnpm --filter @trusty-squire/mcp build
+      - name: Fresh systemd install, upgrade, reconnect, and stopped-service acceptance
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 022
+          acceptance_root=$(mktemp -d /tmp/ts-native-XXXXXX)
+          acceptance_user=ts-broker-acceptance
+          cleanup() {
+            sudo loginctl disable-linger "$acceptance_user" || true
+            sudo systemctl stop "user@${acceptance_uid}.service" || true
+            sudo userdel "$acceptance_user" || true
+            sudo rm -rf "$acceptance_root"
+          }
+          sudo chmod 755 "$acceptance_root" "$HOME"
+          sudo useradd --create-home --home-dir "$acceptance_root/home" --shell /bin/bash "$acceptance_user"
+          acceptance_uid=$(id -u "$acceptance_user")
+          trap cleanup EXIT
+          sudo loginctl enable-linger "$acceptance_user"
+          sudo systemctl start "user@${acceptance_uid}.service"
+          sudo -u "$acceptance_user" env \
+            HOME="$acceptance_root/home" \
+            TS_NATIVE_ACCEPTANCE_HOME="$acceptance_root/home" \
+            XDG_RUNTIME_DIR="/run/user/$acceptance_uid" \
+            DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$acceptance_uid/bus" \
+            PATH="$PATH" \
+            "$(command -v node)" apps/mcp/scripts/broker-service-acceptance.mjs
+      - name: Fresh launchd install, upgrade, reconnect, and stopped-service acceptance
+        if: runner.os == 'macOS'
+        run: |
+          umask 022
+          node apps/mcp/scripts/broker-service-acceptance.mjs

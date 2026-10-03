@@ -1,5 +1,5 @@
 import { awaitOperatorPreparation } from "../request-cancellation.js";
-import { connectOrLaunchBroker } from "./discovery.js";
+import { connectBroker } from "./discovery.js";
 import { randomUUID } from "node:crypto";
 import type { SessionGuard } from "../../session-guard.js";
 import type { BrokerClient, BrokerNotifier } from "./transport.js";
@@ -90,15 +90,10 @@ export class OperatorForwarder {
     if (this.connection === undefined) {
       this.connecting = true;
       this.connection = (async () => {
-        // Connecting takes nothing. The enrolled account is carried only so an
-        // upgrade can positively identify a resident broker from an older
-        // release before reclaiming it; it is never an admission credential.
+        // The account verifies the declared endpoint binding, not admission.
         const session = await this.guard.bind();
-        const client = await connectOrLaunchBroker(this.path, {
+        const client = await connectBroker(this.path, {
           ...(session?.account_id === undefined ? {} : { accountId: session.account_id }),
-          ...(session?.agent_session_token === undefined
-            ? {}
-            : { agentSessionToken: session.agent_session_token }),
         });
         this.client = client;
         return client;

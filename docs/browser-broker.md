@@ -1,7 +1,7 @@
 # Cross-process identity browser broker
 
 The broker is the sole production path for MCP operator Chrome custody
-and the only MCP service on the host. Agent-facing `mcp server` (and
+and one MCP service per physical profile on the host. Agent-facing `mcp server` (and
 `mcp relay`) is a lightweight stdio proxy onto that shared socket — there
 is no per-agent operator server and no leftover compatibility path.
 One broker owns one canonical profile, one Chrome,
@@ -15,7 +15,7 @@ Turnstile-safe self-launch itself, once, and hands every tab out from it.
 
 ## Shared MCP socket and relay
 
-Start one resident `mcp broker` per browser profile. The canonical default
+The installer registers one resident broker user service per browser profile. The canonical default
 profile (`~/.trusty-squire/chrome-profile`) listens for MCP at
 `~/.trusty-squire/mcp.sock`. Any other profile listens at
 `~/.trusty-squire/mcp-<digest>.sock`, where the digest comes from the same
@@ -32,12 +32,10 @@ or idle exit. Its listener starts and stops with the elected broker.
 For each agent MCP connection, `mcp server` (and the `relay` alias) sends one
 line from `TRUSTY_SQUIRE_AGENT_IDENTITY` (or `unknown`), then relays MCP stdio
 messages in both directions.
-If the shared socket is down, the proxy starts the elected broker the same
-way other clients do, then waits for the MCP listener. When a systemd user
-unit already owns that profile and is active, activating, or reloading, the
-proxy waits for that unit instead of launching a detached competitor —
-otherwise the detached process takes the profile lock and the unit
-restart-loops. A failed or inactive unit does not suppress on-demand launch.
+If the shared socket is down, the proxy waits with capped backoff. Initial
+startup fails after ten seconds with a clear "broker not running" error and a
+failed initialization/process. MCP clients never start, stop, or replace a broker,
+including when the user service is stopped, failed, absent, or inaccessible.
 If the broker restarts, the proxy reconnects while the agent's pipe remains open,
 replays initialization, and returns an error for calls lost in flight. The
 connection owns the sessions it opened; dropping it closes those sessions after
@@ -70,8 +68,9 @@ proxy derives that profile's socket path itself:
 }
 ```
 
-The broker can be run as a user service with the same entry path and the
-`broker` subcommand. The first `mcp server` starts it on demand.
+The installer writes `npx -y @trusty-squire/mcp@latest server` for all supported
+agent configs, retaining profile, account, and agent identity environment. Manually
+maintained development wrappers can keep their own entries.
 
 ## Configuration and operation
 
@@ -80,7 +79,7 @@ Build with `pnpm --filter @trusty-squire/mcp build`, then run
 That process is the stdio proxy; it does not start a second operator stack.
 No broker-specific environment is required. Discovery derives a private local
 socket from the profile device identity and user ID, independent of cwd and
-TMPDIR, and starts or attaches the elected broker. `TRUSTY_SQUIRE_BROKER_SOCKET`
+TMPDIR, and attaches to the service-owned broker. `TRUSTY_SQUIRE_BROKER_SOCKET`
 optionally overrides that endpoint; its parent must exist, belong to the current
 user, and have mode 0700. The default private parent is created automatically.
 
@@ -105,46 +104,81 @@ override) collapse to one lock and one socket — one broker wins the election.
 derivation; `profileOperationLockPath`, `defaultBrokerSocket`, and
 `sharedMcpSocketPath` all consume it.
 
-A marker file next to the profile declares that a systemd unit owns it. The
-unit installer writes it; the uninstall path removes it. The contract is fixed
-so a client can implement the strict read side against it:
+### User service installation and upgrades
 
-- **Path:** `<canonical profile parent>/.trusty-squire-broker-unit.json`, mode
-  0600 — BESIDE the profile directory, never inside it, so a replaced profile
-  directory does not destroy it.
-- **Shape (version 1):**
-  ```json
-  {
-    "version": 1,
-    "socket": "/abs/path/to/broker.sock",
-    "profile": { "dev": 123, "ino": 456, "name": "chrome-profile" },
-    "accountBinding": "account-id"
-  }
-  ```
-  `profile` is exactly the anchor a client derives; `accountBinding` is the
-  bound account id, or `null` when the unit serves an unenrolled profile.
-- **Write:** once the unit is up. **Remove:** on unit uninstall
-  (`writeBrokerUnitMarker` / `removeBrokerUnitMarker` in
-  `apps/mcp/src/bot/broker/managed-marker.ts`).
+`npx -y @trusty-squire/mcp@latest connect` resolves the target's canonical profile,
+then registers and starts its service before preflight or enrollment. Linux requires
+a working systemd user manager; macOS requires a launchd GUI user domain. Windows
+and unavailable managers fail clearly without a direct broker fallback.
 
-While the marker file exists — valid or not — a client **never spawns a
-broker**. It waits (bounded, 10 s) for the declared `socket` and returns
-`broker_unavailable` on timeout. A marker with no socket, unparsable content,
-or a wrong version still fails closed: it never reopens spawning. A client
-joining a socket that is not its own derived socket first verifies the declared
-identity — same profile anchor and same account binding — and on either
-mismatch refuses with `profile_mismatch` / `account_mismatch`, neither joining
-nor launching.
+On Linux the default is `trusty-squire-broker.service` under
+`$XDG_CONFIG_HOME/systemd/user` (or `~/.config/systemd/user`). Additional physical
+profiles get deterministic `trusty-squire-broker-<digest>.service` units. The
+installer reuses an existing unit serving that profile, including its configured
+socket. Units marked as installer-owned are rewritten and restarted when their
+entry or environment changes; externally maintained units, including Beeline's,
+retain their configuration. New units use
+`Restart=always`, `RestartSec=1`, `KillSignal=SIGINT`, and bounded graceful shutdown;
+registration runs `daemon-reload` then `enable --now`.
 
-`systemctl` failure is **unknown**, never "no unit". The spawn gate is
-marker-aware: unknown plus no marker may launch on demand (today's behavior);
-unknown plus a marker may not; a live managed unit always defers. Inside a
-sandbox where `systemctl --user` cannot reach the bus, the marker is what
-prevents a competitor. The daemon itself refuses to start when a marker exists
-and it was not started by that unit: it requires `INVOCATION_ID` (set by
-systemd for every unit process) or the unit's own `TRUSTY_SQUIRE_BROKER_UNIT=1`
-flag. An older or foreign client that execs the new bin has neither and exits
-non-zero before touching the lock, the socket, or Chrome.
+On macOS the corresponding label is `ai.trustysquire.trusty-squire-broker` (with the
+profile digest for additional profiles), under `~/Library/LaunchAgents`. The plist
+sets `RunAtLoad`, `KeepAlive`, and a bounded exit timeout. Installation uses
+`launchctl bootstrap`, `enable`, and `kickstart`. An installer-owned agent whose
+definition changes is booted out, bootstrapped with the new plist, and started
+with `kickstart -k`; an unchanged loaded label is left running.
+Both platforms carry the profile, HOME, PATH, intended display environment,
+and `TRUSTY_SQUIRE_BROKER_UNIT=1`. The installer independently probes both listeners
+before proceeding. Manager stdout alone never establishes readiness.
+
+Services execute a durable Node `dist/bin.js broker` entry. If connect runs from an
+npx cache, it first preserves the whole package/dependency tree under
+`~/.trusty-squire/broker/<version>/node_modules`; no service points into `_npx`.
+Client versions use the latest tag; rerunning connect upgrades installer-owned
+services to its durable entry. Existing manually managed units retain their entry
+and configuration and require their owner's service maintenance.
+Use `systemctl --user restart <unit>` on Linux or
+`launchctl kickstart -k gui/$(id -u)/<label>` on macOS after updating the service's
+package/entry. Restart creates fresh connections; sessions and dispatched mutations
+are never restored or replayed.
+
+`.github/workflows/broker-service-acceptance.yml` runs native systemd and launchd
+acceptance on Linux and macOS using isolated homes/profiles. The harness installs
+from two versioned package caches, removes each cache, checks the manager's PID
+and registered entry, reconnects two built stdio clients across an upgrade and
+manager restart, and proves a stopped service produces no client-spawned broker.
+It fails when the native manager is unavailable; it does not substitute mocks or
+skip that acceptance.
+
+### Service endpoint markers
+
+The installer writes a mode-0600 version-1 marker beside the canonical profile,
+before service startup, so the daemon and clients agree on the socket and identity.
+For `chrome-profile` it remains `.trusty-squire-broker-unit.json`; other names use
+`.trusty-squire-broker-<name digest>-unit.json`, allowing sibling profiles their own
+services. Existing non-default legacy markers are read when they describe that
+profile. The JSON shape is:
+
+```json
+{
+  "version": 1,
+  "socket": "/abs/path/to/broker.sock",
+  "profile": { "dev": 123, "ino": 456, "name": "chrome-profile" },
+  "accountBinding": null
+}
+```
+
+Joining verifies the profile anchor and any declared account binding, refusing
+`profile_mismatch` / `account_mismatch` on disagreement. Invalid markers cannot
+permit startup. `systemctl` failure remains unknown; neither unknown nor an absent
+marker permits a client to start a broker. Removing a marker or uninstalling a
+service leaves clients connection-only.
+
+A marked daemon requires systemd's `INVOCATION_ID` or the explicit
+`TRUSTY_SQUIRE_BROKER_UNIT=1` environment before touching the profile lock, sockets,
+or Chrome. Tests may explicitly own foreground `node .../bin.js broker` processes,
+setting that flag for marked profiles, and must stop and await them in cleanup.
+No test client detaches a broker.
 
 `operate_start` accepts `proxy` as an HTTP or HTTPS URL (optional credentials)
 or an unauthenticated SOCKS5 URL. It configures the shared browser at launch,
@@ -169,7 +203,7 @@ yet. Account identity is named by the calls that act as an account
 nothing, and getting a tab and driving it takes nothing. `connect` is an
 ordinary broker client and holds no separate identity.
 
-The first client starts `node apps/mcp/dist/bin.js broker` when necessary.
+Only the OS user service manager starts the production broker.
 Socket mode is 0600. No CDP endpoint or browser
 handle crosses IPC. The agent label is self-declared and carries no account authority.
 
@@ -227,14 +261,13 @@ provider gate reports any missing session.
 
 When an install does need the login ceremony, the ceremony opens the confirm
 page as a TAB in the shared broker browser — an ordinary `open` on a
-`connectOrLaunchBroker` connection, no drain, no second Chrome, and no touch of
+`connectBroker` connection, no drain, no second Chrome, and no touch of
 the broker SQLite lock. **There is no fallback browser.** The broker is the only
-thing in the product that launches one: with no resident broker the ordinary
-connect-or-launch path spawns the daemon (which requires no enrollment), whose
-browser hosts the tab (and keeps the reclaim contracts below). A host with a screen (`hasDisplay()` in
+thing in the product that launches one: with no resident broker the installer first starts its user service (which requires
+no enrollment), whose browser hosts the tab. A host with a screen (`hasDisplay()` in
 `apps/mcp/src/bot/display-env.ts`) launches that Chrome on the machine
 display — no Xvfb, no noVNC. That decision is the daemon's, taken when it
-launches its Chrome: a broker spawned without DISPLAY (over SSH, or from a
+launches its Chrome: a broker started without DISPLAY (over SSH, or from a
 user service) cannot see the GUI session's display and parks its Chrome on a
 private Xvfb. A later connect from a screened terminal keeps the noVNC
 exposure for that Chrome rather than refusing — nothing here can move a live
@@ -349,12 +382,9 @@ and its other sessions intact.
   can leave reparented descendants after a broker crash, as on macOS/Windows.
   The broker logs its selected mode once. Broker SIGKILL may lose cookies
   written very recently; normal browser stops use SIGINT so they flush.
-- During upgrade, a client that receives a legacy `unauthorized` handshake
-  identifies the resident broker from the live Unix listener and its broker
-  argv. It requires either the prior wire handshake with an enrolled token or
-  the profile's own account binding before sending SIGTERM to that old broker.
-  It waits for the old listener to disappear, then launches the new broker.
-  Unknown or differently bound listeners are left alone.
+- A legacy `unauthorized` handshake is returned with an actionable service
+  upgrade/restart instruction. Clients never identify and kill a resident broker
+  or relaunch it; the service manager owns upgrades and lifecycle.
 - Each session owns a target family and a serialized command queue. A service
   URL does not reserve a site; one authenticated client drives the shared profile.
   Several connections to the same profile attach at once, one per client process,
@@ -674,7 +704,7 @@ pnpm --filter @trusty-squire/mcp exec vitest run \
   scripts/bounded-credential-driver.test.mjs \
   scripts/broker-live-acceptance.test.mjs \
   src/__tests__/install-targets-e2e.test.ts \
-  src/bot/__tests__/broker-stdio-restart.test.ts
+  src/bot/__tests__/broker-shared-mcp.test.ts
 ```
 
 5. Firstmate runs the SDK concurrency arm directly in Node, after recording

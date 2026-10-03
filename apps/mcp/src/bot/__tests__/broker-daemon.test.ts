@@ -1,14 +1,6 @@
 import { expect, it, vi } from "vitest";
 import { BrokerClientRegistry, retryableBrokerShutdown } from "../broker/daemon.js";
-import { brokerEnvironment } from "../broker/discovery.js";
 import { BrokerRuntime } from "../broker/runtime.js";
-
-it("passes the socket path to a detached broker without disturbing its environment", () => {
-  expect(brokerEnvironment({ PATH: "/bin" }, "/tmp/broker.sock")).toEqual({
-    PATH: "/bin",
-    TRUSTY_SQUIRE_BROKER_SOCKET: "/tmp/broker.sock",
-  });
-});
 
 it("does not count a status probe as an active broker client", () => {
   const clients = new BrokerClientRegistry();

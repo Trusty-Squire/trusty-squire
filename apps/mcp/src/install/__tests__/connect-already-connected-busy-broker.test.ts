@@ -1,3 +1,4 @@
+vi.mock("../broker-service.js", () => ({ installBrokerService: vi.fn(async () => undefined) }));
 // Regression: an install that is ALREADY connected must not be blocked by a
 // busy browser.
 //

@@ -23,6 +23,9 @@ export async function runRelay(): Promise<void> {
   if (!agentId || agentId.length > 128 || agentId.includes("\n") || agentId.includes("\r"))
     throw new Error("TRUSTY_SQUIRE_AGENT_IDENTITY must be a single line of at most 128 characters");
 
+  const controller = new AbortController();
+  let failStartup: (error: Error) => void = () => undefined;
+  let startupTimer: NodeJS.Timeout | undefined;
   let socket: Socket | undefined;
   let retry: NodeJS.Timeout | undefined;
   let input: Buffer = Buffer.alloc(0);
@@ -55,7 +58,7 @@ export async function runRelay(): Promise<void> {
   };
   const connect = () => {
     if (stopped) return;
-    void ensureSharedMcp()
+    void ensureSharedMcp(undefined, controller.signal)
       .then(() => {
         if (stopped) return;
         attach(createConnection(sharedMcpSocketPath()));
@@ -64,7 +67,8 @@ export async function runRelay(): Promise<void> {
         if (stopped) return;
         const message = error instanceof Error ? error.message : String(error);
         process.stderr.write(`[trusty-squire] relay: ${message}\n`);
-        reconnect();
+        if (!connectedOnce) failStartup(new Error(message));
+        else reconnect();
       });
   };
   const attach = (peer: Socket) => {
@@ -86,6 +90,7 @@ export async function runRelay(): Promise<void> {
         flush();
       }
       connectedOnce = true;
+      if (startupTimer) clearTimeout(startupTimer);
     });
     peer.on("data", (chunk: Buffer) => {
       output = frames(chunk, output, (line) => {
@@ -136,19 +141,45 @@ export async function runRelay(): Promise<void> {
       if (ready) flush();
     });
   });
-  await new Promise<void>((resolve) => {
-    const close = () => {
+  await new Promise<void>((resolve, reject) => {
+    const close = (error?: Error) => {
       if (stopped) return;
       stopped = true;
+      controller.abort();
       if (retry) clearTimeout(retry);
+      if (startupTimer) clearTimeout(startupTimer);
       socket?.destroy();
-      process.stdout.end(resolve);
+      process.stdin.pause();
+      process.stdout.end(() => (error ? reject(error) : resolve()));
     };
-    process.stdin.once("end", close);
-    process.stdin.once("close", close);
-    process.once("SIGHUP", close);
-    process.once("SIGTERM", close);
-    process.once("SIGINT", close);
+    failStartup = (error) => {
+      for (const line of queued.splice(0)) {
+        const frame = JSON.parse(line) as RpcFrame;
+        if (frame.id !== undefined)
+          process.stdout.write(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: frame.id,
+              error: { code: -32000, message: error.message },
+            }) + "\n",
+          );
+      }
+      close(error);
+    };
+    startupTimer = setTimeout(
+      () =>
+        failStartup(
+          new Error(
+            "Trusty Squire broker not running: initial socket unavailable after 10 seconds. Start or repair the broker user service, or re-run connect to install it",
+          ),
+        ),
+      10_000,
+    );
+    process.stdin.once("end", () => close());
+    process.stdin.once("close", () => close());
+    process.once("SIGHUP", () => close());
+    process.once("SIGTERM", () => close());
+    process.once("SIGINT", () => close());
     process.stdin.resume();
     connect();
   });

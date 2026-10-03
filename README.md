@@ -21,7 +21,7 @@ Ask your coding agent to:
 ## Install
 
 ```bash
-npx @trusty-squire/mcp connect
+npx -y @trusty-squire/mcp@latest connect
 ```
 
 Sign in with Google or GitHub, and Trusty Squire adds itself to your coding agent. Restart the agent and ask for what you need.
@@ -29,7 +29,9 @@ Sign in with Google or GitHub, and Trusty Squire adds itself to your coding agen
 To pick the agent yourself:
 
 ```bash
-npx @trusty-squire/mcp connect --target=codex
+npx -y @trusty-squire/mcp@latest connect --target=codex
 ```
+
+On Linux, connect registers and starts a systemd user service; on macOS, a launchd user agent. A working user service manager is required. MCP clients connect to that broker and report "broker not running" after bounded retries if it is stopped. Installer-written client entries use `@trusty-squire/mcp@latest`.
 
 Works with Claude Code, Codex, Cursor, OpenCode, Goose, Cline, Continue, and Hermes.

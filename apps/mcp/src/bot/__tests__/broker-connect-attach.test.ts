@@ -29,7 +29,6 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import type * as ProfileModule from "../profile.js";
 import { controlLabelV2 } from "../compact-observation-v2.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -431,7 +430,7 @@ describe("connect attaches to the live broker for the profile it is connecting",
     async () => {
       // A live resident from an older release refuses the token-less
       // handshake, the reclaim paths decline (the profile carries no account
-      // binding naming this account), and connectOrLaunchBroker throws. The
+      // binding naming this account), and connectBroker throws. The
       // old ceremony caught that and returned null — connect then raced the
       // profile the resident still holds and reported the generic "another
       // Trusty Squire session is already using the browser", discarding the

@@ -1,3 +1,6 @@
+vi.mock("../install/broker-service.js", () => ({
+  installBrokerService: vi.fn(async () => undefined),
+}));
 // E2E #3 — the install CLI works against the five host agents users
 // commonly run: claude-code, codex, goose, cursor, opencode. For each target,
 // this test:
@@ -123,13 +126,23 @@ import { ProfileBusyError } from "../bot/profile.js";
 import { BrokerRefusal } from "../bot/broker/refusal.js";
 import { installInitiate, installPoll } from "../api-client.js";
 import { captureMachineChannel } from "./machine-channel.js";
+import { installBrokerService } from "../install/broker-service.js";
 import { connect, resolveServerLaunch } from "../install/cli.js";
 import { AGENTS } from "../install/agents.js";
 import { openSessionStorage } from "../session.js";
 import { VERSION } from "../version.js";
 import { nativeLaunchSpecFromInstalledConfig } from "../../scripts/native-launch-diagnostics.mjs";
 
-const TARGETS = ["claude-code", "codex", "goose", "cursor", "hermes", "opencode"] as const;
+const TARGETS = [
+  "claude-code",
+  "codex",
+  "goose",
+  "cursor",
+  "hermes",
+  "opencode",
+  "cline",
+  "continue",
+] as const;
 
 let originalHome: string | undefined;
 let originalXdg: string | undefined;
@@ -153,9 +166,20 @@ async function readSquireConfig(target: (typeof TARGETS)[number]): Promise<Parse
   const raw = await fs.readFile(AGENTS[target].config_path(), "utf8");
   switch (target) {
     case "claude-code":
-    case "cursor": {
+    case "cursor":
+    case "cline": {
       const root = asRecord(JSON.parse(raw), `${target} config`);
       const squire = asRecord(asRecord(root.mcpServers, `${target} mcpServers`).squire, "squire");
+      return { command: squire.command, args: squire.args, env: squire.env };
+    }
+    case "continue": {
+      const root = asRecord(parseYaml(raw), "continue config");
+      const servers = root.mcpServers;
+      if (!Array.isArray(servers)) throw new Error("continue mcpServers must be an array");
+      const squire = asRecord(
+        servers.find((entry) => asRecord(entry, "continue entry").name === "squire"),
+        "squire",
+      );
       return { command: squire.command, args: squire.args, env: squire.env };
     }
     case "codex": {
@@ -191,6 +215,7 @@ function expectSquireConfig(
   profileDir = process.env.TRUSTY_SQUIRE_PROFILE_DIR,
 ): void {
   const launch = resolveServerLaunch();
+  expect(launch).toEqual({ command: "npx", args: ["-y", "@trusty-squire/mcp@latest", "server"] });
   expect(config.command).toBe(launch.command);
   expect(config.args).toEqual(launch.args);
   if (
@@ -241,6 +266,37 @@ afterEach(async () => {
   await fs.rm(tmpHome, { recursive: true, force: true });
 });
 
+it("reports service startup failure before enrollment or config publication", async () => {
+  vi.mocked(installBrokerService).mockRejectedValueOnce(
+    new Error("Broker not running after user service startup"),
+  );
+  vi.mocked(installInitiate).mockClear();
+  const channel = captureMachineChannel();
+  try {
+    await expect(
+      connect({
+        command: "connect",
+        target: "codex",
+        apiBase: "https://test.invalid",
+        skipBrowser: true,
+        forceRelogin: false,
+        noRegistry: false,
+        noInteractive: true,
+        json: true,
+      }),
+    ).rejects.toThrow("Broker not running");
+    expect(channel.terminal()).toMatchObject({
+      state: "no-browser",
+      reason: "run_failed",
+      terminal: true,
+    });
+    expect(installInitiate).not.toHaveBeenCalled();
+    await expect(fs.access(AGENTS.codex.config_path())).rejects.toThrow();
+  } finally {
+    channel.restore();
+  }
+});
+
 describe("connect --target=<agent> writes a valid config", () => {
   for (const target of TARGETS) {
     it(`works for --target=${target}`, async () => {
@@ -257,6 +313,10 @@ describe("connect --target=<agent> writes a valid config", () => {
         noInteractive: false,
       });
 
+      expect(installBrokerService).toHaveBeenCalledWith(process.env.TRUSTY_SQUIRE_PROFILE_DIR);
+      expect(vi.mocked(installBrokerService).mock.invocationCallOrder.at(-1)).toBeLessThan(
+        vi.mocked(installInitiate).mock.invocationCallOrder.at(-1)!,
+      );
       const configPath = AGENTS[target].config_path();
       const exists = await fs
         .access(configPath)

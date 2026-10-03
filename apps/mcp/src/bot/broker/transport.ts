@@ -98,62 +98,6 @@ export interface BrokerTransportPort {
   disconnect(principal: BrokerPrincipal, explicit?: boolean): Promise<void>;
 }
 
-const LEGACY_HANDSHAKE_PROBE_TIMEOUT_MS = 5_000;
-
-/** Positive prior-contract identification for reclaim. Sends the
- * pre-Contract-B `hello` handshake: only a resident prior-contract daemon
- * answers it, because a Contract B broker refuses every pre-auth method that
- * is not `connect`. The probe adds no wire operation to Contract B and is
- * only sent after a `connect` refusal, never on a healthy connect path. */
-export async function brokerSpeaksLegacyWire(path: string, token: string): Promise<boolean> {
-  return await new Promise<boolean>((resolve) => {
-    const socket = createConnection(path);
-    const id = randomUUID();
-    let buffered = Buffer.alloc(0);
-    let settled = false;
-    let timer: NodeJS.Timeout | undefined;
-    const finish = (value: boolean): void => {
-      if (settled) return;
-      settled = true;
-      if (timer !== undefined) clearTimeout(timer);
-      socket.destroy();
-      resolve(value);
-    };
-    timer = setTimeout(() => finish(false), LEGACY_HANDSHAKE_PROBE_TIMEOUT_MS);
-    socket.on("data", (chunk: Buffer) => {
-      buffered = Buffer.concat([buffered, chunk]);
-      for (;;) {
-        const end = buffered.indexOf(10);
-        if (end < 0) break;
-        const frame = buffered.subarray(0, end);
-        buffered = buffered.subarray(end + 1);
-        let reply: Reply;
-        try {
-          reply = JSON.parse(frame.toString("utf8")) as Reply;
-        } catch {
-          continue;
-        }
-        if (reply.id !== id) continue;
-        finish(reply.error === undefined);
-        return;
-      }
-    });
-    socket.once("connect", () =>
-      send(socket, {
-        version: 1,
-        id,
-        method: "hello",
-        params: {
-          token,
-          agentId: process.env.TRUSTY_SQUIRE_AGENT_IDENTITY ?? "local-agent",
-        },
-      }),
-    );
-    socket.once("error", () => finish(false));
-    socket.once("close", () => finish(false));
-  });
-}
-
 async function bindBrokerServer(server: Server, path: string): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
@@ -389,7 +333,7 @@ export class BrokerClient {
     } catch (error) {
       socket.destroy();
       // Socket close rejects pending calls as broker_lost. During connect only,
-      // preserve the deadline cause so discovery can retire a wedged owner.
+      // preserve the deadline cause so callers can report a wedged service.
       throw handshakeTimeout ?? error;
     } finally {
       clearTimeout(deadline);

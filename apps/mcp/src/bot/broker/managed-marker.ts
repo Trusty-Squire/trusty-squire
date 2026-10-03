@@ -1,29 +1,13 @@
-// Managed-broker marker: the record a systemd unit installer leaves next to
-// the profile so every client knows a managed broker owns it and must never
-// spawn a competitor. The read side is strict and fail-closed: any marker file
-// present blocks spawning, whether or not it parses.
-//
-// Contract (documented in docs/browser-broker.md):
-//   - The file lives NEXT TO the profile directory (its parent), never inside
-//     it, so a --force-relogin profile-directory replacement does not destroy
-//     it. Name: .trusty-squire-broker-unit.json
-//   - JSON shape (version 1):
-//       { "version": 1,
-//         "socket": "/abs/path/broker.sock",
-//         "profile": { "dev": <number>, "ino": <number>, "name": "chrome-profile" },
-//         "accountBinding": "<account id>" | null }
-//     `profile` is the same device anchor clients derive (parent dev/ino plus
-//     the profile directory name), so a client verifies "same physical
-//     profile" by comparing it against its own derived anchor.
-//   - The unit installer writes it after the unit starts and removes it on
-//     unit uninstall (removeBrokerUnitMarker below specifies that removal).
-//     While it exists, clients never spawn; they wait for `socket` (bounded)
-//     and return broker_unavailable on timeout. A marker with no socket never
-//     reopens spawning.
+// Service endpoint markers survive profile-directory replacement. Each physical
+// profile has its own marker beside the directory; the default name remains
+// compatible with installed systemd units. Clients only read/join, never spawn.
+// Version 1 records the wire socket, device anchor, and optional account binding.
+// Contract: docs/browser-broker.md.
 
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { readFile, unlink, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { profilePathIdentity, type ProfileDeviceAnchor } from "../profile-path.js";
 
 export const BROKER_UNIT_MARKER_FILE = ".trusty-squire-broker-unit.json";
@@ -40,9 +24,8 @@ export interface ManagedBrokerMarker {
   accountBinding: string | null;
 }
 
-/** Strict read outcome. `absent` is the ONLY value that permits on-demand
- * launch; `invalid` (present but unreadable/unparseable, or socket-less after
- * all) fails closed exactly like a valid marker. */
+/** Strict read outcome. `invalid` means present but unreadable or
+ * unparsable. No read outcome permits a client to launch a broker. */
 export type BrokerMarkerRead =
   | { kind: "absent" }
   | { kind: "invalid" }
@@ -52,7 +35,12 @@ export type BrokerMarkerRead =
  * so a replaced profile dir (--force-relogin) does not destroy the marker. */
 export function brokerUnitMarkerPath(profileDir: string): string {
   const canonicalProfile = profilePathIdentity(profileDir);
-  return join(dirname(canonicalProfile), BROKER_UNIT_MARKER_FILE);
+  const name = basename(canonicalProfile);
+  const markerName =
+    name === "chrome-profile"
+      ? BROKER_UNIT_MARKER_FILE
+      : `.trusty-squire-broker-${createHash("sha256").update(name).digest("hex").slice(0, 16)}-unit.json`;
+  return join(dirname(canonicalProfile), markerName);
 }
 
 function isAnchor(value: unknown): value is ProfileDeviceAnchor {
@@ -82,7 +70,7 @@ function parseMarker(text: string): ManagedBrokerMarker | null {
   if (!isAnchor(marker.profile)) return null;
   const binding = marker.accountBinding;
   if (binding !== null && binding !== undefined && typeof binding !== "string") return null;
-  if (binding !== null && (binding as string).length === 0) return null;
+  if (typeof binding === "string" && binding.length === 0) return null;
   return {
     version: BROKER_UNIT_MARKER_VERSION,
     socket: marker.socket,
@@ -95,10 +83,7 @@ function isMissing(error: unknown): boolean {
   return (error as NodeJS.ErrnoException).code === "ENOENT";
 }
 
-type MarkerFileRead =
-  | { kind: "text"; text: string }
-  | { kind: "absent" }
-  | { kind: "unreadable" };
+type MarkerFileRead = { kind: "text"; text: string } | { kind: "absent" } | { kind: "unreadable" };
 
 function classify(read: MarkerFileRead): BrokerMarkerRead {
   if (read.kind === "absent") return { kind: "absent" };
@@ -107,12 +92,30 @@ function classify(read: MarkerFileRead): BrokerMarkerRead {
   return marker === null ? { kind: "invalid" } : { kind: "valid", marker };
 }
 
+function legacyMarkerPath(profileDir: string): string {
+  return join(dirname(profilePathIdentity(profileDir)), BROKER_UNIT_MARKER_FILE);
+}
+
+function acceptLegacy(text: string, profileDir: string): MarkerFileRead {
+  const marker = parseMarker(text);
+  if (marker !== null && marker.profile.name !== basename(profilePathIdentity(profileDir)))
+    return { kind: "absent" };
+  return { kind: "text", text };
+}
+
 function readMarkerFile(profileDir: string): MarkerFileRead {
   try {
     return { kind: "text", text: readFileSync(brokerUnitMarkerPath(profileDir), "utf8") };
   } catch (error) {
     // ENOENT is the only "absent"; anything else (EACCES, EIO) fails closed.
-    return isMissing(error) ? { kind: "absent" } : { kind: "unreadable" };
+    if (!isMissing(error)) return { kind: "unreadable" };
+    if (brokerUnitMarkerPath(profileDir) === legacyMarkerPath(profileDir))
+      return { kind: "absent" };
+    try {
+      return acceptLegacy(readFileSync(legacyMarkerPath(profileDir), "utf8"), profileDir);
+    } catch (legacyError) {
+      return isMissing(legacyError) ? { kind: "absent" } : { kind: "unreadable" };
+    }
   }
 }
 
@@ -120,7 +123,7 @@ async function readMarkerFileAsync(profileDir: string): Promise<MarkerFileRead> 
   try {
     return { kind: "text", text: await readFile(brokerUnitMarkerPath(profileDir), "utf8") };
   } catch (error) {
-    return isMissing(error) ? { kind: "absent" } : { kind: "unreadable" };
+    return isMissing(error) ? readMarkerFile(profileDir) : { kind: "unreadable" };
   }
 }
 
@@ -129,12 +132,12 @@ export function readBrokerUnitMarkerSync(profileDir: string): BrokerMarkerRead {
   return classify(readMarkerFile(profileDir));
 }
 
-/** Strict async read for the launch gate. */
+/** Strict async read for connection discovery. */
 export async function readBrokerUnitMarkerAsync(profileDir: string): Promise<BrokerMarkerRead> {
   return classify(await readMarkerFileAsync(profileDir));
 }
 
-/** Write the marker. Used by the unit installer (Beeline-side) and by tests
+/** Write the marker. Used by the service installer and by tests
  * that must prove the client honors a conforming marker. */
 export async function writeBrokerUnitMarker(
   profileDir: string,
@@ -146,7 +149,7 @@ export async function writeBrokerUnitMarker(
 }
 
 /** Remove the marker. Specified in the contract: the unit uninstaller MUST
- * call this so a removed unit restores on-demand launch. */
+ * call this to remove stale endpoint routing; clients remain connection-only. */
 export async function removeBrokerUnitMarker(profileDir: string): Promise<void> {
   try {
     await unlink(brokerUnitMarkerPath(profileDir));

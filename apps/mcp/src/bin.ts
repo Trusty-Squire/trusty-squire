@@ -61,8 +61,7 @@ dispatch()
     // after printing "You're done."
     //
     // The `server`/`relay` branch returns when the stdio pipe or a signal
-    // closes the proxy; force-exit so a detached broker child cannot keep
-    // this process alive. `skill` returns its own code via T30 taxonomy.
+    // closes the proxy; force-exit after its transport has closed. `skill` returns its own code via T30 taxonomy.
     if (isServer || isRelay) process.exit(code);
     if (!isBroker) process.exit(code);
   })
