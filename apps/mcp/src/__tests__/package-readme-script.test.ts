@@ -109,7 +109,7 @@ describe("canonical README discovery order", () => {
     expect(readme.match(/^## .+$/gm)).toEqual(["## What you can do", "## Install"]);
     expect(readme).toContain("**Get an API key.**");
     expect(readme).toContain("**Buy things.**");
-    expect(readme).toContain("npx @trusty-squire/mcp connect\n");
-    expect(readme).toContain("npx @trusty-squire/mcp connect --target=codex\n");
+    expect(readme).toContain("npx -y @trusty-squire/mcp@latest connect\n");
+    expect(readme).toContain("npx -y @trusty-squire/mcp@latest connect --target=codex\n");
   });
 });

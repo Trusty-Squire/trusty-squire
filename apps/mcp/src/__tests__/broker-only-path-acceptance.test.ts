@@ -141,8 +141,7 @@ interface Stack {
   enroll: (token: string) => Promise<void>;
   startServer: () => Promise<Client>;
   startRelay: () => Promise<Client>;
-  /** Launch the daemon the way `connect` does — with the caller's isolated
-   * environment — so a test can reach the broker with no enrollment at all. */
+  /** Own a foreground test broker in an isolated environment without enrollment. */
   startBroker: () => Promise<void>;
   competeBroker: () => Promise<{ code: number | null; stderr: string }>;
   stop: () => Promise<void>;
@@ -264,6 +263,7 @@ async function startStack(
   let broker: ReturnType<typeof spawn> | undefined;
   const clients: Client[] = [];
   const startServer = async (): Promise<Client> => {
+    await startBroker();
     const client = new Client({ name: "broker-only-path-fixture", version: "1" });
     clients.push(client);
     const transport = new StdioClientTransport({
@@ -277,6 +277,7 @@ async function startStack(
     return client;
   };
   const startRelay = async (): Promise<Client> => {
+    await startBroker();
     const client = new Client({ name: "broker-relay-fixture", version: "1" });
     clients.push(client);
     const transport = new StdioClientTransport({
@@ -293,11 +294,9 @@ async function startStack(
   const startBroker = async (): Promise<void> => {
     if (broker === undefined || !alive(broker.pid!)) {
       broker = spawn(process.execPath, [DIST_BIN, "broker"], {
-        detached: true,
         stdio: "ignore",
         env,
       });
-      broker.unref();
     }
     await waitForBrokerSocket(socket);
   };

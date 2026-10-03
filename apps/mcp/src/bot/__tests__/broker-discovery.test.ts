@@ -1,21 +1,21 @@
 import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { writeFileSync, mkdirSync, existsSync, statSync } from "node:fs";
-import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import {
-  brokerLaunchDecision,
-  connectOrLaunchBroker,
+  brokerConnectionTarget,
+  connectBroker,
   defaultBrokerSocket,
   findLiveManagedBrokerUnit,
   liveUnixSocket,
   parseManagedBrokerShow,
   readSystemctlUnits,
   resolveBrokerSocket,
-  unitDefersOnDemandLaunch,
+  unitServesLiveProfile,
 } from "../broker/discovery.js";
 import { listenBroker } from "../broker/transport.js";
 import {
@@ -34,12 +34,15 @@ import { brokerAccountBindingPath } from "../broker/account-binding.js";
 import { sharedMcpSocketPath } from "../broker/mcp-socket-path.js";
 
 const roots: string[] = [];
-afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
+afterEach(async () => {
+  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+});
 
 /** Prepend an executable fake `systemctl` to PATH for the duration of `fn`.
  * Returns the value `fn` produced. */
 async function withSystemctlShim<T>(script: string, fn: () => Promise<T>): Promise<T> {
-  const root = await mkdtemp(join(tmpdir(), "ts-systemctl-shim-")); roots.push(root);
+  const root = await mkdtemp(join(tmpdir(), "ts-systemctl-shim-"));
+  roots.push(root);
   const bin = join(root, "systemctl");
   writeFileSync(bin, script, { mode: 0o755 });
   const priorPath = process.env.PATH ?? "";
@@ -71,31 +74,21 @@ function liveUnitShim(profileDir: string, socket: string): string {
 
 /** The sandbox profile every test process is pointed at by isolate-config-home. */
 function sandboxProfile(): string {
-  return process.env.TRUSTY_SQUIRE_PROFILE_DIR ?? join(process.env.HOME ?? "/tmp", ".trusty-squire", "chrome-profile");
+  return (
+    process.env.TRUSTY_SQUIRE_PROFILE_DIR ??
+    join(process.env.HOME ?? "/tmp", ".trusty-squire", "chrome-profile")
+  );
 }
 
 function ensureProfile(profile: string): void {
   mkdirSync(profile, { recursive: true, mode: 0o700 });
 }
 
-/** SIGTERM the process holding the given unix listener (the detached broker
- * launched by connectOrLaunchBroker), so no broker leaks between runs. */
-async function killBrokerListener(path: string): Promise<void> {
-  const deadline = Date.now() + 10_000;
-  while (await liveUnixSocket(path)) {
-    let pid: number | null = null;
-    try {
-      const out = execFileSync("lsof", ["-a", "-t", "-U", "--", path], { encoding: "utf8" });
-      pid = Number(out.trim().split(/\s+/)[0]);
-    } catch { pid = null; }
-    if (pid === null || !Number.isSafeInteger(pid) || pid <= 0) break;
-    try { process.kill(pid, "SIGTERM"); } catch { break; }
-    await new Promise((resolve) => setTimeout(resolve, 200));
-    if (Date.now() >= deadline) break;
-  }
-}
-
-async function writeProfileMarker(profile: string, socket: string, accountBinding: string | null = null): Promise<void> {
+async function writeProfileMarker(
+  profile: string,
+  socket: string,
+  accountBinding: string | null = null,
+): Promise<void> {
   const anchor = profileDeviceAnchor(profile);
   if (anchor === null) throw new Error("profile has no device anchor");
   mkdirSync(join(profile, ".."), { recursive: true });
@@ -109,7 +102,8 @@ async function writeProfileMarker(profile: string, socket: string, accountBindin
 
 describe("broker discovery", () => {
   it("derives one endpoint and one lock for canonical profile aliases", async () => {
-    const root = await mkdtemp(join(tmpdir(), "ts-broker-discovery-")); roots.push(root);
+    const root = await mkdtemp(join(tmpdir(), "ts-broker-discovery-"));
+    roots.push(root);
     const profile = join(root, "profile");
     const alias = join(root, "alias");
     await mkdir(profile);
@@ -128,7 +122,8 @@ describe("broker discovery", () => {
   });
 
   it("keys identity on the parent, so a replaced profile directory keeps one identity and one broker endpoint", async () => {
-    const root = await mkdtemp(join(tmpdir(), "ts-broker-discovery-")); roots.push(root);
+    const root = await mkdtemp(join(tmpdir(), "ts-broker-discovery-"));
+    roots.push(root);
     const profile = join(root, "profile");
     ensureProfile(profile);
     const identityBefore = profileDeviceIdentity(profile);
@@ -148,7 +143,8 @@ describe("broker discovery", () => {
   });
 
   it("keeps one identity and one endpoint when the profile parent is created after the first read", async () => {
-    const root = await mkdtemp(join(tmpdir(), "ts-broker-discovery-")); roots.push(root);
+    const root = await mkdtemp(join(tmpdir(), "ts-broker-discovery-"));
+    roots.push(root);
     const profile = join(root, ".trusty-squire", "signup-test-profile");
     // The first read happens before anything exists under root. Creating the
     // parent later (daemon startup, an MCP listener) must not move the anchor
@@ -163,17 +159,20 @@ describe("broker discovery", () => {
   });
 
   it("attaches to the live broker without launching a second one", async () => {
-    const root = await mkdtemp(join(tmpdir(), "ts-broker-discovery-")); roots.push(root);
+    const root = await mkdtemp(join(tmpdir(), "ts-broker-discovery-"));
+    roots.push(root);
     const socket = join(root, "broker.sock");
     const listener = await listenBroker(socket, {
       call: async () => ({ live: true }),
       disconnect: async () => undefined,
     });
     try {
-      const client = await connectOrLaunchBroker(socket);
+      const client = await connectBroker(socket);
       expect(await client.call("status", {})).toEqual({ live: true });
       await client.close();
-    } finally { await listener.close(); }
+    } finally {
+      await listener.close();
+    }
   });
 
   it("recognizes a Beeline-managed broker unit for its profile and ignores others", () => {
@@ -213,8 +212,8 @@ describe("broker discovery", () => {
       id: "trusty-squire-broker-dead.service",
       activeState: "failed",
     });
-    expect(unitDefersOnDemandLaunch(units[0]!, profile)).toBe(true);
-    expect(unitDefersOnDemandLaunch(units[3]!, profile)).toBe(false);
+    expect(unitServesLiveProfile(units[0]!, profile)).toBe(true);
+    expect(unitServesLiveProfile(units[3]!, profile)).toBe(false);
   });
 
   it("finds the live unit's configured broker socket for its profile", () => {
@@ -230,24 +229,29 @@ describe("broker discovery", () => {
       findLiveManagedBrokerUnit(units, "/home/user/.trusty-squire/chrome-profile")?.environment
         .TRUSTY_SQUIRE_BROKER_SOCKET,
     ).toBe("/home/user/.trusty-squire/broker.sock");
-    expect(findLiveManagedBrokerUnit(units, "/home/user/.trusty-squire/other-profile")).toBeUndefined();
     expect(
-      findLiveManagedBrokerUnit([{ ...units[0]!, activeState: "failed" }], "/home/user/.trusty-squire/chrome-profile"),
+      findLiveManagedBrokerUnit(units, "/home/user/.trusty-squire/other-profile"),
+    ).toBeUndefined();
+    expect(
+      findLiveManagedBrokerUnit(
+        [{ ...units[0]!, activeState: "failed" }],
+        "/home/user/.trusty-squire/chrome-profile",
+      ),
     ).toBeUndefined();
   });
 });
 
-describe("managed-broker spawn gate", () => {
+describe("managed-broker connection discovery", () => {
   it("parses a failing systemctl as unknown, not no-unit", async () => {
     await withSystemctlShim(FAILING_SYSTEMCTL, async () => {
       expect(readSystemctlUnits(sandboxProfile())).toEqual({ state: "unknown" });
     });
   });
 
-  it("a failing systemctl without a marker may still launch on demand", async () => {
+  it("a failing systemctl without a marker only resolves a connection target", async () => {
     await withSystemctlShim(FAILING_SYSTEMCTL, async () => {
-      const decision = await brokerLaunchDecision(sandboxProfile(), "/tmp/ts-absent-broker.sock");
-      expect(decision.kind).toBe("spawn");
+      const decision = await brokerConnectionTarget(sandboxProfile(), "/tmp/ts-absent-broker.sock");
+      expect(decision.socket).toBe("/tmp/ts-absent-broker.sock");
     });
   });
 
@@ -258,9 +262,8 @@ describe("managed-broker spawn gate", () => {
     await writeProfileMarker(profile, declared);
     try {
       await withSystemctlShim(FAILING_SYSTEMCTL, async () => {
-        const decision = await brokerLaunchDecision(profile, defaultBrokerSocket(profile));
-        expect(decision.kind).toBe("wait");
-        if (decision.kind === "wait") expect(decision.socket).toBe(declared);
+        const decision = await brokerConnectionTarget(profile, defaultBrokerSocket(profile));
+        expect(decision.socket).toBe(declared);
       });
     } finally {
       await removeBrokerUnitMarker(profile);
@@ -275,8 +278,8 @@ describe("managed-broker spawn gate", () => {
     mkdirSync(join(profile, ".."), { recursive: true });
     writeFileSync(path, "{ not json", { mode: 0o600 });
     try {
-      const decision = await brokerLaunchDecision(profile, defaultBrokerSocket(profile));
-      expect(decision.kind).toBe("wait");
+      const decision = await brokerConnectionTarget(profile, defaultBrokerSocket(profile));
+      expect(decision.socket).toBe(defaultBrokerSocket(profile));
     } finally {
       await rm(path, { force: true });
     }
@@ -287,8 +290,8 @@ describe("managed-broker spawn gate", () => {
     ensureProfile(profile);
     const unitSocket = join("/tmp", `ts-broker-restart-${randomUUID()}.sock`); // absent
     await withSystemctlShim(liveUnitShim(profile, unitSocket), async () => {
-      const decision = await brokerLaunchDecision(profile, defaultBrokerSocket(profile));
-      expect(decision.kind).toBe("wait");
+      const decision = await brokerConnectionTarget(profile, defaultBrokerSocket(profile));
+      expect(decision.socket).toBe(unitSocket);
     });
   });
 
@@ -306,7 +309,7 @@ describe("managed-broker spawn gate", () => {
     });
     try {
       await withSystemctlShim(liveUnitShim(profile, unitSocket), async () => {
-        const client = await connectOrLaunchBroker(defaultBrokerSocket(profile), {
+        const client = await connectBroker(defaultBrokerSocket(profile), {
           accountId: "account-a",
         });
         try {
@@ -338,7 +341,7 @@ describe("managed-broker spawn gate", () => {
     try {
       await withSystemctlShim(liveUnitShim(profile, unitSocket), async () => {
         await expect(
-          connectOrLaunchBroker(defaultBrokerSocket(profile), { accountId: "account-b" }),
+          connectBroker(defaultBrokerSocket(profile), { accountId: "account-b" }),
         ).rejects.toThrow(/account_mismatch|bound to account/);
       });
     } finally {
@@ -357,7 +360,8 @@ describe("managed-broker spawn gate", () => {
       console.warn("skipping bind-mount alias test: unprivileged user namespaces unavailable");
       return;
     }
-    const root = await mkdtemp(join(tmpdir(), "ts-broker-bindmount-")); roots.push(root);
+    const root = await mkdtemp(join(tmpdir(), "ts-broker-bindmount-"));
+    roots.push(root);
     const realParent = join(root, "real-parent");
     const aliasParent = join(root, "mnt");
     await mkdir(join(realParent, "chrome-profile"), { recursive: true });
@@ -370,7 +374,7 @@ describe("managed-broker spawn gate", () => {
     await writeFile(
       probePath,
       [
-        `import { unitDefersOnDemandLaunch } from ${JSON.stringify(discoveryUrl)};`,
+        `import { unitServesLiveProfile } from ${JSON.stringify(discoveryUrl)};`,
         `import { profileDeviceIdentity } from ${JSON.stringify(profileUrl)};`,
         `const unit = {`,
         `  id: "trusty-squire-broker.service",`,
@@ -379,7 +383,7 @@ describe("managed-broker spawn gate", () => {
         `  environment: { TRUSTY_SQUIRE_PROFILE_DIR: ${JSON.stringify(real)} },`,
         `};`,
         `process.stdout.write(JSON.stringify({`,
-        `  defers: unitDefersOnDemandLaunch(unit, ${JSON.stringify(alias)}),`,
+        `  defers: unitServesLiveProfile(unit, ${JSON.stringify(alias)}),`,
         `  real: profileDeviceIdentity(${JSON.stringify(real)}),`,
         `  alias: profileDeviceIdentity(${JSON.stringify(alias)}),`,
         `}));`,
@@ -391,9 +395,13 @@ describe("managed-broker spawn gate", () => {
       `cd ${JSON.stringify(process.cwd())}`,
       `node --import tsx ${JSON.stringify(probePath)}`,
     ].join(" && ");
-    const result = spawnSync("unshare", ["-Ur", "-m", "--propagation", "private", "sh", "-c", shell], {
-      encoding: "utf8",
-    });
+    const result = spawnSync(
+      "unshare",
+      ["-Ur", "-m", "--propagation", "private", "sh", "-c", shell],
+      {
+        encoding: "utf8",
+      },
+    );
     expect(result.status, result.stderr).toBe(0);
     const parsed = JSON.parse(result.stdout) as { defers: boolean; real: string; alias: string };
     // Same physical profile, two path strings: device identity must agree and
@@ -412,18 +420,24 @@ describe("managed-broker spawn gate", () => {
     try {
       // Rewrite the marker so its declared anchor is a different physical profile.
       const path = brokerUnitMarkerPath(profile);
-      writeFileSync(path, JSON.stringify({
-        version: 1,
-        socket,
-        profile: { dev: 1, ino: 2, name: "other-profile" },
-        accountBinding: null,
-      }) + "\n", { mode: 0o600 });
+      writeFileSync(
+        path,
+        JSON.stringify({
+          version: 1,
+          socket,
+          profile: { dev: 1, ino: 2, name: "other-profile" },
+          accountBinding: null,
+        }) + "\n",
+        { mode: 0o600 },
+      );
       const listener = await listenBroker(socket, {
         call: async () => ({ live: true }),
         disconnect: async () => undefined,
       });
       try {
-        await expect(connectOrLaunchBroker(defaultBrokerSocket(profile))).rejects.toThrow(/different profile|Refusing to join/);
+        await expect(connectBroker(defaultBrokerSocket(profile))).rejects.toThrow(
+          /different profile|Refusing to join/,
+        );
       } finally {
         await listener.close();
       }
@@ -440,12 +454,16 @@ describe("managed-broker spawn gate", () => {
     if (anchor === null) throw new Error("profile has no device anchor");
     const path = brokerUnitMarkerPath(profile);
     mkdirSync(join(profile, ".."), { recursive: true });
-    writeFileSync(path, JSON.stringify({
-      version: 1,
-      socket,
-      profile: anchor,
-      accountBinding: "account-b",
-    }) + "\n", { mode: 0o600 });
+    writeFileSync(
+      path,
+      JSON.stringify({
+        version: 1,
+        socket,
+        profile: anchor,
+        accountBinding: "account-b",
+      }) + "\n",
+      { mode: 0o600 },
+    );
     try {
       const listener = await listenBroker(socket, {
         call: async () => ({ live: true }),
@@ -453,7 +471,7 @@ describe("managed-broker spawn gate", () => {
       });
       try {
         await expect(
-          connectOrLaunchBroker(defaultBrokerSocket(profile), { accountId: "account-a" }),
+          connectBroker(defaultBrokerSocket(profile), { accountId: "account-a" }),
         ).rejects.toThrow(/account_mismatch|different account|bound to account/);
       } finally {
         await listener.close();
@@ -475,7 +493,7 @@ describe("managed-broker spawn gate", () => {
         disconnect: async () => undefined,
       });
       try {
-        const client = await connectOrLaunchBroker(defaultBrokerSocket(profile), {
+        const client = await connectBroker(defaultBrokerSocket(profile), {
           accountId: "account-a",
         });
         try {
@@ -502,7 +520,7 @@ describe("managed-broker spawn gate", () => {
         disconnect: async () => undefined,
       });
       try {
-        const client = await connectOrLaunchBroker(defaultBrokerSocket(profile));
+        const client = await connectBroker(defaultBrokerSocket(profile));
         try {
           expect(await client.call("status", {})).toEqual({ live: true });
         } finally {
@@ -517,7 +535,7 @@ describe("managed-broker spawn gate", () => {
   });
 });
 
-describe("managed-broker spawn gate end-to-end", () => {
+describe("managed-broker connection discovery end-to-end", () => {
   it("a marker with an absent socket never spawns: returns broker_unavailable, creates no lock", async () => {
     const profile = sandboxProfile();
     ensureProfile(profile);
@@ -525,8 +543,8 @@ describe("managed-broker spawn gate end-to-end", () => {
     await writeProfileMarker(profile, declared);
     try {
       await withSystemctlShim(FAILING_SYSTEMCTL, async () => {
-        await expect(connectOrLaunchBroker(defaultBrokerSocket(profile))).rejects.toThrow(
-          /broker_unavailable|did not become available/,
+        await expect(connectBroker(defaultBrokerSocket(profile))).rejects.toThrow(
+          /broker not running/,
         );
       });
       // No spawn: the profile lock file was never created and nothing listens.
@@ -537,22 +555,21 @@ describe("managed-broker spawn gate end-to-end", () => {
     }
   }, 15_000);
 
-  it("no marker keeps today's on-demand launch", async () => {
+  it("joins an explicitly owned foreground broker without a marker", async () => {
     const profile = sandboxProfile();
     ensureProfile(profile);
     // resolveBrokerSocket provisions the 0700 socket parent the daemon's own
     // permission check requires, exactly like real callers do.
     const socket = resolveBrokerSocket(profile);
-    // The client's gate must still authorize an on-demand launch.
-    await expect(brokerLaunchDecision(profile, socket)).resolves.toMatchObject({ kind: "spawn" });
-    // Start the real broker entry (source form, like the race suite does) and
-    // prove a client joins it: the gate did not block the launch.
+    await expect(brokerConnectionTarget(profile, socket)).resolves.toEqual({ socket });
+    // The harness owns the foreground broker and awaits its exit.
     const bin = fileURLToPath(new URL("../../bin.ts", import.meta.url));
     // A short daemon HOME, independent of the harness TMPDIR: the shared MCP
     // socket path is bounded by the Unix socket length limit, and a long
     // TMPDIR-derived HOME would push it over. This does not change the profile
     // under test (TRUSTY_SQUIRE_PROFILE_DIR pins it).
-    const daemonHome = await mkdtemp(join("/tmp", "ts-daemon-home-")); roots.push(daemonHome);
+    const daemonHome = await mkdtemp(join("/tmp", "ts-daemon-home-"));
+    roots.push(daemonHome);
     const daemonEnv: Record<string, string | undefined> = { ...process.env };
     daemonEnv.HOME = daemonHome;
     daemonEnv.XDG_CONFIG_HOME = join(daemonHome, ".config");
@@ -563,7 +580,7 @@ describe("managed-broker spawn gate end-to-end", () => {
       stdio: "ignore",
     });
     try {
-      const client = await connectOrLaunchBroker(socket);
+      const client = await connectBroker(socket);
       try {
         expect(await liveUnixSocket(socket)).toBe(true);
         expect(await client.call("status", {})).toBeDefined();
@@ -571,8 +588,9 @@ describe("managed-broker spawn gate end-to-end", () => {
         await client.close();
       }
     } finally {
-      daemon.kill("SIGTERM");
-      await killBrokerListener(socket);
+      const exited = new Promise<void>((resolve) => daemon.once("exit", () => resolve()));
+      if (daemon.exitCode === null) daemon.kill("SIGTERM");
+      if (daemon.exitCode === null) await exited;
     }
   }, 20_000);
 });

@@ -38,7 +38,6 @@ import { cpSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { loadHarvesterEnvFile } from "../operator-env.js";
-import { fileURLToPath } from "node:url";
 import { installInitiate, installPoll, issueMachineToken } from "../api-client.js";
 import { openSessionStorage, type SessionData } from "../session.js";
 import {
@@ -65,7 +64,6 @@ import {
   profilePathIdentity,
   withProfileOperationGuard,
 } from "../bot/profile.js";
-import { VERSION } from "../version.js";
 import { isBrowserContentionRefusal } from "../bot/broker/discovery.js";
 import { BrokerRefusal } from "../bot/broker/refusal.js";
 import { ensureLatestVersion, VersionUpdateRequiredError } from "./version-check.js";
@@ -93,6 +91,7 @@ import {
   type ConnectBrowserLocation,
   type ConnectOutcome,
 } from "./connect-report.js";
+import { installBrokerService } from "./broker-service.js";
 import { PAIRING_TOKEN_TTL_MS } from "../pairing-ttl.js";
 
 const DEFAULT_API_BASE = process.env.TRUSTY_SQUIRE_API_BASE ?? "https://trusty-squire-api.fly.dev";
@@ -327,12 +326,7 @@ export function copyNpxNodeModules(src: string, dest: string): void {
 }
 
 function resolveServerLaunch(): { command: string; args: string[] } {
-  const binPath = fileURLToPath(new URL("../bin.js", import.meta.url));
-  const ephemeral = /[/\\]_npx[/\\]/.test(binPath);
-  if (!ephemeral) {
-    return { command: process.execPath, args: [binPath, "server"] };
-  }
-  return { command: "npx", args: ["-y", `@trusty-squire/mcp@${VERSION}`, "server"] };
+  return { command: "npx", args: ["-y", "@trusty-squire/mcp@latest", "server"] };
 }
 
 // Historical fallback for GitHub-release tarball installs. The normal install
@@ -534,7 +528,7 @@ async function connect(args: Argv, argv: readonly string[] = []): Promise<void> 
   const placed: BrowserPlacementSlot = { value: null, ownBrowserPid: null };
   try {
     // `npx …/mcp connect` reuses a stale local copy instead of fetching the
-    // latest, and connect then pins the host config to that stale version.
+    // latest, and connect then installs a broker from that stale version.
     // Re-exec on the current release first so the one-liner alone lands it.
     await ensureLatestVersion(argv);
     const { target, agent, wantInteractive } = await prepareConnect(args);
@@ -548,6 +542,7 @@ async function connect(args: Argv, argv: readonly string[] = []): Promise<void> 
         agentIdentity: context.agentIdentity,
       },
       async () => {
+        await installBrokerService(canonicalProfileDir);
         // An install that is already connected needs no browser at all. Decide
         // that BEFORE any browser work, or a machine whose browser is busy with
         // other work fails an install it never had to perform.
@@ -562,12 +557,8 @@ async function connect(args: Argv, argv: readonly string[] = []): Promise<void> 
           )
         )
           return;
-        // No drain, no exclusive profile guard: the ceremony opens the confirm
-        // page as a TAB in the shared browser (the resident broker's Chrome),
-        // or — on a machine where no broker can serve yet — launches the
-        // operator's own persistent-context browser on the bot profile. It
-        // never starts a second instance beside a broker that owns the
-        // profile, and it never waits for one to free it.
+        // The ceremony opens a tab in the service-owned browser. Its service
+        // is ready before either enrollment path reaches broker discovery.
         await runConnectInstall(
           args,
           target,

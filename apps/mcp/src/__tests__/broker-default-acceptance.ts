@@ -4,7 +4,7 @@ import { chromium } from "playwright";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, readdir, symlink, rm } from "node:fs/promises";
 import { hostname } from "node:os";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { dirname, join } from "node:path";
 import { expect } from "vitest";
 import { SessionStore } from "../session.js";
@@ -18,9 +18,17 @@ type Owner = { pid: number; start_time: string };
 /** The live Unix listener identifies the elected broker in this test. */
 async function readBrokerOwner(profile: string): Promise<Owner | undefined> {
   try {
-    const pid = Number(execFileSync("lsof", ["-a", "-t", "-U", "--", defaultBrokerSocket(profile)], { encoding: "utf8" }).trim().split(/\s+/)[0]);
+    const pid = Number(
+      execFileSync("lsof", ["-a", "-t", "-U", "--", defaultBrokerSocket(profile)], {
+        encoding: "utf8",
+      })
+        .trim()
+        .split(/\s+/)[0],
+    );
     return processBirthIdentity(pid) ?? undefined;
-  } catch { return undefined; }
+  } catch {
+    return undefined;
+  }
 }
 async function waitFor<T>(read: () => Promise<T | undefined>, description: string): Promise<T> {
   const deadline = Date.now() + 20_000;
@@ -89,6 +97,11 @@ export async function checkDefaultBrokerAcceptance(
     UNIVERSAL_BOT_CHROME_BINARY: chromium.executablePath(),
     BOT_CDP_ENDPOINT: "",
   });
+  let foreground: ChildProcess | undefined;
+  const startForeground = async () => {
+    foreground = spawn(process.execPath, [distBin, "broker"], { env, stdio: "ignore" });
+    return await waitFor(readOwner, "owned foreground broker");
+  };
   const clients: Client[] = [];
   const sessionOf = new Map<Client, string>();
   let owner: Owner | undefined;
@@ -127,6 +140,7 @@ export async function checkDefaultBrokerAcceptance(
     return client;
   };
   try {
+    owner = await startForeground();
     await Promise.all([start(), start(), start()]);
     owner = await waitFor(readOwner, "elected broker");
     expect(processBirthIdentityState(owner)).toBe("matching");
@@ -152,6 +166,7 @@ export async function checkDefaultBrokerAcceptance(
       async () => (processBirthIdentityState(owner!) === "stale" ? true : undefined),
       "dead broker",
     );
+    await startForeground();
     await start();
     const replacement = await waitFor(async () => {
       const next = await readOwner();
@@ -182,6 +197,15 @@ export async function checkDefaultBrokerAcceptance(
         await client.close();
       }),
     );
+    if (foreground && foreground.exitCode === null && foreground.signalCode === null) {
+      foreground.kill("SIGCONT");
+      foreground.kill("SIGTERM");
+      await waitFor(
+        async () =>
+          foreground!.exitCode !== null || foreground!.signalCode !== null ? true : undefined,
+        "foreground broker teardown",
+      );
+    }
     // Also find an elected child if a failed start returned before owner capture.
     owner = (await readOwner()) ?? owner;
     if (owner && processBirthIdentityState(owner) === "matching") {

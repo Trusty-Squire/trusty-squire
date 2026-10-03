@@ -10,7 +10,7 @@ import {
 } from "./broker-default-acceptance.js";
 const require = createRequire(import.meta.url);
 it.skipIf(!canRunDefaultBrokerAcceptance)(
-  "shares the default broker across concurrent servers and replaces dead and wedged owners without broker configuration",
+  "shares an owned foreground broker across concurrent servers and its replacement",
   async () => {
     const root = await mkdtemp(join(tmpdir(), "ts-broker-default-"));
     try {

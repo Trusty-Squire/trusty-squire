@@ -3,7 +3,7 @@
 // The footgun this closes: `npx @trusty-squire/mcp connect` does NOT fetch the
 // latest version when a copy is already installed. npx reuses an existing global
 // bin (or a cached copy) instead of hitting the registry, so a months-old
-// install keeps running — and connect then pins the host-agent config to
+// install keeps running — and connect then registers a broker service from
 // whatever stale copy ran it. The documented one-liner silently freezes the
 // user's version, and only a separate `npm install -g` moves it. That's the bug.
 //
@@ -136,8 +136,8 @@ export async function ensureLatestVersion(argv: readonly string[]): Promise<void
   if (result.error === undefined && typeof result.status === "number") {
     process.exit(result.status);
   }
-  // Couldn't self-heal (npx missing / spawn failed). Fail CLOSED — refuse to pin
-  // a stale version silently, which is the whole bug. Tell the user exactly what
+  // Couldn't self-heal (npx missing / spawn failed). Fail CLOSED — refuse to install
+  // a stale broker silently, which is the whole bug. Tell the user exactly what
   // to run. Thrown rather than exited so the caller still reports before the
   // process ends; `runCli` keeps the exit code.
   console.error(

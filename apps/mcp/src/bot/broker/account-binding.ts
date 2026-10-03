@@ -3,8 +3,8 @@ import { join } from "node:path";
 
 /** The account a profile's browser is enrolled to. The broker runtime writes
  * this record on its first acquire and refuses a profile bound to another
- * account; reclaim reads it to prove a resident broker is OURS before
- * signalling it. One path, one shape, one owner. */
+ * account; connection discovery reads it to verify the service endpoint
+ * binding. One path, one shape, one owner. */
 export function brokerAccountBindingPath(profileDir: string): string {
   return join(profileDir, "trusty-squire-broker-account.json");
 }

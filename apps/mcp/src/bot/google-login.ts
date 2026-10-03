@@ -27,7 +27,7 @@ import {
 } from "./profile.js";
 import { closeBrowserContextWithin, registerLocalBrowserLaunch } from "./browser.js";
 import { createSessionGuard } from "../session-guard.js";
-import { connectOrLaunchBroker, resolveBrokerSocket } from "./broker/discovery.js";
+import { connectBroker, resolveBrokerSocket } from "./broker/discovery.js";
 import { BrokerRefusal } from "./broker/refusal.js";
 import type { BrokerClient } from "./broker/transport.js";
 import { controlLabelV2, wireRoleToSafeRoleV2 } from "./compact-observation-v2.js";
@@ -357,7 +357,7 @@ export async function probeGoogleSessionInBroker(profileDir: string): Promise<bo
   let client: BrokerClient | undefined;
   let sessionId: string | undefined;
   try {
-    client = await connectOrLaunchBroker(resolveBrokerSocket(profileDir));
+    client = await connectBroker(resolveBrokerSocket(profileDir));
     const opened = (await client.call("open", {
       serviceUrl: "about:blank",
       ceremony: true,
@@ -955,17 +955,14 @@ export async function runCeremonyInSharedBroker(opts: RunInBotChromeOpts): Promi
   const socket = resolveBrokerSocket(opts.profileDir);
   const connectOptions = {
     ...(session?.account_id === undefined ? {} : { accountId: session.account_id }),
-    ...(session?.agent_session_token === undefined
-      ? {}
-      : { agentSessionToken: session.agent_session_token }),
   };
   let client: BrokerClient;
   try {
-    client = await connectOrLaunchBroker(socket, connectOptions);
+    client = await connectBroker(socket, connectOptions);
   } catch (err) {
     // Nothing left to fall back to: the broker is the only path that owns a
     // browser. An identified resident's refusal (a broker still serving
-    // clients, an unreclaimed pid, a handshake timeout) names the resident
+    // clients, a legacy handshake, a handshake timeout) names the resident
     // process and the recovery step, and swallowing it would replace that
     // message with a generic "another Trusty Squire session is already using
     // the browser".

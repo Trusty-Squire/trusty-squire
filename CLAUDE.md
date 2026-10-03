@@ -439,10 +439,11 @@ everything else → `runCli()`. `server.ts` and `install/cli.ts` are
 pure modules — no shebang, no `import.meta.url === argv[1]` "am I
 main?" guard. That guard was wrong in both files (it fails under a bin
 symlink) and caused three shipped bugs; the structural fix is that
-there is nothing to guard. The installer writes an absolute
-`node <dist/bin.js> server` config (deterministic, no per-launch npx
-resolution), falling back to pinned `npx @trusty-squire/mcp@<ver>
-server` only when it is itself running from npx's cache.
+there is nothing to guard. The installer writes
+`npx -y @trusty-squire/mcp@latest server` entries and registers the broker as a
+systemd user service on Linux or a launchd user agent on macOS. Only the service
+manager starts production brokers; clients wait boundedly and never spawn them.
+The service's broker entry is durable, including when connect runs from npx.
 `src/__tests__/bin-smoke.test.ts` spawns the built artifact through a
 bin symlink and would catch any regression of the above.
 
@@ -673,7 +674,7 @@ npx-installed users as of 0.4.2. (Before 0.4.2 it wrote `profiles.yaml`,
 the old pre-1.0 path, so goose never saw it.)
 
 For **local dev** against this monorepo checkout, the installer's
-`node dist/bin.js server` command fails under Goose Desktop (it spawns
+checkout command can fail under Goose Desktop (it spawns
 extensions with `cwd=/`, and the monorepo's deps aren't hoisted — see
 below). Hand-write a cwd-anchored wrapper into
 `~/.config/goose/config.yaml` instead:

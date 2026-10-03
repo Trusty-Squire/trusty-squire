@@ -726,7 +726,7 @@ function runSubcommand(scriptPath: string, args: string[]): string {
 
 // Keep compiled-artifact checks under this file's single build owner.
 it.skipIf(!canRunDefaultBrokerAcceptance)(
-  "auto-starts one default broker across concurrent MCP servers and replaces its dead owner",
+  "connects concurrent MCP servers to an owned foreground broker and its replacement",
   async () => {
     await checkDefaultBrokerAcceptance(distBin, path.join(tmpDir, "default-broker"));
   },
