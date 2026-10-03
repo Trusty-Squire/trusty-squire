@@ -18,7 +18,9 @@ async function fixture() {
   cleanup.push(async () => await rm(root, { recursive: true, force: true }));
   const profile = join(root, ".trusty-squire", "chrome-profile");
   await mkdir(profile, { recursive: true, mode: 0o700 });
-  await writeFile(join(root, "systemctl"), "#!/bin/sh\nexit 1\n", { mode: 0o700 });
+  // Scope probing and cleanup must agree that this user manager is unavailable.
+  for (const command of ["systemctl", "systemd-run"])
+    await writeFile(join(root, command), "#!/bin/sh\nexit 1\n", { mode: 0o700 });
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     HOME: root,
