@@ -118,18 +118,24 @@ installer reuses an existing unit serving that profile, including its configured
 socket. Units marked as installer-owned are rewritten and restarted when their
 entry or environment changes; externally maintained units, including Beeline's,
 retain their configuration. New units use
-`Restart=always`, `RestartSec=1`, `KillSignal=SIGINT`, and bounded graceful shutdown;
+`Restart=on-failure`, `RestartSec=5`, a six-start limit within 60 seconds,
+`KillSignal=SIGINT`, and bounded graceful shutdown;
 registration runs `daemon-reload` then `enable --now`.
 
 On macOS the corresponding label is `ai.trustysquire.trusty-squire-broker` (with the
 profile digest for additional profiles), under `~/Library/LaunchAgents`. The plist
-sets `RunAtLoad`, `KeepAlive`, and a bounded exit timeout. Installation uses
+sets `RunAtLoad`, `KeepAlive` for unsuccessful exits, a five-second throttle,
+and a bounded exit timeout. Installation uses
 `launchctl bootstrap`, `enable`, and `kickstart`. An installer-owned agent whose
 definition changes is booted out, bootstrapped with the new plist, and started
 with `kickstart -k`; an unchanged loaded label is left running.
 Both platforms carry the profile, HOME, PATH, intended display environment,
 and `TRUSTY_SQUIRE_BROKER_UNIT=1`. The installer independently probes both listeners
 before proceeding. Manager stdout alone never establishes readiness.
+At startup, only a service-started broker may stop a predecessor identified by
+the profile's SQLite write lock or broker sockets. It waits for graceful broker
+shutdown before forcing a stuck predecessor; an orphaned Chrome is identified by
+that profile's `SingletonLock` and receives a graceful `SIGINT` first.
 
 Services execute a durable Node `dist/bin.js broker` entry. If connect runs from an
 npx cache, it first preserves the whole package/dependency tree under

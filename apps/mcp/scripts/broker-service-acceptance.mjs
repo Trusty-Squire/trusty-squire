@@ -189,7 +189,11 @@ try {
   assert.deepEqual(brokers(), [firstPid]);
   if (process.platform === "linux")
     assert.equal(run("systemctl", ["--user", "is-enabled", unit]).trim(), "enabled");
-  else assert.ok((await readFile(registration, "utf8")).includes("<key>KeepAlive</key><true/>"));
+  else {
+    const plist = await readFile(registration, "utf8");
+    assert.ok(plist.includes("<key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>"));
+    assert.ok(plist.includes("<key>ThrottleInterval</key><integer>5</integer>"));
+  }
   const peers = [client(firstEntry), client(firstEntry)];
   assert.deepEqual(await Promise.all(peers.map(initialize)), [
     "0.0.0-acceptance.1",

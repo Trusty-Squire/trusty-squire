@@ -65,10 +65,12 @@ it("renders literal paths and environment with restart and graceful shutdown", (
     'ExecStart="/opt/Node space/node" "/opt/MCP \\"package\\"/%%$$entry/bin.js" broker',
   );
   expect(unit).toContain('Environment="TRUSTY_SQUIRE_PROFILE_DIR=/home/profile \\"a\\""');
-  expect(unit).toContain("Restart=always\nRestartSec=1\nKillSignal=SIGINT\nKillMode=mixed");
+  expect(unit).toContain("StartLimitIntervalSec=60\nStartLimitBurst=6");
+  expect(unit).toContain("Restart=on-failure\nRestartSec=5\nKillSignal=SIGINT\nKillMode=mixed");
   const plist = renderLaunchdBroker(fixture());
   expect(plist).toContain("<string>/opt/MCP &quot;package&quot;/%$entry/bin.js</string>");
-  expect(plist).toContain("<key>KeepAlive</key><true/>");
+  expect(plist).toContain("<key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>");
+  expect(plist).toContain("<key>ThrottleInterval</key><integer>5</integer>");
   expect(plist).toContain("<key>RunAtLoad</key><true/>");
   expect(plist).toContain("/home/user &amp; space");
 });
@@ -320,7 +322,7 @@ it("registers and starts a macOS user agent, and avoids a duplicate bootstrap", 
   await installBrokerService(profile);
   const name = brokerServiceName(profile);
   const plistPath = join(homedir(), "Library", "LaunchAgents", `ai.trustysquire.${name}.plist`);
-  expect(await readFile(plistPath, "utf8")).toContain("<key>KeepAlive</key><true/>");
+  expect(await readFile(plistPath, "utf8")).toContain("<key>SuccessfulExit</key><false/>");
   expect(execFileSync).toHaveBeenCalledWith(
     "launchctl",
     ["bootstrap", `gui/${process.getuid?.()}`, plistPath],
