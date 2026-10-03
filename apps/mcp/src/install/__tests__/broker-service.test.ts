@@ -99,6 +99,38 @@ it("registers Linux once, starts through systemctl, and probes both sockets", as
     false,
   );
 });
+it("Reproduction BBC-CI3: accepts systemctl's empty fresh-install unit inventory", async () => {
+  vi.mocked(execFileSync).mockImplementation((_command, args) => {
+    if (args?.includes("list-unit-files"))
+      throw Object.assign(new Error("Command failed: systemctl list-unit-files"), {
+        status: 1,
+        signal: null,
+        stdout: "",
+        stderr: "",
+      });
+    return "";
+  });
+  await installBrokerService(profile);
+  expect(execFileSync).toHaveBeenCalledWith(
+    "systemctl",
+    ["--user", "enable", "--now", `${brokerServiceName(profile)}.service`],
+    expect.anything(),
+  );
+});
+it("refuses an empty-looking unit inventory when the manager reports an error", async () => {
+  vi.mocked(execFileSync).mockImplementation((_command, args) => {
+    if (args?.includes("list-unit-files"))
+      throw Object.assign(new Error("user bus unavailable"), {
+        status: 1,
+        signal: null,
+        stdout: "",
+        stderr: "Failed to connect to bus",
+      });
+    return "";
+  });
+  await expect(installBrokerService(profile)).rejects.toThrow(/working systemctl user manager/);
+  expect(liveUnixSocket).not.toHaveBeenCalled();
+});
 it("reuses an existing stopped Beeline unit and its custom socket without overwriting it", async () => {
   const socket = join(profile, "custom.sock");
   const unitPath = join(
@@ -176,7 +208,14 @@ it("Reproduction BBC-R1: reloads an installer-owned macOS entry on a version upg
       environment: { HOME: homedir(), TRUSTY_SQUIRE_PROFILE_DIR: profile },
     }),
   );
+  let bootstraps = 0;
+  vi.mocked(execFileSync).mockImplementation((_command, args) => {
+    if (args?.includes("bootstrap") && ++bootstraps === 1)
+      throw new Error("Bootstrap failed: 5: Input/output error");
+    return "";
+  });
   await installBrokerService(profile);
+  expect(bootstraps).toBe(2);
   const domain = `gui/${process.getuid?.()}`;
   const target = `${domain}/ai.trustysquire.${name}`;
   expect(execFileSync).toHaveBeenCalledWith("launchctl", ["bootout", target], expect.anything());
@@ -204,6 +243,38 @@ it("reuses an installed but unloaded service instead of overwriting its entry", 
   expect(
     vi.mocked(execFileSync).mock.calls.some((call) => call[1]?.includes("daemon-reload")),
   ).toBe(false);
+});
+it("bounds macOS upgrade retries and reports a persistent bootstrap failure", async () => {
+  Object.defineProperty(process, "platform", { value: "darwin" });
+  const name = brokerServiceName(profile);
+  const plist = join(homedir(), "Library", "LaunchAgents", `ai.trustysquire.${name}.plist`);
+  await mkdir(dirname(plist), { recursive: true });
+  await writeFile(
+    plist,
+    renderLaunchdBroker({
+      name,
+      node: process.execPath,
+      entry: "/old-version/dist/bin.js",
+      environment: { HOME: homedir(), TRUSTY_SQUIRE_PROFILE_DIR: profile },
+    }),
+  );
+  vi.mocked(execFileSync).mockImplementation((_command, args) => {
+    if (args?.includes("bootstrap")) throw new Error("Bootstrap failed: 5: Input/output error");
+    return "";
+  });
+  vi.useFakeTimers();
+  const result = expect(installBrokerService(profile)).rejects.toThrow(/Bootstrap failed: 5:/);
+  await vi.waitFor(() =>
+    expect(vi.mocked(execFileSync).mock.calls.some((call) => call[1]?.includes("bootstrap"))).toBe(
+      true,
+    ),
+  );
+  await vi.runAllTimersAsync();
+  await result;
+  expect(liveUnixSocket).not.toHaveBeenCalled();
+  expect(vi.mocked(execFileSync).mock.calls.some((call) => call[1]?.includes("kickstart"))).toBe(
+    false,
+  );
 });
 it("recognizes a default-profile unit through its declared HOME", async () => {
   const home = join(profile, "unit-home");

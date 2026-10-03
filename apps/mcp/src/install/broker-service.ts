@@ -29,7 +29,7 @@ import {
 import { readBrokerUnitMarkerSync, writeBrokerUnitMarker } from "../bot/broker/managed-marker.js";
 import { sharedMcpSocketPath } from "../bot/broker/mcp-socket-path.js";
 
-function run(command: string, args: string[]): string {
+function run(command: string, args: string[], emptyInventory = false): string {
   try {
     return execFileSync(command, args, {
       encoding: "utf8",
@@ -37,6 +37,21 @@ function run(command: string, args: string[]): string {
       stdio: ["ignore", "pipe", "pipe"],
     });
   } catch (error) {
+    const result = error as {
+      status?: number;
+      signal?: string | null;
+      stdout?: string;
+      stderr?: string;
+    };
+    // systemctl returns 1 for an empty filtered list, including a fresh install.
+    if (
+      emptyInventory &&
+      result.status === 1 &&
+      result.signal === null &&
+      result.stdout === "" &&
+      result.stderr === ""
+    )
+      return "";
     throw new Error(
       `Broker user service failed (${command} ${args.join(" ")}): ${error instanceof Error ? error.message : String(error)}. A working ${command} user manager is required; no direct broker fallback was attempted`,
     );
@@ -172,13 +187,11 @@ export async function installBrokerService(profileDir: string): Promise<void> {
       ]),
     );
     // Inactive units can be unloaded from the manager's live inventory.
-    const registered = run("systemctl", [
-      "--user",
-      "list-unit-files",
-      "trusty-squire-broker*.service",
-      "--no-legend",
-      "--no-pager",
-    ])
+    const registered = run(
+      "systemctl",
+      ["--user", "list-unit-files", "trusty-squire-broker*.service", "--no-legend", "--no-pager"],
+      true,
+    )
       .split("\n")
       .map((line) => line.trim().split(/\s+/)[0] ?? "")
       .filter((id) => /^trusty-squire-broker\S*\.service$/.test(id) && !id.includes("@."));
@@ -291,11 +304,29 @@ export async function installBrokerService(profileDir: string): Promise<void> {
       /* bootstrap reports manager errors */
     }
     // launchd keeps the loaded definition until it is booted out and reloaded.
-    if (loaded && owned && changed) {
+    const reloading = loaded && owned && changed;
+    if (reloading) {
       run("launchctl", ["bootout", target]);
       loaded = false;
     }
-    if (!loaded) run("launchctl", ["bootstrap", domain, registration]);
+    if (!loaded) {
+      const deadline = Date.now() + 10_000;
+      for (;;) {
+        try {
+          run("launchctl", ["bootstrap", domain, registration]);
+          break;
+        } catch (error) {
+          // bootout can return before launchd finishes removing the old job.
+          if (
+            !reloading ||
+            Date.now() >= deadline ||
+            !String(error).includes("Bootstrap failed: 5:")
+          )
+            throw error;
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+      }
+    }
     run("launchctl", ["enable", target]);
     run("launchctl", owned && changed ? ["kickstart", "-k", target] : ["kickstart", target]);
   }
