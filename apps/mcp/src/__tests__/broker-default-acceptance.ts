@@ -58,7 +58,7 @@ export async function checkDefaultBrokerAcceptance(
     api_base_url: "http://127.0.0.1:1",
     saved_at: new Date().toISOString(),
   });
-  const chromeRoots = async () => {
+  const chromeRootPids = async (): Promise<number[]> => {
     const processes = await readdir("/proc");
     const matches = await Promise.all(
       processes
@@ -69,10 +69,12 @@ export async function checkDefaultBrokerAcceptance(
           return (
             words.includes(`--user-data-dir=${profile}`) &&
             !words.some((word) => word.startsWith("--type="))
-          );
+          )
+            ? Number(pid)
+            : null;
         }),
     );
-    return matches.filter(Boolean).length;
+    return matches.filter((pid): pid is number => pid !== null);
   };
   const socket = defaultBrokerSocket(profile);
   const env = Object.fromEntries(
@@ -144,12 +146,14 @@ export async function checkDefaultBrokerAcceptance(
     await Promise.all([start(), start(), start()]);
     owner = await waitFor(readOwner, "elected broker");
     expect(processBirthIdentityState(owner)).toBe("matching");
-    const initialChromeRoots = await chromeRoots();
-    expect(initialChromeRoots).toBe(1);
+    const initialChromeRoots = await chromeRootPids();
+    expect(initialChromeRoots).toHaveLength(1);
+    const initialChrome = processBirthIdentity(initialChromeRoots[0]!);
+    expect(initialChrome).not.toBeNull();
     process.stdout.write(
       "default-broker concurrent servers:" +
         " " +
-        JSON.stringify({ servers: clients.length, owner, chromeRoots: initialChromeRoots }) +
+        JSON.stringify({ servers: clients.length, owner, chromeRoots: initialChromeRoots.length }) +
         "\n",
     );
     await Promise.all(clients.splice(0).map(async (client) => await client.close()));
@@ -174,12 +178,17 @@ export async function checkDefaultBrokerAcceptance(
     }, "replacement broker");
     expect(replacement.pid).not.toBe(owner.pid);
     owner = replacement;
-    const replacementChromeRoots = await chromeRoots();
-    expect(replacementChromeRoots).toBe(1);
+    const replacementChromeRoots = await chromeRootPids();
+    expect(replacementChromeRoots).toHaveLength(1);
+    expect(replacementChromeRoots[0]).not.toBe(initialChromeRoots[0]);
+    await waitFor(
+      async () => (initialChrome && processBirthIdentityState(initialChrome) === "stale" ? true : undefined),
+      "old Chrome after broker replacement",
+    );
     process.stdout.write(
       "default-broker after SIGKILL replacement:" +
         " " +
-        JSON.stringify({ owner, chromeRoots: replacementChromeRoots }) +
+        JSON.stringify({ owner, chromeRoots: replacementChromeRoots.length }) +
         "\n",
     );
   } finally {
