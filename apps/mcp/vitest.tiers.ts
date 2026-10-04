@@ -111,6 +111,7 @@ export function excludingRealBrowser(files: string[]): string[] {
 // test names — same contract as REQUIRED_PAYMENT_SAFETY_FILES. The nightly
 // full suite still covers everything as a drift backstop.
 export const REQUIRED_BEHAVIOR_FILES = [
+  "src/__tests__/approval-decided-notify.test.ts",
   "src/bot/__tests__/broker-service-client.test.ts",
   "src/install/__tests__/broker-service.test.ts",
   "src/bot/__tests__/drive-act.test.ts",

@@ -95,7 +95,7 @@ export async function runRelay(): Promise<void> {
     peer.on("data", (chunk: Buffer) => {
       output = frames(chunk, output, (line) => {
         const frame = JSON.parse(line) as RpcFrame;
-        if (frame.id === replayId) {
+        if (replayId !== undefined && frame.id === replayId) {
           replayId = undefined;
           if (frame.error) {
             peer.destroy(new Error("broker rejected relay initialization"));
