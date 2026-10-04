@@ -570,20 +570,47 @@ describe("passkey-gated fetch_credential", () => {
     expect(await revealOutcomes()).toEqual(["approved"]);
   });
 
-  it("selects one field, and refuses an ambiguous or unknown field with no value", async () => {
+  it("releases a login's email and password together after one signed approval", async () => {
+    const reference = await storeCredential({
+      service: "Beeline",
+      fields: { email: "crew@example.test", password: SECRET_VALUE },
+    });
+    const created = await createFetch({ reference });
+    expect(created.statusCode).toBe(201);
+    const approval = created.json() as {
+      approval_id: string;
+      field: string | null;
+      field_names: string[];
+    };
+    expect(approval.field).toBeNull();
+    expect(approval.field_names).toEqual(["email", "password"]);
+    expectNoValueAnywhere(created.body);
+
+    const signed = await ceremony(approval.approval_id);
+    expect(signed.payload).toMatchObject({
+      credential: { reference },
+      fetch: { field: null, field_names: ["email", "password"], purpose: "credential.reveal" },
+    });
+    expect(JSON.stringify(signed)).not.toContain(SECRET_VALUE);
+    expectNoValueAnywhere((await resume(approval.approval_id)).body);
+
+    expect((await approve(approval.approval_id)).statusCode).toBe(200);
+    const delivered = await resume(approval.approval_id);
+    expect(delivered.statusCode).toBe(200);
+    expect((delivered.json() as { fields: Record<string, string> }).fields).toEqual({
+      email: "crew@example.test",
+      password: SECRET_VALUE,
+    });
+    const replay = await resume(approval.approval_id);
+    expect(replay.statusCode).toBe(409);
+    expectNoValueAnywhere(replay.body);
+  });
+
+  it("selects one field, and refuses an unknown field with no value", async () => {
     const reference = await storeCredential({
       service: "AWS",
       fields: { access_key_id: "AKIAEXAMPLE", secret_access_key: SECRET_VALUE },
     });
-
-    const ambiguous = await createFetch({ reference });
-    expect(ambiguous.statusCode).toBe(409);
-    expect(ambiguous.json()).toEqual({
-      error: "ambiguous_credential_field",
-      field_names: ["access_key_id", "secret_access_key"],
-    });
-    expectNoValueAnywhere(ambiguous.body);
-
     const unknown = await createFetch({ reference, field: "session_token" });
     expect(unknown.statusCode).toBe(404);
     expect((unknown.json() as { error: string }).error).toBe("credential_field_not_found");

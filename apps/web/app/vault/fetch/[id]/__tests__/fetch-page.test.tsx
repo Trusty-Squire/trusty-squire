@@ -59,7 +59,7 @@ const ceremony = {
   agent: "Grok",
   reason: "write it into GitHub Actions" as string | null,
   expires_at: "2026-09-05T12:10:00.000Z",
-  payload: { fetch: { purpose: "credential.reveal" } },
+  payload: { fetch: { purpose: "credential.reveal" } } as unknown,
   payload_sha256: "payload-hash",
 };
 
@@ -70,9 +70,11 @@ beforeEach(() => {
   vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-09-05T12:00:00.000Z"));
   status = "pending";
   ceremony.reason = "write it into GitHub Actions";
+  ceremony.credential.service = "AWS";
   ceremony.credential.name = "prod";
   ceremony.field = "secret_access_key";
   ceremony.field_names = ["access_key_id", "secret_access_key"];
+  ceremony.payload = { fetch: { purpose: "credential.reveal" } };
   pairing.getPairingState.mockResolvedValue({ enrolled: true });
   pairing.pairDevice.mockResolvedValue(undefined);
   pairing.registerEnrolledDevice.mockResolvedValue(false);
@@ -145,6 +147,33 @@ describe("credential fetch approval page", () => {
     ).toBeTruthy();
     expect(screen.queryByText(/Value/)).toBeNull();
     expect(screen.queryByText(/default/)).toBeNull();
+  });
+
+  it("shows both login fields and signs the payload covering them in one approval", async () => {
+    ceremony.credential.service = "Beeline";
+    ceremony.credential.name = "login";
+    ceremony.field = null;
+    ceremony.field_names = ["email", "password"];
+    ceremony.payload = {
+      fetch: { field: null, field_names: ["email", "password"], purpose: "credential.reveal" },
+    };
+    render(<CredentialFetchApprovalPage />);
+    expect(
+      await screen.findByRole("heading", {
+        name: "Reveal Beeline (login) Email and Password to your agent?",
+      }),
+    ).toBeTruthy();
+    expect(screen.getByText(/Your agent sees these values once, in clear/)).toBeTruthy();
+
+    await userEvent.setup().click(screen.getByRole("button", { name: "Approve reveal" }));
+    await waitFor(() =>
+      expect(vouchflow.signPayload).toHaveBeenCalledWith({
+        context: "vault_credential_fetch",
+        payload: ceremony.payload,
+        minConfidence: "low",
+      }),
+    );
+    expect(api.apiPost).toHaveBeenCalledTimes(1);
   });
 
   it("names the requesting agent alone when it stated no reason", async () => {

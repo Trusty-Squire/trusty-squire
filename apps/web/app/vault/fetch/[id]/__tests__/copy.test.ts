@@ -30,6 +30,10 @@ describe("fieldLabel", () => {
   it("humanizes the credential's only field when none was named", () => {
     expect(fieldLabel(null, ["api_key"])).toBe("API key");
   });
+
+  it("names every field released by an unscoped approval", () => {
+    expect(fieldLabel(null, ["email", "password"])).toBe("Email and Password");
+  });
 });
 
 describe("revealQuestion", () => {
@@ -73,6 +77,12 @@ describe("revealQuestion", () => {
       "Reveal your OpenAI (staging) secret to your agent?",
     );
   });
+
+  it("names both fields of a website login", () => {
+    expect(revealQuestion({ service: "Beeline", name: "login" }, null, ["email", "password"])).toBe(
+      "Reveal Beeline (login) Email and Password to your agent?",
+    );
+  });
 });
 
 describe("formatExpiryRemaining", () => {
@@ -99,6 +109,14 @@ describe("consequenceLine", () => {
       consequenceLine("2026-09-05T12:10:00.000Z", Date.parse("2026-09-05T12:00:00.000Z")),
     ).toBe(
       "Your agent sees this value once, in clear, and it stays in that conversation. Expires in 10 minutes.",
+    );
+  });
+
+  it("uses plural wording when one approval releases two fields", () => {
+    expect(
+      consequenceLine("2026-09-05T12:10:00.000Z", Date.parse("2026-09-05T12:00:00.000Z"), 2),
+    ).toBe(
+      "Your agent sees these values once, in clear, and they stay in that conversation. Expires in 10 minutes.",
     );
   });
 });
