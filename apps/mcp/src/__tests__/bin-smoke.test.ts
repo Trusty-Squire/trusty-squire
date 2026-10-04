@@ -18,10 +18,12 @@ import { execFileSync, spawn, spawnSync, type ChildProcess } from "node:child_pr
 import { existsSync, readFileSync, readdirSync, promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { OperatorBroker } from "../bot/broker/operator.js";
 import { listenSharedMcp } from "../bot/broker/mcp-socket.js";
 import { sharedMcpSocketPath } from "../bot/broker/mcp-socket-path.js";
+import { createSessionGuard } from "../session-guard.js";
+import { SessionStore } from "../session.js";
 import { VERSION } from "../version.js";
 
 const pkgRoot = fileURLToPath(new URL("../../", import.meta.url));
@@ -279,6 +281,7 @@ describe("launched through a bin symlink", () => {
     await fs.writeFile(
       path.join(home, ".config", "trusty-squire", "session.json"),
       JSON.stringify({
+        account_id: "smoke-account",
         api_base_url: "http://127.0.0.1:1",
         agent_session_token: "test-session-token",
         saved_at: new Date().toISOString(),
@@ -314,8 +317,8 @@ describe("launched through a bin symlink", () => {
       // The removed union remains unavailable rather than being retained as a
       // compatibility adapter.
       { name: "operate_act", arguments: { session_id: "s1", kind: "click" } },
-      // A real post-error request proves the child remains reachable, and its
-      // recovery guidance must teach retry-once rather than process killing.
+      // A post-error request for an unowned session must report that ownership
+      // refusal without taking down the stdio connection.
       { name: "operate_observe", arguments: { session_id: "lost-after-restart" } },
       { method: "tools/list", params: {} },
     ]);
@@ -331,13 +334,11 @@ describe("launched through a bin symlink", () => {
       error?: { code?: string };
     };
     expect(removed.error?.code).toBe("unknown_tool");
-    const unavailable = JSON.parse(replies[5]?.result?.content?.[0]?.text ?? "{}") as {
-      error?: { code?: string; message?: string; retry?: { max_attempts?: number } };
+    const unowned = JSON.parse(replies[5]?.result?.content?.[0]?.text ?? "{}") as {
+      error?: { code?: string; message?: string };
     };
-    expect(unavailable.error?.code).toBe("server_unavailable");
-    expect(unavailable.error?.retry?.max_attempts).toBe(1);
-    expect(unavailable.error?.message).toMatch(/retry once/i);
-    expect(unavailable.error?.message).toMatch(/never kill or restart/i);
+    expect(unowned.error?.code).toBe("stale_lease");
+    expect(unowned.error?.message).toMatch(/not owned by this MCP connection/i);
     expect(replies[6]?.result?.tools?.length).toBeGreaterThan(0);
   }, 30_000);
 
@@ -364,100 +365,6 @@ describe("launched through a bin symlink", () => {
     ]);
     expect(out).toMatch(/`install` has been removed/);
   }, 30_000);
-});
-
-describe("owner-death process reaping", () => {
-  it.skipIf(process.platform !== "linux")(
-    "leaves no live process-group members after the owning process is SIGKILLed",
-    async () => {
-      const caseDir = path.join(tmpDir, "owner-reaper");
-      const profileDir = path.join(caseDir, "operator-profile", "user-data");
-      const reaperDir = path.join(caseDir, "reapers");
-      const groupFile = path.join(caseDir, "group.json");
-      const helperGroupFile = path.join(caseDir, "helper-group.json");
-      const readyFile = path.join(caseDir, "ready.json");
-      const fixture = path.join(caseDir, "owner.mjs");
-      const processMarker = "v1:1:owner-reaper-smoke";
-      await fs.mkdir(profileDir, { recursive: true });
-      const ownerReaperUrl = pathToFileURL(
-        path.join(pkgRoot, "dist", "bot", "owner-process-reaper.js"),
-      ).href;
-      const profileUrl = pathToFileURL(path.join(pkgRoot, "dist", "bot", "profile.js")).href;
-      await fs.writeFile(
-        fixture,
-        `import { spawn } from "node:child_process";\n` +
-          `import { writeFileSync } from "node:fs";\n` +
-          `import { spawnOwnerTrackedHelper, trackOwnerProcess } from ${JSON.stringify(ownerReaperUrl)};\n` +
-          `import { profileProcessIdentity } from ${JSON.stringify(profileUrl)};\n` +
-          `const profileDir = ${JSON.stringify(profileDir)};\n` +
-          `const groupFile = ${JSON.stringify(groupFile)};\n` +
-          `const helperGroupFile = ${JSON.stringify(helperGroupFile)};\n` +
-          `const readyFile = ${JSON.stringify(readyFile)};\n` +
-          `const helperCode = ${JSON.stringify(
-            `const { spawn } = require("node:child_process"); const { writeFileSync } = require("node:fs"); const child = spawn("sleep", ["300"], { stdio: "ignore" }); writeFileSync(${JSON.stringify(helperGroupFile)}, JSON.stringify([process.pid, child.pid])); setInterval(() => {}, 1000);`,
-          )};\n` +
-          `const sessionHelper = spawnOwnerTrackedHelper(process.execPath, ["-e", helperCode], { stdio: "ignore" });\n` +
-          `sessionHelper.unref();\n` +
-          `const memberCode = ${JSON.stringify(
-            `const { spawn } = require("node:child_process"); const { writeFileSync } = require("node:fs"); const helper = spawn("sleep", ["300"], { stdio: "ignore" }); writeFileSync(${JSON.stringify(groupFile)}, JSON.stringify([process.pid, helper.pid])); setInterval(() => {}, 1000);`,
-          )};\n` +
-          `const leader = spawn(process.execPath, ["-e", memberCode, "--", "--user-data-dir=" + profileDir], { detached: true, stdio: "ignore", env: { ...process.env, TRUSTY_SQUIRE_OPERATOR_BROWSER_MARKER: ${JSON.stringify(processMarker)} } });\n` +
-          `leader.unref();\n` +
-          `let identity = null;\n` +
-          `for (let i = 0; i < 100 && identity === null; i += 1) { identity = profileProcessIdentity(leader.pid, profileDir); if (identity === null) await new Promise((r) => setTimeout(r, 10)); }\n` +
-          `if (identity === null) process.exit(3);\n` +
-          `identity.process_marker = ${JSON.stringify(processMarker)};\n` +
-          `trackOwnerProcess(identity);\n` +
-          `writeFileSync(readyFile, JSON.stringify({ owner: process.pid, leader: leader.pid, helperLeader: sessionHelper.pid }));\n` +
-          `setInterval(() => {}, 1000);\n`,
-      );
-
-      const owner = spawn(process.execPath, [fixture], {
-        env: {
-          ...process.env,
-          TRUSTY_SQUIRE_REAPER_POLL_MS: "25",
-          TRUSTY_SQUIRE_REAPER_TERM_GRACE_MS: "50",
-          TRUSTY_SQUIRE_REAPER_DIR: reaperDir,
-        },
-        stdio: "ignore",
-      });
-      let members: number[] = [];
-      let groupLeaders: number[] = [];
-      try {
-        await waitUntil(
-          () => existsSync(readyFile) && existsSync(groupFile) && existsSync(helperGroupFile),
-          10_000,
-        );
-        const browserMembers = JSON.parse(await fs.readFile(groupFile, "utf8")) as number[];
-        const helperMembers = JSON.parse(await fs.readFile(helperGroupFile, "utf8")) as number[];
-        members = [...browserMembers, ...helperMembers];
-        groupLeaders = [browserMembers[0]!, helperMembers[0]!];
-        expect(members).toHaveLength(4);
-        expect(members.every(processIsRunning)).toBe(true);
-
-        // Prove the persisted pgid + exact launch marker can reap the group
-        // even after its original leader is already gone.
-        for (const leader of groupLeaders) process.kill(leader, "SIGKILL");
-        await waitUntil(() => groupLeaders.every((pid) => !processIsRunning(pid)), 10_000);
-        expect(processIsRunning(browserMembers[1]!)).toBe(true);
-        expect(processIsRunning(helperMembers[1]!)).toBe(true);
-
-        owner.kill("SIGKILL");
-        await waitForExit(owner);
-        await waitUntil(() => members.every((pid) => !processIsRunning(pid)), 10_000);
-
-        expect(members.filter(processIsRunning)).toEqual([]);
-      } finally {
-        owner.kill("SIGKILL");
-        for (const pid of groupLeaders) {
-          try {
-            process.kill(-pid, "SIGKILL");
-          } catch {}
-        }
-      }
-    },
-    30_000,
-  );
 });
 
 interface InitResponse {
@@ -543,11 +450,11 @@ async function startSmokeMcp(home: string): Promise<{ close(): Promise<void> }> 
   return await listenSharedMcp(
     new OperatorBroker({ registryBaseUrl: "http://unused.test" }),
     socket,
-    () => ({
-      bind: async () => null,
-      inspect: async () => ({ problem: null }),
-      boundAccountId: () => null,
-    }),
+    () =>
+      createSessionGuard({
+        openStorage: async () =>
+          new SessionStore(path.join(home, ".config", "trusty-squire", "session.json")),
+      }),
   );
 }
 
@@ -561,9 +468,10 @@ function serverEnv(home: string): NodeJS.ProcessEnv {
 }
 
 async function startMcpServer(scriptPath: string): Promise<ChildProcess> {
-  const mcp = await startSmokeMcp(tmpDir);
+  const home = await fs.mkdtemp(path.join(tmpDir, "server-"));
+  const mcp = await startSmokeMcp(home);
   const child = spawn(process.execPath, [scriptPath, "server"], {
-    env: serverEnv(tmpDir),
+    env: serverEnv(home),
     stdio: ["pipe", "pipe", "pipe"],
   });
   child.once("exit", () => {
