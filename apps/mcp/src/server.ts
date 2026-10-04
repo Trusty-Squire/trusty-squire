@@ -8,18 +8,16 @@ import { ForwardedResultError, OperatorForwarder } from "./bot/broker/forwarder.
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
-import { ApiClient } from "./api-client.js";
+import type { ApiClient } from "./api-client.js";
+import { ApprovalDecidedNotifier } from "./approval-decided-notifier.js";
+import type { ApprovalDecisionClaims } from "./approval-decided-notifier.js";
 import {
   awaitOperatorSettlement,
   composeOperatorSignals,
   withOperatorRequestContext,
 } from "./bot/request-cancellation.js";
 import { buildToolRegistry, findTool } from "./tools/index.js";
-import {
-  createSessionGuard,
-  withServingAccountId,
-  type SessionGuard,
-} from "./session-guard.js";
+import { createSessionGuard, withServingAccountId, type SessionGuard } from "./session-guard.js";
 import { VERSION } from "./version.js";
 
 const SERVER_NAME = "trusty-squire";
@@ -145,6 +143,8 @@ export async function buildServer(
     sessionGuard ?? createSessionGuard(),
   ),
   requestingAgent?: string,
+  connectionSignal?: AbortSignal,
+  approvalClaims?: ApprovalDecisionClaims,
 ): Promise<Server> {
   let activeApi = api;
   const tools = buildToolRegistry();
@@ -152,6 +152,7 @@ export async function buildServer(
     { name: SERVER_NAME, version: VERSION },
     { capabilities: { tools: {}, logging: {} }, instructions: SERVER_INSTRUCTIONS },
   );
+  const approvalNotifier = new ApprovalDecidedNotifier(server, connectionSignal, approvalClaims);
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: tools.map((t) => ({
@@ -266,6 +267,7 @@ export async function buildServer(
         composed.signal,
         tool.name === "operate_finish" ? 500 : 2_000,
       );
+      approvalNotifier.watch(tool.name, result, callApi);
       return toolResultContent(result);
     } catch (err) {
       const rawMessage = err instanceof Error ? err.message : String(err);

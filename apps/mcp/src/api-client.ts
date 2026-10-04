@@ -254,6 +254,7 @@ export class ApiClient {
     candidateRead: boolean | "immediate" | "peek" | "wait-peek" = false,
     waitMs?: number,
     transportTimeoutMs?: number,
+    cancellation?: AbortSignal,
   ): Promise<PaymentApproval> {
     const query =
       candidateRead === true
@@ -269,10 +270,14 @@ export class ApiClient {
       waitMs === undefined
         ? ""
         : `${query.length === 0 ? "?" : "&"}wait_ms=${Math.max(0, Math.floor(waitMs))}`;
-    const signal =
+    const timeout =
       transportTimeoutMs === undefined
         ? undefined
         : AbortSignal.timeout(Math.max(1, Math.floor(transportTimeoutMs)));
+    const signal =
+      timeout && cancellation
+        ? AbortSignal.any([timeout, cancellation])
+        : (timeout ?? cancellation);
     return this.get(`/v1/pay/approvals/${encodeURIComponent(id)}${query}${boundedWait}`, signal);
   }
 
@@ -397,8 +402,11 @@ export class ApiClient {
     return this.post("/v1/vault/mutation-approvals", input);
   }
 
-  async getCredentialMutationApproval(id: string): Promise<CredentialMutationApproval> {
-    return this.get(`/v1/vault/mutation-approvals/${encodeURIComponent(id)}`);
+  async getCredentialMutationApproval(
+    id: string,
+    signal?: AbortSignal,
+  ): Promise<CredentialMutationApproval> {
+    return this.get(`/v1/vault/mutation-approvals/${encodeURIComponent(id)}`, signal);
   }
 
   // edit_payment_card — start (card selector) or resume (approval_id).
@@ -410,8 +418,8 @@ export class ApiClient {
     return this.post("/v1/vault/card-mutation-approvals", input);
   }
 
-  async getCardMutationApproval(id: string): Promise<CardMutationApproval> {
-    return this.get(`/v1/vault/card-mutation-approvals/${encodeURIComponent(id)}`);
+  async getCardMutationApproval(id: string, signal?: AbortSignal): Promise<CardMutationApproval> {
+    return this.get(`/v1/vault/card-mutation-approvals/${encodeURIComponent(id)}`, signal);
   }
 
   async createCredentialFetchApproval(input: {
@@ -426,6 +434,15 @@ export class ApiClient {
 
   async getCredentialFetchApproval(id: string): Promise<CredentialFetchApproval> {
     return this.get(`/v1/vault/fetch-approvals/${encodeURIComponent(id)}`);
+  }
+
+  // The resume GET above consumes an approved fetch. The ceremony read is a
+  // non-consuming status lookup, so a decision watch cannot reveal the value.
+  async getCredentialFetchApprovalStatus(
+    id: string,
+    signal?: AbortSignal,
+  ): Promise<CredentialFetchApproval> {
+    return this.get(`/v1/vault/fetch-approvals/${encodeURIComponent(id)}/ceremony`, signal);
   }
 
   // ── use_credential: write-only-sink proxy ─────────────────

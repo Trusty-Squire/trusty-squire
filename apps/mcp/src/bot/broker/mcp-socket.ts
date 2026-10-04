@@ -4,6 +4,7 @@ import { chmod, lstat, mkdir, unlink } from "node:fs/promises";
 import { dirname } from "node:path";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { ApiClient } from "../../api-client.js";
+import { ApprovalDecisionClaims } from "../../approval-decided-notifier.js";
 import { buildServer, createServerCallAdmission, runBoundedServerCleanup } from "../../server.js";
 import { shutdownDeadlineMs } from "../../server.js";
 import { createSessionGuard } from "../../session-guard.js";
@@ -64,6 +65,7 @@ export async function listenSharedMcp(
   if (!stat.isDirectory() || stat.uid !== process.getuid?.() || (stat.mode & 0o077) !== 0)
     throw new Error("MCP socket directory must be owned by this user with mode 0700");
   const sockets = new Set<Socket>();
+  const approvalClaims = new ApprovalDecisionClaims();
   const cleanup = new Set<Promise<void>>();
   const listener = createServer((socket) => {
     sockets.add(socket);
@@ -117,6 +119,7 @@ export async function listenSharedMcp(
             : null;
         };
         const admission = createServerCallAdmission();
+        const connection = new AbortController();
         const server = await buildServer(
           await loadApi(),
           admission,
@@ -124,12 +127,15 @@ export async function listenSharedMcp(
           guard,
           owner,
           agentId,
+          connection.signal,
+          approvalClaims,
         );
         const transport = new StdioServerTransport(socket, socket);
         let retired = false;
         retire = async () => {
           if (retired) return;
           retired = true;
+          connection.abort();
           const drained = admission.closeAndDrain();
           await runBoundedServerCleanup(
             Promise.allSettled([owner.disconnect(), drained]).then(() => undefined),
@@ -164,6 +170,7 @@ export async function listenSharedMcp(
       for (const socket of sockets) socket.destroy();
       await new Promise<void>((resolve) => listener.close(() => resolve()));
       await Promise.all(cleanup);
+      approvalClaims.close();
       const current = await lstat(path).catch(() => null);
       if (current?.ino === identity.ino && current.dev === identity.dev) await unlink(path);
     },
