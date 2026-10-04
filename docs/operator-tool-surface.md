@@ -541,6 +541,9 @@ selector that does not depend on the secret value. The read policy is owned by
 `fetch_credential` is the only raw-value path. Its first call returns an
 approval link and no value; only a user’s passkey signature for that exact fetch
 permits one resumed call with the returned `approval_id` to receive the value.
+Omitting `field` requests every field on that credential in the same approval;
+passing `field` requests only the named field. The approval page names every
+field that will be released.
 Do not use a payment or mutation approval as a substitute. Prefer
 `use_credential` or a scoped app grant whenever server-side injection can do the
 job without exposing plaintext to the agent.

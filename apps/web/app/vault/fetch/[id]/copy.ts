@@ -23,11 +23,12 @@ export function humanizeFieldKey(key: string): string {
     .join(" ");
 }
 
-// The route settles field selection before minting, refusing a multi-field
-// credential with no field named — so the ceremony always describes exactly
-// one field: the one the agent named, or the credential's only one.
 export function fieldLabel(field: string | null, fieldNames: string[]): string {
-  return humanizeFieldKey(field ?? fieldNames[0]!);
+  const names = field === null ? fieldNames : [field];
+  const labels = names.map(humanizeFieldKey);
+  if (labels.length <= 1) return labels[0] ?? "secret";
+  if (labels.length === 2) return labels.join(" and ");
+  return `${labels.slice(0, -1).join(", ")}, and ${labels.at(-1)}`;
 }
 
 export function revealQuestion(
@@ -54,9 +55,9 @@ export function formatExpiryRemaining(expiresAt: string, nowMs = Date.now()): st
   return minutes === 1 ? "1 minute" : `${minutes} minutes`;
 }
 
-export function consequenceLine(expiresAt: string, nowMs = Date.now()): string {
+export function consequenceLine(expiresAt: string, nowMs = Date.now(), fieldCount = 1): string {
   return (
-    "Your agent sees this value once, in clear, and it stays in that conversation. " +
+    `Your agent sees ${fieldCount === 1 ? "this value" : "these values"} once, in clear, and ${fieldCount === 1 ? "it stays" : "they stay"} in that conversation. ` +
     `Expires in ${formatExpiryRemaining(expiresAt, nowMs)}.`
   );
 }

@@ -73,6 +73,51 @@ describe("fetch_credential", () => {
     expect(res.fields).toEqual({ value: SECRET });
   });
 
+  it("returns both login fields from one approval when field is omitted", async () => {
+    const login = {
+      ...pending,
+      credential: { reference: "vault://a/login/c", service: "Beeline", name: "login" },
+      field_names: ["email", "password"],
+    };
+    const api = mockApi({
+      createCredentialFetchApproval: async (input) => {
+        expect(input).toEqual({ service: "Beeline" });
+        return login;
+      },
+      getCredentialFetchApproval: async (id) => {
+        expect(id).toBe("fetch_1");
+        return {
+          ...login,
+          status: "consumed",
+          fields: { email: "crew@example.test", password: SECRET },
+          fetched_at: "2026-09-05T12:05:00.000Z",
+        };
+      },
+    });
+    const requested = (await fetchCredentialTool.handler({ service: "Beeline" }, api)) as Record<
+      string,
+      unknown
+    >;
+    expect(requested).toMatchObject({
+      status: "approval_pending",
+      approval_id: "fetch_1",
+      field: null,
+      field_names: ["email", "password"],
+    });
+    expect(requested).not.toHaveProperty("fields");
+
+    const delivered = (await fetchCredentialTool.handler(
+      { approval_id: "fetch_1" },
+      api,
+    )) as Record<string, unknown>;
+    expect(delivered).toMatchObject({
+      status: "credential_fetched",
+      approval_id: "fetch_1",
+      field: null,
+      fields: { email: "crew@example.test", password: SECRET },
+    });
+  });
+
   it("keeps polling shape while the approval is still pending", async () => {
     const api = mockApi({ getCredentialFetchApproval: async () => pending });
     const res = (await fetchCredentialTool.handler({ approval_id: "fetch_1" }, api)) as Record<
@@ -109,27 +154,6 @@ describe("fetch_credential", () => {
     }
   });
 
-  it("turns an ambiguous multi-field credential into an actionable retry", async () => {
-    const api = mockApi({
-      createCredentialFetchApproval: async () => {
-        throw new ApiCallError(409, "ambiguous_credential_field", "409", {
-          error: "ambiguous_credential_field",
-          field_names: ["access_key_id", "secret_access_key"],
-        });
-      },
-    });
-    const res = (await fetchCredentialTool.handler({ service: "AWS" }, api)) as Record<
-      string,
-      unknown
-    >;
-    expect(res).toEqual({
-      status: "credential_fetch_refused",
-      reason: "ambiguous_credential_field",
-      field_names: ["access_key_id", "secret_access_key"],
-      remedy: "Retry fetch_credential with `field` set to one of field_names.",
-    });
-  });
-
   it("forwards a named field and reports the delivered field back", async () => {
     let seen: unknown;
     const api = mockApi({
@@ -137,9 +161,26 @@ describe("fetch_credential", () => {
         seen = input;
         return { ...pending, field: "secret_access_key", field_names: ["secret_access_key"] };
       },
+      getCredentialFetchApproval: async () => ({
+        ...pending,
+        field: "secret_access_key",
+        field_names: ["secret_access_key"],
+        status: "consumed",
+        fields: { secret_access_key: SECRET },
+        fetched_at: "2026-09-05T12:05:00.000Z",
+      }),
     });
     await fetchCredentialTool.handler({ service: "AWS", field: "secret_access_key" }, api);
     expect(seen).toEqual({ service: "AWS", field: "secret_access_key" });
+    const delivered = (await fetchCredentialTool.handler(
+      { approval_id: "fetch_1" },
+      api,
+    )) as Record<string, unknown>;
+    expect(delivered).toMatchObject({
+      status: "credential_fetched",
+      field: "secret_access_key",
+      fields: { secret_access_key: SECRET },
+    });
   });
 
   it("forwards a stated reason on the first call", async () => {

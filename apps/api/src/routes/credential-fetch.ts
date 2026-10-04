@@ -246,20 +246,13 @@ export const registerCredentialFetchRoutes: FastifyPluginAsync<{
 
     const credential = resolution.credential;
     const fieldNames = [...credential.field_names];
-    // Field selection is settled BEFORE the human is asked, so the ceremony
-    // states exactly which value is about to be disclosed. A multi-field
-    // credential with no field named would otherwise reveal all of them on
-    // the strength of an approval that never said so.
+    // Field selection is settled BEFORE the human is asked. With no named
+    // field, the signed ceremony names every field that will be disclosed.
     const field = parsed.data.field ?? null;
     if (field !== null && !fieldNames.includes(field)) {
       reply.code(404).send({ error: "credential_field_not_found", field_names: fieldNames });
       return;
     }
-    if (field === null && fieldNames.length > 1) {
-      reply.code(409).send({ error: "ambiguous_credential_field", field_names: fieldNames });
-      return;
-    }
-
     const agent = authenticatedRequester(auth);
     const requesterKind = auth.kind;
     const intentHash = hashVouchPayload({

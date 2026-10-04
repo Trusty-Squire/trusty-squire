@@ -149,11 +149,13 @@ export default function CredentialFetchApprovalPage() {
     }
   }, [redirectToLogin]);
 
+  const releasedFieldCount =
+    ceremony === null ? 1 : ceremony.field === null ? ceremony.field_names.length : 1;
   const terminal =
     ceremony?.status === "approved"
-      ? "Approved — the agent can now read this secret once. You can return to your agent session."
+      ? `Approved — the agent can now read ${releasedFieldCount === 1 ? "this secret" : "these secrets"} once. You can return to your agent session.`
       : ceremony?.status === "consumed"
-        ? "The agent has read this secret. This approval is spent and cannot be used again."
+        ? `The agent has read ${releasedFieldCount === 1 ? "this secret" : "these secrets"}. This approval is spent and cannot be used again.`
         : ceremony?.status === "denied"
           ? "Denied — no value was released."
           : ceremony?.status === "expired"
@@ -199,7 +201,7 @@ export default function CredentialFetchApprovalPage() {
             </dl>
           )}
           <p className="app-sub" style={{ marginTop: "var(--s-3)" }}>
-            {consequenceLine(ceremony.expires_at)}
+            {consequenceLine(ceremony.expires_at, Date.now(), releasedFieldCount)}
           </p>
 
           {needsPasskeySetup ? (

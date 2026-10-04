@@ -43,9 +43,10 @@ with an approval_url — NO value. The user opens that link and signs with their
 passkey. Then call fetch_credential again with ONLY that approval_id to receive
 the value. Delivery is single-use: the same approval_id will not return the
 value twice, so store it where it needs to go on first receipt. A denied or
-expired approval returns a refusal and no value. Pass \`field\` to name one
-field of a multi-field credential (required when the credential has more than
-one — call list_credentials for its field names). Pass optional \`reason\`
+expired approval returns a refusal and no value. Omit \`field\` to receive every
+field of the credential together under one approval (for example, a website
+login's email and password). Pass \`field\` to receive only that one field;
+call list_credentials for field names. Pass optional \`reason\`
 (short, in your own words) saying what you will do with the value so the
 owner can see who is asking and why.`;
 
@@ -150,15 +151,6 @@ export const fetchCredentialTool: Tool<z.infer<typeof inputSchema>> = {
     } catch (error) {
       const refused = refusalFromError(error);
       if (refused !== null) return refused;
-      if (error instanceof ApiCallError && error.code === "ambiguous_credential_field") {
-        const names = (error.body as { field_names?: unknown } | undefined)?.field_names;
-        return {
-          status: "credential_fetch_refused",
-          reason: "ambiguous_credential_field",
-          field_names: Array.isArray(names) ? names : [],
-          remedy: "Retry fetch_credential with `field` set to one of field_names.",
-        };
-      }
       throw error;
     }
   },
