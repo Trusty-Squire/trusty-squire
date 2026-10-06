@@ -34,14 +34,15 @@ export function shutdownDeadlineMs(): number {
 // Injected into the model's system prompt every turn (≤2KB). Teaches
 // the routing between store / use / request so the agent reaches for
 // the right credential tool without the user spelling it out.
-export const SERVER_INSTRUCTIONS = `This is Trusty Squire — it drives a real browser through signup, provisioning,
-and checkout flows on the user's behalf (\`operate_start\`/\`operate_observe\`/
-\`operate_click\`/\`operate_type\`/\`inject_card\`/\`operate_finish\`, plus recipe replay), and backs it
-with a write-only credential vault.
-The user's secrets (API keys, tokens, passwords) live in the vault encrypted;
+export const SERVER_INSTRUCTIONS = `Trusty Squire drives signup, provisioning, and checkout in a real browser
+(\`operate_start\`/\`operate_observe\`/\`operate_click\`/\`operate_type\`/
+\`inject_card\`/\`operate_finish\`) with a write-only credential vault.
+Secrets live encrypted in the vault;
 they are NOT in the conversation context. Reading one back is possible but
 costly — see fetch_credential below.
-Routing rules for THIS server's vault tools:
+For inject_card, amount_cents is in the currency's smallest unit: USD $12.34 -> 1234;
+JPY ¥65,800 -> 65800 (do not multiply by 100); KRW works like JPY.
+Vault routing:
 
 - User pastes a secret-shaped value (sk-…, ghp_…, AKIA…, eyJ…) into chat
   → call store_credential AUTOMATICALLY; don't ask permission.

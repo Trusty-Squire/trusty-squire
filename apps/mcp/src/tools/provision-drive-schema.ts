@@ -1133,7 +1133,7 @@ export const operateDriveTool: Tool = {
     "operate_start, with no blanket sign-in wall) and drive in one call. goal is the task in words. " +
     "facts is the key/value bag of values the loop may type (email, first_name, last_name, company, " +
     "address, city, state, zip, password, card_ref, merchant, amount_cents, currency, …); it never " +
-    "invents a value. A search or query field may receive a phrase Jev assigns from the goal's own " +
+    "invents a value. Amount_cents is in the currency's smallest unit: USD $12.34 -> 1234; JPY ¥65,800 -> 65800 (do not multiply by 100); KRW works like JPY. A search or query field may receive a phrase Jev assigns from the goal's own " +
     "words or the facts; identity and payment fields still require a fact. Each step asks Jev for one operation (CLICK, TYPE_TEXT, SELECT, SCROLL, WAIT, DONE, BLOCKED) " +
     "and a matching per-operation target; unused target heads cannot act. It reads verification mail " +
     "when a verification field is chosen or the page is stuck after a click. Optional max_steps (default 60) and max_seconds (default 45) bound this call; " +

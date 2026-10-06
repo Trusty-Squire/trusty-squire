@@ -12,6 +12,7 @@ import { describe, expect, it } from "vitest";
 import {
   OPERATE_TOOLS,
   operateClickTool,
+  operateDriveTool,
   operateLoginTool,
   provisionScreenshotTool,
   operateFillCredentialTool,
@@ -129,6 +130,23 @@ describe("still-true contracts survive the cleanup", () => {
       expect(description).toContain(
         "operate_screenshot or operate_observe (short, non-blocking checks)",
       );
+    }
+  });
+
+  it("states the minor-unit rule on every payment amount prompt", () => {
+    const amountDescription = (injectCardTool.jsonInputSchema.properties as {
+      amount_cents: { description: string };
+    }).amount_cents.description;
+    for (const description of [
+      injectCardTool.description,
+      amountDescription,
+      operateDriveTool.description,
+      SERVER_INSTRUCTIONS,
+    ]) {
+      expect(description).toContain("smallest unit");
+      expect(description).toContain("USD $12.34 -> 1234");
+      expect(description).toContain("JPY ¥65,800 -> 65800 (do not multiply by 100)");
+      expect(description).toContain("KRW works like JPY");
     }
   });
 
