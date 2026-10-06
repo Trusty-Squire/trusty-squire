@@ -673,11 +673,22 @@ async function compactV2Observation(
     ref: (node) => {
       const element = capture.nodeElements.get(node.id);
       const ref = element === undefined ? undefined : handles.get(element);
-      if (ref !== undefined) return ref;
+      if (ref !== undefined && targetableRefs.has(ref)) return ref;
+      const proxyId = capture.actionProxyNodeIds?.get(node.id);
+      const proxyElement = proxyId === undefined ? undefined : capture.nodeElements.get(proxyId);
+      const proxyRef = proxyElement === undefined ? undefined : handles.get(proxyElement);
+      const actionableRef =
+        proxyRef !== undefined && targetableRefs.has(proxyRef) ? proxyRef : undefined;
+      let reason = "no action binding";
+      if (actionableRef !== undefined) reason = "action delegated to visible label";
+      else if (element !== undefined)
+        reason = ref === undefined ? "no stable action identity" : "absent from action map";
       // Display-only identities share the allocator but not the action namespace.
       return {
         ref: compactV2StableRef(session, epochDoc, `unbound\u001f${node.id}`),
         targetable: false,
+        ...(actionableRef === undefined ? {} : { actionableRef }),
+        reason,
       };
     },
     ...(sameFullDocument ? { previous: new Set(previous.renderedRefs ?? []) } : {}),

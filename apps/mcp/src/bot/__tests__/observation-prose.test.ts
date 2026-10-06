@@ -790,6 +790,14 @@ describe("interleaved observation DOM", () => {
       expect(ids).toEqual(expect.arrayContaining(["choice-proxy", "nested-owner", "nested-child"]));
       const proxy = capture.elements.find((element) => element.id === "choice-proxy")!;
       expect(proxy).toMatchObject({ role: "checkbox", type: "checkbox" });
+      const nodeByDomId = (node: BrowserUseNode, id: string): BrowserUseNode | undefined =>
+        node.attributes.id === id
+          ? node
+          : node.children.map((child) => nodeByDomId(child, id)).find(Boolean) ??
+            (node.contentDocument ? nodeByDomId(node.contentDocument, id) : undefined);
+      expect(
+        capture.actionProxyNodeIds?.get(nodeByDomId(capture.root, "native-choice")!.id),
+      ).toBe(nodeByDomId(capture.root, "choice-proxy")!.id);
       await page.locator(proxy.selector).click();
       expect(await page.locator("#native-choice").isChecked()).toBe(true);
 

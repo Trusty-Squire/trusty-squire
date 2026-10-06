@@ -799,7 +799,9 @@ function codeText(
 export function serializeBrowserUseDOM(
   root: BrowserUseNode,
   options: {
-    ref?: (node: BrowserUseNode) => string | { ref: string; targetable: boolean };
+    ref?: (
+      node: BrowserUseNode,
+    ) => string | { ref: string; targetable: boolean; reason?: string; actionableRef?: string };
     previous?: ReadonlySet<string>;
     /** Oracle comparison only: omit local byte filters/reachability exceptions. */
     canonical?: boolean;
@@ -808,7 +810,10 @@ export function serializeBrowserUseDOM(
   const efficient = !options.canonical;
   const isInteractive = (n: BrowserUseNode): boolean =>
     browserUseInteractive(n, !!options.canonical);
-  const targets = new Map<Simplified, { ref: string; targetable: boolean }>();
+  const targets = new Map<
+    Simplified,
+    { ref: string; targetable: boolean; reason?: string; actionableRef?: string }
+  >();
   const actionDescendants = new Map<BrowserUseNode, boolean>();
   const containsAction = (node: BrowserUseNode): boolean => {
     if (!actionDescendants.has(node))
@@ -1169,8 +1174,11 @@ export function serializeBrowserUseDOM(
         browserUseBoundedRawText(o, 1) === ""
       )
         attrs += (attrs ? " " : "") + `context=${cap(contexts.get(n)!)}`;
-      if (n.interactive && targets.get(n)?.targetable === false)
+      if (n.interactive && target?.targetable === false) {
         attrs += (attrs ? " " : "") + "not-targetable=true";
+        if (target.reason) attrs += ` not-targetable-reason=${JSON.stringify(target.reason)}`;
+        attrs += ` actionable-ref=${target.actionableRef ?? "none"}`;
+      }
       if (t === "svg" && !(efficient && hasInteractive(n)))
         return efficient &&
           !n.interactive &&

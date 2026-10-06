@@ -90,6 +90,12 @@ selectors; their controls follow this path. This explicit marker is the
 captain-authorized exception for unbindable nodes, not a change to canonical
 rendering of bindable nodes. The shadow fixture and session regression cover
 complete surrounding text, working sibling controls and stable fallback refs.
+The full row also states `not-targetable-reason` and `actionable-ref=none` when
+there is no verified action capability for that node. A visually hidden input
+with one browser-owned visible label names that label's exact action ref in
+`actionable-ref` instead. A node that has an action capability in the compact
+map uses that same ref in the full tree, including
+after released-card masking; it is never assigned a display-only fallback ref.
 
 Read-path redaction is removed by the standing captain directive, restated on
 2026-09-07. Names, visible text, semantic headings and revealed field values are

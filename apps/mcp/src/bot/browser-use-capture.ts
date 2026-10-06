@@ -128,6 +128,8 @@ export interface BrowserUseCapture {
   root: BrowserUseNode;
   elements: InteractiveElement[];
   nodeElements: Map<string, InteractiveElement>;
+  /** Exact DOM owner for a visually hidden input activated through one visible label. */
+  actionProxyNodeIds?: Map<string, string>;
   moreAbove: boolean;
   moreBelow: boolean;
   /** Closed-shadow/iframe/frame-set structural signature (delta change hash). */
@@ -259,6 +261,7 @@ export async function captureBrowserUseDOM(
   framePath: (frame: Frame) => string | null,
 ): Promise<BrowserUseCapture> {
   const nodeElements = new Map<string, InteractiveElement>();
+  const actionProxyNodeIds = new Map<string, string>();
   const omissions: BrowserUseCapture["omissions"] = [];
   // Rows whose frame produced an omission. The marker is decided only once the
   // whole tree exists: a same-process frame's document is pierced into the tree
@@ -1020,6 +1023,7 @@ export async function captureBrowserUseDOM(
         if (!cssVisible(n) && visibleLabels.length === 1) {
           proxyTargets.set(visibleLabels[0]!, n);
           proxyOwners.set(n, visibleLabels[0]!);
+          actionProxyNodeIds.set(n.id, visibleLabels[0]!.id);
         }
       }
       n.children.forEach(indexPositiveLabelProxies);
@@ -1613,6 +1617,7 @@ export async function captureBrowserUseDOM(
       root,
       elements,
       nodeElements,
+      actionProxyNodeIds,
       moreAbove: moreAbove || scroll.above,
       moreBelow: moreBelow || scroll.below,
       dynamics,

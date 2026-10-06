@@ -40,6 +40,33 @@ function node(overrides: Partial<BrowserUseNode> = {}): BrowserUseNode {
 }
 
 describe("released card value output mask", () => {
+  it("preserves the DOM-to-action element join while masking a released card", () => {
+    const mask = new CardValueOutputMask();
+    mask.register(SYNTHETIC_CARD);
+    const card = { value: SYNTHETIC_CARD.pan, cardMaskKind: "pan" } as InteractiveElement;
+    const email = { value: "buyer@example.com", cardMaskKind: null } as InteractiveElement;
+    const capture = {
+      root: node(),
+      elements: [card, email],
+      nodeElements: new Map([
+        ["card", card],
+        ["email", email],
+      ]),
+      moreAbove: false,
+      moreBelow: false,
+      dynamics: "test",
+      omissions: [],
+    };
+
+    const masked = mask.maskCapture(capture);
+
+    expect(masked.elements[0]).toBe(masked.nodeElements.get("card"));
+    expect(masked.elements[1]).toBe(masked.nodeElements.get("email"));
+    expect(masked.elements[0]?.value).toBe(CARD_NUMBER_MASK);
+    expect(masked.elements[1]?.value).toBe("buyer@example.com");
+    expect(card.value).toBe(SYNTHETIC_CARD.pan);
+  });
+
   it("masks complete PAN spellings and labelled CVV copies without becoming a secret scanner", () => {
     const mask = new CardValueOutputMask();
     mask.register(SYNTHETIC_CARD);

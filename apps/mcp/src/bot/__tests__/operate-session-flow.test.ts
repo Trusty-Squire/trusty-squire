@@ -3295,6 +3295,8 @@ describe("Compact V2 action-map boundary", () => {
     expect(started.dom).toContain("Complete surrounding page");
     expect(started.dom).toContain("Unbound shadow action");
     const line = started.dom!.split("\n").find((value) => value.includes("not-targetable=true"))!;
+    expect(line).toContain('not-targetable-reason="no action binding"');
+    expect(line).toContain("actionable-ref=none");
     const fallback = line.match(/\[(@e:[^\]]+)\]</)![1]!;
     const actionable = domRefs(started).filter((ref) => ref !== fallback);
     expect(actionable).toHaveLength(2);
