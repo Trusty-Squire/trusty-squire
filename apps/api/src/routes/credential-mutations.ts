@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
+import { waitForApprovalStatus } from "./approval-status-wait.js";
 import type { ApiDeps } from "../services/deps.js";
 import {
   applyCredentialMetadataChanges,
@@ -290,22 +291,24 @@ export const registerCredentialMutationRoutes: FastifyPluginAsync<{
     },
   );
 
-  fastify.get<{ Params: { id: string } }>(
-    "/v1/vault/mutation-approvals/:id",
-    { preHandler: opts.requireAny },
-    async (req, reply) => {
-      const auth = req.auth!;
-      const record = await opts.deps.credentialMutationApprovalStore.getByIdForAccount(
-        req.params.id,
-        auth.account_id,
-      );
-      if (record === null) {
-        reply.code(404).send({ error: "credential_mutation_approval_not_found" });
-        return;
-      }
-      return reply.code(200).send(approvalResponse(record, opts.deps.now?.() ?? new Date()));
-    },
-  );
+  fastify.get<{
+    Params: { id: string };
+    Querystring: { wait_for_decision?: string; wait_ms?: string };
+  }>("/v1/vault/mutation-approvals/:id", { preHandler: opts.requireAny }, async (req, reply) => {
+    const auth = req.auth!;
+    const record = await waitForApprovalStatus(
+      () =>
+        opts.deps.credentialMutationApprovalStore.getByIdForAccount(req.params.id, auth.account_id),
+      () => opts.deps.now?.() ?? new Date(),
+      req.query.wait_for_decision === "1",
+      req.query.wait_ms,
+    );
+    if (record === null) {
+      reply.code(404).send({ error: "credential_mutation_approval_not_found" });
+      return;
+    }
+    return reply.code(200).send(approvalResponse(record, opts.deps.now?.() ?? new Date()));
+  });
 
   // The exact bytes the owner's passkey will sign. Sessionless like the
   // payment ceremony: the payload names the owning account only through its

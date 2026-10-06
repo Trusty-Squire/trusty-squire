@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
+import { waitForApprovalStatus } from "./approval-status-wait.js";
 import type { ApiDeps } from "../services/deps.js";
 import {
   cardMutationAuditEvent,
@@ -256,14 +257,19 @@ export const registerCardMutationRoutes: FastifyPluginAsync<{
     },
   );
 
-  fastify.get<{ Params: { id: string } }>(
+  fastify.get<{
+    Params: { id: string };
+    Querystring: { wait_for_decision?: string; wait_ms?: string };
+  }>(
     "/v1/vault/card-mutation-approvals/:id",
     { preHandler: opts.requireAny },
     async (req, reply) => {
       const auth = req.auth!;
-      const record = await opts.deps.cardMutationApprovalStore.getByIdForAccount(
-        req.params.id,
-        auth.account_id,
+      const record = await waitForApprovalStatus(
+        () => opts.deps.cardMutationApprovalStore.getByIdForAccount(req.params.id, auth.account_id),
+        () => opts.deps.now?.() ?? new Date(),
+        req.query.wait_for_decision === "1",
+        req.query.wait_ms,
       );
       if (record === null) {
         reply.code(404).send({ error: "card_mutation_approval_not_found" });
@@ -360,11 +366,7 @@ export const registerCardMutationRoutes: FastifyPluginAsync<{
       }
 
       const mandateId = typeof claims.mandate_id === "string" ? claims.mandate_id : null;
-      const result = await opts.deps.cardMutationApprovalStore.commit(
-        record.id,
-        mandateId,
-        after,
-      );
+      const result = await opts.deps.cardMutationApprovalStore.commit(record.id, mandateId, after);
       if (result === "already_approved") {
         return reply.code(200).send({ status: "approved", operation: record.operation });
       }
@@ -384,10 +386,7 @@ export const registerCardMutationRoutes: FastifyPluginAsync<{
         reply.code(409).send({ error: "card_mutation_approval_not_pending" });
         return;
       }
-      notifyVaultAuditAfterCommit(
-        opts.deps.vaultAuditStore,
-        cardMutationAuditEvent(record, after),
-      );
+      notifyVaultAuditAfterCommit(opts.deps.vaultAuditStore, cardMutationAuditEvent(record, after));
       return reply.code(200).send({ status: "approved", operation: record.operation });
     },
   );

@@ -251,7 +251,7 @@ export class ApiClient {
 
   async getPaymentApproval(
     id: string,
-    candidateRead: boolean | "immediate" | "peek" | "wait-peek" = false,
+    candidateRead: boolean | "immediate" | "peek" | "wait-peek" | "wait-decision-peek" = false,
     waitMs?: number,
     transportTimeoutMs?: number,
     cancellation?: AbortSignal,
@@ -265,7 +265,9 @@ export class ApiClient {
             ? "?peek_submission=1"
             : candidateRead === "wait-peek"
               ? "?wait_for_submission=1&peek_submission=1"
-              : "";
+              : candidateRead === "wait-decision-peek"
+                ? "?wait_for_decision=1&peek_submission=1"
+                : "";
     const boundedWait =
       waitMs === undefined
         ? ""
@@ -405,8 +407,10 @@ export class ApiClient {
   async getCredentialMutationApproval(
     id: string,
     signal?: AbortSignal,
+    waitMs?: number,
   ): Promise<CredentialMutationApproval> {
-    return this.get(`/v1/vault/mutation-approvals/${encodeURIComponent(id)}`, signal);
+    const wait = waitMs === undefined ? "" : `?wait_for_decision=1&wait_ms=${waitMs}`;
+    return this.get(`/v1/vault/mutation-approvals/${encodeURIComponent(id)}${wait}`, signal);
   }
 
   // edit_payment_card — start (card selector) or resume (approval_id).
@@ -418,8 +422,13 @@ export class ApiClient {
     return this.post("/v1/vault/card-mutation-approvals", input);
   }
 
-  async getCardMutationApproval(id: string, signal?: AbortSignal): Promise<CardMutationApproval> {
-    return this.get(`/v1/vault/card-mutation-approvals/${encodeURIComponent(id)}`, signal);
+  async getCardMutationApproval(
+    id: string,
+    signal?: AbortSignal,
+    waitMs?: number,
+  ): Promise<CardMutationApproval> {
+    const wait = waitMs === undefined ? "" : `?wait_for_decision=1&wait_ms=${waitMs}`;
+    return this.get(`/v1/vault/card-mutation-approvals/${encodeURIComponent(id)}${wait}`, signal);
   }
 
   async createCredentialFetchApproval(input: {
@@ -441,8 +450,10 @@ export class ApiClient {
   async getCredentialFetchApprovalStatus(
     id: string,
     signal?: AbortSignal,
+    waitMs?: number,
   ): Promise<CredentialFetchApproval> {
-    return this.get(`/v1/vault/fetch-approvals/${encodeURIComponent(id)}/ceremony`, signal);
+    const wait = waitMs === undefined ? "" : `?wait_for_decision=1&wait_ms=${waitMs}`;
+    return this.get(`/v1/vault/fetch-approvals/${encodeURIComponent(id)}/ceremony${wait}`, signal);
   }
 
   // ── use_credential: write-only-sink proxy ─────────────────

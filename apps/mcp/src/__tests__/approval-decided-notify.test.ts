@@ -4,11 +4,13 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, expect, it, vi } from "vitest";
+import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import type { ApiClient } from "../api-client.js";
 import { OperatorBroker } from "../bot/broker/operator.js";
 import { listenSharedMcp } from "../bot/broker/mcp-socket.js";
 import type { SessionGuard } from "../session-guard.js";
 import type { SessionData } from "../session.js";
-import { pendingApprovals } from "../approval-decided-notifier.js";
+import { ApprovalDecidedNotifier, pendingApprovals } from "../approval-decided-notifier.js";
 
 type Frame = {
   jsonrpc: string;
@@ -57,6 +59,44 @@ it("recognizes every pending approval result shape, including a drive handoff", 
       status: "credential_fetched",
     }),
   ).toEqual([]);
+});
+
+it("keeps one non-consuming payment wait outstanding and reissues after a held pending result", async () => {
+  let releaseFirst!: (value: { status: string }) => void;
+  const first = new Promise<{ status: string }>((resolve) => {
+    releaseFirst = resolve;
+  });
+  const getPaymentApproval = vi
+    .fn()
+    .mockImplementationOnce(async () => await first)
+    .mockResolvedValueOnce({ status: "approved" });
+  const notification = vi.fn(async (_message: unknown) => {});
+  const notifier = new ApprovalDecidedNotifier({ notification } as unknown as Server);
+  notifier.watch(
+    "inject_card",
+    {
+      status: "approval_pending",
+      approval_id: "pay_1",
+      expires_at: new Date(Date.now() + 60_000).toISOString(),
+    },
+    { getPaymentApproval } as unknown as ApiClient,
+  );
+  await vi.waitFor(() => expect(getPaymentApproval).toHaveBeenCalledTimes(1));
+  expect(getPaymentApproval.mock.calls[0]?.slice(0, 3)).toEqual([
+    "pay_1",
+    "wait-decision-peek",
+    15_000,
+  ]);
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  expect(getPaymentApproval).toHaveBeenCalledTimes(1);
+  releaseFirst({ status: "pending" });
+  await vi.waitFor(() => expect(getPaymentApproval).toHaveBeenCalledTimes(2));
+  await vi.waitFor(() => expect(notification).toHaveBeenCalledTimes(1));
+  expect(notification.mock.calls[0]?.[0]).toMatchObject({
+    method: "notifications/approval_decided",
+    params: { approval_id: "pay_1", status: "approved" },
+  });
+  notifier.close();
 });
 
 async function relay(root: string, identity: string) {
@@ -114,7 +154,8 @@ it("sends each approved or denied decision once on the originating stdio relay o
   cleanup.push(async () => await rm(root, { recursive: true, force: true }));
   const approvals = new Map<string, "pending" | "approved" | "denied">();
   let created = 0;
-  const expiry = new Date(Date.now() + 20_000).toISOString();
+  const expiry = new Date(Date.now() + 60_000).toISOString();
+  const statusReads = new Map<string, number>();
   const body = (id: string) => ({
     approval_id: id,
     approval_url: `https://example.test/approve/${id}`,
@@ -124,8 +165,9 @@ it("sends each approved or denied decision once on the originating stdio relay o
     field_names: ["key"],
     expires_at: expiry,
   });
-  const api = createServer((request, response) => {
-    const path = request.url ?? "";
+  const api = createServer(async (request, response) => {
+    const url = new URL(request.url ?? "/", "http://localhost");
+    const path = url.pathname;
     let data: unknown;
     if (request.method === "POST" && path === "/v1/vault/fetch-approvals") {
       const id = `fetch_${++created}`;
@@ -133,6 +175,15 @@ it("sends each approved or denied decision once on the originating stdio relay o
       data = body(id);
     } else {
       const id = path.match(/^\/v1\/vault\/fetch-approvals\/(fetch_\d+)(?:\/ceremony)?$/)?.[1];
+      if (id && path.endsWith("/ceremony")) {
+        statusReads.set(id, (statusReads.get(id) ?? 0) + 1);
+        if (url.searchParams.get("wait_for_decision") === "1") {
+          const deadline = Date.now() + Number(url.searchParams.get("wait_ms"));
+          while (approvals.get(id) === "pending" && Date.now() < deadline) {
+            await new Promise((resolve) => setTimeout(resolve, 25));
+          }
+        }
+      }
       data = id && approvals.has(id) ? body(id) : { error: "not_found" };
     }
     response.writeHead(200, { "content-type": "application/json" });
@@ -171,6 +222,9 @@ it("sends each approved or denied decision once on the originating stdio relay o
   // Repeated pending results for the same approval must not add another watch.
   await alice.call("tools/call", { name: "fetch_credential", arguments: { approval_id: aliceId } });
   await bob.call("tools/call", { name: "fetch_credential", arguments: { approval_id: aliceId } });
+  await new Promise((resolve) => setTimeout(resolve, 3_300));
+  expect(statusReads.get(aliceId)).toBeLessThanOrEqual(2);
+  expect(statusReads.get(bobId)).toBeLessThanOrEqual(2);
   approvals.set(aliceId, "approved");
   await vi.waitFor(
     () =>

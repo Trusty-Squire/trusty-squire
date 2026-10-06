@@ -182,6 +182,27 @@ describe("vouch-gated credential mutations", () => {
     return messages;
   }
 
+  it("holds the status read until the mutation decision", async () => {
+    const reference = await storeCredential();
+    const created = await createMutation({ operation: "delete", reference });
+    const id = (created.json() as { approval_id: string }).approval_id;
+    let settled = false;
+    const waiting = server
+      .inject({
+        method: "GET",
+        url: `/v1/vault/mutation-approvals/${id}?wait_for_decision=1&wait_ms=2000`,
+        headers: { authorization: `Bearer ${agentToken}` },
+      })
+      .then((response) => {
+        settled = true;
+        return response;
+      });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(settled).toBe(false);
+    expect((await approveMutation(id)).statusCode).toBe(200);
+    expect(((await waiting).json() as { status: string }).status).toBe("approved");
+  });
+
   it("binds ceremony and settlement to the account-bound payload, sessionless", async () => {
     const reference = await storeCredential();
     const created = await createMutation({ operation: "delete", reference });
@@ -792,7 +813,9 @@ describe("vouch-gated credential mutations", () => {
       type: VAULT_AUDIT_TYPES.metadataEdited,
       reference,
     });
-    expect(audits.find((event) => event.payload.approval_id === id)?.payload.requester).toBe("user");
+    expect(audits.find((event) => event.payload.approval_id === id)?.payload.requester).toBe(
+      "user",
+    );
   });
 
   it("leaves approval and metadata pending when the atomic audit write fails", async () => {

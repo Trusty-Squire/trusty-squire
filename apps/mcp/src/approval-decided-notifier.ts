@@ -61,15 +61,22 @@ async function readDecision(
   approval: PendingApproval,
   signal: AbortSignal,
 ): Promise<Decision | "pending" | "terminal"> {
-  const requestSignal = AbortSignal.any([signal, AbortSignal.timeout(5_000)]);
+  const holdMs = 15_000;
+  const requestSignal = AbortSignal.any([signal, AbortSignal.timeout(holdMs + 5_000)]);
   const record =
     approval.kind === "payment"
-      ? await api.getPaymentApproval(approval.id, false, undefined, 5_000, signal)
+      ? await api.getPaymentApproval(
+          approval.id,
+          "wait-decision-peek",
+          holdMs,
+          holdMs + 5_000,
+          signal,
+        )
       : approval.kind === "credential_fetch"
-        ? await api.getCredentialFetchApprovalStatus(approval.id, requestSignal)
+        ? await api.getCredentialFetchApprovalStatus(approval.id, requestSignal, holdMs)
         : approval.kind === "credential_mutation"
-          ? await api.getCredentialMutationApproval(approval.id, requestSignal)
-          : await api.getCardMutationApproval(approval.id, requestSignal);
+          ? await api.getCredentialMutationApproval(approval.id, requestSignal, holdMs)
+          : await api.getCardMutationApproval(approval.id, requestSignal, holdMs);
   if (record.status === "approved" || record.status === "consumed") return "approved";
   if (record.status === "denied") return "denied";
   if (record.status === "pending") return "pending";
@@ -111,23 +118,23 @@ export class ApprovalDecidedNotifier {
     controller: AbortController,
   ): Promise<void> {
     const signal = controller.signal;
-    // Let the tools/call response reach the original client before a decision notification.
+    // Give the tool response a turn to reach its originating socket first.
+    await new Promise<void>((resolve) => setImmediate(resolve));
     while (!signal.aborted && Date.now() < approval.expiresAt) {
-      try {
-        await delay(Math.min(1_000, approval.expiresAt - Date.now()), undefined, {
-          signal,
-          ref: false,
-        });
-      } catch {
-        return;
-      }
-      if (signal.aborted || Date.now() >= approval.expiresAt) return;
       let decision: Decision | "pending" | "terminal";
       try {
         decision = await readDecision(api, approval, signal);
       } catch {
         // An unavailable status read is transient. The approval's own expiry
         // remains the bound; the watcher neither changes nor consumes it.
+        try {
+          await delay(Math.min(3_000, approval.expiresAt - Date.now()), undefined, {
+            signal,
+            ref: false,
+          });
+        } catch {
+          return;
+        }
         continue;
       }
       if (signal.aborted || decision === "terminal") return;

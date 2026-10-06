@@ -18,6 +18,7 @@ import {
 } from "../services/vouch-mandate.js";
 import { authenticatedRequester } from "../services/requesting-agent.js";
 import { VAULT_AUDIT_TYPES } from "@trusty-squire/vault";
+import { waitForApprovalStatus } from "./approval-status-wait.js";
 
 // Web base for the approval link sent to Telegram. Reuses PWA_BASE_URL
 // (the same override server.ts's defaultPwaBaseUrl() reads) if set, else
@@ -441,6 +442,7 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
     Params: { id: string };
     Querystring: {
       wait_for_submission?: string;
+      wait_for_decision?: string;
       read_submission?: string;
       peek_submission?: string;
       wait_ms?: string;
@@ -456,7 +458,24 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
     }
     const peekSubmission = req.query.peek_submission === "1";
     let submission: Submission | null = null;
-    if (req.auth!.kind === "agent" && req.query.wait_for_submission === "1") {
+    if (req.auth!.kind === "agent" && req.query.wait_for_decision === "1") {
+      const { id, accountId } = record;
+      const waited = await waitForApprovalStatus(
+        () => opts.deps.pendingPaymentApprovalStore.getByIdForAccount(id, accountId),
+        () => opts.deps.now?.() ?? new Date(),
+        true,
+        req.query.wait_ms,
+      );
+      if (waited === null) {
+        reply.code(404).send({ error: "payment_approval_not_found" });
+        return;
+      }
+      record = waited;
+      const now = opts.deps.now?.() ?? new Date();
+      if (peekSubmission && record.status === "pending" && record.expiresAt > now) {
+        submission = await readSubmission(record.id, record.accountId, true);
+      }
+    } else if (req.auth!.kind === "agent" && req.query.wait_for_submission === "1") {
       const requestedWaitMs = Number(req.query.wait_ms);
       const waitMs = Number.isFinite(requestedWaitMs)
         ? Math.min(Math.max(Math.floor(requestedWaitMs), 0), submissionWaitMs)

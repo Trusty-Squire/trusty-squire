@@ -45,6 +45,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
+import { waitForApprovalStatus } from "./approval-status-wait.js";
 import {
   CredentialFieldsChangedError,
   CredentialNotFoundError,
@@ -423,23 +424,27 @@ export const registerCredentialFetchRoutes: FastifyPluginAsync<{
   // payment ceremony: the payload names the owning account only through its
   // opaque account binding, and SIGNING it is what authorizes — reading it
   // authorizes nothing.
-  fastify.get<{ Params: { id: string } }>(
-    "/v1/vault/fetch-approvals/:id/ceremony",
-    {},
-    async (req, reply) => {
-      const record = await opts.deps.credentialFetchApprovalStore.getById(req.params.id);
-      if (record === null) {
-        reply.code(404).send({ error: "credential_fetch_approval_not_found" });
-        return;
-      }
-      const now = opts.deps.now?.() ?? new Date();
-      return reply.code(200).send({
-        ...approvalResponse(record, now),
-        payload: credentialFetchPayload(record),
-        payload_sha256: hashVouchPayload(credentialFetchPayload(record)).toString("base64url"),
-      });
-    },
-  );
+  fastify.get<{
+    Params: { id: string };
+    Querystring: { wait_for_decision?: string; wait_ms?: string };
+  }>("/v1/vault/fetch-approvals/:id/ceremony", {}, async (req, reply) => {
+    const record = await waitForApprovalStatus(
+      () => opts.deps.credentialFetchApprovalStore.getById(req.params.id),
+      () => opts.deps.now?.() ?? new Date(),
+      req.query.wait_for_decision === "1",
+      req.query.wait_ms,
+    );
+    if (record === null) {
+      reply.code(404).send({ error: "credential_fetch_approval_not_found" });
+      return;
+    }
+    const now = opts.deps.now?.() ?? new Date();
+    return reply.code(200).send({
+      ...approvalResponse(record, now),
+      payload: credentialFetchPayload(record),
+      payload_sha256: hashVouchPayload(credentialFetchPayload(record)).toString("base64url"),
+    });
+  });
 
   // The human's YES, sessionless like the payment approve: the authority is
   // the Vouchflow assertion itself, and it must be signed over this exact
