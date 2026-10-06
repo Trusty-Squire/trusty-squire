@@ -595,14 +595,27 @@ job without exposing plaintext to the agent.
   drive the page with ordinary actions. A rendered 3-D Secure challenge is
   detected on observation/action results; the operator notifies the cardholder
   once and reports `three_ds` state `challenge_detected` without waiting on or
-  gating the challenge. The same key also carries state `sdk_error_retryable`
-  — no challenge rendered and nothing notified, because the processor's SDK
-  failed to launch its challenge UI (e.g. `THREEDS_CARDINAL_SDK_ERROR` in the
-  page's error telemetry). It is observation-only advice that the failure is
-  transient and reports whether the observed submit control is enabled. If it
-  is disabled, re-arm the payment form and refill the card fields with the
-  existing approval's masked tokens before retrying; a detected challenge
-  always takes precedence.
+  gating the challenge. `challenge_loading` means an ACS URL appeared but no
+  rendered challenge control or prompt was found, so no nudge is sent yet.
+  `sdk_error_retryable` carries the exact emitted error `code`, its
+  console/exception/request-body `source`, and `observed_at` timestamp. It
+  describes SDK initialization before a challenge was observed, not an
+  authentication verdict. The retry guidance reports whether the observed
+  submit control is enabled. If it is disabled, re-arm the payment form and
+  refill the card fields with the existing approval's masked tokens before
+  retrying; a detected challenge always takes precedence. Explicit page text
+  can yield `authentication_failed`,
+  `authentication_succeeded`, or `merchant_order_confirmed`, each marked as
+  page-text evidence. Generic checkout error copy alone does not prove a 3-D
+  Secure outcome; keep observing the checkout before another submission.
+
+  Card controls expose `card-empty`, `card-complete`, `card-valid`, and
+  `card-validity-source` in full DOM, and the same value-free status in compact
+  `card=` facts. Braintree hosted-field container classes take precedence when
+  readable. `unknown` means the source cannot determine that bit. A separate
+  `invalid-source` identifies authored `aria-invalid`, native input validity,
+  or an AX invalid signal whose native origin is unknown; none is silently
+  promoted to a provider verdict.
 
 Legacy union verbs and aliases are not part of this contract. Use the flat names
 shown above, and use the installed server’s `tools/list` schema for optional

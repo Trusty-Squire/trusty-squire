@@ -427,6 +427,8 @@ export async function captureBrowserUseDOM(
     // C7 readout can tell Chrome's constraint-validation fold-in apart from a
     // page verdict. See the C7 block below for why this is load-bearing.
     const validityByBackendNode = new Map<number, string>();
+    const valueStateByBackendNode = new Map<number, { empty: boolean; valid: boolean | null }>();
+    const hostedStateByFramePath = new Map<string, "empty" | "valid" | "invalid">();
     const baseUris = new Map<Frame, string>();
     const baseTargets = new Map<Frame, string>();
     const formOwners = new Map<number, number | null>();
@@ -444,10 +446,31 @@ export async function captureBrowserUseDOM(
       if (!frame) continue;
       if (isFrameUnbound(frame)) continue;
       const path = framePathById.get(frameId)!;
+      if (path !== null) {
+        const hostedState = await frame
+          .frameElement()
+          .then((handle) =>
+            handle.evaluate((iframe) => {
+              for (
+                let node: Element | null = iframe as Element;
+                node !== null;
+                node = node.parentElement
+              ) {
+                if (node.classList.contains("braintree-hosted-fields-empty")) return "empty";
+                if (node.classList.contains("braintree-hosted-fields-valid")) return "valid";
+                if (node.classList.contains("braintree-hosted-fields-invalid")) return "invalid";
+              }
+              return null;
+            }),
+          )
+          .catch(() => null);
+        if (hostedState !== null) hostedStateByFramePath.set(path, hostedState);
+      }
       const candidates = inventory.filter((e) => (e.framePath ?? null) === path);
       const frameBindings = new Map<number, InteractiveElement>();
       const frameListeners = new Set<number>();
       const validitySelections = new Map<number, string>();
+      const valueStateSelections = new Map<number, { empty: boolean; valid: boolean | null }>();
       let formAssociated = new Set<string>();
       if (containsCustomElements)
         try {
@@ -493,7 +516,7 @@ export async function captureBrowserUseDOM(
         // backend identities without guessing from tag names or accessible names.
         const selectors = candidates.map((e) => e.selector);
         const objects = await client.send("Runtime.evaluate", {
-          expression: `(() => { const roots=[document],getShadowRoot=Object.getOwnPropertyDescriptor(Element.prototype,'shadowRoot')?.get; for(let i=0;i<roots.length;i++) for(const e of roots[i].querySelectorAll('*')) { const shadowRoot=getShadowRoot?.call(e); if(shadowRoot) roots.push(shadowRoot); } const found=${JSON.stringify(selectors)}.map(s => { const p=s.split(' >> nth='); const matches=roots.flatMap(r=>{try{return [...r.querySelectorAll(p[0])]}catch{return []}}); return matches[Number(p[1]||0)] || null; }); const formOwners=roots.flatMap(r=>[...r.querySelectorAll('[form]')]).flatMap(e=>[e,e.form||null]); const validity=found.map(el => { const v=el&&el.validity; return v ? [v.valueMissing,v.typeMismatch,v.patternMismatch,v.tooLong,v.tooShort,v.rangeOverflow,v.rangeUnderflow,v.stepMismatch,v.badInput].map(f=>f?1:0).join('') : null; }); return Object.assign(found,{viewport:JSON.stringify({width:innerWidth,height:innerHeight,x:scrollX,y:scrollY}),baseURI:document.baseURI,baseTarget:document.querySelector('base[target]')?.getAttribute('target'),formOwners,validity}); })()`,
+          expression: `(() => { const roots=[document],getShadowRoot=Object.getOwnPropertyDescriptor(Element.prototype,'shadowRoot')?.get; for(let i=0;i<roots.length;i++) for(const e of roots[i].querySelectorAll('*')) { const shadowRoot=getShadowRoot?.call(e); if(shadowRoot) roots.push(shadowRoot); } const found=${JSON.stringify(selectors)}.map(s => { const p=s.split(' >> nth='); const matches=roots.flatMap(r=>{try{return [...r.querySelectorAll(p[0])]}catch{return []}}); return matches[Number(p[1]||0)] || null; }); const formOwners=roots.flatMap(r=>[...r.querySelectorAll('[form]')]).flatMap(e=>[e,e.form||null]); const validity=found.map(el => { const v=el&&el.validity; return v ? [v.valueMissing,v.typeMismatch,v.patternMismatch,v.tooLong,v.tooShort,v.rangeOverflow,v.rangeUnderflow,v.stepMismatch,v.badInput].map(f=>f?1:0).join('') : null; }); const valueState=found.map(el => el&&typeof el.value==='string' ? {empty:el.value.length===0,valid:el.validity?.valid??null} : null); return Object.assign(found,{viewport:JSON.stringify({width:innerWidth,height:innerHeight,x:scrollX,y:scrollY}),baseURI:document.baseURI,baseTarget:document.querySelector('base[target]')?.getAttribute('target'),formOwners,validity,valueState:JSON.stringify(valueState)}); })()`,
           contextId: context.executionContextId,
           objectGroup: "ts-observation",
         });
@@ -509,6 +532,16 @@ export async function captureBrowserUseDOM(
           const baseTarget = props.result.find((p) => p.name === "baseTarget")?.value?.value;
           if (typeof baseTarget === "string") baseTargets.set(frame, baseTarget);
           const validityObjects = props.result.find((p) => p.name === "validity")?.value?.objectId;
+          const valueStateJson = props.result.find((p) => p.name === "valueState")?.value?.value;
+          if (typeof valueStateJson === "string") {
+            const states = JSON.parse(valueStateJson) as Array<{
+              empty: boolean;
+              valid: boolean | null;
+            } | null>;
+            states.forEach((state, index) => {
+              if (state !== null) valueStateSelections.set(index, state);
+            });
+          }
           if (validityObjects) {
             const validityProps = await client.send("Runtime.getProperties", {
               objectId: validityObjects,
@@ -553,6 +586,8 @@ export async function captureBrowserUseDOM(
                 if (el) frameBindings.set(d.node.backendNodeId, el);
                 const validity = validitySelections.get(Number(p.name));
                 if (validity) validityByBackendNode.set(d.node.backendNodeId, validity);
+                const valueState = valueStateSelections.get(Number(p.name));
+                if (valueState) valueStateByBackendNode.set(d.node.backendNodeId, valueState);
               }),
             );
         }
@@ -1211,10 +1246,7 @@ export async function captureBrowserUseDOM(
       // Chrome presents as operable (unignored, focusable, interactive role)
       // survives an opacity:0 style-hidden treatment (Oura's payment-method
       // chooser), where the old rendered gate silently dropped it.
-      if (
-        el &&
-        (!ownsAction || (renderedNodes.get(n.id) !== true && !browserUseAxOperable(n)))
-      )
+      if (el && (!ownsAction || (renderedNodes.get(n.id) !== true && !browserUseAxOperable(n))))
         el = undefined;
       // Playwright selectors cannot enter closed shadow roots. Preserve their
       // nodes for display, but do not manufacture an unusable action binding.
@@ -1414,6 +1446,9 @@ export async function captureBrowserUseDOM(
         const validity = semanticRaw
           ? validityByBackendNode.get(semanticRaw.backendNodeId)
           : undefined;
+        const valueState = semanticRaw
+          ? valueStateByBackendNode.get(semanticRaw.backendNodeId)
+          : undefined;
         let axInvalid = semanticNode.axProperties.some(
           (p) => p.name === "invalid" && (p.value === true || p.value === "true"),
         );
@@ -1421,6 +1456,58 @@ export async function captureBrowserUseDOM(
         if (authoredInvalid || axInvalid) {
           el.invalid = true;
           n.attributes.invalid ??= "true";
+          el.invalidSource = authoredInvalid
+            ? "aria_invalid"
+            : valueState?.valid === false
+              ? "native_input"
+              : "browser_ax_invalid";
+          n.attributes["invalid-source"] = el.invalidSource;
+        }
+        const cardSignal = [
+          semanticNode.attributes.autocomplete,
+          semanticNode.attributes.name,
+          semanticNode.attributes.id,
+          semanticNode.attributes["aria-label"],
+          el.ariaLabel,
+        ]
+          .filter(Boolean)
+          .join(" ");
+        if (
+          /\b(?:cc-(?:number|exp|csc)|card[-_ ]?(?:number|expiry|expiration|security|cvv|cvc)|credit[-_ ]card[-_ ]number|expir(?:y|ation)[-_ ]?(?:month|year|date)|exp[-_ ](?:month|year)|(?:cvv|cvc|csc|security[-_ ]code))\b/i.test(
+            cardSignal,
+          )
+        ) {
+          const hostedState =
+            hostedStateByFramePath.get(framePath(frame) ?? "") ??
+            (/(?:^|\s)braintree-hosted-fields-(?:empty|valid|invalid)(?:\s|$)/.test(stateClass)
+              ? (stateClass.match(
+                  /(?:^|\s)braintree-hosted-fields-(empty|valid|invalid)(?:\s|$)/,
+                )?.[1] as "empty" | "valid" | "invalid" | undefined)
+              : undefined);
+          el.cardValidation =
+            hostedState === undefined
+              ? {
+                  source: "native_input",
+                  empty: valueState?.empty ?? null,
+                  complete: valueState?.empty === true ? false : null,
+                  valid: valueState?.valid ?? null,
+                }
+              : {
+                  source: "braintree_hosted_fields",
+                  empty: hostedState === "empty" ? true : (valueState?.empty ?? null),
+                  complete: hostedState === "valid" ? true : hostedState === "empty" ? false : null,
+                  valid:
+                    hostedState === "valid"
+                      ? true
+                      : hostedState === "invalid" || hostedState === "empty"
+                        ? false
+                        : null,
+                };
+          n.attributes["card-validity-source"] = el.cardValidation.source;
+          for (const key of ["empty", "complete", "valid"] as const) {
+            const value = el.cardValidation[key];
+            n.attributes[`card-${key}`] = value === null ? "unknown" : String(value);
+          }
         }
         el.compactNames = {
           ariaLabel: semanticNode.attributes["aria-label"]?.trim() || ownedLabel || null,

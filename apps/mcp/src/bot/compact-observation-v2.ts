@@ -165,6 +165,8 @@ export interface SafeControlV2 {
   ref: string;
   role: SafeRoleV2;
   state?: string;
+  invalidSource?: InteractiveElement["invalidSource"];
+  cardValidation?: InteractiveElement["cardValidation"];
   visibility: "viewport" | "near";
   action?: SafeIntentV2;
   field?: SafeFieldV2;
@@ -633,6 +635,12 @@ function wireControl(row: SafeControlV2): WireControlV2 {
     row.label,
     ...(row.visibility === "near" ? ["v=offscreen"] : []),
     ...(row.state === undefined ? [] : [`s=${row.state}`]),
+    ...(row.invalidSource === undefined ? [] : [`invalid_source=${row.invalidSource}`]),
+    ...(row.cardValidation === undefined
+      ? []
+      : [
+          `card=${row.cardValidation.source}:empty=${row.cardValidation.empty ?? "unknown"},complete=${row.cardValidation.complete ?? "unknown"},valid=${row.cardValidation.valid ?? "unknown"}`,
+        ]),
     ...(row.action === undefined ? [] : [`a=${row.action}`]),
     ...(row.field === undefined ? [] : [`f=${row.field}`]),
     ...(row.choice === undefined ? [] : [`q=${row.choice}`]),
@@ -2422,6 +2430,8 @@ export function buildSafeControlsV2(args: {
       visibility: el.inViewport ? "viewport" : "near",
       frame: frameOf(el, args.pageOrigin),
       ...(state === undefined ? {} : { state }),
+      ...(el.invalidSource === undefined ? {} : { invalidSource: el.invalidSource }),
+      ...(el.cardValidation === undefined ? {} : { cardValidation: el.cardValidation }),
       ...(action === undefined ? {} : { action }),
       ...(field === undefined ? {} : { field }),
       ...(label === undefined ? {} : { label }),
