@@ -599,8 +599,10 @@ job without exposing plaintext to the agent.
   — no challenge rendered and nothing notified, because the processor's SDK
   failed to launch its challenge UI (e.g. `THREEDS_CARDINAL_SDK_ERROR` in the
   page's error telemetry). It is observation-only advice that the failure is
-  transient, the checkout re-arms, and a resubmitted payment is expected to
-  launch the challenge; a detected challenge always takes precedence.
+  transient and reports whether the observed submit control is enabled. If it
+  is disabled, re-arm the payment form and refill the card fields with the
+  existing approval's masked tokens before retrying; a detected challenge
+  always takes precedence.
 
 Legacy union verbs and aliases are not part of this contract. Use the flat names
 shown above, and use the installed server’s `tools/list` schema for optional

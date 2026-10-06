@@ -127,7 +127,11 @@ async function injectReleasedCard(session: Session, args: InjectCardInput) {
   if (args.approval_id !== released.approvalId) {
     throw new Error("approval_id does not match this session's released purchase");
   }
-  if (Date.now() >= released.deadline) throw new Error("payment_approval_expired");
+  if (Date.now() >= released.deadline) {
+    throw new Error(
+      "payment_approval_expired: call inject_card again without approval_id to request a new approval in this session",
+    );
+  }
   const results = await injectCardIntoSessionTargets(session.id, released.card, args.fields);
   return cardInjectedResult(session, args, released, results);
 }
@@ -210,7 +214,14 @@ export async function injectCardOnSession(
   api: ApiClient,
   options: InjectCardCallOptions = {},
 ): Promise<Record<string, unknown>> {
-  if (session.releasedPaymentCard !== null) return await injectReleasedCard(session, args);
+  if (session.releasedPaymentCard !== null) {
+    if (args.approval_id !== undefined || Date.now() < session.releasedPaymentCard.deadline) {
+      return await injectReleasedCard(session, args);
+    }
+    // The released approval is no longer usable. A no-id call follows the
+    // normal new-approval path in this same browser session.
+    session.releasedPaymentCard = null;
+  }
   if (args.approval_id !== undefined) {
     const pending = session.activePayment;
     if (pending?.status !== "awaiting_approval" || pending.state.approval_id !== args.approval_id) {

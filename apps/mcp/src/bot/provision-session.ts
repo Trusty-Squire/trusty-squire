@@ -90,8 +90,8 @@ export interface Observation {
   //
   // `sdk_error_retryable` is the observation-only complement: the processor's
   // SDK failed to LAUNCH the challenge (its own asset-load race — never an
-  // operator action). The checkout re-arms and a resubmitted payment is
-  // expected to launch the challenge. No state is owned; nothing is gated.
+  // operator action). Retry guidance reflects the currently observed submit
+  // control; no state is owned and nothing is gated.
   three_ds?:
     | {
         state: "challenge_detected";
@@ -102,6 +102,7 @@ export interface Observation {
     | {
         state: "sdk_error_retryable";
         reason: string;
+        submit_enabled: boolean | null;
         next_action: "operate_observe";
       };
   // A provider-owned OAuth popup closed while a legacy two-step OAuth action

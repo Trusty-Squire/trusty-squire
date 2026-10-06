@@ -176,7 +176,7 @@ describe("3-D Secure detection and notification", () => {
       try {
         const released = await releasedCardSession(
           isolated,
-          "<div>Verification details were not entered correctly.</div>" +
+          "<div>Verification details were not entered correctly.</div><button disabled>Place Order</button>" +
             sdkErrorTelemetryScript(
               '{ "event": "3ds_verification.error", "code": "THREEDS_CARDINAL_SDK_ERROR" }',
             ),
@@ -190,7 +190,23 @@ describe("3-D Secure detection and notification", () => {
           if (observed.three_ds !== undefined) break;
           await new Promise((resolve) => setTimeout(resolve, 250));
         }
-        expect(observed?.three_ds).toMatchObject({ state: "sdk_error_retryable" });
+        expect(observed?.three_ds).toMatchObject({
+          state: "sdk_error_retryable",
+          submit_enabled: false,
+          reason: expect.stringMatching(/re-arm.*existing approval/i),
+        });
+        expect(
+          observed?.three_ds?.state === "sdk_error_retryable" ? observed.three_ds.reason : "",
+        ).not.toContain("Resubmit the payment with ordinary actions");
+        await isolated.page.getByRole("button", { name: "Place Order" }).evaluate((button) => {
+          (button as HTMLButtonElement).disabled = false;
+        });
+        const ready = await observe(sessionId);
+        expect(ready.three_ds).toMatchObject({
+          state: "sdk_error_retryable",
+          submit_enabled: true,
+          reason: expect.stringContaining("Resubmit the payment with ordinary actions"),
+        });
         expect(released.notifyThreeDs).not.toHaveBeenCalled();
       } finally {
         if (sessionId !== undefined) await finishProvisionSession(sessionId).catch(() => undefined);
