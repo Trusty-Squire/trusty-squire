@@ -179,6 +179,11 @@ describe("operator evidence stream", () => {
         },
       });
       expect(evidence.threeDsSdkErrorSeenAt()).toBe(1_000_000);
+      expect(evidence.threeDsSdkErrorEvidence()).toEqual({
+        code: "THREEDS_CARDINAL_SDK_ERROR",
+        source: "network_request_body",
+        observed_at: 1_000_000,
+      });
 
       vi.setSystemTime(1_200_000);
       (page as unknown as { emit: (event: string, value: unknown) => void }).emit("console", {
@@ -191,6 +196,11 @@ describe("operator evidence stream", () => {
         }),
       } satisfies Partial<ConsoleMessage>);
       expect(evidence.threeDsSdkErrorSeenAt()).toBe(1_200_000);
+      expect(evidence.threeDsSdkErrorEvidence()).toEqual({
+        code: "THREEDS_CARDINAL_SDK_ERROR",
+        source: "console",
+        observed_at: 1_200_000,
+      });
 
       vi.setSystemTime(1_300_000);
       (page as unknown as { emit: (event: string, value: unknown) => void }).emit(

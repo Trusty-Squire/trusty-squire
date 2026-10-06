@@ -176,6 +176,11 @@ const ATTRIBUTES = new Set([
   "pressed",
   "disabled",
   "invalid",
+  "invalid-source",
+  "card-validity-source",
+  "card-empty",
+  "card-complete",
+  "card-valid",
   "valuemin",
   "valuemax",
   "valuenow",
@@ -251,9 +256,7 @@ export function browserUseAxOperable(n: BrowserUseNode): boolean {
 }
 
 /** The AX verdict for a single node, without the descendant check. */
-function axSelfOperable(
-  n: Pick<BrowserUseNode, "axRole" | "axProperties" | "axIgnored">,
-): boolean {
+function axSelfOperable(n: Pick<BrowserUseNode, "axRole" | "axProperties" | "axIgnored">): boolean {
   return (
     n.axRole !== null &&
     n.axIgnored !== true &&
@@ -607,7 +610,17 @@ function attributes(n: BrowserUseNode, localState = false): string {
     if (k in a && a[k]!.length > 5) {
       if (
         seen.has(a[k]!) &&
-        !["format", "expected_format", "placeholder", "value", "aria-label", "title"].includes(k)
+        ![
+          "format",
+          "expected_format",
+          "placeholder",
+          "value",
+          "aria-label",
+          "title",
+          "card-empty",
+          "card-complete",
+          "card-valid",
+        ].includes(k)
       )
         delete a[k];
       else seen.add(a[k]!);

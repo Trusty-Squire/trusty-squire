@@ -547,15 +547,16 @@ export class BrowserController implements BrowserDriver {
     return this.operatorEvidence.read(since, requestId);
   }
 
-  /** Diagnostic-only boolean: did the processor's 3-D Secure SDK recently fail
-   * to launch its challenge (Braintree's THREEDS_CARDINAL_SDK_ERROR in the
-   * page's own telemetry)? Returns a classification and never exposes evidence
-   * values. */
+  /** Diagnostic-only boolean for a fresh, emitted 3-D Secure SDK error. */
   hasThreeDsSdkErrorEvidence(): boolean {
-    return threeDsSdkErrorEvidenceIsFresh(
-      this.operatorEvidence.threeDsSdkErrorSeenAt(),
-      Date.now(),
-    );
+    return this.threeDsSdkErrorEvidence() !== null;
+  }
+
+  threeDsSdkErrorEvidence() {
+    const evidence = this.operatorEvidence.threeDsSdkErrorEvidence();
+    return threeDsSdkErrorEvidenceIsFresh(evidence?.observed_at ?? null, Date.now())
+      ? evidence
+      : null;
   }
 
   async brokerTargetId(): Promise<string> {
@@ -2477,7 +2478,10 @@ export class BrowserController implements BrowserDriver {
           allowCaptchaCheckboxFrame: true,
         });
         if (handle === null) {
-          throw new BrowserClickDispatchError("not_dispatched", new Error("click target detached before dispatch"));
+          throw new BrowserClickDispatchError(
+            "not_dispatched",
+            new Error("click target detached before dispatch"),
+          );
         }
         try {
           labels = await this.clickTargetLabels(handle);
@@ -2489,7 +2493,10 @@ export class BrowserController implements BrowserDriver {
       const resolvedHandle = handle;
       const click =
         performClick ??
-        (() => (target.method === "click" ? this.clickHandle(resolvedHandle) : this.jsClickHandle(resolvedHandle)));
+        (() =>
+          target.method === "click"
+            ? this.clickHandle(resolvedHandle)
+            : this.jsClickHandle(resolvedHandle));
       await markOperatorMutationDispatchAttempted();
       if (!shouldTrack(labels)) {
         await click();
@@ -6445,23 +6452,25 @@ export class BrowserController implements BrowserDriver {
   }
 
   /**
-   * A rendered 3-D Secure challenge, or null. URL/ACS markers plus frame and
-   * rendered-text signals; captcha frames are fraud checks, never
-   * authentication. Detection is read-only — it never clears, advances, waits
-   * on, or takes custody of the challenge.
+   * A loading ACS frame or rendered 3-D Secure challenge, or null. URL/ACS,
+   * frame, and rendered-text signals are read-only; captcha frames are not
+   * authentication. This never advances or takes custody of a challenge.
    */
-  async detectThreeDsChallenge(page: Page | null = this.page): Promise<{ url: string } | null> {
+  async detectThreeDsChallenge(
+    page: Page | null = this.page,
+  ): Promise<{ url: string; phase?: "loading" | "cardholder_approval_pending" } | null> {
     if (page === null) return null;
     // Cross-processor markers (CardinalCommerce backs many processors, not
     // just Stripe): the URL/ACS path, the structural forms/frames, and the
     // rendered challenge copy. The URL pattern is module-level
     // (threeDsChallengeUrlPattern) so tests can pin the ACS paths it covers.
     const challengeText =
-      /\b(?:3d secure|authenticate (?:this )?payment|verify (?:your )?identity|security code sent to)\b/i;
+      /\b(?:3[- ]?d secure (?:challenge|verification required)|authenticate (?:this )?payment|verify (?:your )?identity|security code sent to)\b/i;
+    let loadingUrl: string | null = null;
     for (const frame of page.frames()) {
       if (this.frameWithinCaptcha(frame)) continue;
       const url = frame.url();
-      if (threeDsChallengeUrlPattern.test(url)) return { url };
+      if (threeDsChallengeUrlPattern.test(url)) loadingUrl = url;
       const structural = await frame
         .locator(
           'iframe[title*="3d secure" i],form[action*="acs" i],form:has(input[name="creq" i]),form[name="credit3d2FepBuyAuthenticateActionForm" i],form:has(input[name="md" i]):has([name="resSumbitButtonId" i],#resSumbitButtonId)',
@@ -6469,12 +6478,49 @@ export class BrowserController implements BrowserDriver {
         .first()
         .isVisible()
         .catch(() => false);
-      if (structural) return { url: url || page.url() };
+      if (structural) return { url: url || page.url(), phase: "cardholder_approval_pending" };
+      if (threeDsChallengeUrlPattern.test(url)) {
+        const interactive = await frame
+          .locator("input,button,select,[role=button]")
+          .first()
+          .isVisible()
+          .catch(() => false);
+        if (interactive) return { url, phase: "cardholder_approval_pending" };
+      }
       const text = await frame.evaluate(extractObservationVisibleText).catch(() => "");
       if (challengeText.test(text) || /本人認証/u.test(text)) {
-        return { url: url || page.url() };
+        return { url: url || page.url(), phase: "cardholder_approval_pending" };
       }
     }
+    return loadingUrl === null ? null : { url: loadingUrl, phase: "loading" };
+  }
+
+  async readThreeDsOutcome(): Promise<
+    "authentication_failed" | "authentication_succeeded" | "merchant_order_confirmed" | null
+  > {
+    if (this.page === null) return null;
+    const text = await this.page
+      .mainFrame()
+      .evaluate(extractObservationVisibleText)
+      .catch(() => "");
+    if (
+      /\b(?:your order is confirmed|order (?:has been |is )?confirmed|thank you for your order)\b/i.test(
+        text,
+      )
+    )
+      return "merchant_order_confirmed";
+    if (
+      /\b(?:3-?d secure|card authentication|payment authentication)(?: authentication| verification)? (?:was |is )?(?:successful|succeeded|complete|approved)\b/i.test(
+        text,
+      )
+    )
+      return "authentication_succeeded";
+    if (
+      /\b(?:3-?d secure|card authentication|payment authentication)(?: authentication| verification)? (?:was |is )?(?:failed|declined|unsuccessful)\b/i.test(
+        text,
+      )
+    )
+      return "authentication_failed";
     return null;
   }
 
@@ -6956,7 +7002,9 @@ export class BrowserController implements BrowserDriver {
             });
           }
         }
-        return remountedFields.has(field) ? { status: "filled", remounted: true } : { status: "filled" };
+        return remountedFields.has(field)
+          ? { status: "filled", remounted: true }
+          : { status: "filled" };
       } catch (error) {
         if (
           target.driveAnchor !== undefined &&
@@ -7516,6 +7564,15 @@ export interface InteractiveElement {
    * value anywhere. Absent/null means "not captured or not invalid".
    */
   invalid?: boolean | null;
+  /** Origin of the `invalid` bit; native constraints are not a provider verdict. */
+  invalidSource?: "aria_invalid" | "native_input" | "browser_ax_invalid";
+  /** Value-free status of a payment card field. Null means the source cannot tell. */
+  cardValidation?: {
+    source: "braintree_hosted_fields" | "native_input";
+    empty: boolean | null;
+    complete: boolean | null;
+    valid: boolean | null;
+  };
   // <select>-only: the visible text of the currently-selected option
   // and a short list of available option labels (capped to 8 — long
   // pickers like countries blow the inventory rendering). Lets the

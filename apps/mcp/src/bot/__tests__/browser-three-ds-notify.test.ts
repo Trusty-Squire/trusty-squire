@@ -142,6 +142,26 @@ describe("3-D Secure detection and notification", () => {
     }
   });
 
+  it.skipIf(!available)(
+    "does not call a generic verification error authentication failure",
+    async () => {
+      const isolated = await page();
+      let sessionId: string | undefined;
+      try {
+        const released = await releasedCardSession(
+          isolated,
+          "<div>Verification details were not entered correctly. Please try again.</div>",
+        );
+        sessionId = released.sessionId;
+        expect((await observe(sessionId)).three_ds).toBeUndefined();
+        expect(released.notifyThreeDs).not.toHaveBeenCalled();
+      } finally {
+        if (sessionId !== undefined) await finishProvisionSession(sessionId).catch(() => undefined);
+        await isolated.context.close();
+      }
+    },
+  );
+
   // A real Cardinal/Braintree failure mode (Oura, 2026-09): the ACS render
   // races the SDK's own UI-framework chunk load, loses, and the processor
   // surfaces THREEDS_CARDINAL_SDK_ERROR through the page's telemetry while the
@@ -194,6 +214,11 @@ describe("3-D Secure detection and notification", () => {
           state: "sdk_error_retryable",
           submit_enabled: false,
           reason: expect.stringMatching(/re-arm.*existing approval/i),
+          evidence: {
+            code: "THREEDS_CARDINAL_SDK_ERROR",
+            source: "network_request_body",
+            observed_at: expect.any(Number),
+          },
         });
         expect(
           observed?.three_ds?.state === "sdk_error_retryable" ? observed.three_ds.reason : "",
@@ -280,7 +305,10 @@ describe("3-D Secure detection and notification", () => {
         session.releasedPaymentCard!.threeDsNotified = true;
 
         const observed = await observe(sessionId);
-        expect(observed.three_ds).toBeUndefined();
+        expect(observed.three_ds).toMatchObject({
+          state: "merchant_order_confirmed",
+          evidence: { source: "page_text", observed_at: expect.any(Number) },
+        });
         expect(released.notifyThreeDs).not.toHaveBeenCalled();
       } finally {
         if (sessionId !== undefined) await finishProvisionSession(sessionId).catch(() => undefined);
@@ -288,4 +316,43 @@ describe("3-D Secure detection and notification", () => {
       }
     },
   );
+
+  it.skipIf(!available)("distinguishes challenge loading from cardholder approval", async () => {
+    const isolated = await page();
+    let sessionId: string | undefined;
+    try {
+      const released = await releasedCardSession(
+        isolated,
+        '<iframe src="/acs/challenge" title="Bank frame"></iframe>',
+      );
+      sessionId = released.sessionId;
+      await expect.poll(() => isolated.page.frames().length).toBe(2);
+      const observed = await observe(sessionId);
+      expect(observed.three_ds).toMatchObject({ state: "challenge_loading" });
+      expect(released.notifyThreeDs).not.toHaveBeenCalled();
+    } finally {
+      if (sessionId !== undefined) await finishProvisionSession(sessionId).catch(() => undefined);
+      await isolated.context.close();
+    }
+  });
+
+  it.skipIf(!available).each([
+    ["3-D Secure authentication failed. Please try again.", "authentication_failed"],
+    ["3-D Secure authentication successful.", "authentication_succeeded"],
+  ] as const)("reports explicit %s page outcome", async (body, state) => {
+    const isolated = await page();
+    let sessionId: string | undefined;
+    try {
+      const released = await releasedCardSession(isolated, `<div>${body}</div>`);
+      sessionId = released.sessionId;
+      expect((await observe(sessionId)).three_ds).toMatchObject({
+        state,
+        evidence: { source: "page_text", observed_at: expect.any(Number) },
+      });
+      expect(released.notifyThreeDs).not.toHaveBeenCalled();
+    } finally {
+      if (sessionId !== undefined) await finishProvisionSession(sessionId).catch(() => undefined);
+      await isolated.context.close();
+    }
+  });
 });

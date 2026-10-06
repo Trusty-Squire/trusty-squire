@@ -1030,11 +1030,29 @@ export async function observedThreeDsChallenge(
   if (session === undefined) return undefined;
   const released = session.releasedPaymentCard;
   if (released === null) return undefined;
+  const outcome = await session.browser.readThreeDsOutcome().catch(() => null);
+  if (outcome === "merchant_order_confirmed")
+    return {
+      state: outcome,
+      evidence: { source: "page_text", observed_at: Date.now() },
+      next_action: "operate_observe",
+    };
   const challenge = await session.browser.detectThreeDsChallenge().catch(() => null);
+  if (challenge?.phase === "loading")
+    return { state: "challenge_loading", url: challenge.url, next_action: "operate_observe" };
   if (challenge === null) {
-    return released.threeDsNotified === true
+    const sdkError =
+      released.threeDsNotified === true
+        ? undefined
+        : observedThreeDsSdkError(session.browser, session.compactV2Index?.rows ?? []);
+    if (sdkError !== undefined) return sdkError;
+    return outcome === null
       ? undefined
-      : observedThreeDsSdkError(session.browser, session.compactV2Index?.rows ?? []);
+      : {
+          state: outcome,
+          evidence: { source: "page_text", observed_at: Date.now() },
+          next_action: "operate_observe",
+        };
   }
   let notified: boolean | undefined;
   if (released.threeDsNotified !== true) {
@@ -1089,13 +1107,21 @@ function observedPaymentSubmitEnabled(rows: readonly SafeControlV2[]): boolean |
 }
 
 function observedThreeDsSdkError(
-  browser: { hasThreeDsSdkErrorEvidence(): boolean },
+  browser: {
+    threeDsSdkErrorEvidence(): {
+      code: "THREEDS_CARDINAL_SDK_ERROR";
+      source: "network_request_body" | "console" | "page_exception";
+      observed_at: number;
+    } | null;
+  },
   rows: readonly SafeControlV2[],
 ): Extract<Observation["three_ds"], { state: "sdk_error_retryable" }> | undefined {
-  if (!browser.hasThreeDsSdkErrorEvidence()) return undefined;
+  const evidence = browser.threeDsSdkErrorEvidence();
+  if (evidence === null) return undefined;
   const submitEnabled = observedPaymentSubmitEnabled(rows);
   return {
     state: "sdk_error_retryable",
+    evidence,
     submit_enabled: submitEnabled,
     reason:
       "The processor's 3-D Secure SDK failed to launch the authentication challenge " +
