@@ -601,6 +601,9 @@ vi.mock("../browser.js", async (importOriginal) => ({
     async detectThreeDsChallenge(): Promise<{ url: string } | null> {
       return null;
     }
+    async readThreeDsOutcome(): Promise<null> {
+      return null;
+    }
     async dismissConsentBanner(): Promise<string | null> {
       h.consentDismissCalls += 1;
       return h.consentCta;

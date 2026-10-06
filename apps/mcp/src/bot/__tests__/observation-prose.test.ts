@@ -2336,4 +2336,89 @@ describe("interleaved observation DOM", () => {
       await page.close();
     }
   });
+  it("labels hosted card status separately from an authored invalid flag without exposing values in status", async () => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(`<div id="host" class="braintree-hosted-fields-valid"><iframe
+        srcdoc='<input id="number" name="credit-card-number" aria-label="Card number" aria-invalid="true" pattern="[0-9]+" value="4111 1111">'
+      ></iframe></div><input id="native" name="card-number" type="email" value="bad-email">`);
+      await page.frames()[1]!.locator("#number").waitFor();
+      const capture = await captureThroughController(page);
+      const number = capture.elements.find((element) => element.id === "number")!;
+      expect(number.invalid).toBe(true);
+      expect(number.invalidSource).toBe("aria_invalid");
+      expect(number.cardValidation).toEqual({
+        source: "braintree_hosted_fields",
+        empty: false,
+        complete: true,
+        valid: true,
+      });
+      const full = serializeBrowserUseDOM(capture.root).dom;
+      expect(full).toContain("invalid-source=aria_invalid");
+      expect(full).toContain("card-validity-source=braintree_hosted_fields");
+      expect(full).toContain("card-complete=true");
+      const native = capture.elements.find((element) => element.id === "native")!;
+      expect(native.invalidSource).toBe("native_input");
+      expect(native.cardValidation).toEqual({
+        source: "native_input",
+        empty: false,
+        complete: null,
+        valid: false,
+      });
+      expect(full).toContain("invalid-source=native_input");
+
+      const handles = new Map(capture.elements.map((element) => [element, `@e:${element.index}`]));
+      const rows = buildSafeControlsV2({
+        elements: capture.elements,
+        legacyRefs: handles,
+        handles,
+        pageOrigin: "https://merchant.test",
+        canonical: true,
+      }).rows;
+      const compact = encodeV2QueryPage({
+        sessionId: "fixture",
+        stage: "checkout",
+        rows,
+        cursorFor: () => "cursor",
+      }).payload;
+      const table = compact.safe_table as Array<[string, string, string?]>;
+      const row = JSON.stringify(table.find((entry) => entry[0] === handles.get(number)));
+      expect(row).toContain("invalid_source=aria_invalid");
+      expect(row).toContain("card=braintree_hosted_fields:empty=false,complete=true,valid=true");
+      expect(row).not.toContain("4111");
+
+      await page.locator("#host").evaluate((host) => {
+        host.setAttribute("class", "braintree-hosted-fields-invalid");
+      });
+      await page
+        .frames()[1]!
+        .locator("#number")
+        .evaluate((input) => input.setAttribute("aria-invalid", "false"));
+      const invalid = (await captureThroughController(page)).elements.find(
+        (element) => element.id === "number",
+      )!;
+      expect(invalid.cardValidation).toEqual({
+        source: "braintree_hosted_fields",
+        empty: false,
+        complete: null,
+        valid: false,
+      });
+
+      await page.locator("#host").evaluate((host) => {
+        host.setAttribute("class", "braintree-hosted-fields-empty");
+      });
+      await page.frames()[1]!.locator("#number").fill("");
+      const empty = (await captureThroughController(page)).elements.find(
+        (element) => element.id === "number",
+      )!;
+      expect(empty.cardValidation).toEqual({
+        source: "braintree_hosted_fields",
+        empty: true,
+        complete: false,
+        valid: false,
+      });
+    } finally {
+      await page.close();
+    }
+  });
 });

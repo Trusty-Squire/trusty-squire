@@ -88,10 +88,9 @@ export interface Observation {
   // taken into custody. The human completes it in their bank app and the agent
   // keeps observing the live checkout.
   //
-  // `sdk_error_retryable` is the observation-only complement: the processor's
-  // SDK failed to LAUNCH the challenge (its own asset-load race — never an
-  // operator action). The checkout re-arms and a resubmitted payment is
-  // expected to launch the challenge. No state is owned; nothing is gated.
+  // `sdk_error_retryable` reports an emitted SDK initialization code with its
+  // source and capture time. It does not prove authentication or order outcome.
+  // No state is owned and nothing is gated.
   three_ds?:
     | {
         state: "challenge_detected";
@@ -100,8 +99,23 @@ export interface Observation {
         hint: string;
       }
     | {
+        state: "challenge_loading";
+        url: string;
+        next_action: "operate_observe";
+      }
+    | {
         state: "sdk_error_retryable";
+        evidence: {
+          code: "THREEDS_CARDINAL_SDK_ERROR";
+          source: "network_request_body" | "console" | "page_exception";
+          observed_at: number;
+        };
         reason: string;
+        next_action: "operate_observe";
+      }
+    | {
+        state: "authentication_failed" | "authentication_succeeded" | "merchant_order_confirmed";
+        evidence: { source: "page_text"; observed_at: number };
         next_action: "operate_observe";
       };
   // A provider-owned OAuth popup closed while a legacy two-step OAuth action

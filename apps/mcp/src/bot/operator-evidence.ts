@@ -74,6 +74,11 @@ type CdpFailure = {
  * usually shows only a generic checkout error, so the marker is the operator's
  * only durable evidence. */
 export const THREE_DS_SDK_ERROR_MARKER = "THREEDS_CARDINAL_SDK_ERROR";
+export interface ThreeDsSdkErrorEvidence {
+  code: typeof THREE_DS_SDK_ERROR_MARKER;
+  source: "network_request_body" | "console" | "page_exception";
+  observed_at: number;
+}
 
 /** Pure per-record classifier: does this one captured text carry the marker?
  * Only ever applied to text the merchant page EMITS (see noteThreeDsSdkError)
@@ -91,7 +96,7 @@ export class OperatorEvidenceCollector {
   private readonly screenshots: OperatorScreenshotRecord[] = [];
   private readonly attachments = new WeakMap<Page, Promise<void>>();
   private readonly sessions = new WeakMap<Page, CDPSession>();
-  private threeDsSdkErrorAt: number | null = null;
+  private threeDsSdkError: ThreeDsSdkErrorEvidence | null = null;
 
   constructor(private readonly mask: CardValueOutputMask) {}
 
@@ -106,7 +111,11 @@ export class OperatorEvidenceCollector {
    * one. Latched at capture time so nothing has to rescan the buffer, and
    * never cleared; freshness is the caller's to bound. */
   threeDsSdkErrorSeenAt(): number | null {
-    return this.threeDsSdkErrorAt;
+    return this.threeDsSdkError?.observed_at ?? null;
+  }
+
+  threeDsSdkErrorEvidence(): ThreeDsSdkErrorEvidence | null {
+    return this.threeDsSdkError;
   }
 
   /** Arm the latch from evidence the merchant page EMITS. The primary class is
@@ -118,8 +127,12 @@ export class OperatorEvidenceCollector {
    * passed here — braintree-web's own three-d-secure bundle ships the literal
    * error code, so scanning script bodies would arm the latch on every
    * Braintree 3DS checkout, failure or not. */
-  private noteThreeDsSdkError(text: string | null): void {
-    if (isThreeDsSdkErrorText(text)) this.threeDsSdkErrorAt = Date.now();
+  private noteThreeDsSdkError(
+    text: string | null,
+    source: ThreeDsSdkErrorEvidence["source"],
+  ): void {
+    if (isThreeDsSdkErrorText(text))
+      this.threeDsSdkError = { code: THREE_DS_SDK_ERROR_MARKER, source, observed_at: Date.now() };
   }
 
   private boundedPush<T>(target: T[], value: T): void {
@@ -138,7 +151,7 @@ export class OperatorEvidenceCollector {
   private async attachPage(page: Page): Promise<void> {
     const onConsole = (message: ConsoleMessage): void => {
       const text = this.mask.maskText(message.text());
-      this.noteThreeDsSdkError(text);
+      this.noteThreeDsSdkError(text, "console");
       this.boundedPush(this.console, {
         seq: this.next(),
         kind: "console",
@@ -150,7 +163,7 @@ export class OperatorEvidenceCollector {
     };
     const onPageError = (error: Error): void => {
       const text = this.mask.maskText(error.message);
-      this.noteThreeDsSdkError(text);
+      this.noteThreeDsSdkError(text, "page_exception");
       this.boundedPush(this.console, {
         seq: this.next(),
         kind: "exception",
@@ -196,7 +209,7 @@ export class OperatorEvidenceCollector {
         response_body: null,
         loading_failed: null,
       };
-      this.noteThreeDsSdkError(record.request_body);
+      this.noteThreeDsSdkError(record.request_body, "network_request_body");
       if (previous !== undefined && previous.state === "pending") previous.state = "completed";
       this.network.set(event.requestId, record);
       if (this.network.size > 500) this.network.delete(this.network.keys().next().value as string);

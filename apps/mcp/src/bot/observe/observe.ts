@@ -1019,9 +1019,27 @@ export async function observedThreeDsChallenge(
   if (session === undefined) return undefined;
   const released = session.releasedPaymentCard;
   if (released === null) return undefined;
+  const outcome = await session.browser.readThreeDsOutcome().catch(() => null);
+  if (outcome === "merchant_order_confirmed")
+    return {
+      state: outcome,
+      evidence: { source: "page_text", observed_at: Date.now() },
+      next_action: "operate_observe",
+    };
   const challenge = await session.browser.detectThreeDsChallenge().catch(() => null);
+  if (challenge?.phase === "loading")
+    return { state: "challenge_loading", url: challenge.url, next_action: "operate_observe" };
   if (challenge === null) {
-    return released.threeDsNotified === true ? undefined : observedThreeDsSdkError(session.browser);
+    const sdkError =
+      released.threeDsNotified === true ? undefined : observedThreeDsSdkError(session.browser);
+    if (sdkError !== undefined) return sdkError;
+    return outcome === null
+      ? undefined
+      : {
+          state: outcome,
+          evidence: { source: "page_text", observed_at: Date.now() },
+          next_action: "operate_observe",
+        };
   }
   let notified: boolean | undefined;
   if (released.threeDsNotified !== true) {
@@ -1045,38 +1063,27 @@ export async function observedThreeDsChallenge(
   };
 }
 
-// After a card release, the processor's SDK can fail to launch the challenge
-// at all — Cardinal/Braintree's known race where the ACS render fires before
-// the SDK's UI-framework assets finish loading (THREEDS_CARDINAL_SDK_ERROR as
-// the page itself reports it — primarily its own error/telemetry POST, and
-// secondarily console text when the page prints the code; the rendered page
-// usually shows only a generic checkout error). This is observation, not
-// custody: report the transient failure and that a resubmitted payment is
-// expected to launch the challenge, and never block, wait on, or take over the
-// retry. Two things bound the report. A detected challenge always takes
-// precedence (checked first above). And once a challenge has rendered in this
-// session — which is exactly what `threeDsNotified` records — a LATER absence
-// of one means it resolved (completed, declined, or dismissed) and the
-// checkout is settling; the resubmit advisory must never ride that state or it
-// tells the agent to resubmit a payment that already went through. Before any
-// challenge ever rendered, which is the failure this targets, `threeDsNotified`
-// is still false and the advisory fires as designed. The marker is also latched
-// at capture time and reported only inside a freshness window.
+// The SDK error is an emitted code captured from the merchant's request body,
+// console, or exception. A live challenge takes precedence. Once a challenge
+// has rendered (`threeDsNotified`), a later absence could be a payment settling,
+// so an old SDK error must not advise another submission. The captured code is
+// bounded by the evidence freshness window.
 function observedThreeDsSdkError(browser: {
-  hasThreeDsSdkErrorEvidence(): boolean;
+  threeDsSdkErrorEvidence(): {
+    code: "THREEDS_CARDINAL_SDK_ERROR";
+    source: "network_request_body" | "console" | "page_exception";
+    observed_at: number;
+  } | null;
 }): Extract<Observation["three_ds"], { state: "sdk_error_retryable" }> | undefined {
-  if (!browser.hasThreeDsSdkErrorEvidence()) return undefined;
+  const evidence = browser.threeDsSdkErrorEvidence();
+  if (evidence === null) return undefined;
   return {
     state: "sdk_error_retryable",
+    evidence,
     reason:
-      "The processor's 3-D Secure SDK failed to launch the authentication challenge " +
-      "(its challenge UI lost a race loading its own assets — e.g. Braintree " +
-      "THREEDS_CARDINAL_SDK_ERROR). This failure is transient: the checkout re-arms " +
-      "after it and a resubmitted payment is expected to launch the challenge. " +
-      "Resubmit the payment with ordinary actions, then operate_observe for the " +
-      "challenge; the cardholder completes it in their bank app. This report " +
-      "reflects evidence from the last few minutes; if the checkout has since " +
-      "completed, do not resubmit.",
+      "The page emitted a 3-D Secure SDK initialization error before a challenge was observed. " +
+      "Check the current checkout state before retrying with ordinary actions; an order may " +
+      "already be settling. Observe again for a challenge or an explicit outcome.",
     next_action: "operate_observe",
   };
 }
