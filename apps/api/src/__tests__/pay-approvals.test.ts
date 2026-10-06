@@ -1028,6 +1028,44 @@ describe("payment approval relay", () => {
     },
   );
 
+  it("holds a decision peek even when a payment candidate is already submitted", async () => {
+    const created = await createApproval();
+    const submission = makeSubmission(created);
+    const record = await deps.pendingPaymentApprovalStore.getById(created.id);
+    expect(record).not.toBeNull();
+    const fingerprint = createHash("sha256")
+      .update(JSON.stringify([submission.jws, submission.sealed_card]))
+      .digest("base64url");
+    expect(
+      await deps.pendingPaymentApprovalStore.submitCandidate(
+        created.id,
+        record!.accountId,
+        { jws: submission.jws, sealedCard: submission.sealed_card, fingerprint },
+        new Date(nowMs + 15_000),
+        new Date(nowMs),
+      ),
+    ).toBe("submitted");
+    let settled = false;
+    const waiting = server
+      .inject({
+        method: "GET",
+        url: `/v1/pay/approvals/${created.id}?wait_for_decision=1&peek_submission=1&wait_ms=150`,
+        headers: { authorization: `Bearer ${agentToken}` },
+      })
+      .then((response) => {
+        settled = true;
+        return response;
+      });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(settled).toBe(false);
+    const response = await waiting;
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({ status: "pending", ...submission });
+    expect((await deps.pendingPaymentApprovalStore.getById(created.id))?.submissionPhase).toBe(
+      "submitted",
+    );
+  });
+
   it("retains a peeked final candidate past the long-poll window until confirmation", async () => {
     const created = await createApproval();
     const submission = makeSubmission(created);
@@ -1366,11 +1404,16 @@ describe("payment approval relay", () => {
       await mkdir(evidence, { recursive: true });
       await writeFile(
         join(evidence, "telegram-three-ds.json"),
-        JSON.stringify({
-          scope: "Real API route and Telegram serialization; intercepted delivery, no external message sent",
-          response: response.json(),
-          telegram: body,
-        }, null, 2),
+        JSON.stringify(
+          {
+            scope:
+              "Real API route and Telegram serialization; intercepted delivery, no external message sent",
+            response: response.json(),
+            telegram: body,
+          },
+          null,
+          2,
+        ),
       );
     }
   });

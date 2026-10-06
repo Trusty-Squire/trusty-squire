@@ -230,6 +230,29 @@ describe("passkey-gated fetch_credential", () => {
     expect(await revealAudit()).toEqual([]);
   });
 
+  it("holds a non-consuming ceremony status read until the fetch decision", async () => {
+    const reference = await storeCredential({ service: "OpenAI", value: SECRET_VALUE });
+    const created = await createFetch({ reference });
+    const id = (created.json() as { approval_id: string }).approval_id;
+    let settled = false;
+    const waiting = server
+      .inject({
+        method: "GET",
+        url: `/v1/vault/fetch-approvals/${id}/ceremony?wait_for_decision=1&wait_ms=2000`,
+      })
+      .then((response) => {
+        settled = true;
+        return response;
+      });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(settled).toBe(false);
+    expect((await approve(id)).statusCode).toBe(200);
+    const response = await waiting;
+    expect((response.json() as { status: string }).status).toBe("approved");
+    expectNoValueAnywhere(response.body);
+    expect((await resume(id)).body).toContain(SECRET_VALUE);
+  });
+
   it("names the authenticated requester and the stated reason on the ceremony the page reads", async () => {
     const reference = await storeCredential({ service: "OpenAI", value: SECRET_VALUE });
     const created = await createFetch({

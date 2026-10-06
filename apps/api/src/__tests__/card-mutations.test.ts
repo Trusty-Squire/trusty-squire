@@ -195,6 +195,27 @@ describe("vouch-gated card mutations", () => {
     });
   }
 
+  it("holds the status read until the card mutation decision", async () => {
+    const cardId = await storeCard();
+    const created = await createMutation({ operation: "edit_card", card_id: cardId });
+    const id = (created.json() as { approval_id: string }).approval_id;
+    let settled = false;
+    const waiting = server
+      .inject({
+        method: "GET",
+        url: `/v1/vault/card-mutation-approvals/${id}?wait_for_decision=1&wait_ms=2000`,
+        headers: { authorization: `Bearer ${agentToken}` },
+      })
+      .then((response) => {
+        settled = true;
+        return response;
+      });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(settled).toBe(false);
+    expect((await approveCard(id, { label: "Updated card" })).statusCode).toBe(200);
+    expect(((await waiting).json() as { status: string }).status).toBe("approved");
+  });
+
   async function captureTelegramMessages(): Promise<string[]> {
     const messages: string[] = [];
     await deps.accountStore.setTelegramChatId(accountId, "123456789");
@@ -518,9 +539,9 @@ describe("vouch-gated card mutations", () => {
       type: VAULT_AUDIT_TYPES.cardUpdated,
       reference: `card://${cardId}`,
     });
-    expect(
-      recoveredAudits.filter((entry) => entry.payload.approval_id === retryId),
-    ).toHaveLength(1);
+    expect(recoveredAudits.filter((entry) => entry.payload.approval_id === retryId)).toHaveLength(
+      1,
+    );
   });
 
   it("sends card edit approval metadata and an explicit browser link to Telegram", async () => {
@@ -631,7 +652,13 @@ describe("vouch-gated card mutations", () => {
       method: "POST",
       url: `/v1/vault/card-mutation-approvals/${id}/approve`,
       headers: { cookie: webCookie },
-      payload: { jws, blob: after.blob, label: after.label, brand: after.brand, last4: after.last4 },
+      payload: {
+        jws,
+        blob: after.blob,
+        label: after.label,
+        brand: after.brand,
+        last4: after.last4,
+      },
     });
     expect(approved.statusCode).toBe(200);
     expect((await deps.e2eCredentialStore.getByIdForAccount(cardId, accountId))?.blob).toBe(
