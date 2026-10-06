@@ -1021,7 +1021,9 @@ export async function observedThreeDsChallenge(
   if (released === null) return undefined;
   const challenge = await session.browser.detectThreeDsChallenge().catch(() => null);
   if (challenge === null) {
-    return released.threeDsNotified === true ? undefined : observedThreeDsSdkError(session.browser);
+    return released.threeDsNotified === true
+      ? undefined
+      : observedThreeDsSdkError(session.browser, session.compactV2Index?.rows ?? []);
   }
   let notified: boolean | undefined;
   if (released.threeDsNotified !== true) {
@@ -1051,9 +1053,9 @@ export async function observedThreeDsChallenge(
 // the page itself reports it — primarily its own error/telemetry POST, and
 // secondarily console text when the page prints the code; the rendered page
 // usually shows only a generic checkout error). This is observation, not
-// custody: report the transient failure and that a resubmitted payment is
-// expected to launch the challenge, and never block, wait on, or take over the
-// retry. Two things bound the report. A detected challenge always takes
+// custody: report the transient failure with the observed submit state, and
+// never block, wait on, or take over the retry. Two things bound the report.
+// A detected challenge always takes
 // precedence (checked first above). And once a challenge has rendered in this
 // session — which is exactly what `threeDsNotified` records — a LATER absence
 // of one means it resolved (completed, declined, or dismissed) and the
@@ -1062,19 +1064,38 @@ export async function observedThreeDsChallenge(
 // challenge ever rendered, which is the failure this targets, `threeDsNotified`
 // is still false and the advisory fires as designed. The marker is also latched
 // at capture time and reported only inside a freshness window.
-function observedThreeDsSdkError(browser: {
-  hasThreeDsSdkErrorEvidence(): boolean;
-}): Extract<Observation["three_ds"], { state: "sdk_error_retryable" }> | undefined {
+function observedPaymentSubmitEnabled(rows: readonly SafeControlV2[]): boolean | null {
+  const controls = rows.filter((row) => row.role === "button");
+  const named = controls.filter((row) =>
+    /\b(?:place(?:-the)?-order|complete(?:-your)?-order|submit-(?:order|payment)|pay-now|confirm-(?:order|payment)|purchase)\b/i.test(
+      row.label ?? "",
+    ),
+  );
+  const candidates = named.length > 0 ? named : controls.filter((row) => row.action === "submit");
+  if (candidates.length === 0) return null;
+  const states = new Set(candidates.map((row) => !row.state?.includes("d")));
+  return states.size === 1 ? states.values().next().value! : null;
+}
+
+function observedThreeDsSdkError(
+  browser: { hasThreeDsSdkErrorEvidence(): boolean },
+  rows: readonly SafeControlV2[],
+): Extract<Observation["three_ds"], { state: "sdk_error_retryable" }> | undefined {
   if (!browser.hasThreeDsSdkErrorEvidence()) return undefined;
+  const submitEnabled = observedPaymentSubmitEnabled(rows);
   return {
     state: "sdk_error_retryable",
+    submit_enabled: submitEnabled,
     reason:
       "The processor's 3-D Secure SDK failed to launch the authentication challenge " +
       "(its challenge UI lost a race loading its own assets — e.g. Braintree " +
-      "THREEDS_CARDINAL_SDK_ERROR). This failure is transient: the checkout re-arms " +
-      "after it and a resubmitted payment is expected to launch the challenge. " +
-      "Resubmit the payment with ordinary actions, then operate_observe for the " +
-      "challenge; the cardholder completes it in their bank app. This report " +
+      "THREEDS_CARDINAL_SDK_ERROR). " +
+      (submitEnabled === true
+        ? "The submit/place-order control is currently enabled. Resubmit the payment with ordinary actions, then operate_observe for the challenge; the cardholder completes it in their bank app. "
+        : submitEnabled === false
+          ? "The submit/place-order control is currently disabled. Reset or re-arm the payment form (for example, re-select the card payment method so its fields remount), then refill with the existing approval's masked tokens. Re-observe until the submit control is enabled before retrying. "
+          : "No submit/place-order control was identified in the current observation. Inspect and re-arm the payment form before retrying. ") +
+      "This report " +
       "reflects evidence from the last few minutes; if the checkout has since " +
       "completed, do not resubmit.",
     next_action: "operate_observe",

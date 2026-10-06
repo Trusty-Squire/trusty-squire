@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { ApiClient } from "../../api-client.js";
 import { injectCardTool } from "../../tools/inject-card.js";
 import { operateTypeTool } from "../../tools/provision-drive.js";
@@ -54,23 +54,26 @@ function byName(elements: InteractiveElement[], name: string): InteractiveElemen
 }
 
 describe("direct card injection and masked observation", () => {
-  it.skipIf(!available)("reports a detected hosted-field remount with the filled result", async () => {
-    const isolated = await page();
-    try {
-      await isolated.page.setContent('<input name="number" aria-label="Card number">');
-      const controller = BrowserController.fromHarnessPage(isolated.page);
-      const element = byName(await controller.extractInteractiveElements(), "number");
-      const results = await controller.injectCardIntoTargets(
-        CARD,
-        { pan: {} },
-        isolated.page,
-        async () => ({ element, remounted: true }),
-      );
-      expect(results.pan).toEqual({ status: "filled", remounted: true });
-    } finally {
-      await isolated.context.close();
-    }
-  });
+  it.skipIf(!available)(
+    "reports a detected hosted-field remount with the filled result",
+    async () => {
+      const isolated = await page();
+      try {
+        await isolated.page.setContent('<input name="number" aria-label="Card number">');
+        const controller = BrowserController.fromHarnessPage(isolated.page);
+        const element = byName(await controller.extractInteractiveElements(), "number");
+        const results = await controller.injectCardIntoTargets(
+          CARD,
+          { pan: {} },
+          isolated.page,
+          async () => ({ element, remounted: true }),
+        );
+        expect(results.pan).toEqual({ status: "filled", remounted: true });
+      } finally {
+        await isolated.context.close();
+      }
+    },
+  );
 
   it.skipIf(!available)(
     "requires the same approval id before re-injecting a released card",
@@ -150,6 +153,58 @@ describe("direct card injection and masked observation", () => {
           fields: { pan: { status: "filled" } },
         });
         expect(await isolated.page.locator('[name="number"]').inputValue()).toBe(CARD.pan);
+
+        // Expiry ends the old release, but the live browser session can mint a
+        // fresh approval for the same purchase without losing its checkout.
+        paymentSession(sessionId).releasedPaymentCard!.deadline = Date.now() - 1;
+        await expect(
+          injectCardTool.handler(
+            injectCardTool.inputSchema.parse({ ...input, approval_id: "approval_same_purchase" }),
+            api,
+          ),
+        ).rejects.toThrow(/payment_approval_expired.*without approval_id/);
+        let approvalCount = 0;
+        const createPaymentApproval = vi.fn(async () => ({
+          id: ++approvalCount === 1 ? "approval_renewed" : "approval_after_denial",
+          nonce: "renewed_nonce",
+          agent: "synthetic_agent",
+          account_binding: "synthetic_account",
+          expires_at: new Date(Date.now() + 60_000).toISOString(),
+        }));
+        const renewalApi = {
+          getPaymentConfig: async () => ({ vouchflow_audience: "synthetic_customer" }),
+          createPaymentApproval,
+          getPaymentApproval: vi.fn(async () => ({
+            status: "denied",
+            expires_at: new Date(Date.now() + 60_000).toISOString(),
+          })),
+        } as unknown as ApiClient;
+        await expect(
+          injectCardTool.handler(injectCardTool.inputSchema.parse(input), renewalApi),
+        ).resolves.toMatchObject({ status: "approval_pending", approval_id: "approval_renewed" });
+        expect(createPaymentApproval).toHaveBeenCalledWith(
+          expect.objectContaining({
+            merchant: input.merchant,
+            amount_cents: input.amount_cents,
+            currency: input.currency,
+            card_ref: input.card_ref,
+          }),
+        );
+        expect(paymentSession(sessionId).activePayment?.state.approval_id).toBe("approval_renewed");
+        expect(paymentSession(sessionId).releasedPaymentCard).toBeNull();
+        await expect(
+          injectCardTool.handler(
+            injectCardTool.inputSchema.parse({ ...input, approval_id: "approval_renewed" }),
+            renewalApi,
+          ),
+        ).resolves.toMatchObject({ status: "payment_approval_denied" });
+        expect(paymentSession(sessionId).activePayment).toBeNull();
+        await expect(
+          injectCardTool.handler(injectCardTool.inputSchema.parse(input), renewalApi),
+        ).resolves.toMatchObject({
+          status: "approval_pending",
+          approval_id: "approval_after_denial",
+        });
       } finally {
         if (sessionId !== undefined) await finishProvisionSession(sessionId).catch(() => undefined);
         await isolated.context.close();
@@ -211,12 +266,10 @@ describe("direct card injection and masked observation", () => {
         // Expiry and cardholder name are NOT secret and NOT inject_card
         // fields: the agent fills them with ordinary tools (here: direct page
         // writes standing in for operate_type/operate_select).
-        await isolated.page
-          .locator("#host")
-          .evaluate((host) => {
-            const input = host.shadowRoot!.querySelector("input") as HTMLInputElement;
-            input.value = "Daeun Lee";
-          });
+        await isolated.page.locator("#host").evaluate((host) => {
+          const input = host.shadowRoot!.querySelector("input") as HTMLInputElement;
+          input.value = "Daeun Lee";
+        });
         const frame = isolated.page.frames().find((candidate) => candidate.url() === frameUrl)!;
         await frame.locator('[name="year"]').fill("12/30");
 
@@ -548,12 +601,14 @@ describe("direct card injection and masked observation", () => {
         // Mixed per-digit tokens compose in one field too (a non-secret
         // prefix of the PAN — ordering is what matters, not the values).
         await operateTypeTool.handler(
-          { session_id: sessionId, ref: await refFor("cvv-box"), text: "{{pan:1}}{{pan:2}}{{pan:3}}" },
+          {
+            session_id: sessionId,
+            ref: await refFor("cvv-box"),
+            text: "{{pan:1}}{{pan:2}}{{pan:3}}",
+          },
           null,
         );
-        expect(await frame.locator('[name="cvvbox"]').inputValue()).toBe(
-          CARD.pan.slice(0, 3),
-        );
+        expect(await frame.locator('[name="cvvbox"]').inputValue()).toBe(CARD.pan.slice(0, 3));
 
         // Re-arm: a second full-value write replaces the field contents.
         await operateTypeTool.handler(
@@ -580,12 +635,15 @@ describe("direct card injection and masked observation", () => {
         }, CARD);
         const full = await observe(sessionId, "full");
         const compact = await observe(sessionId, "compact");
-        const dom = serializeBrowserUseDOM((await controller.extractBrowserUseObservation()).root)
-          .dom;
+        const dom = serializeBrowserUseDOM(
+          (await controller.extractBrowserUseObservation()).root,
+        ).dom;
         for (const output of [JSON.stringify(full), JSON.stringify(compact), dom]) {
           expect(output).not.toContain(CARD.pan);
           expect(output).not.toContain(CARD.pan.slice(0, 10));
-          expect(output).not.toMatch(new RegExp(`(?:cvv|security code)[^\\n]{0,20}${CARD.cvv}`, "i"));
+          expect(output).not.toMatch(
+            new RegExp(`(?:cvv|security code)[^\\n]{0,20}${CARD.cvv}`, "i"),
+          );
         }
         expect(dom).toContain("[security code]");
         expect(dom).toContain("[card number]");
