@@ -277,6 +277,8 @@ beforeAll(async () => {
       } else {
         res.end(
           `<!doctype html><html><body><main>Checkout</main>
+          <input id="email" aria-label="Email address">
+          <button id="continue">Continue</button>
           ${FRAME_HOSTS.map(
             (host, i) =>
               `<iframe name="braintree-hosted-field-${i}" src="http://${host}:${port}/frame${i}" ` +
@@ -651,6 +653,66 @@ async function simpleSession(mode: string): Promise<{
 }
 
 describe("inject_card across remounting hosted-field iframes (real Chromium)", () => {
+  it.skipIf(!available)(
+    "keeps full and compact refs aligned after a hosted card field remount",
+    async () => {
+      const isolated = await page();
+      let sessionId: string | undefined;
+      try {
+        const topUrl = `http://${PARENT_HOST}:${port}/checkout`;
+        const controller = BrowserController.fromHarnessPage(isolated.page);
+        const started = await startHarnessProvisionSession({
+          browser: controller,
+          serviceUrl: topUrl,
+          format: "compact",
+        });
+        sessionId = started.session_id;
+        await waitForLiveFrames(isolated.page);
+        const initial = (await observe(sessionId, "compact")) as unknown as {
+          safe_table?: Array<[string, string, string?]>;
+        };
+        paymentSession(sessionId).releasedPaymentCard = releasedCard();
+        await injectCardTool.handler(
+          injectCardTool.inputSchema.parse({
+            ...injectArgs(sessionId),
+            fields: { pan: { ref: textboxRow(initial.safe_table!, "card-number")[0] } },
+          }),
+          {} as ApiClient,
+        );
+        await waitForStableFrames(isolated.page);
+        const full = (await observe(sessionId, "full")) as { dom?: string };
+        const compact = (await observe(sessionId, "compact")) as unknown as {
+          safe_table?: Array<[string, string, string?]>;
+        };
+        const controls = [
+          ["id=email", "email-address"],
+          ["id=continue", "continue"],
+          ["name=credit-card-number", "card-number"],
+          ["name=expiry", "expiration"],
+          ["name=cvv", "security-code"],
+          ["name=cardholder-name", "name-on-card"],
+        ] as const;
+        for (const [domIdentity, compactLabel] of controls) {
+          const line = full.dom?.split("\n").find((entry) => entry.includes(domIdentity));
+          const row = compact.safe_table?.find((entry) => entry[2]?.includes(`@${compactLabel}`));
+          expect(row, `compact control ${compactLabel}`).toBeDefined();
+          expect(line, `full control ${domIdentity}`).toContain(`[${row![0]}]`);
+          expect(line).not.toContain("not-targetable=true");
+        }
+        const emailRef = textboxRow(compact.safe_table!, "email-address")[0];
+        await operateTypeTool.handler(
+          { session_id: sessionId, ref: emailRef, text: "buyer@example.com" },
+          null,
+        );
+        expect(await isolated.page.locator("#email").inputValue()).toBe("buyer@example.com");
+      } finally {
+        if (sessionId !== undefined) await finishProvisionSession(sessionId).catch(() => undefined);
+        await isolated.context.close();
+      }
+    },
+    120_000,
+  );
+
   it.skipIf(!available)(
     "leaves every written card value present in the live frames after the sibling rebuild",
     async () => {

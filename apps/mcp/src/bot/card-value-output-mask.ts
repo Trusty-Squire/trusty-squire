@@ -333,14 +333,16 @@ export class CardValueOutputMask {
       if (kind === "pan" || kind === "cvv") targetKinds.set(id, kind);
     }
     maskNode(capture.root, this.records, targetKinds);
+    // The DOM-to-action join uses object identity: nodeElements must point to
+    // the same masked objects as elements, including after a hosted frame remount.
+    const originals = [...new Set([...capture.elements, ...capture.nodeElements.values()])];
+    const masked = this.maskInteractiveElements(originals);
+    const byOriginal = new Map(originals.map((element, index) => [element, masked[index]!]));
     return {
       ...capture,
-      elements: this.maskInteractiveElements(capture.elements),
+      elements: capture.elements.map((element) => byOriginal.get(element)!),
       nodeElements: new Map(
-        [...capture.nodeElements].map(([id, element]) => [
-          id,
-          this.maskInteractiveElements([element])[0]!,
-        ]),
+        [...capture.nodeElements].map(([id, element]) => [id, byOriginal.get(element)!]),
       ),
     };
   }

@@ -49,6 +49,25 @@ describe("canonical browser-use 0.13.10 fixture oracle", () => {
     firstVisibleText(root)!.value = username;
     expect(serializeBrowserUseDOM(root).dom).toContain(username);
   });
+  it("explains a display-only ref and names its verified action proxy", () => {
+    const { root } = JSON.parse(readFileSync(`${fixtures}hacker-news.json`, "utf8")) as {
+      root: BrowserUseNode;
+    };
+    const findAnchor = (node: BrowserUseNode): BrowserUseNode | undefined =>
+      node.nodeName === "A" ? node : node.children.map(findAnchor).find(Boolean);
+    const anchor = findAnchor(root)!;
+    const dom = serializeBrowserUseDOM(anchor, {
+      ref: () => ({
+        ref: "@e:display",
+        targetable: false,
+        reason: "action delegated to visible label",
+        actionableRef: "@e:label",
+      }),
+    }).dom;
+    expect(dom).toContain(
+      '[@e:display]<a not-targetable=true not-targetable-reason="action delegated to visible label" actionable-ref=@e:label',
+    );
+  });
   it.each(["title", "aria-label", "image_alt"])(
     "keeps canonical truncation without rewriting credential-shaped spans in %s",
     (attribute) => {
