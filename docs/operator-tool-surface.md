@@ -50,7 +50,9 @@ itself presents: the drive reads the page's last summary total — a line the
 total label opens, carrying a currency symbol or code — and signs the human's
 approval for that amount. The same words inside a sentence are prose ("you
 saved a total of $12.00 today"), and so are a tax-exclusive figure or a counted
-quantity; none of them answer for the amount. An `amount_cents` fact can only
+quantity; none of them answer for the amount. `amount_cents` is in the
+currency's smallest unit: USD $12.34 → 1234; JPY ¥65,800 → 65800 (do not
+multiply by 100); KRW works like JPY. That fact can only
 confirm it — the page amount still stands when the two disagree, and the
 disagreement is appended to the approval's item so the human reads it beside
 the amount. A `currency` fact names the currency only for a symbol several
@@ -580,7 +582,9 @@ job without exposing plaintext to the agent.
   write-only vault boundary. `fetch_credential` has the separate passkey gate
   above.
 - `inject_card` retains the existing single purchase approval and fills only
-  caller-named `pan`/`cvv` refs. Expiry, cardholder name, and billing are NOT
+  caller-named `pan`/`cvv` refs. Its `amount_cents` uses the currency's smallest
+  unit: USD $12.34 → 1234; JPY ¥65,800 → 65800 (do not multiply by 100);
+  KRW works like JPY. Expiry, cardholder name, and billing are NOT
   inject targets and are not secret: after approval the result carries
   `exp_month`, `exp_year`, `name`, and any stored `billing` alongside `last4`;
   type those with ordinary `operate_type`/`operate_select`, or place the masked

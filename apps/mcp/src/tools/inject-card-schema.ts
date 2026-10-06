@@ -12,7 +12,14 @@ const targetSchema = z.object({
 const inputSchema = z.object({
   session_id: z.string().uuid(),
   merchant: z.string().trim().min(1).max(256),
-  amount_cents: z.number().int().min(0).max(2_147_483_647),
+  amount_cents: z
+    .number()
+    .int()
+    .min(0)
+    .max(2_147_483_647)
+    .describe(
+      "Amount in the currency's smallest unit: USD $12.34 -> 1234; JPY ¥65,800 -> 65800 (do not multiply by 100); KRW works like JPY.",
+    ),
   currency: z.string().regex(/^[A-Za-z]{3}$/),
   item: z.string().trim().min(1).max(500),
   reason: z.string().trim().min(1).max(500),
@@ -31,7 +38,7 @@ const inputSchema = z.object({
 export const injectCardTool: Tool = {
   name: "inject_card",
   description:
-    "Release one saved card under the existing single human purchase approval and fill only the supplied observation refs. A new approval returns approval_pending and approval_url immediately: show the link now, then call inject_card again with the same arguments to wait for the human. The resumed call waits for the same approval. Supply session_id and refs for pan/cvv from operate_observe; each may target the main document or any reachable frame. Expiry, cardholder name, and billing are NOT inject targets and are not secret: after approval the result carries exp_month, exp_year, name, and any stored billing alongside last4, and you type those with operate_type/operate_select like any other field. After approval the session also exposes the card as opaque per-digit masked tokens you can place into ANY field ref yourself with operate_type: {{pan}} and {{cvv}} type the whole value, {{pan:N}} and {{cvv:N}} type one digit (1-based, N up to the returned pan_length/cvv_length); the broker substitutes the real digit at the keystroke boundary and the digits are never shown to you or masked out of every observation, screenshot, and error. Use the refs for the ordinary path and the tokens for arbitrary layouts, single-digit boxes, remounts, re-validation, or post-error re-arm. Avoid provider helper/autofill/focus inputs and choose the actual card control. This tool never searches for payment providers, chooses a card UI, reads or validates the total, clicks submit, clears fields, or diagnoses the checkout. Partial results are ordinary browser outcomes; retry changed refs with the same approval_id. Before placing the order, re-observe and confirm no competing saved-card control is selected. If a 3-D Secure challenge appears, the operator notifies the cardholder once. While bank approval is in progress, do not click, type, navigate, reload, resubmit, or trigger another verification. Only watch with operate_screenshot or operate_observe (short, non-blocking checks) until checkout resolves. The released PAN/CVV are masked from all normal operator output before the first write.",
+    "Release one saved card under the existing single human purchase approval and fill only the supplied observation refs. Amount_cents is the amount in the currency's smallest unit: USD $12.34 -> 1234; JPY ¥65,800 -> 65800 (do not multiply by 100); KRW works like JPY. A new approval returns approval_pending and approval_url immediately: show the link now, then call inject_card again with the same arguments to wait for the human. The resumed call waits for the same approval. Supply session_id and refs for pan/cvv from operate_observe; each may target the main document or any reachable frame. Expiry, cardholder name, and billing are NOT inject targets and are not secret: after approval the result carries exp_month, exp_year, name, and any stored billing alongside last4, and you type those with operate_type/operate_select like any other field. After approval the session also exposes the card as opaque per-digit masked tokens you can place into ANY field ref yourself with operate_type: {{pan}} and {{cvv}} type the whole value, {{pan:N}} and {{cvv:N}} type one digit (1-based, N up to the returned pan_length/cvv_length); the broker substitutes the real digit at the keystroke boundary and the digits are never shown to you or masked out of every observation, screenshot, and error. Use the refs for the ordinary path and the tokens for arbitrary layouts, single-digit boxes, remounts, re-validation, or post-error re-arm. Avoid provider helper/autofill/focus inputs and choose the actual card control. This tool never searches for payment providers, chooses a card UI, reads or validates the total, clicks submit, clears fields, or diagnoses the checkout. Partial results are ordinary browser outcomes; retry changed refs with the same approval_id. Before placing the order, re-observe and confirm no competing saved-card control is selected. If a 3-D Secure challenge appears, the operator notifies the cardholder once. While bank approval is in progress, do not click, type, navigate, reload, resubmit, or trigger another verification. Only watch with operate_screenshot or operate_observe (short, non-blocking checks) until checkout resolves. The released PAN/CVV are masked from all normal operator output before the first write.",
   inputSchema,
   jsonInputSchema: {
     type: "object",
@@ -48,7 +55,12 @@ export const injectCardTool: Tool = {
     properties: {
       session_id: { type: "string", format: "uuid" },
       merchant: { type: "string" },
-      amount_cents: { type: "integer", minimum: 0 },
+      amount_cents: {
+        type: "integer",
+        minimum: 0,
+        description:
+          "Amount in the currency's smallest unit: USD $12.34 -> 1234; JPY ¥65,800 -> 65800 (do not multiply by 100); KRW works like JPY.",
+      },
       currency: { type: "string", pattern: "^[A-Za-z]{3}$" },
       item: { type: "string" },
       reason: { type: "string" },
