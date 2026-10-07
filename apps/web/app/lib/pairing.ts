@@ -94,6 +94,12 @@ export function approvalErrorMessage(caught: unknown, fallback: string): string 
 export async function pairDevice(): Promise<void> {
   const client = getVouchflow();
 
+  // Never mint a second passkey. The SDK enrolls every credential under the
+  // same "__default__" user handle, so a platform password manager replaces the
+  // existing passkey, and cards encrypted with its PRF output can no longer be
+  // decrypted.
+  if ((await getPairingState()).enrolled) return;
+
   try {
     const support = await client.checkSupport();
     if (!support.platformAuthenticator) {

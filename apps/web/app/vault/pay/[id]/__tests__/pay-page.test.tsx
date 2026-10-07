@@ -21,7 +21,7 @@ const vault = vi.hoisted(() => ({ decryptCard: vi.fn() }));
 const pairing = vi.hoisted(() => ({
   getPairingState: vi.fn(),
   pairDevice: vi.fn(),
-  isPaymentPasskeyUnavailable: vi.fn(() => false),
+  isPaymentPasskeyUnavailable: vi.fn((_err: unknown) => false),
 }));
 
 vi.mock("next/navigation", () => ({
@@ -629,5 +629,34 @@ describe("pay page — single payment authorization", () => {
     const user = userEvent.setup();
     await user.click(await screen.findByRole("button", { name: /Approve payment/ }));
     await screen.findByText("Failed to submit the payment approval.");
+  });
+
+  it("names the card-key mismatch when decrypt rejects with a non-empty OperationError", async () => {
+    bound = true;
+    vault.decryptCard.mockRejectedValue(
+      new DOMException("The operation failed for an operation-specific reason", "OperationError"),
+    );
+    render(<PaymentApprovalPage />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: /Approve payment/ }));
+    await screen.findByText(/This passkey could not unlock the card/);
+  });
+
+  it("shows an error instead of passkey setup when an enrolled passkey returns no card key", async () => {
+    bound = true;
+    pairing.isPaymentPasskeyUnavailable.mockImplementation((err: unknown) =>
+      err instanceof Error ? err.message.toLowerCase().includes("prf result") : false,
+    );
+    vouchflow.signPayload.mockImplementation(async ({ payload }: { payload: unknown }) => ({
+      assertion: "e30.synthetic.signature",
+      payload: JSON.stringify(payload),
+      prfResult: undefined,
+    }));
+    render(<PaymentApprovalPage />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: /Approve payment/ }));
+    await screen.findByText(/did not return the key that unlocks this card/);
+    expect(screen.queryByRole("button", { name: /set up passkey/i })).toBeNull();
+    expect(pairing.pairDevice).not.toHaveBeenCalled();
   });
 });

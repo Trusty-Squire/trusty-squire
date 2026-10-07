@@ -84,6 +84,11 @@ function errorText(err: unknown, fallback: string): string {
   return err instanceof Error && err.message.trim() !== "" ? err.message : fallback;
 }
 
+// The page's own wording: it must not match isPaymentPasskeyUnavailable, which
+// would offer passkey setup to an already enrolled device.
+const PASSKEY_NO_CARD_KEY =
+  "Your passkey did not return the key that unlocks this card. Use the passkey you saved this card with.";
+
 const CARD_UNLOCK_FAILED =
   "This passkey could not unlock the card. It was likely saved with a different passkey; remove the card and add it again on this device.";
 
@@ -257,9 +262,17 @@ export default function PaymentApprovalPage() {
         prfSalt: fromBase64(storedCard.prf_salt),
       });
       key = sign.prfResult;
-      if (key === undefined) throw new Error("Passkey did not return a PRF result");
+      if (key === undefined) throw new Error(PASSKEY_NO_CARD_KEY);
       failure = CARD_UNLOCK_FAILED;
-      card = await decryptCard(key, storedCard);
+      try {
+        card = await decryptCard(key, storedCard);
+      } catch (decryptFailure) {
+        // AES-GCM rejects a key from a different passkey with OperationError.
+        if (decryptFailure instanceof DOMException && decryptFailure.name === "OperationError") {
+          throw new Error(CARD_UNLOCK_FAILED);
+        }
+        throw decryptFailure;
+      }
       cardBytes = new TextEncoder().encode(JSON.stringify(card));
       const aad = new Uint8Array(
         await crypto.subtle.digest("SHA-256", new TextEncoder().encode(sign.payload)),
