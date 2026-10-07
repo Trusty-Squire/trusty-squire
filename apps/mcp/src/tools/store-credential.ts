@@ -50,7 +50,9 @@ For username/password credentials, pass \`auth_strategy: "username_password"\`
 and explicit \`login_hosts\`; those credentials cannot be spent through
 \`use_credential\` and can only be sealed into browser-fill slots on allowed
 signin hosts. Returns the reference, field names, and allowed_hosts. The value
-is never readable back to you afterwards.`;
+is never readable back to you afterwards. Do not re-store a fetched value;
+mint a grant on the existing credential with \`grant_app_access\` or use it
+with \`use_credential\`.`;
 
 export const storeCredentialTool: Tool<z.infer<typeof inputSchema>> = {
   name: "store_credential",
@@ -102,6 +104,8 @@ export const storeCredentialTool: Tool<z.infer<typeof inputSchema>> = {
       login_hosts: res.login_hosts,
       allowed_hosts: res.allowed_hosts,
       updated: res.updated,
+      ...(res.duplicate_of !== undefined ? { duplicate_of: res.duplicate_of } : {}),
+      ...(res.hint !== undefined ? { hint: res.hint } : {}),
     };
   },
 };
