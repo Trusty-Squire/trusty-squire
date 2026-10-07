@@ -272,6 +272,45 @@ describe("E2E #1 — install → signup → vault data path", () => {
     expect(stillStored.json()).not.toHaveProperty("duplicate_of");
     lookup.mockRestore();
   });
+
+  it("ignores shared login identifiers but reports a shared password", async () => {
+    const account = await h.deps.accountStore.createAccount("logins@example.test", "Logins");
+    const token = await makeAgentToken(h.deps, account.id);
+    const save = async (service: string, fields: Record<string, string>) =>
+      h.server.inject({
+        method: "POST",
+        url: "/v1/vault/credentials",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        payload: { service, fields },
+      });
+
+    const first = (
+      await save("Login A", {
+        email: "shared@example.test",
+        password: "first-password-123",
+      })
+    ).json() as { reference: string };
+    const second = await save("Login B", {
+      username: "shared@example.test",
+      password: "second-password-456",
+    });
+    expect(second.statusCode).toBe(201);
+    expect(second.json()).not.toHaveProperty("duplicate_of");
+
+    const matchingPassword = await save("Login B", {
+      email: "shared@example.test",
+      password: "first-password-123",
+    });
+    expect(matchingPassword.statusCode).toBe(200);
+    expect(matchingPassword.json().duplicate_of).toEqual([
+      { service: "Login A", label: "default", reference: first.reference },
+    ]);
+
+    const shortSecret = await save("Login C", { password: "short" });
+    expect(shortSecret.json()).not.toHaveProperty("duplicate_of");
+    const sameShortSecret = await save("Login D", { password: "short" });
+    expect(sameShortSecret.json()).not.toHaveProperty("duplicate_of");
+  });
 });
 
 describe("E2E #2 — vault persistence across web sessions", () => {
