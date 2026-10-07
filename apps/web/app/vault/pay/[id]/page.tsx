@@ -77,6 +77,16 @@ function toBase64Url(bytes: Uint8Array): string {
     .replace(/=+$/, "");
 }
 
+// Some browser failures carry an empty message (Chrome's WebCrypto rejects a
+// failed AES-GCM decrypt with a bare OperationError). The banner must still
+// say what failed.
+function errorText(err: unknown, fallback: string): string {
+  return err instanceof Error && err.message.trim() !== "" ? err.message : fallback;
+}
+
+const CARD_UNLOCK_FAILED =
+  "This passkey could not unlock the card. It was likely saved with a different passkey; remove the card and add it again on this device.";
+
 function formatAmount(amountCents: number, currency: string): string {
   try {
     const formatter = new Intl.NumberFormat(undefined, { style: "currency", currency });
@@ -132,7 +142,7 @@ export default function PaymentApprovalPage() {
       })
       .catch((err: unknown) => {
         if (cancelled) return;
-        setError(err instanceof Error ? err.message : "Failed to load payment approval.");
+        setError(errorText(err, "Failed to load payment approval."));
       });
     return () => {
       cancelled = true;
@@ -187,7 +197,7 @@ export default function PaymentApprovalPage() {
         } catch {
           // Surface the original bind failure below; it is the actionable error.
         }
-        setError(bindFailure instanceof Error ? bindFailure.message : "Failed to attach the card.");
+        setError(errorText(bindFailure, "Failed to attach the card."));
       } finally {
         setBinding(false);
       }
@@ -210,6 +220,7 @@ export default function PaymentApprovalPage() {
     let key: Uint8Array | undefined;
     let card: Record<string, unknown> | undefined;
     let cardBytes: Uint8Array | undefined;
+    let failure = "Failed to check this device's passkey.";
     try {
       const pairing = await getPairingState();
       if (!pairing.enrolled) {
@@ -238,6 +249,7 @@ export default function PaymentApprovalPage() {
         reason: ceremony.reason,
         agent: ceremony.agent,
       };
+      failure = "Passkey signing failed.";
       const sign = await getVouchflow().signPayload({
         context: "purchase",
         payload,
@@ -246,12 +258,15 @@ export default function PaymentApprovalPage() {
       });
       key = sign.prfResult;
       if (key === undefined) throw new Error("Passkey did not return a PRF result");
+      failure = CARD_UNLOCK_FAILED;
       card = await decryptCard(key, storedCard);
       cardBytes = new TextEncoder().encode(JSON.stringify(card));
       const aad = new Uint8Array(
         await crypto.subtle.digest("SHA-256", new TextEncoder().encode(sign.payload)),
       );
+      failure = "Failed to seal the card for the operator.";
       const sealedCard = await sealToRecipient(ceremony.operator_pubkey, cardBytes, aad);
+      failure = "Failed to submit the payment approval.";
       await apiPost(`/v1/pay/approvals/${encodeURIComponent(id)}/approve`, {
         jws: sign.assertion,
         sealed_card: sealedCard,
@@ -263,7 +278,7 @@ export default function PaymentApprovalPage() {
         setNeedsPasskeySetup(true);
         return;
       }
-      setError(err instanceof Error ? err.message : "Failed to unlock payment approval.");
+      setError(errorText(err, failure));
     } finally {
       key?.fill(0);
       cardBytes?.fill(0);
@@ -285,7 +300,7 @@ export default function PaymentApprovalPage() {
         redirectToLogin();
         return;
       }
-      setError(err instanceof Error ? err.message : "Failed to deny payment approval.");
+      setError(errorText(err, "Failed to deny payment approval."));
     } finally {
       setBusy(false);
     }
@@ -303,7 +318,7 @@ export default function PaymentApprovalPage() {
         redirectToLogin();
         return;
       }
-      setError(err instanceof Error ? err.message : "Failed to set up a payment passkey.");
+      setError(errorText(err, "Failed to set up a payment passkey."));
     } finally {
       setBusy(false);
     }

@@ -600,4 +600,34 @@ describe("pay page — single payment authorization", () => {
       api.apiPost.mock.calls.some(([path]) => path === "/v1/pay/approvals/appr_1/approve"),
     ).toBe(false);
   });
+
+  it("names the card unlock failure when decrypt rejects with an empty message", async () => {
+    bound = true;
+    // Chrome rejects a failed AES-GCM decrypt with an OperationError whose
+    // message is "".
+    vault.decryptCard.mockRejectedValue(new DOMException("", "OperationError"));
+    render(<PaymentApprovalPage />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: /Approve payment/ }));
+    await screen.findByText(/This passkey could not unlock the card/);
+    const banner = document.querySelector(".app-banner.err");
+    expect(banner?.textContent?.trim()).not.toBe("");
+    expect(banner?.textContent).not.toContain("4242424242424242");
+    expect(
+      api.apiPost.mock.calls.some(([path]) => path === "/v1/pay/approvals/appr_1/approve"),
+    ).toBe(false);
+  });
+
+  it("names the submit step when the approve request fails with an empty message", async () => {
+    bound = true;
+    api.apiPost.mockImplementation((path: string) =>
+      path === "/v1/pay/approvals/appr_1/approve"
+        ? Promise.reject(new api.ApiError("", 502))
+        : Promise.resolve({}),
+    );
+    render(<PaymentApprovalPage />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: /Approve payment/ }));
+    await screen.findByText("Failed to submit the payment approval.");
+  });
 });
