@@ -14,7 +14,7 @@
 //   credentials. This is the "is the vault actually persistent or did
 //   it just hide" test.
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { issueAgentSession } from "../auth/agent.js";
 import { issueSession, signSessionJwt, SESSION_COOKIE_NAME } from "../auth/session.js";
@@ -22,7 +22,6 @@ import { buildInMemoryDeps, type ApiDeps } from "../services/deps.js";
 import { buildServer } from "../server.js";
 
 const SESSION_SECRET = "dev-test-secret-do-not-use-anywhere-else";
-const CUSTOMER_ID = "ts-test";
 
 interface Harness {
   server: FastifyInstance;
@@ -81,10 +80,7 @@ describe("E2E #1 — install → signup → vault data path", () => {
   it("bot writes a Resend key via agent auth; web AND agent reads both surface it", async () => {
     // Set up: an account exists (the install handshake's /claim step
     // creates it; we shortcut that by creating it directly).
-    const account = await h.deps.accountStore.createAccount(
-      "user@example.test",
-      "Test User",
-    );
+    const account = await h.deps.accountStore.createAccount("user@example.test", "Test User");
     const agentToken = await makeAgentToken(h.deps, account.id);
     const { cookie: webCookie } = await makeWebSession(h.deps, account.id);
 
@@ -196,6 +192,125 @@ describe("E2E #1 — install → signup → vault data path", () => {
     const bodyB = listB.json() as { credentials: unknown[] };
     expect(bodyB.credentials).toHaveLength(0);
   });
+
+  it("reports another entry with an identical field while preserving stores and rotations", async () => {
+    const account = await h.deps.accountStore.createAccount("duplicate@example.test", "Duplicate");
+    const other = await h.deps.accountStore.createAccount("other@example.test", "Other");
+    const token = await makeAgentToken(h.deps, account.id);
+    const otherToken = await makeAgentToken(h.deps, other.id);
+    const save = async (bearer: string, payload: Record<string, unknown>) =>
+      h.server.inject({
+        method: "POST",
+        url: "/v1/vault/credentials",
+        headers: { authorization: `Bearer ${bearer}`, "content-type": "application/json" },
+        payload,
+      });
+
+    const original = (
+      await save(token, {
+        service: "Openrouter",
+        fields: { api_key: "shared-test-value", other: "original-only" },
+      })
+    ).json() as { reference: string; duplicate_of?: unknown };
+    expect(original.duplicate_of).toBeUndefined();
+
+    const sameSlot = (
+      await save(token, {
+        service: "Openrouter",
+        fields: { api_key: "shared-test-value", other: "original-only" },
+      })
+    ).json() as { reference: string; updated: boolean; duplicate_of?: unknown };
+    expect(sameSlot.reference).toBe(original.reference);
+    expect(sameSlot.updated).toBe(true);
+    expect(sameSlot.duplicate_of).toBeUndefined();
+
+    const distinct = (await save(token, { service: "Distinct", value: "different-value" })).json();
+    expect(distinct.duplicate_of).toBeUndefined();
+
+    const crossAccount = (
+      await save(otherToken, {
+        service: "Other account",
+        value: "shared-test-value",
+      })
+    ).json();
+    expect(crossAccount.duplicate_of).toBeUndefined();
+
+    const copyResponse = await save(token, {
+      service: "Beeline agents",
+      value: "shared-test-value",
+    });
+    expect(copyResponse.statusCode).toBe(201);
+    const copy = copyResponse.json() as {
+      reference: string;
+      duplicate_of: Array<{ service: string; label: string; reference: string }>;
+      hint: string;
+    };
+    expect(copy.reference).not.toBe(original.reference);
+    expect(copy.duplicate_of).toEqual([
+      { service: "Openrouter", label: "default", reference: original.reference },
+    ]);
+    expect(copy.hint).toContain("grant_app_access");
+    expect(copy.hint).toContain("use_credential");
+    expect(JSON.stringify(copy)).not.toContain("shared-test-value");
+
+    const rotation = await save(token, { service: "Openrouter", value: "new-value" });
+    expect(rotation.statusCode).toBe(200);
+    const rotated = rotation.json() as {
+      reference: string;
+      updated: boolean;
+      duplicate_of?: unknown;
+    };
+    expect(rotated.reference).toBe(original.reference);
+    expect(rotated.updated).toBe(true);
+    expect(rotated.duplicate_of).toBeUndefined();
+
+    const lookup = vi
+      .spyOn(h.deps.credentialStore, "listByAccount")
+      .mockRejectedValueOnce(new Error("candidate list unavailable"));
+    const stillStored = await save(token, { service: "Advisory failure", value: "new-value" });
+    expect(stillStored.statusCode).toBe(201);
+    expect(stillStored.json()).not.toHaveProperty("duplicate_of");
+    lookup.mockRestore();
+  });
+
+  it("ignores shared login identifiers but reports a shared password", async () => {
+    const account = await h.deps.accountStore.createAccount("logins@example.test", "Logins");
+    const token = await makeAgentToken(h.deps, account.id);
+    const save = async (service: string, fields: Record<string, string>) =>
+      h.server.inject({
+        method: "POST",
+        url: "/v1/vault/credentials",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        payload: { service, fields },
+      });
+
+    const first = (
+      await save("Login A", {
+        email: "shared@example.test",
+        password: "first-password-123",
+      })
+    ).json() as { reference: string };
+    const second = await save("Login B", {
+      username: "shared@example.test",
+      password: "second-password-456",
+    });
+    expect(second.statusCode).toBe(201);
+    expect(second.json()).not.toHaveProperty("duplicate_of");
+
+    const matchingPassword = await save("Login B", {
+      email: "shared@example.test",
+      password: "first-password-123",
+    });
+    expect(matchingPassword.statusCode).toBe(200);
+    expect(matchingPassword.json().duplicate_of).toEqual([
+      { service: "Login A", label: "default", reference: first.reference },
+    ]);
+
+    const shortSecret = await save("Login C", { password: "short" });
+    expect(shortSecret.json()).not.toHaveProperty("duplicate_of");
+    const sameShortSecret = await save("Login D", { password: "short" });
+    expect(sameShortSecret.json()).not.toHaveProperty("duplicate_of");
+  });
 });
 
 describe("E2E #2 — vault persistence across web sessions", () => {
@@ -212,10 +327,7 @@ describe("E2E #2 — vault persistence across web sessions", () => {
     const agentToken = await makeAgentToken(h.deps, account.id);
 
     // First session: store a credential.
-    const { cookie: firstCookie, jti: firstJti } = await makeWebSession(
-      h.deps,
-      account.id,
-    );
+    const { cookie: firstCookie, jti: firstJti } = await makeWebSession(h.deps, account.id);
     await h.server.inject({
       method: "POST",
       url: "/v1/vault/credentials",
@@ -272,6 +384,8 @@ describe("E2E #2 — vault persistence across web sessions", () => {
       headers: { cookie: secondCookie },
     });
     expect(reveal.statusCode).toBe(200);
-    expect((reveal.json() as { fields: Record<string, string> }).fields.value).toBe("re_pre_signout_value");
+    expect((reveal.json() as { fields: Record<string, string> }).fields.value).toBe(
+      "re_pre_signout_value",
+    );
   });
 });

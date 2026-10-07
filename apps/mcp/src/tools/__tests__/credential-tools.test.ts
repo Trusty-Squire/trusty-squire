@@ -87,6 +87,36 @@ describe("store_credential (upsert)", () => {
     });
   });
 
+  it("surfaces the API's duplicate hint without altering the save result", async () => {
+    const api = mockApi({
+      storeCredential: async () => ({
+        reference: "vault://a/b/new",
+        service: "Beeline agents",
+        label: "default",
+        field_names: ["value"],
+        auth_strategy: null,
+        signin_url: null,
+        login_hosts: [],
+        allowed_hosts: [],
+        created_at: "x",
+        updated: false,
+        duplicate_of: [{ service: "Openrouter", label: "default", reference: "vault://a/b/old" }],
+        hint: "Use the existing credential for grants.",
+      }),
+    });
+    const result = await storeCredentialTool.handler(
+      { service: "Beeline agents", value: "shared-test-value" },
+      api,
+    );
+    expect(result).toMatchObject({
+      reference: "vault://a/b/new",
+      updated: false,
+      duplicate_of: [{ reference: "vault://a/b/old" }],
+      hint: "Use the existing credential for grants.",
+    });
+    expect(JSON.stringify(result)).not.toContain("shared-test-value");
+  });
+
   it("forwards observed_hosts so captured keys do not land with an empty allowlist", async () => {
     let seen: unknown;
     const api = mockApi({

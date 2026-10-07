@@ -48,7 +48,9 @@ field of the credential together under one approval (for example, a website
 login's email and password). Pass \`field\` to receive only that one field;
 call list_credentials for field names. Pass optional \`reason\`
 (short, in your own words) saying what you will do with the value so the
-owner can see who is asking and why.`;
+owner can see who is asking and why. Do not re-store a fetched value; mint a
+grant on the existing credential with \`grant_app_access\` or use it with
+\`use_credential\`.`;
 
 function refusal(reason: string, approval: CredentialFetchApproval): Record<string, unknown> {
   return {

@@ -592,6 +592,11 @@ async function storeUpsert(
     ? await opts.deps.credentialStore.findActive(entry.reference)
     : null;
   const persistedMetadata = persisted?.metadata ?? {};
+  // Duplicate detection is advisory. A list/KMS failure must not turn a
+  // completed write into an error or change the upsert/rotation contract.
+  const duplicateOf = await opts.deps.vault
+    .findDuplicates(accountId, fieldsFrom(data), entry.reference)
+    .catch(() => []);
   reply.code(entry.updated ? 200 : 201).send({
     reference: entry.reference,
     service: entry.service,
@@ -619,6 +624,12 @@ async function storeUpsert(
     allowed_hosts: entry.allowed_hosts,
     created_at: entry.created_at,
     updated: entry.updated,
+    ...(duplicateOf.length > 0
+      ? {
+          duplicate_of: duplicateOf,
+          hint: "An identical value already exists; to give an app or agent access, call grant_app_access or use_credential on the existing credential instead of copying it, because copies do not follow rotations.",
+        }
+      : {}),
   });
 }
 

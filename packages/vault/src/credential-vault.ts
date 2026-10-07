@@ -188,6 +188,37 @@ export interface VaultEntry {
   updated: boolean;
 }
 
+export interface DuplicateCredential {
+  service: string;
+  label: string;
+  reference: string;
+}
+
+function secretValues(fields: Record<string, string>): Set<string> {
+  const values = new Set<string>();
+  const singleValue = Object.keys(fields).length === 1 && fields.value !== undefined;
+  for (const [name, value] of Object.entries(fields)) {
+    if (value.length < 8) continue;
+    if (singleValue && name === "value") {
+      values.add(value);
+      continue;
+    }
+    const field = name
+      .replace(/([a-z\d])([A-Z])/g, "$1_$2")
+      .toLowerCase()
+      .replace(/[^a-z\d]+/g, "_")
+      .replace(/^_|_$/g, "");
+    // A key's identifier, URL, or public half can repeat without sharing
+    // the secret. Specific secret names such as client_secret still qualify.
+    if (/(?:^|_)(?:id|name|url|uri|host|hostname|hint|type)$/.test(field)) continue;
+    if (field.startsWith("public_key") || field.startsWith("publickey")) continue;
+    if (/(?:^|_)(?:password|passphrase|secret|token|key|otp|totp|seed)(?:_|$)/.test(field)) {
+      values.add(value);
+    }
+  }
+  return values;
+}
+
 export interface RotateResult {
   rotated_at: string;
 }
@@ -381,6 +412,36 @@ export interface CredentialVaultDeps {
 
 export class CredentialVault implements VaultClient {
   constructor(private readonly deps: CredentialVaultDeps) {}
+
+  // The existing account-scoped list already contains the encrypted envelopes.
+  // Compare their decrypted field values here, without a retrieval audit or a
+  // stored fingerprint. This is an advisory read; an unreadable candidate is
+  // skipped so it cannot prevent a successful store.
+  async findDuplicates(
+    accountId: string,
+    fields: Record<string, string>,
+    excludeReference: string,
+  ): Promise<DuplicateCredential[]> {
+    const values = secretValues(fields);
+    if (values.size === 0) return [];
+    const records = await this.deps.store.listByAccount(accountId);
+    const matches: DuplicateCredential[] = [];
+    for (const record of records) {
+      if (record.reference === excludeReference) continue;
+      try {
+        const candidate = await this.decryptFields(record);
+        if (![...secretValues(candidate)].some((value) => values.has(value))) continue;
+        matches.push({
+          service: typeof record.metadata.service === "string" ? record.metadata.service : "",
+          label: record.label,
+          reference: record.reference,
+        });
+      } catch {
+        // Corrupt/unavailable candidates do not affect the stored entry.
+      }
+    }
+    return matches;
+  }
 
   // Upsert by (account, service, label). Creates on first write;
   // overwrites the field set (= rotation) on subsequent writes, keeping

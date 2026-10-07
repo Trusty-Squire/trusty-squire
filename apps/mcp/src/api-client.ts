@@ -386,6 +386,8 @@ export class ApiClient {
     allowed_hosts: string[];
     created_at: string;
     updated: boolean;
+    duplicate_of?: Array<{ service: string; label: string; reference: string }>;
+    hint?: string;
   }> {
     return this.post("/v1/vault/credentials", input);
   }

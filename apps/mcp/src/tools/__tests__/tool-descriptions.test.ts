@@ -21,6 +21,7 @@ import {
 import { injectCardTool } from "../inject-card.js";
 import { useCredentialTool } from "../use-credential.js";
 import { fetchCredentialTool } from "../fetch-credential.js";
+import { storeCredentialTool } from "../store-credential.js";
 import { SERVER_INSTRUCTIONS } from "../../server.js";
 
 const STEERING_SURFACE = [...OPERATE_TOOLS, useCredentialTool, fetchCredentialTool];
@@ -45,6 +46,14 @@ describe("agent-facing steering text", () => {
 // fetch_credential is the one tool whose correct use is mostly "don't". The
 // steering has to say so in every place the model might reach for it.
 describe("the raw-value path is steered as the last resort", () => {
+  it("store and fetch steer grants to the existing credential", () => {
+    for (const description of [storeCredentialTool.description, fetchCredentialTool.description]) {
+      expect(description).toContain("Do not re-store a fetched value");
+      expect(description).toContain("grant_app_access");
+      expect(description).toContain("use_credential");
+    }
+  });
+
   it("fetch_credential names the cost, the approval, and the cheaper route", () => {
     const description = fetchCredentialTool.description;
     expect(description).toContain("transcript");
@@ -134,9 +143,11 @@ describe("still-true contracts survive the cleanup", () => {
   });
 
   it("states the minor-unit rule on every payment amount prompt", () => {
-    const amountDescription = (injectCardTool.jsonInputSchema.properties as {
-      amount_cents: { description: string };
-    }).amount_cents.description;
+    const amountDescription = (
+      injectCardTool.jsonInputSchema.properties as {
+        amount_cents: { description: string };
+      }
+    ).amount_cents.description;
     for (const description of [
       injectCardTool.description,
       amountDescription,
