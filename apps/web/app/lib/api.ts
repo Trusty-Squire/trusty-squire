@@ -39,7 +39,7 @@ async function request<T>(
     body: body !== undefined ? JSON.stringify(body) : null,
   });
   if (!res.ok) {
-    let detail = res.statusText;
+    let detail = res.statusText || `HTTP ${res.status}`;
     try {
       const parsed = (await res.json()) as { error?: string };
       if (typeof parsed.error === "string") detail = parsed.error;
