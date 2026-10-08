@@ -454,6 +454,8 @@ const pressSchema = z.object({
   format: actionFormatSchema.optional(),
 });
 
+const solveCaptchaSchema = z.object({ ...sessionShape });
+
 const scrollSchema = z.object({
   ...sessionShape,
   direction: z.enum(["down", "up", "bottom", "top"]).default("down"),
@@ -914,6 +916,23 @@ export const operatePressTool: Tool = {
   },
 };
 
+export const operateSolveCaptchaTool: Tool = {
+  name: "operate_solve_captcha",
+  description:
+    "Press a visible CAPTCHA checkbox and try the configured 2Captcha solver. Returns the outcome and a fresh page observation; check a pending solve with operate_observe.",
+  inputSchema: solveCaptchaSchema,
+  jsonInputSchema: {
+    type: "object",
+    required: ["session_id"],
+    properties: { ...sessionJson },
+  },
+  async handler(args, api, context) {
+    return await (
+      await import("./provision-drive.js")
+    ).operateSolveCaptchaTool.handler(args as never, api, context);
+  },
+};
+
 export const operateScrollTool: Tool = {
   name: "operate_scroll",
   description:
@@ -1089,6 +1108,7 @@ export const OPERATE_TOOLS: Tool[] = [
   operateSelectTool,
   operateUploadTool,
   operatePressTool,
+  operateSolveCaptchaTool,
   operateScrollTool,
   operateWaitTool,
   operateReadInboxTool,

@@ -95,7 +95,7 @@ import {
   resolveDriveApprovalAmount,
 } from "./checkout-total.js";
 import {
-  attemptOperateCaptchaAutoSolve,
+  runOperateCaptchaSolve,
   captchaAutoSolveHasWork,
   injectPendingCaptchaToken,
 } from "./captcha-solve.js";
@@ -104,7 +104,6 @@ import {
   RES_TIMEOUT_MS,
   hasVisibleCheckboxCaptchaWidget,
   isCaptchaFrameUrl,
-  solveVisibleCaptcha,
 } from "./captcha.js";
 import type { CaptchaSolveResult } from "./captcha.js";
 import { findCredentialTokens, isMaskedDisplay } from "./credential-shape.js";
@@ -392,15 +391,6 @@ const defaultInjectCard: InjectCardFn = async (session, args, api, options) => {
   const { injectCardOnSession } = await import("../tools/inject-card.js");
   return await injectCardOnSession(session, args, api, options);
 };
-
-const defaultPressCheckboxChallenge: NonNullable<
-  DriveDependencies["pressCheckboxChallenge"]
-> = async (session, page) =>
-  await solveVisibleCaptcha(
-    session.browser,
-    DRIVE_CHECKBOX_CHALLENGE_PRESS_TIMEOUT_MS,
-    page ?? session.browser.page,
-  );
 
 const defaultDependencies: DriveDependencies = {
   askJev,
@@ -5524,16 +5514,23 @@ async function driveLoop(input: {
     });
 
   const solveCaptcha = async (): Promise<string> =>
-    await (dependencies.attemptCaptchaAutoSolve ?? attemptOperateCaptchaAutoSolve)(
-      session,
-      session.browser.page ?? undefined,
-    );
+    (
+      await runOperateCaptchaSolve(session, {
+        page: session.browser.page ?? undefined,
+        attemptAutoSolve: dependencies.attemptCaptchaAutoSolve,
+      })
+    ).outcome;
 
-  const pressCheckboxChallenge = async (): Promise<CaptchaSolveResult> =>
-    await (dependencies.pressCheckboxChallenge ?? defaultPressCheckboxChallenge)(
-      session,
-      session.browser.page ?? undefined,
-    );
+  const pressCheckboxChallenge = async (timeoutMs: number): Promise<CaptchaSolveResult> =>
+    (
+      await runOperateCaptchaSolve(session, {
+        page: session.browser.page ?? undefined,
+        pressCheckbox: true,
+        autoSolve: false,
+        pressTimeoutMs: timeoutMs,
+        pressCheckboxChallenge: dependencies.pressCheckboxChallenge,
+      })
+    ).checkbox!;
 
   const rememberSubmitResponse = (): void => {
     if (typeof drive.submitBeforeText !== "string") return;
@@ -7165,14 +7162,7 @@ async function driveLoop(input: {
           ...(drive.checkboxChallengePressedKeys ?? []),
           progressKey,
         ];
-        const pressed =
-          dependencies.pressCheckboxChallenge !== undefined
-            ? await pressCheckboxChallenge()
-            : await solveVisibleCaptcha(
-                session.browser,
-                pressBudget,
-                session.browser.page ?? undefined,
-              );
+        const pressed = await pressCheckboxChallenge(pressBudget);
         if (pressed.found) dispatchedActs += 1;
         if (pressed.found && pressed.solved) lastCaptchaOutcome = "ok";
         const pressedSnap = await snapshotOrTimeout(framesIfNeeded());

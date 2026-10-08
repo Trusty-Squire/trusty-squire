@@ -9,6 +9,8 @@ import {
   throwIfOperatorRequestCancelled,
 } from "../bot/request-cancellation.js";
 import { runOperateDrive } from "../bot/operate-drive.js";
+import { runOperateCaptchaSolve } from "../bot/captcha-solve.js";
+import { detectCaptchaVariant, hasVisibleCheckboxCaptchaWidget } from "../bot/captcha.js";
 import { createHash, randomUUID } from "node:crypto";
 // Phase 1 — the interactive provisioning tool surface a frontier HOST agent
 // drives. The host is the planner; these tools are the browser + the moat.
@@ -1379,6 +1381,30 @@ export const operatePressTool: Tool<z.infer<typeof pressSchema>> = {
     await runAction(args.session_id, { kind: "press", key: args.key }, args.format ?? "compact"),
 };
 
+const solveCaptchaSchema = z.object({ ...sessionShape });
+export const operateSolveCaptchaTool: Tool<z.infer<typeof solveCaptchaSchema>> = {
+  name: "operate_solve_captcha",
+  description:
+    "Press a visible CAPTCHA checkbox and try the configured 2Captcha solver. Returns the outcome and a fresh page observation; check a pending solve with operate_observe.",
+  inputSchema: solveCaptchaSchema,
+  jsonInputSchema: {
+    type: "object",
+    required: ["session_id"],
+    properties: { ...sessionJson },
+  },
+  async handler(args) {
+    const session = sessionForCall(args.session_id);
+    if (session === undefined) throw new Error(`unknown provision session ${args.session_id}`);
+    const page = session.browser.page ?? undefined;
+    const pressCheckbox =
+      page !== undefined &&
+      !(await detectCaptchaVariant(session.browser, page)).challengeRendered &&
+      (await hasVisibleCheckboxCaptchaWidget(page));
+    const result = await runOperateCaptchaSolve(session, { page, pressCheckbox });
+    return { ...(await observe(args.session_id, "compact")), captcha: result };
+  },
+};
+
 const scrollSchema = z.object({
   ...sessionShape,
   direction: z.enum(["down", "up", "bottom", "top"]).default("down"),
@@ -1653,6 +1679,7 @@ export const OPERATE_TOOLS: Tool[] = [
   operateSelectTool,
   operateUploadTool,
   operatePressTool,
+  operateSolveCaptchaTool,
   operateScrollTool,
   operateWaitTool,
   operateReadInboxTool,
