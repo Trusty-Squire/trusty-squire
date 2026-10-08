@@ -135,20 +135,6 @@ export type ResolvedPageTarget =
     }
   | { ok: false; reason: "none" | "ambiguous"; candidates: string[] };
 
-export interface BrowserAction {
-  type: "goto" | "click" | "type" | "screenshot" | "extract" | "wait";
-  selector?: string;
-  text?: string;
-  url?: string;
-}
-
-export interface BrowserState {
-  url: string;
-  title: string;
-  html: string;
-  screenshot: string; // base64
-}
-
 // Checkout data types moved to checkout.ts (design PR 5, where the caller-less
 // checkout parsing/reads were deleted); re-exported so the existing
 // browser-side CheckoutCard importers are unchanged in this PR.
@@ -685,8 +671,6 @@ export class BrowserController implements BrowserDriver {
     hardened: boolean,
     remoteMode: boolean,
   ): Promise<void> {
-    // Speed: optionally abort heavy/irrelevant requests before any navigation.
-    await this.installResourceBlocking();
     const contextInitScripts = contextInitScriptsFor({ hardened, remoteMode });
     // Never register context init scripts under patchright. Its injection path
     // rewrites text/html after decoding the response as UTF-8, corrupting
@@ -922,53 +906,6 @@ export class BrowserController implements BrowserDriver {
     return this.processOwner.stealthProfile;
   }
 
-  // Resource blocking for speed (BOT_BLOCK_RESOURCES, default OFF). Aborts
-  // image/media/font requests to cut page-load wall-clock. Exempt captcha/challenge + payment
-  // scripts (blocking those breaks the Turnstile/hCaptcha token poll and the
-  // signup form). CSS + first-party JS are never blocked (not in BLOCK_TYPES) —
-  // the SPA form renders from them and the vision planner reads the styled
-  // render. DUAL RISK, hence default-OFF + an OF#2 A/B before flipping on:
-  //   (1) a browser that loads ZERO images is itself an anti-bot fingerprint;
-  //   (2) the screenshot the vision planner reads loses detail — mitigated
-  //       because the DOM inventory is the authoritative action space, but
-  //       still a regression risk on image-only affordances.
-  // Registered on the CONTEXT so it covers OAuth popups + iframes.
-  private async installResourceBlocking(): Promise<void> {
-    const ctx = this.context;
-    if (ctx === null) return;
-    if (!/^(1|true|on)$/i.test(process.env.BOT_BLOCK_RESOURCES ?? "")) return;
-    const BLOCK_TYPES = new Set(["image", "media", "font"]);
-    // NEVER block — these break signup (captcha/challenge widgets + payment SDK).
-    const ALWAYS_ALLOW = [
-      "challenges.cloudflare.com",
-      "turnstile",
-      "hcaptcha.com",
-      "newassets.hcaptcha.com",
-      "recaptcha",
-      "gstatic.com/recaptcha",
-      "js.stripe.com",
-    ];
-    await ctx.route("**/*", async (route) => {
-      try {
-        const url = route.request().url();
-        if (ALWAYS_ALLOW.some((h) => url.includes(h))) {
-          await route.continue();
-          return;
-        }
-        const type = route.request().resourceType();
-        if (BLOCK_TYPES.has(type)) {
-          await route.abort();
-          return;
-        }
-        await route.continue();
-      } catch {
-        // Routing race / already-handled — never let a decision crash nav.
-      }
-    });
-    this.logOperatorDiagnostic(
-      "[operator] resource blocking ON (image/media/font aborted; captcha/CSS/JS allowed)",
-    );
-  }
   async start(): Promise<void> {
     // A satellite's page is already attached by attachSessionPage() — there is
     // no process for it to start.
@@ -4224,50 +4161,8 @@ export class BrowserController implements BrowserDriver {
     }
   }
 
-  async getState(page: Page | null = this.page): Promise<BrowserState> {
-    if (!page) throw new Error("Browser not started");
-    // page.content() / page.title() / screenshot() all throw
-    // "Execution context was destroyed" when the page is mid-
-    // navigation — common after an OAuth-button click that kicks off
-    // a 3-5 hop redirect chain (sentry.io → accounts.google.com →
-    // consent → callback → onboarding). Retry once after a short
-    // settle: most navigations finish in <500ms even on slow links.
-    try {
-      return await this.snapshotState(page);
-    } catch {
-      await this.wait(0.8);
-      return await this.snapshotState(page);
-    }
-  }
-
-  private async snapshotState(page: Page | null = this.page): Promise<BrowserState> {
-    if (!page) throw new Error("Browser not started");
-    return {
-      url: page.url(),
-      title: await page.title(),
-      html: await page.content(),
-      screenshot: await page
-        .screenshot({ fullPage: false, type: "jpeg", quality: 70, timeout: 8_000 })
-        .then((shot) => shot.toString("base64"))
-        .catch(() => ""),
-    };
-  }
-
-  async extractText(): Promise<string> {
-    if (!this.page) throw new Error("Browser not started");
-    return (await this.page.textContent("body")) || "";
-  }
-
-  // RENDERED, visibility-respecting body text. extractText() reads
-  // textContent("body"), which includes display:none / visibility:hidden /
-  // off-screen nodes — so a fully-rendered dashboard whose DOM merely
-  // CONTAINS a hidden skeleton / "Loading…" / "Please wait 30 seconds…"
-  // string (Next.js RSC inline payloads, lazy placeholders, aria-hidden
-  // spinners) reads as still-loading and false-trips the loading-shell gate.
-  // innerText is layout-aware: it omits hidden text and reflects what a user
-  // would actually see. Use this for the SHELL decision ONLY — credential/key
-  // extraction and wall-text checks deliberately read RAW text via
-  // extractText() and must stay byte-identical, so this is purely additive.
+  // Visible page text omits hidden skeletons and placeholders that could
+  // otherwise make a rendered page look like it is still loading.
   async extractVisibleText(page: Page | null = this.page): Promise<string> {
     if (page === null) throw new Error("Browser not started");
     return this.cardValueOutputMask.maskText(await page.evaluate(extractObservationVisibleText));
@@ -4590,20 +4485,6 @@ export class BrowserController implements BrowserDriver {
     }
   }
 
-  // Discrete strings an API key might occupy — for credential
-  // extraction. Gathered so a key is read WHOLE and un-glued from its
-  // neighbours: extractText() concatenates the whole <body>, which
-  // fuses a key to an adjacent "Copy"/"Done" button with no separator.
-  //
-  // Two surfaces:
-  //   1. input/textarea VALUES — a copy-to-clipboard key field. An
-  //      input's value is not in textContent at all. Hidden and
-  //      password fields are excluded (captcha tokens / the signup
-  //      password), keeping this a clean credential surface.
-  //   2. Each element's OWN direct text — the text nodes that are its
-  //      immediate children, excluding descendants. A key in a
-  //      <code>/<span>/<div> yields its clean value here even when a
-  //      sibling button shares the same parent.
   // F10: read the clipboard contents (typically populated by the
   // user-modal's Copy button — every modern API-key reveal modal puts
   // the full secret here while displaying a masked stub). Requires
@@ -4636,56 +4517,6 @@ export class BrowserController implements BrowserDriver {
       } finally {
         if (timeout !== undefined) window.clearTimeout(timeout);
       }
-    });
-  }
-
-  async extractCredentialCandidates(): Promise<string[]> {
-    if (!this.page) throw new Error("Browser not started");
-    return await this.page.evaluate(() => {
-      const out: string[] = [];
-      const isVisible = (el: Element): boolean => {
-        const r = el.getBoundingClientRect();
-        return r.width > 2 && r.height > 2;
-      };
-      document.querySelectorAll("input, textarea").forEach((el) => {
-        // Only text-shaped inputs can RENDER a credential. A checkbox/
-        // radio/button's `value` is a markup constant, not page content —
-        // zilliz's CookieScript banner ships `<input type="checkbox"
-        // value="personalization">` and those words sit earlier in DOM
-        // order than the real key, so the validator-shaped scan tier was
-        // returning them as the "credential".
-        if (
-          el instanceof HTMLInputElement &&
-          !["text", "search", "url", "tel", "number", "email", ""].includes(el.type)
-        ) {
-          return;
-        }
-        const value =
-          el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement ? el.value : "";
-        if (value.trim().length > 0 && isVisible(el)) out.push(value.trim());
-      });
-      document.querySelectorAll("body *").forEach((el) => {
-        if (el.tagName === "SCRIPT" || el.tagName === "STYLE") return;
-        if (!isVisible(el)) return;
-        let direct = "";
-        el.childNodes.forEach((n) => {
-          if (n.nodeType === Node.TEXT_NODE) direct += n.textContent ?? "";
-        });
-        direct = direct.trim();
-        // A real key is short; a long blob is a paragraph, not a key.
-        if (direct.length > 0 && direct.length <= 256) out.push(direct);
-      });
-      // Structural containers (<code>, <pre>, kbd, samp, [role=textbox])
-      // often render a credential by interpolating it through nested
-      // <span>s — the loop above sees an empty direct-text and skips
-      // them. Push the full textContent so a UUID built as
-      // <code><span>7</span><span>5</span>…</code> is still scannable.
-      document.querySelectorAll('code, pre, kbd, samp, [role="textbox"]').forEach((el) => {
-        if (!isVisible(el)) return;
-        const full = (el.textContent ?? "").trim();
-        if (full.length > 0 && full.length <= 256) out.push(full);
-      });
-      return out;
     });
   }
 

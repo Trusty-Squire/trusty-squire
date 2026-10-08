@@ -118,7 +118,7 @@ export class PageDriver {
   }
 
   // URL of the active page (the OAuth page mid-handshake, the product
-  // page otherwise). Cheap — no screenshot, unlike getState().
+  // page otherwise). Cheap — no screenshot capture.
   currentUrl(): string {
     return this.page !== null ? this.page.url() : "";
   }
