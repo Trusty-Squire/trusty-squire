@@ -21,6 +21,7 @@ const vault = vi.hoisted(() => ({ decryptCard: vi.fn() }));
 const pairing = vi.hoisted(() => ({
   getPairingState: vi.fn(),
   pairDevice: vi.fn(),
+  registerEnrolledDevice: vi.fn().mockResolvedValue(true),
   isPaymentPasskeyUnavailable: vi.fn((_err: unknown) => false),
 }));
 
@@ -581,6 +582,7 @@ describe("pay page — single payment authorization", () => {
     expect(screen.getByRole("button", { name: "Deny payment" })).toBeTruthy();
     await user.click(setup);
     await waitFor(() => expect(pairing.pairDevice).toHaveBeenCalledTimes(1));
+    expect(pairing.registerEnrolledDevice).toHaveBeenCalledTimes(1);
     expect(api.apiGet).toHaveBeenCalledWith("/v1/vault/e2e");
     expect(
       api.apiPost.mock.calls.some(([path]) => path === "/v1/pay/approvals/appr_1/approve"),
@@ -609,7 +611,7 @@ describe("pay page — single payment authorization", () => {
     render(<PaymentApprovalPage />);
     const user = userEvent.setup();
     await user.click(await screen.findByRole("button", { name: /Approve payment/ }));
-    await screen.findByText(/This passkey could not unlock the card/);
+    await screen.findByText(/This card was saved with a different passkey/);
     const banner = document.querySelector(".app-banner.err");
     expect(banner?.textContent?.trim()).not.toBe("");
     expect(banner?.textContent).not.toContain("4242424242424242");
@@ -639,7 +641,7 @@ describe("pay page — single payment authorization", () => {
     render(<PaymentApprovalPage />);
     const user = userEvent.setup();
     await user.click(await screen.findByRole("button", { name: /Approve payment/ }));
-    await screen.findByText(/This passkey could not unlock the card/);
+    await screen.findByText(/This card was saved with a different passkey/);
   });
 
   it("shows an error instead of passkey setup when an enrolled passkey returns no card key", async () => {

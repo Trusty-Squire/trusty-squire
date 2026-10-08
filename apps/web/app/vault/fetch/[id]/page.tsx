@@ -3,7 +3,9 @@
 import { useCallback, useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { AppShell } from "../../../components/AppShell";
+import { PasskeySetup } from "../../../components/PasskeySetup";
 import { ApiError, apiGet, apiPost } from "../../../lib/api";
+import { errorText } from "../../../lib/error-text";
 import {
   approvalErrorMessage,
   getPairingState,
@@ -62,7 +64,7 @@ export default function CredentialFetchApprovalPage() {
       })
       .catch((caught: unknown) => {
         if (cancelled) return;
-        setError(caught instanceof Error ? caught.message : "Failed to load approval.");
+        setError(errorText(caught, "Failed to load approval."));
       });
     return () => {
       cancelled = true;
@@ -120,18 +122,18 @@ export default function CredentialFetchApprovalPage() {
       );
       setCeremony(await fetchCeremony());
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Denial failed.");
+      setError(errorText(caught, "Denial failed."));
     } finally {
       setBusy(false);
     }
   }, [ceremony, fetchCeremony]);
 
-  const setUpPasskey = useCallback(async () => {
+  const setUpPasskey = useCallback(async (forceNew: boolean) => {
     setBusy(true);
     setError(null);
     try {
       await apiGet("/v1/vault/e2e");
-      await pairDevice();
+      await pairDevice({ forceNew });
       // Setting up here needed a session (the /v1/vault/e2e probe above), so
       // this is the moment the new device can be claimed for the account — and
       // a claim that lands here counts, or the next refusal would send a human
@@ -143,7 +145,7 @@ export default function CredentialFetchApprovalPage() {
         redirectToLogin();
         return;
       }
-      setError(caught instanceof Error ? caught.message : "Failed to set up passkey.");
+      throw caught;
     } finally {
       setBusy(false);
     }
@@ -205,14 +207,7 @@ export default function CredentialFetchApprovalPage() {
           </p>
 
           {needsPasskeySetup ? (
-            <button
-              className="btn-primary"
-              type="button"
-              onClick={() => void setUpPasskey()}
-              disabled={busy}
-            >
-              {busy ? "Setting up…" : "Sign in and set up passkey"}
-            </button>
+            <PasskeySetup onSetup={setUpPasskey} busy={busy} />
           ) : (
             <div style={{ display: "flex", gap: "var(--s-3)", flexWrap: "wrap" }}>
               <button

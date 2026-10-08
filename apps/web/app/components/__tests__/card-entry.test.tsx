@@ -20,6 +20,7 @@ vi.mock("../../lib/api", () => ({
 const pairing = vi.hoisted(() => ({
   getPairingState: vi.fn(),
   pairDevice: vi.fn(),
+  registerEnrolledDevice: vi.fn().mockResolvedValue(true),
 }));
 vi.mock("../../lib/pairing", () => pairing);
 
