@@ -782,6 +782,20 @@ describe("decideAfterJev stop reasons", () => {
     expect(requiredFillableMissingFact(ROWS, missingFacts)?.ref).toBe("@e:email");
   });
 
+  it("does not generate a password fact on a create-account step", () => {
+    const rows: WireRow[] = [
+      ["@e:password", "t", "New password|f=password|s=r"],
+      ["@e:create", "b", "Create account"],
+    ];
+    const facts = ensureGeneratedFacts(
+      rows,
+      { email: "ada@fixture.test", name: "Ada Lovelace", date_of_birth: "1815-12-10" },
+      { pageUrl: "https://kagi.com/signup", headings: ["Secure your account"] },
+    );
+    expect(facts.password).toBeUndefined();
+    expect(requiredFillableMissingFact(rows, facts)?.ref).toBe("@e:password");
+  });
+
   it("defers a card expiry control only while a card is in play", () => {
     const expiry: WireRow = ["@e:exp", "t", "Expiration date (MM / YY)|s=r"];
     expect(isExpiryRow(expiry)).toBe(true);

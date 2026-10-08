@@ -307,7 +307,7 @@ describe("drive OAuth trace", () => {
     }
   }, 30_000);
 
-  it("still generates and types a password on a new-account form", async () => {
+  it("hands back a new-account password when no password fact was supplied", async () => {
     const context = await browser.newContext();
     const page = await context.newPage();
     await page.goto(`data:text/html,${encodeURIComponent('<main><h1>Create an account</h1><label>Password <input type="password" name="password" required></label><button>Create account</button></main>')}`);
@@ -349,13 +349,15 @@ describe("drive OAuth trace", () => {
         awaitVerification,
         injectCard: async () => ({ status: "unused" }),
       };
-      await runOperateDrive(
+      const result = await runOperateDrive(
         { session_id: started.session_id, goal: "Sign up for Neon", max_steps: 1 },
         {} as ApiClient,
         undefined,
         deps,
       );
-      expect(await page.locator('input[type="password"]').inputValue()).not.toBe("");
+      expect(result.status).toBe("needs_value");
+      expect(result.field).toMatch(/password/i);
+      expect(await page.locator('input[type="password"]').inputValue()).toBe("");
       const loginRows: WireRow[] = [
         ["@password", "t", "Password|f=password"],
         ["@signup", "l", "Sign up for an account"],

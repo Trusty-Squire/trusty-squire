@@ -59,6 +59,23 @@ const SIGNUP_HTML = `<!doctype html><meta charset="utf-8"><title>Signup fixture<
   </form>
 </main>`;
 
+const CREATE_PASSWORD_NEXT_HTML = `<!doctype html><meta charset="utf-8"><title>Signup fixture</title>
+<main>
+  <h1>Create account</h1>
+  <button id="continue" type="button">Continue</button>
+</main>
+<script>
+  document.getElementById('continue').addEventListener('click', () => {
+    document.querySelector('main').innerHTML =
+      '<h1>Secure your account</h1>' +
+      '<label>New password <input id=password name=password type=password required></label>' +
+      '<button id=create type=button>Create account</button>';
+    document.getElementById('create').addEventListener('click', () => {
+      document.querySelector('main').innerHTML = '<p id=done>Account created</p>';
+    });
+  });
+</script>`;
+
 const LINK_VERIFY_HTML = `<!doctype html><meta charset="utf-8"><title>Link verify</title>
 <main>
   <h1>Create account</h1>
@@ -3563,6 +3580,40 @@ describe("operate_drive real-browser fixture", () => {
       );
       expect(resumed.status).toBe("complete");
       expect(await page.locator("#done").textContent()).toContain("Acme");
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 60_000);
+
+  it("hands back a create-password step reached after resume without typing or submitting", async () => {
+    const { context, page, started } = await openFixture(
+      CREATE_PASSWORD_NEXT_HTML,
+      "signup-password-missing.test",
+      "standard",
+      "/signup",
+    );
+    try {
+      const first = await runOperateDrive(
+        { session_id: started.session_id, goal: "create an account", max_steps: 1 },
+        api(),
+        undefined,
+        deps(async (_api, _state, questions) => jevChoose(questions, "CLICK", /Continue/)),
+      );
+      expect(["budget", "stuck"]).toContain(first.status);
+      expect(await page.locator("#password").count()).toBe(1);
+
+      const resumed = await runOperateDrive(
+        { session_id: started.session_id, goal: "create an account", max_steps: 4 },
+        api(),
+        undefined,
+        deps(async (_api, _state, questions) => jevFromQuestions(questions)),
+      );
+      expect(resumed.status).toBe("needs_value");
+      expect(resumed.field).toMatch(/password/i);
+      expect(await page.locator("#password").inputValue()).toBe("");
+      expect(await page.locator("#done").count()).toBe(0);
+      expect(sessionForCall(started.session_id)?.drive?.facts.password).toBeUndefined();
     } finally {
       await finishProvisionSession(started.session_id);
       await context.close();
