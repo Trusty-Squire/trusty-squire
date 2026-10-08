@@ -151,14 +151,16 @@ describe("store_credential (upsert)", () => {
         observed_hosts: ["resend.com", "api.resend.com"],
       });
     }
-    expect(
-      storeCredentialTool.inputSchema.safeParse({
-        service: "Resend",
-        value: "re_x",
-        api_hosts: ["api.resend.com"],
-        observed_hosts: ["other.test"],
-      }).success,
-    ).toBe(false);
+    const combined = storeCredentialTool.inputSchema.parse({
+      service: "Resend",
+      value: "re_x",
+      api_hosts: ["api.resend.com", "shared.test"],
+      observed_hosts: ["shared.test", "other.test"],
+    });
+    await storeCredentialTool.handler(combined, api);
+    expect(seen).toMatchObject({
+      observed_hosts: ["api.resend.com", "shared.test", "other.test"],
+    });
   });
 
   it("schema requires value or fields", () => {

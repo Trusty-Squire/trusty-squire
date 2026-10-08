@@ -443,7 +443,8 @@ the same session-observed hosts and service defaults as before. `store_credentia
 also accepts `api_hosts`; `login_hosts` remains the separate browser sign-in
 allowlist. The former public names `observed_hosts` on `store_credential` and
 `egress_hosts` in extraction and capture stores remain accepted as deprecated
-aliases for one release and are removed next minor. Supply only one spelling.
+aliases for one release and are removed next minor. When both spellings are
+supplied, their host lists are merged and deduplicated.
 
 `operate_type`, `operate_select`, and `operate_press` reject deprecated `capture`
 with an error directing the caller to perform the action, then call

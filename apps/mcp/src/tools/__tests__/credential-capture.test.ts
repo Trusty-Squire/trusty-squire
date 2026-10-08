@@ -84,7 +84,14 @@ describe("explicit mutation capture", () => {
 
   it("maps api_hosts and deprecated egress_hosts to the same vault input", async () => {
     const store = vi.fn().mockResolvedValue(stored);
-    for (const hosts of [{ api_hosts: ["api.example.io"] }, { egress_hosts: ["api.example.io"] }]) {
+    for (const hosts of [
+      { api_hosts: ["api.example.io"] },
+      { egress_hosts: ["api.example.io"] },
+      {
+        api_hosts: ["api.example.io", "shared.test"],
+        egress_hosts: ["shared.test", "legacy.test"],
+      },
+    ]) {
       await withOperatorRequestContext(new AbortController().signal, () =>
         operateClickTool.handler(
           operateClickTool.inputSchema.parse({
@@ -99,21 +106,8 @@ describe("explicit mutation capture", () => {
     expect(store.mock.calls.map(([input]) => input.observed_hosts)).toEqual([
       ["api.example.io", "example.test", "*.example.io"],
       ["api.example.io", "example.test", "*.example.io"],
+      ["api.example.io", "shared.test", "legacy.test", "example.test", "*.example.io"],
     ]);
-    expect(
-      operateClickTool.inputSchema.safeParse({
-        session_id: "session",
-        ref: "@create",
-        capture: {
-          ...capture,
-          store: {
-            service: "Example",
-            api_hosts: ["api.example.io"],
-            egress_hosts: ["other.test"],
-          },
-        },
-      }).success,
-    ).toBe(false);
   });
 
   it("preserves the screenshot dispatch receipt alongside successful capture metadata", async () => {

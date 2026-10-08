@@ -357,30 +357,23 @@ export const provisionNetworkTool: Tool<z.infer<typeof networkSchema>> = {
 };
 
 // Shared credential destination shape for extraction and capture.
-const storeShape = z
-  .object({
-    service: z.string().min(1).max(120),
-    label: z.string().min(1).max(60).optional(),
-    env_var_suggestion: z.string().min(1).max(120).optional(),
-    type: z.string().min(1).max(60).optional(),
-    // Explicit API hosts: where this key may LATER be sent by the proxy.
-    // Read them off the API base URL the page/SDK snippet shows — a grounded
-    // read, not a guess. Unioned with the service-default + start/auto_widen
-    // scope (never mid_session task scope). Omit for a single-service key.
-    api_hosts: z.array(z.string().min(1).max(253)).max(10).optional(),
-    egress_hosts: z.array(z.string().min(1).max(253)).max(10).optional(),
-    auth_shape: z
-      .string()
-      .max(120)
-      .regex(
-        /^(bearer|header:.+|query:.+)$/,
-        "auth_shape must be bearer|header:<name>|query:<param>",
-      )
-      .optional(),
-  })
-  .refine((store) => store.api_hosts === undefined || store.egress_hosts === undefined, {
-    message: "Use api_hosts only; egress_hosts is a deprecated alias (removed next minor)",
-  });
+const storeShape = z.object({
+  service: z.string().min(1).max(120),
+  label: z.string().min(1).max(60).optional(),
+  env_var_suggestion: z.string().min(1).max(120).optional(),
+  type: z.string().min(1).max(60).optional(),
+  // Explicit API hosts: where this key may LATER be sent by the proxy.
+  // Read them off the API base URL the page/SDK snippet shows — a grounded
+  // read, not a guess. Unioned with the service-default + start/auto_widen
+  // scope (never mid_session task scope). Omit for a single-service key.
+  api_hosts: z.array(z.string().min(1).max(253)).max(10).optional(),
+  egress_hosts: z.array(z.string().min(1).max(253)).max(10).optional(),
+  auth_shape: z
+    .string()
+    .max(120)
+    .regex(/^(bearer|header:.+|query:.+)$/, "auth_shape must be bearer|header:<name>|query:<param>")
+    .optional(),
+});
 type StoreSpec = z.infer<typeof storeShape>;
 
 const captureSchema = z
@@ -732,7 +725,8 @@ async function persistExtracted(
   const captureDomain = getDomain(captureUrl, { allowPrivateDomains: true });
   const observedHosts = [
     ...new Set([
-      ...(store.api_hosts ?? store.egress_hosts ?? []),
+      ...(store.api_hosts ?? []),
+      ...(store.egress_hosts ?? []),
       ...observedHostsForSession(sessionId),
       ...(captureDomain === null ? [] : [`*.${captureDomain}`]),
     ]),

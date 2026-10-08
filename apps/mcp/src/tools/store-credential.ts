@@ -30,10 +30,7 @@ const inputSchema = z
     {
       message: "one of value or fields is required",
     },
-  )
-  .refine((b) => b.api_hosts === undefined || b.observed_hosts === undefined, {
-    message: "Use api_hosts only; observed_hosts is a deprecated alias (removed next minor)",
-  });
+  );
 
 const DESCRIPTION = `Save a secret the user just shared into the encrypted vault. CALL THIS
 AUTOMATICALLY whenever the user pastes a secret-shaped value (sk-, ghp_,
@@ -51,7 +48,7 @@ correctly: "bearer" (default) | "header:<name>" (e.g. "header:x-api-key")
 Optional \`api_hosts\` names API hosts this credential may be sent to and is
 unioned into the credential's allowed_hosts with the service defaults.
 \`observed_hosts\` is a deprecated alias accepted for this release; use
-\`api_hosts\` before the next minor. Do not provide both names.
+\`api_hosts\` before the next minor. When both are present, their hosts are merged.
 For username/password credentials, pass \`auth_strategy: "username_password"\`
 and explicit \`login_hosts\`; those credentials cannot be spent through
 \`use_credential\` and can only be sealed into browser-fill slots on allowed
@@ -91,7 +88,7 @@ export const storeCredentialTool: Tool<z.infer<typeof inputSchema>> = {
   meta: ALWAYS_LOAD_META,
   async handler(args, api) {
     assertApi(api);
-    const apiHosts = args.api_hosts ?? args.observed_hosts;
+    const apiHosts = [...new Set([...(args.api_hosts ?? []), ...(args.observed_hosts ?? [])])];
     const res = await api.storeCredential({
       service: args.service,
       ...(args.label !== undefined ? { label: args.label } : {}),
@@ -104,7 +101,9 @@ export const storeCredentialTool: Tool<z.infer<typeof inputSchema>> = {
       ...(args.auth_strategy !== undefined ? { auth_strategy: args.auth_strategy } : {}),
       ...(args.signin_url !== undefined ? { signin_url: args.signin_url } : {}),
       ...(args.login_hosts !== undefined ? { login_hosts: args.login_hosts } : {}),
-      ...(apiHosts !== undefined ? { observed_hosts: apiHosts } : {}),
+      ...(args.api_hosts !== undefined || args.observed_hosts !== undefined
+        ? { observed_hosts: apiHosts }
+        : {}),
       ...(args.auth_shape !== undefined ? { auth_shape: args.auth_shape } : {}),
     });
     return {
