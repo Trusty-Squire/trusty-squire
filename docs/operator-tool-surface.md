@@ -186,6 +186,8 @@ session to retry against the existing `approval_id`. The handoff's `payment`
 contains the per-field results. Always call `operate_finish`
 when the task is finished. Drive-initiated opens follow the
 [broker refused-start receipt contract](browser-broker.md).
+`low_confidence` hands the step back to the frontier operator agent, which can
+inspect a screenshot and act deliberately.
 
 browser-use/jev-ultrafast (MIT) adoptions live in `operate-drive.ts`. Mapping:
 
@@ -198,7 +200,7 @@ browser-use/jev-ultrafast (MIT) adoptions live in `operate-drive.ts`. Mapping:
 | 5 | SELECT option is a target (`slug:option`) | `selectTargets`, `selectTargetKey`, `lastSelectOptions` |
 | 6 | WAIT when the needed control is absent/disabled or results are loading | `DRIVE_RULES`, `{kind:"wait"}`, `DRIVE_WAIT_MS` |
 | 7 | Rules prose adapted from their MIT `NEXT_ACTION` / `TARGET` | `DRIVE_RULES` |
-| 8 | No confidence gates, including DONE. Validation of the answer shape stays. The purchase approval is the payment gate | `admitsChoice`, `decideAfterJev` |
+| 8 | Confidence below `DRIVE_CONFIDENCE_THRESHOLD` returns `low_confidence` to the frontier operator agent, including for DONE; answer-shape validation and purchase approval remain separate checks | `DRIVE_CONFIDENCE_THRESHOLD`, `admitsChoice`, `decideAfterJev` |
 | 9 | Three consecutive non-wait actions with no fingerprint change | `DRIVE_STALE_LIMIT`, `staleNonWait` |
 | 10 | Decision bound to the observation fingerprint, consumed once | `boundFingerprint`, `consumedActionKey` |
 | 11 | Candidate and question budgets; only offered choices can be selected | `driveTargetSets`, `buildDriveQuestions` |

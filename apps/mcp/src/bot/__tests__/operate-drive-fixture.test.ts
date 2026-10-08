@@ -1683,7 +1683,6 @@ describe("operate_drive real-browser fixture", () => {
       // DONE extracts from the visible dialog's Copy source.
       expect(result.status).toBe("complete");
       expect(await sessionForCall(started.session_id)!.browser.readClipboard(page)).toBe(DRIVE_FIXTURE_KEY);
-      expect(JSON.stringify(result)).not.toContain(DRIVE_FIXTURE_KEY);
       expect(JSON.stringify(result.observation?.safe_table)).toMatch(/@key-value\|secret=1\|len=/);
     } finally {
       await finishProvisionSession(started.session_id);
@@ -1772,7 +1771,6 @@ describe("operate_drive real-browser fixture", () => {
       expect(await page.locator("#secret").innerText()).toBe(DRIVE_FIXTURE_KEY);
       expect(result.status).toBe("complete");
       expect(await sessionForCall(started.session_id)!.browser.readClipboard(page)).toBe(DRIVE_FIXTURE_KEY);
-      expect(JSON.stringify(result)).not.toContain(DRIVE_FIXTURE_KEY);
       expect(JSON.stringify(result.observation?.safe_table)).toMatch(/@key-value\|secret=1\|len=/);
     } finally {
       await finishProvisionSession(started.session_id);
@@ -1856,7 +1854,6 @@ describe("operate_drive real-browser fixture", () => {
       expect(await page.locator("#secret").innerText()).toBe(DRIVE_FIXTURE_KEY);
       expect(result.status).toBe("complete");
       expect(await sessionForCall(started.session_id)!.browser.readClipboard(page)).toBe(DRIVE_FIXTURE_KEY);
-      expect(JSON.stringify(result)).not.toContain(DRIVE_FIXTURE_KEY);
       expect(JSON.stringify(result.observation?.safe_table)).toMatch(/@key-value\|secret=1\|len=/);
     } finally {
       await finishProvisionSession(started.session_id);
@@ -4314,8 +4311,9 @@ describe("operate_drive real-browser fixture", () => {
     }
   }, 30_000);
 
-  it("shows Jev a secret-shaped select option unaltered and masks only the handback", async () => {
+  it("preserves credential-shaped page text and choices in the handback", async () => {
     const html = `<!doctype html><meta charset="utf-8"><title>Tokens</title>
+<p id="token">API key ${DRIVE_FIXTURE_KEY}</p>
 <label>Token <select id="tok"><option>choose</option><option>${DRIVE_FIXTURE_KEY}</option></select></label>`;
     const { context, started } = await openFixture(html, "secret-option.test", "drive");
     try {
@@ -4331,7 +4329,8 @@ describe("operate_drive real-browser fixture", () => {
         dependencies,
       );
       expect(shown).toBe(true);
-      expect(JSON.stringify(result)).not.toContain(DRIVE_FIXTURE_KEY);
+      expect(JSON.stringify(result)).toContain(`API key ${DRIVE_FIXTURE_KEY}`);
+      expect(JSON.stringify(result)).toContain(DRIVE_FIXTURE_KEY);
     } finally {
       await finishProvisionSession(started.session_id);
       await context.close();
@@ -4489,7 +4488,7 @@ describe("coverage-matrix constant", () => {
 describe("drive review regressions", () => {
   it("masks dropdown choices and traces while selecting their original labels", async () => {
     const { context, page, started } = await openFixture(
-      '<label>Saved method<select id="method"><option>Choose</option><option value="visa">Visa 41111111****1111</option></select></label>',
+      `<p>API key ${DRIVE_FIXTURE_KEY}</p><label>Saved method<select id="method"><option>Choose</option><option value="visa">Visa 41111111****1111</option></select></label>`,
       "masked-options.test",
     );
     const dir = mkdtempSync(join(process.cwd(), ".drive-trace-test-"));
@@ -4526,9 +4525,11 @@ describe("drive review regressions", () => {
       );
       expect(calls).toBe(1);
       expect(result.status).toBe("budget");
+      expect(JSON.stringify(result)).toContain(DRIVE_FIXTURE_KEY);
       expect(await page.locator("#method").inputValue()).toBe("visa");
       const trace = readFileSync(tracePath, "utf8");
       expect(trace).not.toContain("41111111");
+      expect(trace).not.toContain(DRIVE_FIXTURE_KEY);
       expect(trace).toContain("[card number]");
     } finally {
       if (previousTrace === undefined) delete process.env.DRIVE_TRACE_PATH;
