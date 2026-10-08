@@ -4539,33 +4539,7 @@ export class BrowserController implements BrowserDriver {
     // (zilliz /signup: right-panel spinner, marketing copy on the left).
     // So: if a loading spinner is visible AND no auth-form signal exists
     // yet, give the widget a bounded extra wait to hydrate.
-    await this.waitForAuthWidgetHydration();
-  }
-
-  // Bounded poll for an auth-form signal when the page is still showing a
-  // loading spinner. Strictly additive: returns immediately unless a
-  // spinner is visible AND no auth signal (email/password input or a
-  // provider/sign-up button) is present yet. Best-effort — never throws.
-  async waitForAuthWidgetHydration(timeoutMs = 8_000): Promise<void> {
-    if (!this.page) return;
-    await waitForPageReady(this.page, { kind: "auth-widget", capMs: timeoutMs });
-  }
-
-  // rc.33 — wait for the DOM to grow past a minimum interactive-
-  // element count, polling every 500ms up to timeoutMs. The
-  // single-element wait in waitForFormReady is fast-path; this is
-  // for SPAs where DOMContentLoaded fires almost immediately but the
-  // React/Vue/Svelte tree takes 5-15s more to actually render. Used
-  // after navigate() in the post-verify loop so the planner doesn't
-  // see a 0-button page that's still rendering. Best-effort —
-  // returns whenever the count is reached OR the timeout elapses.
-  async waitForInteractiveDom(
-    minElements = 5,
-    timeoutMs = 20_000,
-    page: Page | null = this.page,
-  ): Promise<void> {
-    if (!page) return;
-    await waitForPageReady(page, { kind: "interactive", minElements, capMs: timeoutMs });
+    if (this.page) await waitForPageReady(this.page, { kind: "auth-widget", capMs: 8_000 });
   }
 
   // Find and click an "Accept"-class button to dismiss any visible

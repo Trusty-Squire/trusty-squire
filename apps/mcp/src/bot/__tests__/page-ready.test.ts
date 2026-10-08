@@ -50,7 +50,7 @@ describe("page readiness", () => {
     await vi.advanceTimersByTimeAsync(16);
     const readiness = await waiting;
     expect(readiness.ready).toBe(true);
-    expect(readiness.steps.some((entry) => entry.name === "drive_empty_content")).toBe(true);
+    expect(readiness.elapsedMs).toBeGreaterThanOrEqual(96);
   });
 
   it("reports an unrendered document after the original 1.5 s cap", async () => {
@@ -120,9 +120,7 @@ describe("page readiness", () => {
     await vi.advanceTimersByTimeAsync(PAGE_READY_CAPS.driveChange + 80);
     const readiness = await waiting;
     expect(readiness.ready).toBe(true);
-    expect(readiness.steps).toContainEqual(
-      expect.objectContaining({ name: "drive_change", capMs: PAGE_READY_CAPS.driveChange }),
-    );
+    expect(readiness.elapsedMs).toBeGreaterThanOrEqual(PAGE_READY_CAPS.driveChange);
   });
 
   it("bounds the two-frame settle when navigation suspends the old context", async () => {
@@ -131,6 +129,6 @@ describe("page readiness", () => {
     await vi.advanceTimersByTimeAsync(PAGE_READY_CAPS.driveFrames);
     const readiness = await waiting;
     expect(readiness.ready).toBe(true);
-    expect(readiness.steps[0]?.name).toBe("drive_frames");
+    expect(readiness.elapsedMs).toBeGreaterThanOrEqual(PAGE_READY_CAPS.driveFrames);
   });
 });

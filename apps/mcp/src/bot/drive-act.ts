@@ -3,16 +3,9 @@
 
 import type { Frame, Page } from "playwright";
 import { evaluateBound } from "./drive-evaluate.js";
-import { PAGE_READY_CAPS, waitForPageReady } from "./page-ready.js";
-
-export const DRIVE_COMBOBOX_WAIT_MS = PAGE_READY_CAPS.driveOverlay;
 
 const OVERLAY_OPTION_SELECTOR =
   '[role="option"],[role="listbox"] a,[role="listbox"] [role="option"],.suggestions a,.suggestion-link,.suggestions-dropdown a,[aria-selected],[role="grid"] button,[role="grid"] [role="gridcell"],[role="gridcell"],[role="dialog"] [role="gridcell"],[role="dialog"] [role="grid"] button';
-
-export async function waitForOpenedOverlay(page: Page): Promise<void> {
-  await waitForPageReady(page, { kind: "overlay" });
-}
 
 /** Visible suggestion rows right now, as the baseline for a refresh wait. */
 export async function overlayOptionLabels(page: Page): Promise<string[]> {
@@ -33,16 +26,6 @@ export async function overlayOptionLabels(page: Page): Promise<string[]> {
     },
     OVERLAY_OPTION_SELECTOR,
   ).catch(() => [] as string[]);
-}
-
-// Autocomplete keeps the pre-type rows until the network refresh (~110ms on
-// Flights). Returning at first option PRESENCE snapshots the stale set and the
-// model reads the previous city's suggestions.
-export async function waitForOverlayOptionsToChange(
-  page: Page,
-  before: readonly string[],
-): Promise<void> {
-  await waitForPageReady(page, { kind: "overlay-refresh", before });
 }
 
 const LIST_FILTER_SELECTOR =

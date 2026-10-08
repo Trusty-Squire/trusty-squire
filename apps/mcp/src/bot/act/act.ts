@@ -103,8 +103,6 @@ import {
   commitDriveListOption,
   selectDriveOption,
   overlayOptionLabels,
-  waitForOpenedOverlay,
-  waitForOverlayOptionsToChange,
 } from "../drive-act.js";
 
 // `detail:"none"` already owns "return no observation". `drive` is the one
@@ -1310,11 +1308,11 @@ async function executeAct(
             // The suggestion baseline is read AFTER the overlay opens; reading
             // it before would make the refresh wait return on the stale rows.
             await actClick({ ...actTarget, method: "click" });
-            await waitForOpenedOverlay(compactV2ActionPage).catch(() => undefined);
+            await waitForPageReady(compactV2ActionPage, { kind: "overlay" }).catch(() => undefined);
             const overlayBefore = await overlayOptionLabels(compactV2ActionPage);
             await compactV2ActionPage.keyboard.press("ControlOrMeta+a");
             await compactV2ActionPage.keyboard.insertText(typedText ?? "");
-            await waitForOverlayOptionsToChange(compactV2ActionPage, overlayBefore);
+            await waitForPageReady(compactV2ActionPage, { kind: "overlay-refresh", before: overlayBefore });
           } else {
             await actType(actTarget, typedText!, false);
           }

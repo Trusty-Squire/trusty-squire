@@ -4814,7 +4814,7 @@ async function captureDriveSession(
     scriptMs = 0,
     wallMs = Date.now() - started,
     timedOut = false,
-    readiness: PageReadyResult = { ready: true, elapsedMs: 0, steps: [] },
+    readiness: PageReadyResult = { ready: true, elapsedMs: 0 },
   ) => ({
     observation,
     rows,
@@ -4844,8 +4844,8 @@ async function captureDriveSession(
       wallMs,
       timedOut,
       pending === undefined
-        ? { ready: true, elapsedMs: 0, steps: [] }
-        : { ready: false, reason: pending.reason, elapsedMs: pending.elapsed_ms, steps: [] },
+        ? { ready: true, elapsedMs: 0 }
+        : { ready: false, reason: pending.reason, elapsedMs: pending.elapsed_ms },
     );
   };
   const page = session.browser.page;
