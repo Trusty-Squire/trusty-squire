@@ -168,6 +168,7 @@ export async function installBrokerService(profileDir: string): Promise<void> {
   let name = brokerServiceName(profile, home);
   let socket = marker.kind === "valid" ? marker.marker.socket : defaultBrokerSocket(profile);
   let existing = false;
+  let active = false;
   if (process.platform === "linux") {
     const units = parseManagedBrokerShow(
       run("systemctl", [
@@ -224,6 +225,7 @@ export async function installBrokerService(profileDir: string): Promise<void> {
       name = unit.id.replace(/\.service$/, "");
       socket = unit.environment.TRUSTY_SQUIRE_BROKER_SOCKET?.trim() || socket;
       existing = true;
+      active = ["active", "activating", "reloading"].includes(unit.activeState);
     }
   }
   await mkdir(dirname(socket), { recursive: true, mode: 0o700 });
@@ -285,8 +287,7 @@ export async function installBrokerService(profileDir: string): Promise<void> {
       });
       run("systemctl", ["--user", "daemon-reload"]);
     }
-    run("systemctl", ["--user", "enable", "--now", `${name}.service`]);
-    if (owned && changed) run("systemctl", ["--user", "restart", `${name}.service`]);
+    if (!active) run("systemctl", ["--user", "enable", "--now", `${name}.service`]);
   } else {
     const rendered = external ? prior : renderLaunchdBroker(config);
     const changed = !external && rendered !== prior;
@@ -303,12 +304,8 @@ export async function installBrokerService(profileDir: string): Promise<void> {
     } catch {
       /* bootstrap reports manager errors */
     }
-    // launchd keeps the loaded definition until it is booted out and reloaded.
-    const reloading = loaded && owned && changed;
-    if (reloading) {
-      run("launchctl", ["bootout", target]);
-      loaded = false;
-    }
+    // A changed plist takes effect on the next bootstrap. Never boot out a
+    // loaded broker here: its browser and every client's sessions belong to it.
     if (!loaded) {
       const deadline = Date.now() + 10_000;
       for (;;) {
@@ -316,19 +313,20 @@ export async function installBrokerService(profileDir: string): Promise<void> {
           run("launchctl", ["bootstrap", domain, registration]);
           break;
         } catch (error) {
-          // bootout can return before launchd finishes removing the old job.
-          if (
-            !reloading ||
-            Date.now() >= deadline ||
-            !String(error).includes("Bootstrap failed: 5:")
-          )
+          if (Date.now() >= deadline || !String(error).includes("Bootstrap failed: 5:"))
             throw error;
           await new Promise((resolve) => setTimeout(resolve, 100));
         }
       }
     }
-    run("launchctl", ["enable", target]);
-    run("launchctl", owned && changed ? ["kickstart", "-k", target] : ["kickstart", target]);
+    if (
+      !loaded ||
+      !(await liveUnixSocket(socket)) ||
+      !(await liveUnixSocket(sharedMcpSocketPath(home, profile)))
+    ) {
+      run("launchctl", ["enable", target]);
+      run("launchctl", ["kickstart", target]);
+    }
   }
   const deadline = Date.now() + 10_000;
   let delay = 100;
