@@ -1604,7 +1604,7 @@ describe("operate_drive real-browser fixture", () => {
     }
   }, 30_000);
 
-  it("opens a listed entry and captures the revealed key", async () => {
+  it("opens a listed entry and reveals its key", async () => {
     const settingsHtml = `<!doctype html><meta charset="utf-8"><title>Settings</title>
 <div role="tablist">
   <button type="button" role="tab" id="apps">Apps</button>
@@ -1654,10 +1654,8 @@ describe("operate_drive real-browser fixture", () => {
       );
       expect(page.url()).toMatch(/\/settings\/apps\//);
       expect(await page.locator("#secret").innerText()).toBe(DRIVE_FIXTURE_KEY);
-      // A key shown only as text has no known source: the drive stops and
-      // asks the agent to point capture at it.
-      expect(result.status).toBe("stuck");
-      expect(result.reason).toContain("capture");
+      // Jev's DONE is trusted; source-gated capture remains separate.
+      expect(result.status).toBe("complete");
       expect(JSON.stringify(result)).not.toContain(DRIVE_FIXTURE_KEY);
       expect(JSON.stringify(result.observation?.safe_table)).toMatch(/@key-value\|secret=1\|len=/);
     } finally {
@@ -1756,8 +1754,7 @@ describe("operate_drive real-browser fixture", () => {
       expect(offered.some((value) => /payments-api/.test(value))).toBe(true);
       expect(page.url()).toMatch(/\/settings\/apps\//);
       expect(await page.locator("#secret").innerText()).toBe(DRIVE_FIXTURE_KEY);
-      expect(result.status).toBe("stuck");
-      expect(result.reason).toContain("capture");
+      expect(result.status).toBe("complete");
       expect(JSON.stringify(result)).not.toContain(DRIVE_FIXTURE_KEY);
       expect(JSON.stringify(result.observation?.safe_table)).toMatch(/@key-value\|secret=1\|len=/);
     } finally {
@@ -1851,8 +1848,7 @@ describe("operate_drive real-browser fixture", () => {
       expect(selectOffered.some((value) => /Production|Sandbox/.test(value))).toBe(true);
       expect(page.url()).toMatch(/\/settings\/apps\//);
       expect(await page.locator("#secret").innerText()).toBe(DRIVE_FIXTURE_KEY);
-      expect(result.status).toBe("stuck");
-      expect(result.reason).toContain("capture");
+      expect(result.status).toBe("complete");
       expect(JSON.stringify(result)).not.toContain(DRIVE_FIXTURE_KEY);
       expect(JSON.stringify(result.observation?.safe_table)).toMatch(/@key-value\|secret=1\|len=/);
     } finally {
@@ -5493,8 +5489,7 @@ describe("capture flow key evidence", () => {
       expect(await page.locator("#modal").count()).toBe(0);
       expect(page.url()).toMatch(/\/settings\/keys/);
       expect(await page.locator("#secret").innerText()).toBe(DRIVE_FIXTURE_KEY);
-      expect(result.status).toBe("stuck");
-      expect(result.reason).toContain("capture");
+      expect(result.status).toBe("complete");
     } finally {
       await finishProvisionSession(started.session_id);
       await context.close();
