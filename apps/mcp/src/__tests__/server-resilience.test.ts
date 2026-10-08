@@ -53,6 +53,23 @@ function resultText(result: Awaited<ReturnType<Client["callTool"]>>): string {
 }
 
 describe("operate_* bad input is a per-call error, never a server failure", () => {
+  it("points removed saved-login alias calls to operate_login load_saved", async () => {
+    const client = await connectedClient();
+    try {
+      const result = await client.callTool({
+        name: "operate_fill_credential",
+        arguments: { session_id: "old-session", reference: "vault://login" },
+      });
+      expect(result.isError).toBe(true);
+      expect(JSON.parse(resultText(result)).error).toMatchObject({
+        code: "unknown_tool",
+        message: expect.stringMatching(/operate_login.*load_saved/),
+      });
+    } finally {
+      await client.close();
+    }
+  });
+
   it.each([
     ["operator_session_busy: retained lease", "session_busy"],
     ["operator_execution_unsettled", "outcome_unknown"],

@@ -1033,7 +1033,7 @@ async function executeAct(
         if (value === undefined) {
           throw new CompactV2ActionFailureError(
             "missing_secret_slot: no sealed slot is loaded. For a saved login, call " +
-              "operate_fill_credential with session_id, reference (or service), and fields. " +
+              "operate_login with action='load_saved', session_id, reference (or service), and fields. " +
               "Use list_credentials to read the credential's field_names; pass those exact names " +
               '(for example fields:["username","password"], or ["login","password"]). ' +
               "Then call operate_type with ref and the returned slot name for each field. " +
