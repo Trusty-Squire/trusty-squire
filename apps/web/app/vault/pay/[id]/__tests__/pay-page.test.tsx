@@ -299,7 +299,7 @@ describe("pay page — JIT add-card ceremony", () => {
     bound = true;
     ceremonyUnauthorizedAfterBind = true;
     render(<PaymentApprovalPage />);
-    await screen.findByText("web_session_required");
+    await screen.findByText("Failed to load payment approval.");
     expect(router.replace).not.toHaveBeenCalled();
     expect(vouchflow.signPayload).not.toHaveBeenCalled();
   });
@@ -326,7 +326,7 @@ describe("pay page — JIT add-card ceremony", () => {
 
     await userEvent.setup().click(await screen.findByRole("button", { name: /Approve payment/ }));
 
-    await screen.findByText("web_session_required");
+    await screen.findByText("Failed to submit the payment approval.");
     expect(router.replace).not.toHaveBeenCalled();
   });
 
@@ -426,7 +426,7 @@ describe("pay page — JIT add-card ceremony", () => {
 
     await userEvent.setup().click(screen.getByTestId("card-entry"));
 
-    await screen.findByText("web_session_required");
+    await screen.findByText("Failed to load the saved card details.");
     expect(router.replace).not.toHaveBeenCalled();
     expect(api.apiPost).toHaveBeenCalledWith("/v1/pay/approvals/appr_1/bind-card", {
       card_ref: "card_new",

@@ -330,7 +330,7 @@ describe("credential fetch approval page", () => {
     const user = userEvent.setup();
     await user.click(await screen.findByRole("button", { name: "Approve reveal" }));
 
-    await waitFor(() => expect(screen.getByText(/credential_fetch_approval_expired/)).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("Approval failed.")).toBeTruthy());
     expect(router.replace).not.toHaveBeenCalled();
   });
 
@@ -344,7 +344,7 @@ describe("credential fetch approval page", () => {
 
     render(<CredentialFetchApprovalPage />);
     await waitFor(() =>
-      expect(screen.getByText(/credential_fetch_approval_not_found/)).toBeTruthy(),
+      expect(screen.getByText("Failed to load approval.")).toBeTruthy(),
     );
     expect(router.replace).not.toHaveBeenCalled();
     expect(api.apiPost).not.toHaveBeenCalled();

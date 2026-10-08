@@ -890,19 +890,21 @@ footer {
   margin-top: 18px;
   max-width: 520px;
 }
-.app-card .btn-primary,
-.app-card .btn-secondary,
-.app-card .btn-deny {
+.approval-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
   margin-top: 18px;
-  width: auto;
-  display: inline-flex;
-  padding: 9px 18px;
 }
-/* .btn-primary is borderless; its neighbours carry a 1px one. Side by side at
-   width:auto that 1px lands on the outer box, so match it invisibly and the
-   pair measures identically. */
-.app-card .btn-primary {
-  border: 1px solid transparent;
+.approval-actions > * {
+  flex: 1 1 160px;
+  min-width: 0;
+  width: auto;
+}
+.approval-question {
+  max-height: 4.4em;
+  overflow-y: auto;
+  overflow-wrap: anywhere;
 }
 .app-banner {
   margin-top: 16px;

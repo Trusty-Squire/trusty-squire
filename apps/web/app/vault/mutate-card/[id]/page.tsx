@@ -359,7 +359,7 @@ export default function CardMutationApprovalPage() {
           </p>
 
           {ceremony.status === "pending" && decrypted === null && (
-            <div style={{ marginTop: "var(--s-6)" }}>
+            <div className="approval-actions">
               {needsPasskeySetup ? (
                 <PasskeySetup onSetup={setUpPasskey} busy={busy} cardName={ceremony.card.label} />
               ) : (
@@ -372,6 +372,14 @@ export default function CardMutationApprovalPage() {
                   {busy ? "Opening…" : "Edit card details"}
                 </button>
               )}
+              <button
+                className="btn-secondary"
+                type="button"
+                onClick={() => router.push("/")}
+                disabled={busy}
+              >
+                Cancel
+              </button>
             </div>
           )}
 
@@ -488,12 +496,23 @@ export default function CardMutationApprovalPage() {
 
               <p className="trust-copy">{CARD_TRUST_COPY}</p>
 
-              <div className="form-actions">
+              <div className="approval-actions">
                 <button className="btn-primary" type="submit" disabled={busy}>
                   {busy ? "Approving…" : "Save and confirm"}
                 </button>
+                <button
+                  className="btn-secondary"
+                  type="button"
+                  onClick={() => router.push("/")}
+                  disabled={busy}
+                >
+                  Cancel
+                </button>
               </div>
             </form>
+          )}
+          {ceremony.status === "pending" && (
+            <p className="app-sub">Cancel leaves this request pending until it expires.</p>
           )}
         </section>
       )}

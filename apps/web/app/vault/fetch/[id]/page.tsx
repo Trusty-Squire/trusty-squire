@@ -176,7 +176,7 @@ export default function CredentialFetchApprovalPage() {
       {pending && question !== null && (
         <div className="app-head">
           <div>
-            <h1 className="app-title" id="credential-target">
+            <h1 className="app-title approval-question" id="credential-target">
               {question}
             </h1>
           </div>
@@ -209,7 +209,7 @@ export default function CredentialFetchApprovalPage() {
           {needsPasskeySetup ? (
             <PasskeySetup onSetup={setUpPasskey} busy={busy} />
           ) : (
-            <div style={{ display: "flex", gap: "var(--s-3)", flexWrap: "wrap" }}>
+            <div className="approval-actions">
               <button
                 className="btn-primary"
                 type="button"
