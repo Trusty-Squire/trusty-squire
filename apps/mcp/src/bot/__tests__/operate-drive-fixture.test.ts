@@ -661,8 +661,9 @@ describe("operate_drive real-browser fixture", () => {
       await page.locator("#product-add-to-cart").click();
       const observation = await observe(started.session_id, "compact");
       expect(await page.locator("#cart-count").textContent()).toBe("1");
-      expect((observation.semantic?.blockers ?? []).filter((blocker) => blocker.kind === "challenge"))
-        .toEqual([]);
+      expect(
+        (observation.semantic?.blockers ?? []).filter((blocker) => blocker.kind === "challenge"),
+      ).toEqual([]);
     } finally {
       await finishProvisionSession(started.session_id);
       await context.close();
@@ -670,8 +671,9 @@ describe("operate_drive real-browser fixture", () => {
   }, 30_000);
 
   it("keeps a product form submit when navigation exceeds the snapshot cap", async () => {
-    const links = Array.from({ length: 260 }, (_, index) =>
-      `<a href="/collection/${index}">Collection ${index}</a>`,
+    const links = Array.from(
+      { length: 260 },
+      (_, index) => `<a href="/collection/${index}">Collection ${index}</a>`,
     ).join("");
     const html = PRODUCT_WITH_NEWSLETTER_HTML.replace("<nav>", `<nav>${links}`);
     const { context, page, started } = await openFixture(html, "whitejade-many-links.test");
@@ -5620,10 +5622,13 @@ describe("operate_drive feedback loop", () => {
       );
       expect(handoff.status).toBe("low_confidence");
       expect(JSON.stringify(handoff.observation?.safe_table)).toMatch(/i-am-human.*x=x/);
-      await page.frameLocator("#captcha").getByRole("checkbox").evaluate((checkbox) => {
-        checkbox.setAttribute("aria-label", "Verify challenge");
-        checkbox.parentElement!.lastChild!.textContent = "Verify challenge";
-      });
+      await page
+        .frameLocator("#captcha")
+        .getByRole("checkbox")
+        .evaluate((checkbox) => {
+          checkbox.setAttribute("aria-label", "Verify challenge");
+          checkbox.parentElement!.lastChild!.textContent = "Verify challenge";
+        });
       const updated = await runOperateDrive(
         { session_id: started.session_id, goal: "Complete verification", max_steps: 4 },
         api(),

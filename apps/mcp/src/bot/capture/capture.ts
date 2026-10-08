@@ -13,7 +13,7 @@ import type { CaptureSource, ElementCaptureSource } from "../credential-capture.
 import type { Session } from "../session/model.js";
 import { audit, sessionForCall } from "../session/lifecycle.js";
 import { invalidateCompactV2Snapshot, operationPageForSession } from "../observe/observe.js";
-import { settleAfterStateChange } from "../act/act.js";
+import { waitForPageReady } from "../page-ready.js";
 import { captureFrameSnapshot } from "../drive-snapshot.js";
 
 // ── extraction (the `extract` thick tool) ──
@@ -601,13 +601,13 @@ export async function captureCredentialSource(
     // clipboard source is only judged after a click that was probed first.
     if (afterAction?.pre === undefined)
       return { candidate_count: 0, clipboard_error: "capture_clipboard_unreadable" };
-    await settleAfterStateChange(session.browser, page);
+    await waitForPageReady(page, { kind: "manual-action" });
     return await resolvePostActionClipboard(page, session.browser, afterAction.pre);
   }
   if (afterAction !== undefined) {
     // Same settle the click itself waits on — judge the source only after the
     // click's mutation has had its render window.
-    await settleAfterStateChange(session.browser, page);
+    await waitForPageReady(page, { kind: "manual-action" });
     return afterAction.pre === undefined
       ? { candidate_count: 0, resolved_from: "pre_action_only" }
       : await resolvePostActionCaptureSource(page, source, afterAction.pre);
@@ -774,8 +774,7 @@ async function copyCredentialFromDialog(
       }
       return null;
     });
-    if (buttonIndex !== null)
-      copyButton = page.locator('button, [role="button"]').nth(buttonIndex);
+    if (buttonIndex !== null) copyButton = page.locator('button, [role="button"]').nth(buttonIndex);
   }
   if (copyButton === null) {
     // The drive snapshot already hit-tests controls against covering layers.

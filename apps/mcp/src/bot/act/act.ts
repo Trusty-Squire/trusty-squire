@@ -97,7 +97,7 @@ import {
   type ActControlIdentity,
 } from "./identity.js";
 import { evaluateBound } from "../drive-evaluate.js";
-import { waitForPageReady, type PageReadyResult } from "../page-ready.js";
+import { waitForPageReady } from "../page-ready.js";
 import {
   clickCrossOriginFrameTarget,
   commitDriveListOption,
@@ -437,7 +437,7 @@ async function runSerializedOAuthBoundary(
       // Human completion returns custody to bounded machine work. Give DOM
       // readiness its own short window instead of spending the human budget.
       resetOAuthActionDeadline(deadline, oauthAutomatedActionTimeoutMs());
-      await settleAfterStateChange(browser);
+      if (browser.page) await waitForPageReady(browser.page, { kind: "manual-action" });
     },
     { deadline },
   );
@@ -917,10 +917,12 @@ async function executeAct(
     const started = Date.now();
     timing?.enter("settle");
     try {
-      await settleAfterStateChange(browser, compactV2ActionPage, {
-        drive: driveSettle,
-        combobox: driveSettle && combobox,
-      });
+      const target = compactV2ActionPage ?? browser.page;
+      if (target)
+        await waitForPageReady(
+          target,
+          driveSettle ? { kind: "drive-action", combobox } : { kind: "manual-action" },
+        );
     } finally {
       settleMs += Date.now() - started;
       timing?.enter("browser_action");
@@ -1312,7 +1314,10 @@ async function executeAct(
             const overlayBefore = await overlayOptionLabels(compactV2ActionPage);
             await compactV2ActionPage.keyboard.press("ControlOrMeta+a");
             await compactV2ActionPage.keyboard.insertText(typedText ?? "");
-            await waitForPageReady(compactV2ActionPage, { kind: "overlay-refresh", before: overlayBefore });
+            await waitForPageReady(compactV2ActionPage, {
+              kind: "overlay-refresh",
+              before: overlayBefore,
+            });
           } else {
             await actType(actTarget, typedText!, false);
           }
@@ -1762,20 +1767,4 @@ async function adoptTabOpenedByClick(
     adopted = await adoptOpenedTab(session, browser, OPENED_TAB_GRACE_MS);
   }
   return adopted;
-}
-
-export async function settleAfterStateChange(
-  browser: BrowserController,
-  page?: Page,
-  options?: { drive?: boolean; combobox?: boolean },
-): Promise<PageReadyResult | undefined> {
-  const target = page ?? browser.page ?? undefined;
-  if (target === undefined) return undefined;
-  if (options?.drive === true) {
-    return await waitForPageReady(target, {
-      kind: "drive-action",
-      combobox: options.combobox === true,
-    });
-  }
-  return await waitForPageReady(target, { kind: "manual-action" });
 }

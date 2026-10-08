@@ -184,9 +184,7 @@ export function widgetUnreadySolveReason(outcome: string): string {
   return `${DRIVE_WIDGET_UNREADY_REASON} (${outcome})`;
 }
 export const DRIVE_INBOX_POLL_MS = 45_000;
-export function inboxPollMissReason(search: {
-  query: string;
-}): string {
+export function inboxPollMissReason(search: { query: string }): string {
   return `inbox poll found nothing (query=${search.query})`;
 }
 export const DRIVE_STALE_LIMIT = 3;
@@ -1243,7 +1241,6 @@ export function pageHasListedWork(
     return isSubmitLikeRow(row) || isChoiceRow(row);
   });
 }
-
 
 function urlPathname(url: string): string {
   try {
@@ -5192,9 +5189,13 @@ export function resumeAnswerOptions(
 }
 
 function isOperatorHandoffAnswer(answer: string): boolean {
-  return [DRIVE_FIXED_STUCK, DRIVE_FIXED_NONE_OF_THESE, "STUCK", "TAKE_OVER", "I AM TAKING OVER"].includes(
-    answer.trim().toUpperCase(),
-  );
+  return [
+    DRIVE_FIXED_STUCK,
+    DRIVE_FIXED_NONE_OF_THESE,
+    "STUCK",
+    "TAKE_OVER",
+    "I AM TAKING OVER",
+  ].includes(answer.trim().toUpperCase());
 }
 
 export function resumeAction(
@@ -5569,7 +5570,8 @@ async function driveLoop(input: {
       JSON.stringify(previous.options) === JSON.stringify(question.options)
     ) {
       return finish("stuck", {
-        reason: "Drive already asked this unchanged question; operator can take over from the current observation",
+        reason:
+          "Drive already asked this unchanged question; operator can take over from the current observation",
       });
     }
     drive.lastQuestion = question;
@@ -6053,7 +6055,14 @@ async function driveLoop(input: {
     if (decision.kind === "low_confidence") {
       const question = {
         question: "Choose one current target key, or DONE, BLOCKED, NONE_OF_THESE, or WAIT.",
-        options: resumeAnswerOptions(rows, drive.facts, drive.goal, drive.facts.card_ref !== undefined, observation.url, liveProviders),
+        options: resumeAnswerOptions(
+          rows,
+          drive.facts,
+          drive.goal,
+          drive.facts.card_ref !== undefined,
+          observation.url,
+          liveProviders,
+        ),
       };
       const repeated = rememberQuestion(question);
       if (repeated !== undefined) return repeated;
