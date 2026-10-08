@@ -29,7 +29,6 @@ import {
 import {
   act,
   awaitVerification,
-  generatePassword,
   observe,
   startProvisionSession,
   TargetStaleError,
@@ -1162,14 +1161,6 @@ export function inferPagePhase(url: string, headings: readonly string[] = []): D
   }
   if (/log\s*in|sign\s*in/.test(headingText)) return "login";
   return "unknown";
-}
-
-function isCreateAccountRow(row: WireRow): boolean {
-  return /create\s+(?:an?\s+)?account|sign\s*up|register/i.test(readableLabel(row));
-}
-
-function isLoginRow(row: WireRow): boolean {
-  return /log\s*in|sign\s*in/i.test(readableLabel(row)) && !isCreateAccountRow(row);
 }
 
 export function candidateAimScore(
@@ -2546,9 +2537,9 @@ export function applyReleasedCardFacts(
 }
 
 export function ensureGeneratedFacts(
-  rows: readonly WireRow[],
+  _rows: readonly WireRow[],
   facts: Record<string, string>,
-  context: { pageUrl?: string; headings?: readonly string[]; goal?: string } = {},
+  _context: { pageUrl?: string; headings?: readonly string[]; goal?: string } = {},
 ): Record<string, string> {
   const next = { ...facts };
   const first = next.first_name?.trim() ?? "";
@@ -2556,27 +2547,8 @@ export function ensureGeneratedFacts(
   if (next.name === undefined && first.length > 0 && last.length > 0) {
     next.name = `${first} ${last}`;
   }
-  const phase = inferPagePhase(context.pageUrl ?? "", context.headings);
-  const hasLoginAction = rows.some((row) => isButtonLikeRow(row) && isLoginRow(row));
-  const hasLoginHeading = context.headings?.some((heading) => /\b(?:log|sign)\s*in\b/i.test(heading)) === true;
-  const hasSignupAction = rows.some((row) => isButtonLikeRow(row) && isCreateAccountRow(row));
-  const hasConfirmPassword = rows.some((row) =>
-    isFillableRow(row) && isPasswordRow(row) &&
-    /(?:^|[_ ])(?:confirm|confirmation|repeat|reenter|verify)(?:[_ ]|$)/.test(
-      `${normalizeKey(fieldNameForRow(row))} ${normalizeKey(readableLabel(row))}`,
-    ),
-  );
-  if (
-    phase !== "login" && (phase === "signup" || (!hasLoginAction && !hasLoginHeading)) &&
-    (phase === "signup" || hasSignupAction || hasConfirmPassword)
-  ) {
-    if (next.password === undefined && rows.some((row) =>
-      isFillableRow(row) && !isActedRow(row) && !isPaymentRow(row) && !isCvvRow(row) &&
-      isPasswordRow(row) && matchingFactKeys(next, row).length === 0
-    )) {
-      next.password = generatePassword();
-    }
-  }
+  // Password creation belongs to operate_login's sealed signup path. A required
+  // password without a fact reaches the drive's needs_value handoff.
   return next;
 }
 
