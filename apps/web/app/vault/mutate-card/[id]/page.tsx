@@ -4,8 +4,10 @@ import { useCallback, useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { decryptCard, encryptCard, type E2EBlob } from "@trusty-squire/vault/e2e";
 import { AppShell } from "../../../components/AppShell";
+import { PasskeySetup } from "../../../components/PasskeySetup";
 import { ApiError, apiGet, apiPost } from "../../../lib/api";
-import { getPairingState, pairDevice } from "../../../lib/pairing";
+import { cardUnlockError, errorText } from "../../../lib/error-text";
+import { getPairingState, pairDevice, registerEnrolledDevice } from "../../../lib/pairing";
 import { evaluatePrf } from "../../../lib/passkey";
 import { getVouchflow } from "../../../lib/vouchflow";
 import { CARD_TRUST_COPY, cardLast4, detectCardBrand } from "../../../lib/wallet";
@@ -120,7 +122,7 @@ export default function CardMutationApprovalPage() {
           redirectToLogin();
           return;
         }
-        setError(caught instanceof Error ? caught.message : "Failed to load approval.");
+        setError(errorText(caught, "Failed to load approval."));
       });
     return () => {
       cancelled = true;
@@ -152,7 +154,12 @@ export default function CardMutationApprovalPage() {
         throw new Error("This device can't use passkeys, or the request was cancelled.");
       }
       try {
-        const card = await decryptCard(key, stored);
+        let card: Record<string, unknown>;
+        try {
+          card = await decryptCard(key, stored);
+        } catch (decryptFailure) {
+          throw new Error(cardUnlockError(decryptFailure));
+        }
         setDecrypted({
           pan: asString(card.pan),
           exp_month: asString(card.exp_month),
@@ -185,17 +192,18 @@ export default function CardMutationApprovalPage() {
         redirectToLogin();
         return;
       }
-      setError(caught instanceof Error ? caught.message : "Couldn't open this card for editing.");
+      setError(errorText(caught, "Couldn't open this card for editing."));
     } finally {
       setBusy(false);
     }
   }, [ceremony, redirectToLogin]);
 
-  const setUpPasskey = useCallback(async () => {
+  const setUpPasskey = useCallback(async (forceNew: boolean) => {
     setBusy(true);
     setError(null);
     try {
-      await pairDevice();
+      await pairDevice({ forceNew });
+      await registerEnrolledDevice();
       setNeedsPasskeySetup(false);
       await startEditing();
     } catch (caught) {
@@ -203,7 +211,7 @@ export default function CardMutationApprovalPage() {
         redirectToLogin();
         return;
       }
-      setError(caught instanceof Error ? caught.message : "Failed to set up passkey.");
+      throw caught;
     } finally {
       setBusy(false);
     }
@@ -300,7 +308,7 @@ export default function CardMutationApprovalPage() {
           redirectToLogin();
           return;
         }
-        setError(caught instanceof Error ? caught.message : "Approval failed.");
+        setError(errorText(caught, "Approval failed."));
       } finally {
         setBusy(false);
       }
@@ -353,14 +361,7 @@ export default function CardMutationApprovalPage() {
           {ceremony.status === "pending" && decrypted === null && (
             <div style={{ marginTop: "var(--s-6)" }}>
               {needsPasskeySetup ? (
-                <button
-                  className="btn-primary"
-                  type="button"
-                  onClick={() => void setUpPasskey()}
-                  disabled={busy}
-                >
-                  {busy ? "Setting up…" : "Sign in and set up passkey"}
-                </button>
+                <PasskeySetup onSetup={setUpPasskey} busy={busy} cardName={ceremony.card.label} />
               ) : (
                 <button
                   className="btn-primary"

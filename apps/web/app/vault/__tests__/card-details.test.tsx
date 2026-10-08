@@ -145,4 +145,14 @@ describe("card detail view", () => {
     );
     expect(screen.queryByText("4242 4242 4242 4242")).toBeNull();
   });
+
+  it("explains an empty WebCrypto decrypt failure without destroying the old card", async () => {
+    e2e.decryptCard.mockRejectedValue(new DOMException("", "OperationError"));
+    const user = await openDetails();
+    await user.click(screen.getByRole("button", { name: "reveal" }));
+    await screen.findByText(
+      "This card was saved with a different passkey. Open this link where you saved it, or add the card again here.",
+    );
+    expect(document.querySelector(".form-err")?.textContent).not.toContain("remove the card");
+  });
 });

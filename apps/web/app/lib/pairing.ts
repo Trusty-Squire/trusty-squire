@@ -1,4 +1,5 @@
 import { ApiError, apiPost } from "./api";
+import { errorText } from "./error-text";
 import { getVouchflow } from "./vouchflow";
 
 const SUPPORT_ERROR =
@@ -88,17 +89,16 @@ export function approvalErrorMessage(caught: unknown, fallback: string): string 
   if (caught instanceof ApiError && caught.message === "missing_device_token") {
     return UNVERIFIABLE_DEVICE_MESSAGE;
   }
-  return caught instanceof Error ? caught.message : fallback;
+  return errorText(caught, fallback);
 }
 
-export async function pairDevice(): Promise<void> {
-  const client = getVouchflow();
+export function isPasskeyRecoveryRequired(error: unknown): boolean {
+  return errorCode(error) === "passkey_recovery_required";
+}
 
-  // Never mint a second passkey. The SDK enrolls every credential under the
-  // same "__default__" user handle, so a platform password manager replaces the
-  // existing passkey, and cards encrypted with its PRF output can no longer be
-  // decrypted.
-  if ((await getPairingState()).enrolled) return;
+export async function pairDevice(options: { forceNew?: boolean } = {}): Promise<void> {
+  const client = getVouchflow();
+  if (!options.forceNew && (await getPairingState()).enrolled) return;
 
   try {
     const support = await client.checkSupport();
@@ -122,9 +122,9 @@ export async function pairDevice(): Promise<void> {
       throw new Error(SUPPORT_ERROR);
     }
 
-    // v0.3 requires an option object; this is the SDK's default user handle,
-    // also used by getEnrollmentState() and evaluatePrf().
-    await client.enroll({ userHandle: "__default__" });
+    // 0.3.2 recovers the existing passkey before creating. Only the explicit,
+    // confirmed forceNew path may replace it.
+    await client.enroll(options.forceNew ? { forceNew: true } : undefined);
   } catch (error) {
     switch (errorCode(error)) {
       case "platform_authenticator_unavailable":

@@ -243,8 +243,8 @@ importers:
         specifier: workspace:*
         version: link:../../packages/vault
       '@vouchflow/web':
-        specifier: 0.3.1
-        version: 0.3.1(react@19.2.4)
+        specifier: 0.3.2
+        version: 0.3.2(react@19.2.4)
       next:
         specifier: 16.2.6
         version: 16.2.6(@babel/core@7.29.0)(react-dom@19.2.4)(react@19.2.4)
@@ -2708,6 +2708,20 @@ packages:
         optional: true
     dependencies:
       react: 19.2.4
+    dev: true
+
+
+  /@vouchflow/web@0.3.2(react@19.2.4):
+    resolution: {integrity: sha512-Wmn4lPa9WbbBJLCogtv77P1Ir+WQtVqgVVZAT+MUt10nwDlskqZ6svyyGfZ6u3iWAZMz4G3eA3O2UWmVGEZeZQ==}
+    engines: {node: '>=18'}
+    peerDependencies:
+      react: '>=18'
+    peerDependenciesMeta:
+      react:
+        optional: true
+    dependencies:
+      react: 19.2.4
+    dev: false
 
   /@zone-eu/mailsplit@5.4.9:
     resolution: {integrity: sha512-Qq7k6FzA5SmGf5HFPcr17gE7M+O1gttlmWn7tlGUlhGsbbjUaBL/4cEWIwExeCzqu5+kyZJ91mcBZbQ9zEwwYA==}

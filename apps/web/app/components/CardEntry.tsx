@@ -5,9 +5,11 @@ import { usePathname, useRouter } from "next/navigation";
 import { encryptCard } from "@trusty-squire/vault/e2e";
 import { ApiError, apiPost } from "../lib/api";
 import { COUNTRIES } from "../lib/countries";
-import { getPairingState, pairDevice } from "../lib/pairing";
+import { errorText } from "../lib/error-text";
+import { getPairingState, pairDevice, registerEnrolledDevice } from "../lib/pairing";
 import { evaluatePrf } from "../lib/passkey";
 import { CARD_TRUST_COPY, cardLast4, detectCardBrand } from "../lib/wallet";
+import { PasskeySetup } from "./PasskeySetup";
 
 function toBase64(bytes: Uint8Array): string {
   return btoa(String.fromCharCode(...bytes));
@@ -48,7 +50,6 @@ export function CardEntry({ onSaved }: CardEntryProps) {
   const [postalCode, setPostalCode] = useState("");
   const [country, setCountry] = useState("");
   const [enrolled, setEnrolled] = useState<boolean | null>(null);
-  const [pairing, setPairing] = useState(false);
   const [pairingError, setPairingError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -62,27 +63,21 @@ export function CardEntry({ onSaved }: CardEntryProps) {
       .catch((err: unknown) => {
         if (cancelled) return;
         setEnrolled(false);
-        setPairingError(err instanceof Error ? err.message : "Failed to check passkey setup.");
+        setPairingError(errorText(err, "Failed to check passkey setup."));
       });
     return () => {
       cancelled = true;
     };
   }, []);
 
-  const pair = useCallback(async (): Promise<void> => {
-    setPairing(true);
+  const pair = useCallback(async (forceNew: boolean): Promise<void> => {
     setPairingError(null);
-    try {
-      await pairDevice();
-      const state = await getPairingState();
-      setEnrolled(state.enrolled);
-      if (!state.enrolled) {
-        throw new Error("Passkey setup did not complete. Please try again.");
-      }
-    } catch (err) {
-      setPairingError(err instanceof Error ? err.message : "Failed to set up payments.");
-    } finally {
-      setPairing(false);
+    await pairDevice({ forceNew });
+    await registerEnrolledDevice();
+    const state = await getPairingState();
+    setEnrolled(state.enrolled);
+    if (!state.enrolled) {
+      throw new Error("Passkey setup did not complete. Please try again.");
     }
   }, []);
 
@@ -153,7 +148,7 @@ export function CardEntry({ onSaved }: CardEntryProps) {
           router.replace(`/login?next=${encodeURIComponent(pathname)}`);
           return;
         }
-        setError(err instanceof Error ? err.message : "Failed to save card.");
+        setError(errorText(err, "Failed to save card."));
       } finally {
         key?.fill(0);
         setBusy(false);
@@ -192,14 +187,7 @@ export function CardEntry({ onSaved }: CardEntryProps) {
               payments. Your full card number is encrypted here and never readable by our servers.
             </p>
             {pairingError !== null && <div className="form-err">{pairingError}</div>}
-            <button
-              className="btn-primary"
-              type="button"
-              disabled={pairing}
-              onClick={() => void pair()}
-            >
-              {pairing ? "Setting up…" : "Set up"}
-            </button>
+            <PasskeySetup onSetup={pair} label="Set up" />
           </div>
         )}
       </>

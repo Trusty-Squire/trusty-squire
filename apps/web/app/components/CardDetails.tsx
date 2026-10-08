@@ -3,6 +3,7 @@
 import { useCallback, useState } from "react";
 import { decryptCard, type E2EBlob } from "@trusty-squire/vault/e2e";
 import { apiGet } from "../lib/api";
+import { cardUnlockError, errorText } from "../lib/error-text";
 import { evaluatePrf } from "../lib/passkey";
 import { type CardMeta } from "../lib/wallet";
 
@@ -77,7 +78,12 @@ export function CardDetails({ card }: { card: CardMeta }) {
       } catch {
         throw new Error("This device can't use passkeys, or the request was cancelled.");
       }
-      const decrypted = await decryptCard(key, stored);
+      let decrypted: Record<string, unknown>;
+      try {
+        decrypted = await decryptCard(key, stored);
+      } catch (decryptFailure) {
+        throw new Error(cardUnlockError(decryptFailure));
+      }
       // Deliberate: cvv is discarded here and never enters component state
       // or the DOM. Everything else is shown.
       setRevealed({
@@ -90,7 +96,7 @@ export function CardDetails({ card }: { card: CardMeta }) {
         billing: billingLine(decrypted.billing),
       });
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Couldn't reveal this card.");
+      setError(errorText(err, "Couldn't reveal this card."));
     } finally {
       key?.fill(0);
       setBusy(false);

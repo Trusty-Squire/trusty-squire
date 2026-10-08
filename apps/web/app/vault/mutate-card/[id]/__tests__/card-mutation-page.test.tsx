@@ -23,7 +23,11 @@ const api = vi.hoisted(() => ({
 }));
 const router = vi.hoisted(() => ({ push: vi.fn(), replace: vi.fn() }));
 const vouchflow = vi.hoisted(() => ({ signPayload: vi.fn() }));
-const pairing = vi.hoisted(() => ({ getPairingState: vi.fn(), pairDevice: vi.fn() }));
+const pairing = vi.hoisted(() => ({
+  getPairingState: vi.fn(),
+  pairDevice: vi.fn(),
+  registerEnrolledDevice: vi.fn().mockResolvedValue(true),
+}));
 const passkey = vi.hoisted(() => ({ evaluatePrf: vi.fn() }));
 const e2e = vi.hoisted(() => ({ decryptCard: vi.fn(), encryptCard: vi.fn() }));
 

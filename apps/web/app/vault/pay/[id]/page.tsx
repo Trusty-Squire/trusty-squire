@@ -6,9 +6,16 @@ import { decryptCard, type E2EBlob } from "@trusty-squire/vault/e2e";
 import { sealToRecipient } from "@trusty-squire/vault/hpke";
 import { AppShell } from "../../../components/AppShell";
 import { CardEntry } from "../../../components/CardEntry";
+import { PasskeySetup } from "../../../components/PasskeySetup";
 import { ApiError, apiGet, apiPost } from "../../../lib/api";
+import { CARD_UNLOCK_FAILED, cardUnlockError, errorText } from "../../../lib/error-text";
 import { formatCardIdentity } from "../../../lib/wallet";
-import { getPairingState, isPaymentPasskeyUnavailable, pairDevice } from "../../../lib/pairing";
+import {
+  getPairingState,
+  isPaymentPasskeyUnavailable,
+  pairDevice,
+  registerEnrolledDevice,
+} from "../../../lib/pairing";
 import { getVouchflow } from "../../../lib/vouchflow";
 
 interface CeremonyCard {
@@ -77,20 +84,10 @@ function toBase64Url(bytes: Uint8Array): string {
     .replace(/=+$/, "");
 }
 
-// Some browser failures carry an empty message (Chrome's WebCrypto rejects a
-// failed AES-GCM decrypt with a bare OperationError). The banner must still
-// say what failed.
-function errorText(err: unknown, fallback: string): string {
-  return err instanceof Error && err.message.trim() !== "" ? err.message : fallback;
-}
-
 // The page's own wording: it must not match isPaymentPasskeyUnavailable, which
 // would offer passkey setup to an already enrolled device.
 const PASSKEY_NO_CARD_KEY =
   "Your passkey did not return the key that unlocks this card. Use the passkey you saved this card with.";
-
-const CARD_UNLOCK_FAILED =
-  "This passkey could not unlock the card. It was likely saved with a different passkey; remove the card and add it again on this device.";
 
 function formatAmount(amountCents: number, currency: string): string {
   try {
@@ -160,7 +157,7 @@ export default function PaymentApprovalPage() {
       applyCeremony(await fetchCeremony());
     } catch (err) {
       setCardMetadataError(
-        err instanceof Error ? err.message : "Failed to load the saved card details.",
+        errorText(err, "Failed to load the saved card details."),
       );
     }
   }, [applyCeremony, fetchCeremony]);
@@ -268,10 +265,7 @@ export default function PaymentApprovalPage() {
         card = await decryptCard(key, storedCard);
       } catch (decryptFailure) {
         // AES-GCM rejects a key from a different passkey with OperationError.
-        if (decryptFailure instanceof DOMException && decryptFailure.name === "OperationError") {
-          throw new Error(CARD_UNLOCK_FAILED);
-        }
-        throw decryptFailure;
+        throw new Error(cardUnlockError(decryptFailure));
       }
       cardBytes = new TextEncoder().encode(JSON.stringify(card));
       const aad = new Uint8Array(
@@ -319,19 +313,20 @@ export default function PaymentApprovalPage() {
     }
   }, [id, redirectToLogin]);
 
-  const setUpPasskey = useCallback(async () => {
+  const setUpPasskey = useCallback(async (forceNew: boolean) => {
     setBusy(true);
     setError(null);
     try {
       await apiGet("/v1/vault/e2e");
-      await pairDevice();
+      await pairDevice({ forceNew });
+      await registerEnrolledDevice();
       setNeedsPasskeySetup(false);
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
         redirectToLogin();
         return;
       }
-      setError(errorText(err, "Failed to set up a payment passkey."));
+      throw err;
     } finally {
       setBusy(false);
     }
@@ -467,14 +462,7 @@ export default function PaymentApprovalPage() {
                 )}
               </div>
             ) : needsPasskeySetup ? (
-              <button
-                className="btn-primary"
-                type="button"
-                onClick={() => void setUpPasskey()}
-                disabled={busy}
-              >
-                {busy ? "Setting up…" : "Sign in and set up passkey"}
-              </button>
+              <PasskeySetup onSetup={setUpPasskey} busy={busy} cardName={cardLine} />
             ) : (
               <button
                 className="btn-primary"
