@@ -8,6 +8,7 @@ import { ForwardedResultError, OperatorForwarder } from "./bot/broker/forwarder.
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import type { ZodIssue } from "zod";
 import type { ApiClient } from "./api-client.js";
 import { ApprovalDecidedNotifier } from "./approval-decided-notifier.js";
 import type { ApprovalDecisionClaims } from "./approval-decided-notifier.js";
@@ -23,6 +24,44 @@ import { VERSION } from "./version.js";
 const SERVER_NAME = "trusty-squire";
 
 const DEFAULT_SHUTDOWN_DEADLINE_MS = 30_000;
+
+function loginValidationIssues(args: unknown, issues: readonly ZodIssue[]): readonly ZodIssue[] {
+  const union = issues.find((issue) => issue.code === "invalid_union");
+  if (union?.code !== "invalid_union") return issues;
+  const action =
+    args !== null && typeof args === "object" && "action" in args ? args.action : undefined;
+  const branch =
+    action === undefined || action === "oauth"
+      ? 0
+      : action === "prepare_signup"
+        ? 1
+        : action === "store_signup"
+          ? 2
+          : action === "load_saved"
+            ? 3
+            : -1;
+  if (branch < 0) {
+    return [
+      {
+        code: "custom",
+        path: ["action"],
+        message: "expected oauth, prepare_signup, store_signup, or load_saved",
+      },
+    ];
+  }
+  return union.unionErrors[branch]?.issues ?? issues;
+}
+
+function formatLoginValidation(args: unknown, issues: readonly ZodIssue[]): string {
+  return loginValidationIssues(args, issues)
+    .map((issue) => {
+      const field = issue.path.length > 0 ? issue.path.join(".") : "reference or service";
+      const missingHosts =
+        field === "login_hosts" && issue.code === "invalid_type" && issue.received === "undefined";
+      return `${field}: ${missingHosts ? "supply login_hosts as a non-empty array of hosts where this login may be filled" : issue.message}`;
+    })
+    .join("; ");
+}
 
 export function shutdownDeadlineMs(): number {
   const raw = process.env.TRUSTY_SQUIRE_SERVER_SHUTDOWN_DEADLINE_MS;
@@ -183,9 +222,13 @@ export async function buildServer(
       }
       return errorContent(
         "invalid_arguments",
-        `invalid arguments: ${parsed.error.issues
-          .map((i) => (i.path.length > 0 ? `${i.path.join(".")}: ${i.message}` : i.message))
-          .join("; ")}`,
+        `invalid arguments: ${
+          tool.name === "operate_login"
+            ? formatLoginValidation(req.params.arguments ?? {}, parsed.error.issues)
+            : parsed.error.issues
+                .map((i) => (i.path.length > 0 ? `${i.path.join(".")}: ${i.message}` : i.message))
+                .join("; ")
+        }`,
       );
     }
     // Which account is this server serving? Sessions are stored per account, so

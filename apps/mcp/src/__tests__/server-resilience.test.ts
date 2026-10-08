@@ -235,6 +235,40 @@ describe("operate_* bad input is a per-call error, never a server failure", () =
     }
   });
 
+  it.each([
+    [
+      { action: "store_signup", session_id: "s1", service: "cal.com" },
+      "login_hosts",
+      "supply login_hosts",
+    ],
+    [
+      { action: "store_signup", session_id: "s1", service: "cal.com", login_hosts: [] },
+      "login_hosts",
+      "at least 1",
+    ],
+    [
+      { action: "prepare_signup", session_id: "s1", password_length: 4 },
+      "password_length",
+      "greater than or equal to 16",
+    ],
+    [{ action: "load_saved", session_id: "s1" }, "reference or service", "required"],
+    [{ session_id: "s1", provider: "google", ref: 3 }, "ref", "string"],
+    [{ action: "unexpected", session_id: "s1" }, "action", "expected"],
+  ])("operate_login names invalid fields for %j", async (args, field, detail) => {
+    const client = await connectedClient();
+    try {
+      const result = await client.callTool({ name: "operate_login", arguments: args });
+      expect(result.isError).toBe(true);
+      const { error } = JSON.parse(resultText(result));
+      expect(error.code).toBe("invalid_arguments");
+      expect(error.message).toContain(field);
+      expect(error.message).toContain(detail);
+      expect(error.message).not.toContain("Invalid input");
+    } finally {
+      await client.close();
+    }
+  });
+
   it("validates each flat verb before crossing the session boundary", async () => {
     const client = await connectedClient();
     const cases = [
@@ -389,7 +423,10 @@ it("propagates client cancellation to the forwarded operator signal", async () =
   const controller = new AbortController();
   try {
     const response = client.callTool(
-      { name: "operate_navigate", arguments: { session_id: "session", url: "https://example.test/" } },
+      {
+        name: "operate_navigate",
+        arguments: { session_id: "session", url: "https://example.test/" },
+      },
       undefined,
       { signal: controller.signal },
     );
