@@ -50,9 +50,12 @@ import {
 } from "./compact-observation-v2.js";
 import type { HeightenedAuthNotificationResult } from "../api-client.js";
 import type { OAuthProviderId } from "./oauth-providers.js";
+import type { PageNotReadyReason } from "./page-ready.js";
 
 export interface Observation {
   session_id: string;
+  /** No DOM snapshot was taken while the page was still rendering. */
+  page_readiness?: { ready: false; reason: PageNotReadyReason; elapsed_ms: number };
   // The live page location. Compact V2 can shorten fixed metadata only when
   // necessary to fit its wire budget.
   url: string;

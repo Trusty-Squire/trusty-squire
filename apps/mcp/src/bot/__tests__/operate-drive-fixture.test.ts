@@ -20,7 +20,6 @@ import {
   DRIVE_CONFIDENCE_THRESHOLD,
   DRIVE_EMPTY_SNAPSHOT_WAITS,
   DRIVE_FIXED_NONE,
-  DRIVE_WAIT_MS,
   applyReleasedCardFacts,
   matchingFactKeys,
   emptyDriveState,
@@ -39,7 +38,7 @@ import {
 import { captureFrameSnapshot, driveRowsFromSnapshot } from "../drive-snapshot.js";
 import { dispatchDriveAct } from "../act/act.js";
 import { rememberDriveIdentities } from "../act/identity.js";
-import { settleDriveStep } from "../drive-act.js";
+import { waitForPageReady } from "../page-ready.js";
 import type { DriveSnapshot } from "../drive-snapshot.js";
 import { sessionForCall } from "../session/lifecycle.js";
 import { DriveEvaluateTimeout } from "../drive-evaluate.js";
@@ -139,8 +138,8 @@ const NOOP_HTML = `<!doctype html><meta charset="utf-8"><title>Noop fixture</tit
 // then a same-document swap that leaves the snapshot empty before the payment
 // stage mounts card, expiry, name-on-card, a delivery date the card expiry
 // must never be typed into, and a site-search box the drive never fills. The
-// blank window is longer than one DRIVE_WAIT_MS so the loop must spend more
-// than a single re-observation on it no matter how long a snapshot takes.
+// blank window is longer than the readiness module's first 1.5 s content
+// window, so it must re-enter without asking the model about zero rows.
 const MULTI_STAGE_BLANK_MS = 2000;
 const MULTI_STAGE_CHECKOUT_HTML = `<!doctype html><meta charset="utf-8"><title>Checkout fixture</title>
 <main>
@@ -831,7 +830,7 @@ describe("operate_drive real-browser fixture", () => {
     180_000,
   );
 
-  it("keeps the full general settle for ordinary startup", async () => {
+  it("keeps the full general readiness wait for ordinary startup", async () => {
     const context = await browser.newContext();
     const page = await context.newPage();
     await page.route("**/*", (route) =>
@@ -841,13 +840,16 @@ describe("operate_drive real-browser fixture", () => {
     const capture = vi.spyOn(controller, "extractBrowserUseObservation");
     let sessionId: string | undefined;
     try {
+      const startedAt = Date.now();
       const started = await startHarnessProvisionSession({
         browser: controller,
         serviceUrl: "https://ordinary-start.test/",
         format: "compact",
       });
       sessionId = started.session_id;
-      expect(capture).toHaveBeenCalledWith(undefined, true);
+      expect(capture).toHaveBeenCalledWith(undefined);
+      expect(started.page_readiness).toBeUndefined();
+      expect(Date.now() - startedAt).toBeGreaterThanOrEqual(450);
     } finally {
       if (sessionId !== undefined) await finishProvisionSession(sessionId);
       await context.close();
@@ -1151,7 +1153,9 @@ describe("operate_drive real-browser fixture", () => {
       );
       expect(page.url()).toMatch(/\/keys/);
       expect(result.status).toBe("complete");
-      expect(seen.some((options) => Object.values(options).some((value) => /All API keys/.test(value)))).toBe(true);
+      expect(
+        seen.some((options) => Object.values(options).some((value) => /All API keys/.test(value))),
+      ).toBe(true);
     } finally {
       await finishProvisionSession(started.session_id);
       await context.close();
@@ -1213,9 +1217,7 @@ describe("operate_drive real-browser fixture", () => {
         dependencies,
       );
       expect(page.url()).toMatch(/\/keys/);
-      expect(
-        result.trajectory.filter((step) => step.action === "click").length,
-      ).toBe(2);
+      expect(result.trajectory.filter((step) => step.action === "click").length).toBe(2);
     } finally {
       await finishProvisionSession(started.session_id);
       await context.close();
@@ -1260,7 +1262,11 @@ describe("operate_drive real-browser fixture", () => {
         jevCalls += 1;
         offered.push(...Object.values(choiceCriteria(questions.CLICK_target)));
         if (page.url().includes("/keys")) return jevChoose(questions, "DONE");
-        return jevChoose(questions, "CLICK", page.url().includes("/settings") ? /API Keys/ : /Settings/);
+        return jevChoose(
+          questions,
+          "CLICK",
+          page.url().includes("/settings") ? /API Keys/ : /Settings/,
+        );
       });
       const result = await runOperateDrive(
         { session_id: started.session_id, goal: "extract an API key", max_steps: 8 },
@@ -1869,7 +1875,9 @@ describe("operate_drive real-browser fixture", () => {
       expect(await page.locator("#secret").innerText()).toBe(DRIVE_FIXTURE_KEY);
       // DONE extracts from the visible dialog's Copy source.
       expect(result.status).toBe("complete");
-      expect(await sessionForCall(started.session_id)!.browser.readClipboard(page)).toBe(DRIVE_FIXTURE_KEY);
+      expect(await sessionForCall(started.session_id)!.browser.readClipboard(page)).toBe(
+        DRIVE_FIXTURE_KEY,
+      );
       expect(JSON.stringify(result.observation?.safe_table)).toMatch(/@key-value\|secret=1\|len=/);
     } finally {
       await finishProvisionSession(started.session_id);
@@ -1957,7 +1965,9 @@ describe("operate_drive real-browser fixture", () => {
       expect(page.url()).toMatch(/\/settings\/apps\//);
       expect(await page.locator("#secret").innerText()).toBe(DRIVE_FIXTURE_KEY);
       expect(result.status).toBe("complete");
-      expect(await sessionForCall(started.session_id)!.browser.readClipboard(page)).toBe(DRIVE_FIXTURE_KEY);
+      expect(await sessionForCall(started.session_id)!.browser.readClipboard(page)).toBe(
+        DRIVE_FIXTURE_KEY,
+      );
       expect(JSON.stringify(result.observation?.safe_table)).toMatch(/@key-value\|secret=1\|len=/);
     } finally {
       await finishProvisionSession(started.session_id);
@@ -2026,7 +2036,11 @@ describe("operate_drive real-browser fixture", () => {
             ? jevChoose(questions, "CLICK", /Reveal/)
             : jevChoose(questions, "DONE");
         }
-        return jevChoose(questions, "CLICK", page.url().includes("/settings") ? /payments-api/ : /Settings/);
+        return jevChoose(
+          questions,
+          "CLICK",
+          page.url().includes("/settings") ? /payments-api/ : /Settings/,
+        );
       });
       const result = await runOperateDrive(
         { session_id: started.session_id, goal: "extract an API key", max_steps: 8 },
@@ -2040,7 +2054,9 @@ describe("operate_drive real-browser fixture", () => {
       expect(page.url()).toMatch(/\/settings\/apps\//);
       expect(await page.locator("#secret").innerText()).toBe(DRIVE_FIXTURE_KEY);
       expect(result.status).toBe("complete");
-      expect(await sessionForCall(started.session_id)!.browser.readClipboard(page)).toBe(DRIVE_FIXTURE_KEY);
+      expect(await sessionForCall(started.session_id)!.browser.readClipboard(page)).toBe(
+        DRIVE_FIXTURE_KEY,
+      );
       expect(JSON.stringify(result.observation?.safe_table)).toMatch(/@key-value\|secret=1\|len=/);
     } finally {
       await finishProvisionSession(started.session_id);
@@ -2235,10 +2251,10 @@ describe("operate_drive real-browser fixture", () => {
         dependencies,
       );
       expect(result.status).not.toBe("stuck");
-      // The blank window outlasts one DRIVE_WAIT_MS, so the loop has to keep
-      // re-observing instead of asking Jev to rule on an empty snapshot.
+      // Readiness spends the blank window inside its bounded step, without
+      // recording a model WAIT or asking Jev about an empty snapshot.
       const waits = result.trajectory.filter((step) => step.action === "wait").length;
-      expect(waits).toBeGreaterThanOrEqual(Math.ceil(MULTI_STAGE_BLANK_MS / DRIVE_WAIT_MS));
+      expect(waits).toBe(0);
       expect(await page.locator("#stage").textContent()).toBe("payment");
 
       // The card is released only once every fact-backed fill is done, the
@@ -2283,16 +2299,19 @@ describe("operate_drive real-browser fixture", () => {
     // re-observation budget belongs to each blank window, so the second one
     // must still be waited through rather than ruled on with zero rows.
     const html = `<!doctype html><meta charset="utf-8"><title>Two blanks</title>
-<main><p>loading</p></main>
+<main aria-busy="true"><p>loading</p></main>
 <script>
   setTimeout(() => {
+    document.querySelector("main").setAttribute("aria-busy", "false");
     document.querySelector("main").innerHTML = '<label>Email <input id=email name=email></label>';
   }, 4000);
   document.addEventListener("input", (event) => {
     if (event.target.id !== "email") return;
     document.querySelector("main").innerHTML = "";
+    document.querySelector("main").setAttribute("aria-busy", "true");
     setTimeout(() => {
       document.querySelector("main").innerHTML = "<p>ready to submit</p>";
+      document.querySelector("main").setAttribute("aria-busy", "false");
     }, 2000);
   }, true);
 </script>`;
@@ -2324,14 +2343,10 @@ describe("operate_drive real-browser fixture", () => {
           };
         }),
       );
-      // Without a per-window budget the second blank snapshot goes straight to
-      // the model, which can only answer BLOCKED on zero rows — the reported
-      // "stuck".
+      // Both blank windows must resolve before the model sees the next stage.
       expect(result.status).toBe("complete");
       expect(result.trajectory.filter((step) => step.action === "type")).toHaveLength(1);
-      expect(result.trajectory.filter((step) => step.action === "wait").length).toBeGreaterThan(
-        DRIVE_EMPTY_SNAPSHOT_WAITS,
-      );
+      expect(result.trajectory.filter((step) => step.action === "wait")).toHaveLength(0);
     } finally {
       await finishProvisionSession(started.session_id);
       await context.close();
@@ -2396,9 +2411,7 @@ describe("operate_drive real-browser fixture", () => {
         // carries the only confirmation evidence has to be in it. The document
         // has no heading — title and headings alone would say nothing.
         expect(asked[0]!.pageText).toContain("Your order is confirmed. #1042");
-        expect(result.trajectory.filter((step) => step.action === "wait")).toHaveLength(
-          DRIVE_EMPTY_SNAPSHOT_WAITS,
-        );
+        expect(result.trajectory.filter((step) => step.action === "wait")).toHaveLength(0);
       } finally {
         await finishProvisionSession(started.session_id);
         await context.close();
@@ -2910,9 +2923,7 @@ describe("operate_drive real-browser fixture", () => {
       };
       // The expiry rewrite is an automatic correction. Jev ends each call
       // once the drive has exhausted the available correction step.
-      const dependencies = deps(async (_api, _state, questions) =>
-        jevChoose(questions, "DONE"),
-      );
+      const dependencies = deps(async (_api, _state, questions) => jevChoose(questions, "DONE"));
       let staled = 0;
       dependencies.driveAct = async (_sessionId, action) => {
         if (action.kind === "type" && action.text === "12/2030" && staled === 0) {
@@ -3058,7 +3069,10 @@ describe("operate_drive real-browser fixture", () => {
         snap,
       );
       expect(typed.kind).toBe("ok");
-      await settleDriveStep(page, typed.kind === "ok" && typed.combobox);
+      await waitForPageReady(page, {
+        kind: "drive-action",
+        combobox: typed.kind === "ok" && typed.combobox,
+      });
       expect(await page.locator("#y").inputValue()).toBe("30");
     } finally {
       await finishProvisionSession(started.session_id);
@@ -3091,7 +3105,10 @@ describe("operate_drive real-browser fixture", () => {
         snap,
       );
       expect(typed.kind).toBe("ok");
-      await settleDriveStep(page, typed.kind === "ok" && typed.combobox);
+      await waitForPageReady(page, {
+        kind: "drive-action",
+        combobox: typed.kind === "ok" && typed.combobox,
+      });
       expect(await page.locator("#email").inputValue()).toBe("ada@fixture.test");
     } finally {
       await finishProvisionSession(started.session_id);
@@ -3900,7 +3917,7 @@ describe("operate_drive real-browser fixture", () => {
     }
   }, 60_000);
 
-  it("keeps offering WAIT on a blank page past the automatic empty-snapshot waits", async () => {
+  it("does not ask the model to act on a permanently blank page", async () => {
     const { context, started } = await openFixture(
       BLANK_PROCESSOR_HTML,
       "blank-processor.test",
@@ -3914,6 +3931,7 @@ describe("operate_drive real-browser fixture", () => {
           session_id: started.session_id,
           goal: "complete the purchase",
           max_steps: 5,
+          max_seconds: 6,
         },
         api(),
         undefined,
@@ -3936,14 +3954,13 @@ describe("operate_drive real-browser fixture", () => {
           };
         }),
       );
-      expect(offered.length).toBeGreaterThanOrEqual(1);
-      for (const operations of offered) expect(operations).toContain("WAIT");
-      expect(handoff.status).not.toBe("complete");
+      expect(offered).toHaveLength(0);
+      expect(handoff.status).toBe("budget");
     } finally {
       await finishProvisionSession(started.session_id);
       await context.close();
     }
-  }, 60_000);
+  }, 20_000);
 
   it("returns jev_unavailable when the client budget is exhausted", async () => {
     const { context, started } = await openFixture(NOOP_HTML, "signup-jev.test");
@@ -3970,29 +3987,33 @@ describe("operate_drive real-browser fixture", () => {
   it.each([
     ["non-JSON", "<html>oops</html>"],
     ["wrong-shape", '{"model":"jev-latest"}'],
-  ])("returns resumable jev_unavailable for a %s Jev reply", async (_kind, body) => {
-    const { context, started } = await openFixture(NOOP_HTML, "signup-jev-invalid.test");
-    const jevApi = {
-      listCredentials: vi.fn().mockResolvedValue({ credentials: [] }),
-      decide: vi.fn().mockResolvedValue({ status: 200, body }),
-    } as unknown as ApiClient;
-    try {
-      const handoff = await runOperateDrive(
-        { session_id: started.session_id, goal: "anything" },
-        jevApi,
-        undefined,
-        deps(askJev),
-      );
-      expect(handoff.status).toBe("jev_unavailable");
-      expect(handoff.reason).toContain("jev_invalid_response");
-      expect(handoff.reason).toContain(body);
-      expect(handoff.session_id).toBe(started.session_id);
-      expect(jevApi.decide).toHaveBeenCalledTimes(1);
-    } finally {
-      await finishProvisionSession(started.session_id);
-      await context.close();
-    }
-  }, 30_000);
+  ])(
+    "returns resumable jev_unavailable for a %s Jev reply",
+    async (_kind, body) => {
+      const { context, started } = await openFixture(NOOP_HTML, "signup-jev-invalid.test");
+      const jevApi = {
+        listCredentials: vi.fn().mockResolvedValue({ credentials: [] }),
+        decide: vi.fn().mockResolvedValue({ status: 200, body }),
+      } as unknown as ApiClient;
+      try {
+        const handoff = await runOperateDrive(
+          { session_id: started.session_id, goal: "anything" },
+          jevApi,
+          undefined,
+          deps(askJev),
+        );
+        expect(handoff.status).toBe("jev_unavailable");
+        expect(handoff.reason).toContain("jev_invalid_response");
+        expect(handoff.reason).toContain(body);
+        expect(handoff.session_id).toBe(started.session_id);
+        expect(jevApi.decide).toHaveBeenCalledTimes(1);
+      } finally {
+        await finishProvisionSession(started.session_id);
+        await context.close();
+      }
+    },
+    30_000,
+  );
 
   it("refuses a second in-flight drive as busy", async () => {
     const { context, started } = await openFixture(NOOP_HTML, "signup-busy.test");
@@ -4396,7 +4417,9 @@ describe("operate_drive real-browser fixture", () => {
       expect(acted.kind).toBe("ok");
       if (acted.kind !== "ok") return;
       expect(acted.combobox).toBe(true);
-      const waited = await settleDriveStep(page, acted.combobox);
+      const waited = (
+        await waitForPageReady(page, { kind: "drive-action", combobox: acted.combobox })
+      ).elapsedMs;
       expect(waited).toBeGreaterThan(0);
       expect(await page.locator('[role="gridcell"]').count()).toBe(1);
     } finally {
@@ -4657,7 +4680,9 @@ describe("operate_drive real-browser fixture", () => {
       const oauthSteps = result.trajectory.filter((step) => step.action === "oauth_login");
       expect(oauthSteps.length).toBeLessThanOrEqual(2);
       expect(result.status).toBe("stuck");
-      expect(sessionForCall(started.session_id)?.drive?.outcomeTrail?.map((entry) => entry.outcome)).toContain("bounced_back");
+      expect(
+        sessionForCall(started.session_id)?.drive?.outcomeTrail?.map((entry) => entry.outcome),
+      ).toContain("bounced_back");
     } finally {
       await finishProvisionSession(started.session_id);
       await context.close();
@@ -5886,7 +5911,9 @@ describe("capture flow key evidence", () => {
       expect(page.url()).toMatch(/\/settings\/keys/);
       expect(await page.locator("#secret").innerText()).toBe(DRIVE_FIXTURE_KEY);
       expect(result.status).toBe("complete");
-      expect(await sessionForCall(started.session_id)!.browser.readClipboard(page)).toBe(DRIVE_FIXTURE_KEY);
+      expect(await sessionForCall(started.session_id)!.browser.readClipboard(page)).toBe(
+        DRIVE_FIXTURE_KEY,
+      );
     } finally {
       await finishProvisionSession(started.session_id);
       await context.close();

@@ -84,10 +84,8 @@ import {
   driveControlDigest,
   pageFingerprintOf,
   reenterDriveField,
-  settleDriveStep,
-  waitForInPageChange,
-  waitForNavigationIdle,
 } from "./drive-act.js";
+import { PAGE_READY_CAPS, waitForPageReady, type PageReadyResult } from "./page-ready.js";
 import { rememberDriveIdentities, resolveIdentityScope } from "./act/identity.js";
 import {
   approvalItemWithNote,
@@ -156,7 +154,7 @@ export const DRIVE_HISTORY_CAP = 20;
 export const DRIVE_MAX_JEV_CALLS = 120;
 export const DRIVE_MAX_CANDIDATES = 250;
 export const DRIVE_MAX_CRITERIA = 128;
-export const DRIVE_WAIT_MS = 1500;
+export const DRIVE_WAIT_MS = PAGE_READY_CAPS.modelWait;
 export const DRIVE_EMPTY_SNAPSHOT_WAITS = 3;
 /** Post-submit in-flight patience: a network round trip plus render. */
 export const DRIVE_IN_FLIGHT_MS = 8_000;
@@ -196,7 +194,7 @@ export const DRIVE_EXHAUSTED_ACTION_LIMIT = 5;
 /** How many times the same control may be re-offered after a press refused
  *  for occlusion before the drive gives up on the refusal itself. */
 export const DRIVE_OCCLUSION_RETRY_LIMIT = 3;
-export const DRIVE_IDENTICAL_RESNAP_MS = 200;
+export const DRIVE_IDENTICAL_RESNAP_MS = PAGE_READY_CAPS.identicalResnap;
 export const DRIVE_FIXED_DONE = "DONE";
 export const DRIVE_FIXED_STUCK = "BLOCKED";
 export const DRIVE_FIXED_NONE = "none";
@@ -350,11 +348,13 @@ export interface DriveHandoff {
   options?: Record<string, string>;
   probabilities?: Record<string, number>;
   field?: string;
-  needs_user?: NeedsUserLogin | {
-    wall: "oauth_sign_in";
-    message: string;
-    resume: "connect";
-  };
+  needs_user?:
+    | NeedsUserLogin
+    | {
+        wall: "oauth_sign_in";
+        message: string;
+        resume: "connect";
+      };
   observation?: Observation;
   trajectory: DriveTrajectoryStep[];
   done: string;
@@ -1551,12 +1551,14 @@ export function isExistingCredentialMutationRow(
     return false;
   }
   const credentialNoun = /\b(?:(?:api[- ]?)?keys?|tokens?|secrets?|credentials?)\b/i;
-  return credentialNoun.test(label) ||
+  return (
+    credentialNoun.test(label) ||
     /(?:^|\/)(?:api[-_]?keys?|keys?|tokens?|credentials?)(?:\/|$)/.test(urlPathname(pageUrl)) ||
     headings.some((heading) => credentialNoun.test(heading)) ||
-    rows.some((entry) =>
-      /^(?:h[1-6]|heading)$/.test(entry[1]) && credentialNoun.test(readableLabel(entry))
-    );
+    rows.some(
+      (entry) => /^(?:h[1-6]|heading)$/.test(entry[1]) && credentialNoun.test(readableLabel(entry)),
+    )
+  );
 }
 
 function isKeyCreateOpener(row: WireRow): boolean {
@@ -2021,8 +2023,10 @@ export function isOauthChromeRow(row: WireRow): boolean {
   if (oauthProviderForRow(row) !== undefined) return true;
   if (!OAUTH_CONTROL_ROLES.has(row[1])) return false;
   const label = readableLabel(row).toLowerCase();
-  return /\b(?:microsoft|hasura|sso|oauth)\b/.test(label) ||
-    /\/broker\/[^/]+\/login\b/i.test(row[2] ?? "");
+  return (
+    /\b(?:microsoft|hasura|sso|oauth)\b/.test(label) ||
+    /\/broker\/[^/]+\/login\b/i.test(row[2] ?? "")
+  );
 }
 
 export function isChoiceRow(row: WireRow): boolean {
@@ -2102,15 +2106,24 @@ export function checkoutWorkBeforeCard(
   rows: readonly WireRow[],
   blockers: readonly { kind?: string; text: string }[] = [],
 ): boolean {
-  if (rows.some((row) =>
-    isRequiredRow(row) && isFillableRow(row) && isCheckoutAddressWorkRow(row) &&
-    !isPaymentRow(row) && !isCvvRow(row) &&
-    !isExpiryRow(row) && !isCardholderNameRow(row) &&
-    (isInvalidRow(row) || rowValueMissing(row))
-  )) return true;
-  const shippingChoices = rows.filter((row) =>
-    (row[1] === "r" || row[1] === "radio") &&
-    /\b(?:shipping|delivery|express|standard|free shipping)\b/i.test(readableLabel(row)),
+  if (
+    rows.some(
+      (row) =>
+        isRequiredRow(row) &&
+        isFillableRow(row) &&
+        isCheckoutAddressWorkRow(row) &&
+        !isPaymentRow(row) &&
+        !isCvvRow(row) &&
+        !isExpiryRow(row) &&
+        !isCardholderNameRow(row) &&
+        (isInvalidRow(row) || rowValueMissing(row)),
+    )
+  )
+    return true;
+  const shippingChoices = rows.filter(
+    (row) =>
+      (row[1] === "r" || row[1] === "radio") &&
+      /\b(?:shipping|delivery|express|standard|free shipping)\b/i.test(readableLabel(row)),
   );
   if (shippingChoices.length > 0 && !shippingChoices.some((row) => rowChecked(row) === true))
     return true;
@@ -2118,10 +2131,13 @@ export function checkoutWorkBeforeCard(
   // happens to include "Delivery date" is not that — matching bare "delivery"
   // postponed card inject on a filled checkout and the drive typed the goal
   // into Search instead.
-  return blockers.some((blocker) => blocker.kind === "validation" &&
-    /\b(?:shipping address|enter (?:your )?(?:shipping |billing )?address|select (?:a )?shipping)\b/i.test(
-      blocker.text,
-    ));
+  return blockers.some(
+    (blocker) =>
+      blocker.kind === "validation" &&
+      /\b(?:shipping address|enter (?:your )?(?:shipping |billing )?address|select (?:a )?shipping)\b/i.test(
+        blocker.text,
+      ),
+  );
 }
 
 export type DisabledSubmitKind = "in_flight" | "needs_fill" | "widget_unready" | "none";
@@ -3000,8 +3016,12 @@ export function typedValueEquals(
     return digits(actual).length > 0 && digits(actual) === digits(intended);
   }
   if (/(?:^|\|)it=number(?:\||$)/.test(row[2] ?? "")) {
-    return actual.trim().length > 0 && intended.trim().length > 0 &&
-      Number.isFinite(Number(actual)) && Number(actual) === Number(intended);
+    return (
+      actual.trim().length > 0 &&
+      intended.trim().length > 0 &&
+      Number.isFinite(Number(actual)) &&
+      Number(actual) === Number(intended)
+    );
   }
   return false;
 }
@@ -3413,16 +3433,15 @@ export function buildJevState(
   const pageUrl = feedback.pageUrl ?? url;
   const tried = new Set(feedback.triedHere ?? []);
   const seenElementIds = new Set<string>();
-  const elements: DriveStateElement[] = candidates
-    .map((candidate) => {
-      const leads = driveElementLeads(candidate.row, pageUrl);
-      seenElementIds.add(candidate.ref);
-      return elementState(candidate, {
-        tried: tried.has(stableControlKey(candidate.row, pageUrl)),
-        ...(leads === undefined ? {} : { leads }),
-        layer: driveElementLayer(candidate.row, pageUrl),
-      });
+  const elements: DriveStateElement[] = candidates.map((candidate) => {
+    const leads = driveElementLeads(candidate.row, pageUrl);
+    seenElementIds.add(candidate.ref);
+    return elementState(candidate, {
+      tried: tried.has(stableControlKey(candidate.row, pageUrl)),
+      ...(leads === undefined ? {} : { leads }),
+      layer: driveElementLayer(candidate.row, pageUrl),
     });
+  });
   // Include every observed row. A row absent from the action choices still
   // gives the decider page context, including disabled and previously tried
   // controls, documentation links, and fields below the fold.
@@ -4782,6 +4801,7 @@ async function captureDriveSession(
   snapshotScriptMs: number;
   snapshotWallMs: number;
   timedOut: boolean;
+  readiness: PageReadyResult;
 }> {
   const started = Date.now();
   // The pre-act guard compares against these, and only the full path below can
@@ -4794,6 +4814,7 @@ async function captureDriveSession(
     scriptMs = 0,
     wallMs = Date.now() - started,
     timedOut = false,
+    readiness: PageReadyResult = { ready: true, elapsedMs: 0, steps: [] },
   ) => ({
     observation,
     rows,
@@ -4801,6 +4822,7 @@ async function captureDriveSession(
     snapshotScriptMs: scriptMs,
     snapshotWallMs: wallMs,
     timedOut,
+    readiness,
   });
   // A fallback return still has to leave the epoch describing the document the
   // loop just accounted for. Left pointing at the previous one it reads as
@@ -4814,7 +4836,17 @@ async function captureDriveSession(
   ): Promise<ReturnType<typeof timed>> => {
     const live = session.browser.page;
     if (live !== null) drive.lastDocumentEpoch = await documentEpochOf(live);
-    return timed(observation, rows, scriptMs, wallMs, timedOut);
+    const pending = observation.page_readiness;
+    return timed(
+      observation,
+      rows,
+      scriptMs,
+      wallMs,
+      timedOut,
+      pending === undefined
+        ? { ready: true, elapsedMs: 0, steps: [] }
+        : { ready: false, reason: pending.reason, elapsedMs: pending.elapsed_ms, steps: [] },
+    );
   };
   const page = session.browser.page;
   if (page === null) {
@@ -4822,6 +4854,27 @@ async function captureDriveSession(
     const compactRows = mergeCompactTable([], observation);
     const finalized = await finalizeSnapshotOutputs(session, sessionId, observation, compactRows);
     return await fellBack(finalized.observation, finalized.rows);
+  }
+  let readiness = await waitForPageReady(page, { kind: "drive-read" });
+  const pending = (state: PageReadyResult) => {
+    // No fast DOM snapshot is taken from an unrendered or navigating document.
+    // The drive loop retries the reason before it offers any action to Jev.
+    return timed(
+      { session_id: sessionId, url: page.url(), safe_table: [] },
+      [],
+      0,
+      0,
+      false,
+      state,
+    );
+  };
+  if (!readiness.ready) return pending(readiness);
+  // A purchased captcha token can land only after the target page is ready.
+  const injected = await injectPendingCaptchaToken(session, page);
+  if (injected === "injected") {
+    // Provider callbacks may navigate or replace the document before capture.
+    readiness = await waitForPageReady(page, { kind: "drive-read" });
+    if (!readiness.ready) return pending(readiness);
   }
   ensureFrameCacheInvalidation(session);
   const omit = maskedRefsOf(drive);
@@ -4938,6 +4991,7 @@ async function captureDriveSession(
     snapshot.scriptMs,
     snapshot.wallMs,
     snapshot.timedOut === true,
+    readiness,
   );
 }
 
@@ -4948,10 +5002,8 @@ async function snapshotDriveSession(
   deps: DriveDependencies,
   needFrames: boolean,
 ): Promise<Awaited<ReturnType<typeof captureDriveSession>>> {
-  // Drive snapshots bypass observe(), which is otherwise the lease-holding
-  // inject half. A token purchased while the drive is looping (Kaggle 2026-09-27:
-  // token_purchased, then two budget handoffs with no inject) has to land here.
-  await injectPendingCaptchaToken(session, session.browser.page ?? undefined);
+  // The capture checks readiness before it performs the lease-held token
+  // injection and the fast in-page read.
   const snap = await captureDriveSession(session, sessionId, drive, deps, needFrames);
   if (deps.onSnapshot !== undefined) await deps.onSnapshot();
   return snap;
@@ -5087,19 +5139,32 @@ function resumeTargetSets(
   pageUrl: string,
   liveProviders?: readonly OAuthProviderId[],
 ): DriveTargetSets {
-  const sets = driveTargetSets(rows, facts, includePayment, [], pageUrl, new Map(), (text) => text, [], {
-    goal,
-    ...(liveProviders === undefined ? {} : { liveProviders }),
-  });
+  const sets = driveTargetSets(
+    rows,
+    facts,
+    includePayment,
+    [],
+    pageUrl,
+    new Map(),
+    (text) => text,
+    [],
+    {
+      goal,
+      ...(liveProviders === undefined ? {} : { liveProviders }),
+    },
+  );
   // Jev sees every row. The human handoff offers only providers already live
   // in this browser when one of those providers is present on the page.
-  const click = sets.CLICK.filter((candidate) => resumeAllowsRow(candidate.row, rows, liveProviders));
+  const click = sets.CLICK.filter((candidate) =>
+    resumeAllowsRow(candidate.row, rows, liveProviders),
+  );
   return {
     ...sets,
     CLICK: click,
-    operations: click.length === 0
-      ? sets.operations.filter((operation) => operation !== "CLICK")
-      : sets.operations,
+    operations:
+      click.length === 0
+        ? sets.operations.filter((operation) => operation !== "CLICK")
+        : sets.operations,
   };
 }
 
@@ -5148,17 +5213,28 @@ export function resumeAction(
   if (answer === "WAIT" || answer === "wait") return { kind: "wait", confidence: 1 };
   const includePayment = cardRef !== undefined;
   const sets = resumeTargetSets(rows, facts, goal, includePayment, pageUrl, liveProviders);
-  const questions = buildDriveQuestions(rows, facts, goal, includePayment, [], pageUrl, new Map(), sets);
-  const validKeys = Object.keys(resumeAnswerOptions(rows, facts, goal, includePayment, pageUrl, liveProviders));
+  const questions = buildDriveQuestions(
+    rows,
+    facts,
+    goal,
+    includePayment,
+    [],
+    pageUrl,
+    new Map(),
+    sets,
+  );
+  const validKeys = Object.keys(
+    resumeAnswerOptions(rows, facts, goal, includePayment, pageUrl, liveProviders),
+  );
   const offered = [...sets.CLICK, ...sets.TYPE_TEXT, ...sets.SELECT].find(
     (entry) => entry.slug === answer || entry.ref === answer,
   );
   const fallbackRow = findRow(rows, answer, pageUrl);
-  const row = offered?.row ?? (
-    fallbackRow !== undefined && resumeAllowsRow(fallbackRow, rows, liveProviders)
+  const row =
+    offered?.row ??
+    (fallbackRow !== undefined && resumeAllowsRow(fallbackRow, rows, liveProviders)
       ? fallbackRow
-      : undefined
-  );
+      : undefined);
   if (row === undefined) {
     return {
       kind: "invalid_answer",
@@ -5382,6 +5458,7 @@ async function driveLoop(input: {
   );
   let observation: Observation = firstSnap.observation;
   let rows = firstSnap.rows;
+  let pageReadiness = firstSnap.readiness;
   {
     const attached = attachRevealedSecretMarker(observation, rows);
     observation = attached.observation;
@@ -5415,7 +5492,6 @@ async function driveLoop(input: {
   const typeAttempts = new Set<string>();
   const expiryRewriteAttempts = new Set<string>();
   let typeMustYield = false;
-  let emptySnapshotWaits = 0;
   let settleWaits = 0;
   let widgetWaits = 0;
   let inboxSilent = false;
@@ -5432,10 +5508,7 @@ async function driveLoop(input: {
   let countedDispatchedActs = 0;
   let liveProviders: readonly OAuthProviderId[] | undefined;
   const detectOfferedProviderSessions = async (): Promise<void> => {
-    if (
-      liveProviders === undefined &&
-      rows.filter(isOauthChromeRow).length > 1
-    ) {
+    if (liveProviders === undefined && rows.filter(isOauthChromeRow).length > 1) {
       liveProviders = await liveProviderSessionsForSession(sessionId);
     }
   };
@@ -5566,6 +5639,7 @@ async function driveLoop(input: {
     const snap = await snapshotDriveSession(session, sessionId, drive, dependencies, needFrames);
     observation = snap.observation;
     rows = snap.rows;
+    pageReadiness = snap.readiness;
     if (pagePathKey(observation.url) !== priorPath) {
       drive.submitBeforeText = null;
       drive.submitExcludeLabels = [];
@@ -5615,7 +5689,9 @@ async function driveLoop(input: {
   ): Promise<DriveHandoff | "continue"> => {
     let confirmed = nextFingerprint;
     if (confirmed === fingerprint) {
-      await sleepDrive(DRIVE_IDENTICAL_RESNAP_MS, context?.signal);
+      if (session.browser.page !== null) {
+        await waitForPageReady(session.browser.page, { kind: "identical-resnap" });
+      }
       const snap = await snapshotOrTimeout(framesIfNeeded());
       if (snap !== "ok") return snap;
       confirmed = driveProgressFingerprint(observation, rows, drive, session);
@@ -5784,10 +5860,7 @@ async function driveLoop(input: {
       const completeSnap = await snapshotOrTimeout(framesIfNeeded());
       if (completeSnap !== "ok") return completeSnap;
       const fresh = driveProgressFingerprint(observation, rows, drive, session);
-      if (
-        drive.boundFingerprint !== null &&
-        fresh !== drive.boundFingerprint
-      ) {
+      if (drive.boundFingerprint !== null && fresh !== drive.boundFingerprint) {
         drive.consumedActionKey = null;
         automaticDecisionRefused = true;
         return "continue";
@@ -5828,24 +5901,13 @@ async function driveLoop(input: {
         drive.filledRefs,
         observation.semantic?.headings ?? [],
       );
-      await new Promise<void>((resolve, reject) => {
-        const timer = setTimeout(resolve, DRIVE_WAIT_MS);
-        const signal = context?.signal;
-        if (signal === undefined) return;
-        if (signal.aborted) {
-          clearTimeout(timer);
-          reject(signal.reason ?? new Error("operator_request_cancelled"));
-          return;
-        }
-        signal.addEventListener(
-          "abort",
-          () => {
-            clearTimeout(timer);
-            reject(signal.reason ?? new Error("operator_request_cancelled"));
-          },
-          { once: true },
-        );
-      });
+      const waitPage = session.browser.page;
+      if (waitPage === null) await sleepDrive(DRIVE_WAIT_MS, context?.signal);
+      else
+        await waitForPageReady(waitPage, {
+          kind: "model-wait",
+          ...(context?.signal === undefined ? {} : { signal: context.signal }),
+        });
       const waitSnap = await snapshotOrTimeout(framesIfNeeded());
       if (waitSnap !== "ok") return waitSnap;
       appendDriveTrace(session, {
@@ -6301,7 +6363,8 @@ async function driveLoop(input: {
         } else {
           dispatchedActs += 1;
           const page = session.browser.page;
-          if (page !== null) await settleDriveStep(page, acted.combobox);
+          if (page !== null)
+            await waitForPageReady(page, { kind: "drive-action", combobox: acted.combobox });
         }
       } else if (inboxNext === "goto_link" && driveInboxValue(verification).link !== null) {
         const safe = await actSafely(dependencies, sessionId, {
@@ -6600,8 +6663,7 @@ async function driveLoop(input: {
       if (acted.oauth?.state === "awaiting_human" && onProviderPage) {
         const wall = {
           wall: "oauth_sign_in",
-          message:
-            `${acted.oauth.reason} Run \`npx @trusty-squire/mcp connect --json\` to get the shared-browser sign_in_url for the person, then resume observing this session.`,
+          message: `${acted.oauth.reason} Run \`npx @trusty-squire/mcp connect --json\` to get the shared-browser sign_in_url for the person, then resume observing this session.`,
           resume: "connect",
         } as const;
         return finish("needs_value", {
@@ -6611,30 +6673,20 @@ async function driveLoop(input: {
         });
       }
       if (page !== null) {
-        settleMs = await settleDriveStep(page, acted.combobox);
-        const afterEpoch = await documentEpochOf(page);
-        if (
-          beforeEpoch.length > 0 &&
-          afterEpoch.length > 0 &&
-          documentOriginOf(beforeEpoch) !== documentOriginOf(afterEpoch)
-        ) {
-          await waitForNavigationIdle(page, beforePageFingerprint);
-        } else if (
-          (decision.action.kind === "click" || decision.action.kind === "oauth_login") &&
-          beforePageFingerprint.length > 0
-        ) {
-          await waitForInPageChange(page, beforePageFingerprint);
-        }
+        const ready = await waitForPageReady(page, {
+          kind: "drive-action",
+          combobox: acted.combobox,
+          beforeEpoch,
+          beforeFingerprint: beforePageFingerprint,
+          watchChange: decision.action.kind === "click" || decision.action.kind === "oauth_login",
+        });
+        settleMs = ready.elapsedMs;
       }
       if (decision.action.kind === "click") {
         const clicked = findRow(rows, decision.actionKey, observation.url);
         // A key-list creation control can open a form. Its new fields are
         // progress to fill, not a failed response to a submitted form.
-        if (
-          clicked !== undefined &&
-          isSubmitLikeRow(clicked) &&
-          !isKeyCreateOpener(clicked)
-        ) {
+        if (clicked !== undefined && isSubmitLikeRow(clicked) && !isKeyCreateOpener(clicked)) {
           captchaAfterSubmit = true;
           drive.submitBeforeText = textBeforeClick;
           drive.submitExcludeLabels = excludeBeforeClick;
@@ -6896,7 +6948,15 @@ async function driveLoop(input: {
     drive.boundFingerprint = driveProgressFingerprint(observation, rows, drive, session);
     drive.consumedActionKey = null;
     const resumed = await applyDecision(
-      resumeAction(answer, rows, drive.facts, drive.goal, drive.facts.card_ref, observation.url, liveProviders),
+      resumeAction(
+        answer,
+        rows,
+        drive.facts,
+        drive.goal,
+        drive.facts.card_ref,
+        observation.url,
+        liveProviders,
+      ),
     );
     if (resumed !== "continue") return resumed;
     spendStep("resume");
@@ -6934,16 +6994,25 @@ async function driveLoop(input: {
         jevRetried: "askJev requires an active Trusty Squire session (vaulted typesafe credential)",
       });
     }
-    // Per blank window, not per drive call. The auto-apply branches below all
-    // `continue`, so a reset placed after them is skipped on exactly the
-    // iterations that resolve a fill — and the next stage swap then gets no
-    // re-observation at all before the model is asked to rule on zero rows.
-    if (rows.length > 0) emptySnapshotWaits = 0;
+    if (!pageReadiness.ready) {
+      // The readiness module has already spent the bounded wait for this
+      // reason. Retry only while the document is actually not ready; never
+      // offer a control or a DONE choice from an unrendered snapshot.
+      const next = await refreshSnapshot(framesIfNeeded());
+      if (next.timedOut)
+        return finish("evaluate_timeout", { reason: "in-page evaluate exceeded budget" });
+      spendStep(`page_not_ready:${pageReadiness.reason ?? "unknown"}`);
+      continue;
+    }
     const includePayment = drive.facts.card_ref !== undefined;
     drive.facts = ensureGeneratedFacts(
       rows,
       applyReleasedCardFacts(drive.facts, session.releasedPaymentCard?.card),
-      { pageUrl: observation.url, headings: observation.semantic?.headings ?? [], goal: drive.goal },
+      {
+        pageUrl: observation.url,
+        headings: observation.semantic?.headings ?? [],
+        goal: drive.goal,
+      },
     );
     let pageUrl = observation.url;
     let missing = requiredFillableMissingFact(
@@ -7088,22 +7157,8 @@ async function driveLoop(input: {
         });
       }
 
-      // A same-document stage swap (Shopify one-page checkout) and a hydrating
-      // checkout both leave the snapshot empty for a while, so spend the
-      // re-observation budget before asking anything. Past it the ordinary
-      // question already offers exactly WAIT/DONE/BLOCKED and no target, because
-      // zero rows yield no action candidates — its WAIT keeps a payment settling
-      // behind a blank processor screen for as long as the step and time budgets
-      // allow. The signup repeat-cap must not exhaust that WAIT: an empty
-      // processor screen is not a no-op loop.
-      if (rows.length === 0 && emptySnapshotWaits < DRIVE_EMPTY_SNAPSHOT_WAITS) {
-        emptySnapshotWaits += 1;
-        const applied = await applyDecision({ kind: "wait", confidence: 1 });
-        if (applied !== "continue") return applied;
-        if (automaticDecisionRefused) break automaticDecisions;
-        spendStep("empty_snapshot_wait");
-        continue;
-      }
+      // A rendered page can legitimately have no controls (including DONE).
+      // The readiness result, rather than row count, decides whether to wait.
       // Per page, and read before the settle branch below: dead actions recorded
       // on the page the model just left must not rule on the page it is on now.
       const progressKey = pageProgressKey(
@@ -7148,14 +7203,13 @@ async function driveLoop(input: {
         !(drive.checkboxChallengePressedKeys ?? []).includes(progressKey) &&
         (await hasVisibleCheckboxCaptchaWidget(session.browser.page))
       ) {
-        const pressBudget = driveWaitMs(
-          remainingMs(),
-          DRIVE_CHECKBOX_CHALLENGE_PRESS_TIMEOUT_MS,
-        );
+        const pressBudget = driveWaitMs(remainingMs(), DRIVE_CHECKBOX_CHALLENGE_PRESS_TIMEOUT_MS);
         if (pressBudget === 0) {
           return (
             finishWithSubmitResponse() ??
-            finish("budget", { reason: widgetUnreadySolveReason(lastCaptchaOutcome ?? "in_flight") })
+            finish("budget", {
+              reason: widgetUnreadySolveReason(lastCaptchaOutcome ?? "in_flight"),
+            })
           );
         }
         drive.checkboxChallengePressedKeys = [

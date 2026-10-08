@@ -18,7 +18,6 @@ import { mockBrowserUseCapture } from "./browser-use-test-capture.js";
 //   - credential egress seed excludes mid_session task scope
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { constants, publicEncrypt } from "node:crypto";
-import { fileURLToPath } from "node:url";
 import { chromium, type Page } from "playwright";
 import { BrowserClickDispatchError } from "../browser.js";
 import { OAuthFailedError } from "../oauth-login.js";
@@ -45,6 +44,7 @@ const h = vi.hoisted(() => ({
   oauthExpectedGoogleAccountEmails: [] as Array<string | null | undefined>,
   oauthLoginGates: new Map<number, Promise<void>>(),
   waitForInteractiveDomCalls: [] as Array<{ minElements: number; timeoutMs: number }>,
+  pageReadyInteractiveProbes: 0,
   oauthResultUrl: "https://app.example.com/dashboard",
   oauthTerminalCompletionUrl: null as string | null,
   restoredStorageStates: [] as Array<{ browserIndex: number; state: unknown }>,
@@ -442,11 +442,23 @@ vi.mock("../browser.js", async (importOriginal) => ({
           close: async () => {},
           // This fixture has no DOM controls. A missing dialog/copy target is
           // represented by null, as it is on a real Playwright page.
-          evaluate: async (callback: unknown) =>
-            typeof callback === "function" &&
-            String(callback).includes("navigator.permissions.query")
-              ? { clipboardRead: "granted", geolocation: "prompt" }
-              : null,
+          evaluate: async (callback: unknown) => {
+            if (typeof callback !== "function") return null;
+            const source = String(callback);
+            if (source.includes("document.readyState")) {
+              // The synthetic page is already rendered; its canonical
+              // capture is supplied by extractBrowserUseObservation below.
+              return { state: "complete", rendered: true };
+            }
+            if (source.includes("minimum") && source.includes("getBoundingClientRect")) {
+              h.pageReadyInteractiveProbes += 1;
+              return true;
+            }
+            if (source.includes("navigator.permissions.query")) {
+              return { clipboardRead: "granted", geolocation: "prompt" };
+            }
+            return null;
+          },
           // classifyGoogleAuthState reads body text off the provider page.
           locator: () => ({ innerText: async () => "", evaluateAll: async () => [] }),
         };
@@ -485,12 +497,7 @@ vi.mock("../browser.js", async (importOriginal) => ({
       // settleAfterOAuth compare pages by object identity, so the session's
       // operation page must BE the controller's current page object.
       if (this.page !== null) return this.page;
-      return {
-        isClosed: () => false,
-        url: () => this.currentUrl(),
-        // See activeOAuthPage: no child frames for the gate-handoff walk.
-        frames: () => [],
-      };
+      return this.activeOAuthPage;
     }
     mainDocumentIdentity(): string {
       return String(h.mainDocumentEpoch);
@@ -1267,7 +1274,7 @@ vi.mock("../profile.js", async (importOriginal) => {
   };
 });
 
-import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ApiClient } from "../../api-client.js";
@@ -1387,6 +1394,7 @@ beforeEach(() => {
   h.oauthExpectedGoogleAccountEmails = [];
   h.oauthLoginGates = new Map();
   h.waitForInteractiveDomCalls = [];
+  h.pageReadyInteractiveProbes = 0;
   h.oauthResultUrl = "https://app.example.com/dashboard";
   h.oauthTerminalCompletionUrl = null;
   h.restoredStorageStates = [];
@@ -1752,9 +1760,7 @@ describe("operate session — OAuth lifecycle", () => {
 
   it("waits for DOM readiness instead of spending the OAuth completion budget on a fixed dwell", async () => {
     // The machine budget stays far above the simulated handshake so the flow
-    // completes normally and the post-action settle runs; the assertion below
-    // pins that the settle waits on interactive DOM (bounded 2s) rather than
-    // a fixed dwell.
+    // completes normally and the post-action readiness probe runs.
     process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "1000";
     h.visibleText = "Continue with Google";
     h.elements = [
@@ -1780,7 +1786,7 @@ describe("operate session — OAuth lifecycle", () => {
     await expect(
       act(started.session_id, { kind: "oauth_login", target: googleRef(started) }),
     ).resolves.toMatchObject({ dom: expect.stringContaining("Signed in") });
-    expect(h.waitForInteractiveDomCalls).toContainEqual({ minElements: 1, timeoutMs: 2_000 });
+    expect(h.pageReadyInteractiveProbes).toBeGreaterThan(0);
     await finishProvisionSession(started.session_id);
   });
 
@@ -7132,6 +7138,7 @@ describe("flat operator verbs", () => {
       const started = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
       const browser = await chromium.launch({ headless: true, args: ["--no-sandbox"] });
       const page = await browser.newPage();
+      await page.setContent("<main>Capture ready</main>");
       h.capturePage = page;
       const storeCredential = vi.fn().mockResolvedValue({ reference: "vault://acct/captured" });
       const api = { storeCredential } as unknown as ApiClient;
@@ -7208,6 +7215,7 @@ describe("flat operator verbs", () => {
       }
       expect(storeCredential).toHaveBeenCalledTimes(2);
     },
+    30_000,
   );
 
   it("resends controls after discarded fill observations and filtered queries", async () => {

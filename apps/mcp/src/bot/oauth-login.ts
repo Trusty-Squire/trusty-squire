@@ -28,6 +28,7 @@ import {
 } from "./request-cancellation.js";
 import { BrowserClickDispatchError } from "./click-dispatch.js";
 import type { BrowserController } from "./browser.js";
+import { waitForPageReady } from "./page-ready.js";
 
 export interface ActiveOAuthAttempt {
   id: string;
@@ -1191,11 +1192,7 @@ export async function loginWithOAuth(
     }
     if (browser.page !== null && !browser.page.isClosed()) {
       await browser.page.bringToFront().catch(() => undefined);
-      await browser.page
-        .waitForLoadState("domcontentloaded", {
-          timeout: remainingBudgetMs(),
-        })
-        .catch(() => undefined);
+      await waitForPageReady(browser.page, { kind: "document", capMs: remainingBudgetMs() });
     }
   }
 }
@@ -1250,10 +1247,12 @@ export async function waitForOAuthLifecycle(
       // dashboard can keep polling or streaming forever, so networkidle is
       // not a valid requirement for a completed OAuth redirect.
       const returnedUrl = url;
-      const ready = await returnedPage
-        .waitForLoadState("domcontentloaded", { timeout: Math.max(1, deadline - Date.now()) })
-        .then(() => true)
-        .catch(() => false);
+      const ready = (
+        await waitForPageReady(returnedPage, {
+          kind: "document",
+          capMs: Math.max(1, deadline - Date.now()),
+        })
+      ).ready;
       if (
         !ready ||
         returnedPage.isClosed() ||
@@ -1973,7 +1972,7 @@ export async function settleAfterOAuth(
     }
     browser.page = product;
     await product.bringToFront().catch(() => undefined);
-    await product.waitForLoadState("domcontentloaded", { timeout: 30000 }).catch(() => undefined);
+    await waitForPageReady(product, { kind: "document", capMs: 30_000 });
     settled = true;
     return product;
   } finally {

@@ -97,6 +97,7 @@ import {
   type ActControlIdentity,
 } from "./identity.js";
 import { evaluateBound } from "../drive-evaluate.js";
+import { waitForPageReady, type PageReadyResult } from "../page-ready.js";
 import {
   clickCrossOriginFrameTarget,
   commitDriveListOption,
@@ -1765,60 +1766,18 @@ async function adoptTabOpenedByClick(
   return adopted;
 }
 
-export async function settleAfterDriveAction(page?: Page, combobox = false): Promise<void> {
-  if (!page) return;
-  const capMs = combobox ? 200 : 50;
-  await page
-    .evaluate(
-      ({ cap, waitOptions }: { cap: number; waitOptions: boolean }) =>
-        new Promise<void>((resolve) => {
-          let frames = 0;
-          let stopped = false;
-          const finish = () => {
-            if (stopped) return;
-            stopped = true;
-            resolve();
-          };
-          setTimeout(finish, cap);
-          const tick = () => {
-            if (stopped) return;
-            frames += 1;
-            if (waitOptions) {
-              const visible = Array.from(document.querySelectorAll('[role="option"]')).some(
-                (node) => {
-                  const box = (node as HTMLElement).getBoundingClientRect();
-                  return box.width > 0 && box.height > 0;
-                },
-              );
-              if (visible) {
-                finish();
-                return;
-              }
-            } else if (frames >= 2) {
-              finish();
-              return;
-            }
-            requestAnimationFrame(tick);
-          };
-          requestAnimationFrame(tick);
-        }),
-      { cap: capMs, waitOptions: combobox },
-    )
-    .catch(() => undefined);
-}
-
 export async function settleAfterStateChange(
   browser: BrowserController,
   page?: Page,
   options?: { drive?: boolean; combobox?: boolean },
-): Promise<void> {
+): Promise<PageReadyResult | undefined> {
+  const target = page ?? browser.page ?? undefined;
+  if (target === undefined) return undefined;
   if (options?.drive === true) {
-    await settleAfterDriveAction(page, options.combobox === true);
-    return;
+    return await waitForPageReady(target, {
+      kind: "drive-action",
+      combobox: options.combobox === true,
+    });
   }
-  // A fixed dwell here used to consume the OAuth action's completion window
-  // after the provider had already returned. Wait for the page's actual
-  // interactive state instead; it resolves immediately when the redirect has
-  // rendered and remains bounded for slow SPAs.
-  await browser.waitForInteractiveDom(1, 2_000, page).catch(() => undefined);
+  return await waitForPageReady(target, { kind: "manual-action" });
 }

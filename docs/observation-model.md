@@ -170,6 +170,12 @@ fully delivered to the caller. A fresh, unfiltered observe returns the current m
 For an initial action response without `delta:true`, replace the prior map;
 cursor pages extend the map or delta started by that response.
 
+When the document is still navigating, empty, or hydrating after its bounded
+readiness steps, observation returns `page_readiness: {ready:false, reason,
+elapsed_ms}` with no DOM or actionable refs. The caller can observe again;
+an empty table in this state is not evidence that the page is finished.
+`apps/mcp/src/bot/page-ready.ts` owns the readiness reasons and wait caps.
+
 Full-format observations, filtered queries, paginated responses, and observations
 discarded by compound actions or capture invalidate delta eligibility. This includes
 the fill before `operate_type(submit:true)`, internal multi-select refreshes, and
