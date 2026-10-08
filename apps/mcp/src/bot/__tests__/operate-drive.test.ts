@@ -1,5 +1,5 @@
 // operate_drive unit tests: two-head operation + per-op target, structured
-// state, validate_choice, no confidence gates, each stop reason, the
+// state, validate_choice, low-confidence handback, each stop reason, the
 // handoff shape, and resume-answer execution. No browser.
 
 import { describe, expect, it } from "vitest";
@@ -114,17 +114,10 @@ import {
   rowOccluder,
   type DriveCandidate,
   type WireRow,
-  goalSeeksKey,
-  rowMatchesGoalSeek,
-  clickGoalSeekScore,
-  goalExcludesOauth,
-  pageOffersOnlyThirdPartySignup,
-  noOtherSignupPathReason,
   oauthProviderForRow,
   isListFilterRow,
   isContextPickerRow,
   isListedEntityRow,
-  isGoalDestinationRow,
   isSectionNavRow,
   unvisitedSectionNavRows,
   nextExploreRow,
@@ -161,16 +154,11 @@ import {
   pageHasUntriedPendingAction,
   isEntityNameRow,
   isLogoutRow,
-  alreadySignedInReason,
-  goalSeeksThirdPartySignin,
-  pageLooksLikeEmailVerification,
-  pageShowsForeignIdentity,
-  isPreexistingSessionPage,
   invalidFieldReason,
   rowLooksLikeEmail,
-  rowCarriesGoalNoun,
   isOffProductNavRow,
   isCodeSampleRow,
+  isExistingCredentialMutationRow,
   resetDriveGoalMemory,
   emptyDriveState,
 } from "../operate-drive.js";
@@ -241,6 +229,19 @@ describe("operate_drive constants", () => {
 });
 
 describe("request building", () => {
+  it("offers CLICK even when text fields fill their own candidate budget", () => {
+    const fields: WireRow[] = Array.from({ length: DRIVE_MAX_CANDIDATES + 1 }, (_, index) => [
+      `@e:email-${index}`,
+      "t",
+      "Email|f=email",
+    ]);
+    const link: WireRow = ["@e:docs", "l", "Docs|h=/docs"];
+    const sets = driveTargetSets([...fields, link], { email: "a@b.test" }, false);
+    expect(sets.TYPE_TEXT).toHaveLength(DRIVE_MAX_CANDIDATES);
+    expect(sets.CLICK.map((candidate) => candidate.ref)).toContain(link[0]);
+    expect(sets.operations).toContain("CLICK");
+  });
+
   it("asks operation plus scoped target heads, never a flat mix of fillables and clickables", () => {
     const questions = buildDriveQuestions(
       ROWS,
@@ -253,8 +254,8 @@ describe("request building", () => {
     expect(Object.keys(operation.criteria)).toEqual(
       expect.arrayContaining(["CLICK", "TYPE_TEXT", "DONE"]),
     );
-    expect(operation.criteria).not.toHaveProperty("WAIT");
-    expect(operation.criteria).not.toHaveProperty("BLOCKED");
+    expect(operation.criteria).toHaveProperty("WAIT");
+    expect(operation.criteria).toHaveProperty("BLOCKED");
     expect(operation.criteria).not.toHaveProperty("SELECT");
     expect(operation.criteria).toHaveProperty("NONE_OF_THESE");
     expect(operation.criteria).toHaveProperty("GO_BACK");
@@ -318,12 +319,13 @@ describe("request building", () => {
     );
   });
 
-  it("excludes offscreen, disabled, and payment rows except at the card step", () => {
+  it("offers offscreen rows while withholding disabled and unreleased payment fields", () => {
     const mixed = [...ROWS, OFFSCREEN, DISABLED, PAYMENT];
     expect(driveCandidates(mixed, false).map((c) => c.ref)).toEqual([
       "@e:email",
       "@e:name",
       "@e:go",
+      "@e:signup",
     ]);
     expect(driveCandidates(mixed, true).map((c) => c.ref)).toContain("@e:pan");
   });
@@ -336,19 +338,19 @@ describe("request building", () => {
     const checkout = "https://whitejade.xyz/checkouts/cn/token/en-us";
     expect(isCandidateRow(pay, true, checkout)).toBe(true);
     expect(isCandidateRow(localized, true, checkout)).toBe(true);
-    expect(isCandidateRow(radio, true, checkout)).toBe(false);
+    expect(isCandidateRow(radio, true, checkout)).toBe(true);
     expect(
       clickableCandidates([pay, localized, back, radio], true, [], checkout).map((c) => c.ref),
-    ).toEqual(["@e:pay", "@e:fr", "@e:back"]);
+    ).toEqual(["@e:pay", "@e:fr", "@e:back", "@e:method"]);
   });
 
-  it("drops an offscreen Buy now off a checkout page", () => {
+  it("offers an offscreen Buy now on product and checkout pages", () => {
     const buy: WireRow = ["@e:buy", "b", "Buy now|v=offscreen"];
     const product = "https://whitejade.xyz/products/jade-lamp";
-    expect(isCandidateRow(buy, true, product)).toBe(false);
-    expect(clickableCandidates([buy], true, [], product)).toEqual([]);
-    expect(isCandidateRow(buy, true, "")).toBe(false);
-    expect(clickableCandidates([buy], true)).toEqual([]);
+    expect(isCandidateRow(buy, true, product)).toBe(true);
+    expect(clickableCandidates([buy], true, [], product).map((c) => c.ref)).toEqual(["@e:buy"]);
+    expect(isCandidateRow(buy, true, "")).toBe(true);
+    expect(clickableCandidates([buy], true).map((c) => c.ref)).toEqual(["@e:buy"]);
     expect(
       clickableCandidates([buy], true, [], "https://whitejade.xyz/checkouts/cn/token").map(
         (c) => c.ref,
@@ -563,18 +565,38 @@ describe("page text from observation", () => {
 });
 
 describe("history threading", () => {
+  it("shows every observed row even when it is absent from action choices", () => {
+    const rows: WireRow[] = [
+      ["@e:env", "s", "Environment|v=offscreen"],
+      ["@e:docs", "l", "Docs|u=https://docs.example.test/start"],
+      ["@e:endpoints", "tb", "Endpoints"],
+      ["@e:post", "b", "POST Create key"],
+      ["@e:disabled", "b", "Continue|s=d"],
+    ];
+    const state = buildJevState(
+      "verify email then get an API key", [], [], "https://app.example.test/keys",
+      "Keys", [], "", { rows },
+    );
+    expect(state.elements.map((element) => element.id)).toEqual(rows.map((row) => row[0]));
+    expect(state.goal).toEqual({
+      text: "verify email then get an API key",
+      done_when: "the page shows the requested result and every stated requirement is satisfied",
+    });
+    expect(state.elements.find((element) => element.id === "@e:disabled")?.disabled).toBe(true);
+  });
+
   it("does not present an unrecognized purchase goal as already done", () => {
     const goal = "Buy one The Glow Serum from White Jade";
     const instructions = nextActionInstructions(goal);
     expect(instructions).not.toContain("Current phase: done");
     expect(instructions).not.toContain("Current phase:");
-    expect(instructions).toContain("The goal is complete only when the page shows the requested result.");
+    expect(instructions).toContain("The goal is complete only when the page shows the requested result and every stated requirement is satisfied.");
     expect(goalPhaseAndDoneWhen(goal)).toEqual({
-      done_when: "the page shows the requested result",
+      done_when: "the page shows the requested result and every stated requirement is satisfied",
     });
     expect(buildJevState(goal, [], [], "https://whitejade.test/", "", [])?.goal).toEqual({
       text: goal,
-      done_when: "the page shows the requested result",
+      done_when: "the page shows the requested result and every stated requirement is satisfied",
     });
   });
 
@@ -597,8 +619,7 @@ describe("history threading", () => {
     });
     expect(state.goal).toEqual({
       text: "sign up",
-      phase: "create_or_reveal",
-      done_when: "the page confirms the account or resource was created",
+      done_when: "the page shows the requested result and every stated requirement is satisfied",
     });
     expect(state.trail).toEqual([]);
     expect(state.tried_here).toEqual([]);
@@ -943,7 +964,7 @@ describe("decideAfterJev stop reasons", () => {
     const phone: WireRow = ["@e:phone", "t", "Phone (optional)|f=phone|v=offscreen"];
     const checkout = "https://whitejade.xyz/checkouts/cn/hWNH2exU82n2ocbEQWhd9HjG/en-us";
     const facts = { phone: "2125550100", card_ref: "card-1" };
-    expect(driveCandidates([phone], true).map((row) => row.ref)).toEqual([]);
+    expect(driveCandidates([phone], true).map((row) => row.ref)).toEqual(["@e:phone"]);
     expect(isRequiredRow(phone)).toBe(false);
     expect(fillableCandidates([phone], facts, true, [], checkout).map((row) => row.ref)).toEqual([
       "@e:phone",
@@ -1904,7 +1925,7 @@ describe("form-fill assignment helpers", () => {
     ).toEqual({ solved: false, outcome: "challenge_still_rendered" });
   });
 
-  it("omits BLOCKED while a listed fill or enabled submit remains", () => {
+  it("offers WAIT and BLOCKED alongside listed work", () => {
     expect(pageHasListedWork(ROWS, 1, 0)).toBe(true);
     expect(pageHasListedWork([["@e:go", "b", "Get started now"]], 0, 0)).toBe(true);
     expect(
@@ -1927,8 +1948,8 @@ describe("form-fill assignment helpers", () => {
     expect(pageHasListedWork(welcome, 0, 0)).toBe(true);
     const welcomeSets = driveTargetSets(welcome, {}, false);
     expect(welcomeSets.operations).toContain("CLICK");
-    expect(welcomeSets.operations).not.toContain("WAIT");
-    expect(welcomeSets.operations).not.toContain("BLOCKED");
+    expect(welcomeSets.operations).toContain("WAIT");
+    expect(welcomeSets.operations).toContain("BLOCKED");
     expect(welcomeSets.CLICK.map((c) => c.ref)).not.toContain("@e:logo");
     expect(welcomeSets.CLICK.map((c) => c.ref)).not.toContain("@e:next");
     expect(welcomeSets.CLICK.map((c) => c.ref)).toContain("@e:cb");
@@ -1948,8 +1969,8 @@ describe("form-fill assignment helpers", () => {
     expect(openClicks).toEqual(expect.arrayContaining(["@e:kw", "@e:other"]));
     const signup = driveTargetSets(ROWS, { email: "a@b.test" }, false);
     expect(signup.operations).toContain("TYPE_TEXT");
-    expect(signup.operations).not.toContain("WAIT");
-    expect(signup.operations).not.toContain("BLOCKED");
+    expect(signup.operations).toContain("WAIT");
+    expect(signup.operations).toContain("BLOCKED");
     const nav = driveTargetSets(
       [
         ["@e:home", "l", "Home"],
@@ -1962,76 +1983,21 @@ describe("form-fill assignment helpers", () => {
     expect(nav.operations).toContain("BLOCKED");
   });
 
-  it("ranks a key-seeking control ahead of dashboard chrome when the goal names a key", () => {
-    const dashboard: WireRow[] = [
+  it("offers the same dashboard controls for compound and single goals", () => {
+    const rows: WireRow[] = [
       ["@e:home", "l", "Home"],
       ["@e:skip", "b", "Skip tour"],
       ["@e:keys", "l", "API keys"],
       ["@e:next", "b", "Continue"],
     ];
-    const goal = "sign up and extract an API key";
-    expect(goalSeeksKey(goal)).toBe(true);
-    expect(rowMatchesGoalSeek(["@e:keys", "l", "API keys"], goal)).toBe(true);
-    expect(rowMatchesGoalSeek(["@e:home", "l", "Home"], goal)).toBe(false);
-    expect(
-      clickGoalSeekScore(["@e:keys", "l", "API keys"], goal, "https://example.test/welcome"),
-    ).toBe(2);
-    expect(
-      clickGoalSeekScore(["@e:next", "b", "Continue"], goal, "https://example.test/welcome"),
-    ).toBe(1);
-    expect(
-      clickGoalSeekScore(["@e:keys", "l", "API keys"], goal, "https://example.test/register"),
-    ).toBe(0);
-    const identityMask = (text: string) => text;
-    const ranked = driveTargetSets(
-      dashboard,
-      {},
-      false,
-      [],
-      "https://example.test/welcome",
-      new Map(),
-      identityMask,
-      [],
-      { goal },
-    );
-    expect(ranked.CLICK.map((c) => c.ref)[0]).toBe("@e:keys");
-    expect(ranked.CLICK.map((c) => c.ref)).toContain("@e:next");
-    expect(ranked.operations).toContain("CLICK");
-    expect(ranked.operations).not.toContain("WAIT");
-    expect(ranked.operations).not.toContain("BLOCKED");
-    const signup = driveTargetSets(
-      dashboard,
-      {},
-      false,
-      [],
-      "https://example.test/register",
-      new Map(),
-      identityMask,
-      [],
-      { goal },
-    );
-    expect(signup.CLICK.map((c) => c.ref)[0]).not.toBe("@e:keys");
-    const keysOnly: WireRow[] = [
-      ["@e:home", "l", "Home"],
-      ["@e:keys", "l", "API keys"],
-    ];
-    const idle = driveTargetSets(keysOnly, {}, false, [], "https://example.test/welcome");
-    expect(idle.operations).toContain("WAIT");
-    expect(idle.operations).toContain("BLOCKED");
-    const seeking = driveTargetSets(
-      keysOnly,
-      {},
-      false,
-      [],
-      "https://example.test/welcome",
-      new Map(),
-      identityMask,
-      [],
-      { goal },
-    );
-    expect(seeking.CLICK.map((c) => c.ref)[0]).toBe("@e:keys");
-    expect(seeking.operations).not.toContain("WAIT");
-    expect(seeking.operations).not.toContain("BLOCKED");
+    const targetRefs = (goal: string) => driveTargetSets(
+      rows, {}, false, [], "https://example.test/welcome", new Map(),
+      (text) => text, [], { goal },
+    ).CLICK.map((candidate) => candidate.ref);
+    expect(targetRefs("verify email then get an API key")).toEqual(targetRefs("get an API key"));
+    expect(targetRefs("get an API key")).toEqual(expect.arrayContaining([
+      "@e:home", "@e:skip", "@e:keys", "@e:next",
+    ]));
   });
 
   it("keeps a non-DONE answer when every listed control is suppressed", () => {
@@ -2214,7 +2180,7 @@ describe("form-fill assignment helpers", () => {
         "complete email verification and create an API key",
         true,
       ),
-    ).toEqual({ kind: "link" });
+    ).toBeUndefined();
     expect(
       inboxSpecialPlan(
         [
@@ -2240,7 +2206,7 @@ describe("form-fill assignment helpers", () => {
       [],
       { headings: ["Check your email"], goal: "complete email verification" },
     );
-    expect(verifyAtStart.operations).not.toContain("INBOX");
+    expect(verifyAtStart.operations).toContain("INBOX");
     expect(pageSuggestsInboxWait(checkEmail, "https://app.example.test/verifications")).toBe(true);
     const inboxSets = driveTargetSets(
       checkEmail,
@@ -2258,7 +2224,7 @@ describe("form-fill assignment helpers", () => {
       },
     );
     expect(inboxSets.operations).toContain("INBOX");
-    expect(inboxSets.operations).not.toContain("BLOCKED");
+    expect(inboxSets.operations).toContain("BLOCKED");
     const inboxQuestions = buildDriveQuestions(
       checkEmail,
       {},
@@ -2272,7 +2238,7 @@ describe("form-fill assignment helpers", () => {
     const inboxOps =
       inboxQuestions.operation?.type === "choice" ? inboxQuestions.operation.criteria : {};
     expect(inboxOps).toHaveProperty("INBOX");
-    expect(inboxOps).not.toHaveProperty("BLOCKED");
+    expect(inboxOps).toHaveProperty("BLOCKED");
     expect(
       decideAfterJev({
         answers: { operation: valid("INBOX", inboxOps, 0.91) },
@@ -2303,7 +2269,7 @@ describe("form-fill assignment helpers", () => {
         "sign up and complete email verification",
         true,
       ),
-    ).toEqual({ kind: "link" });
+    ).toBeUndefined();
     expect(
       inboxSpecialPlan(
         [
@@ -2440,7 +2406,7 @@ describe("facts, fingerprint, compact merge", () => {
     expect(matchingFactKeys({ query: "Zurich weather" }, search)).toEqual(["query"]);
   });
 
-  it("includes offscreen fillable rows on a checkout URL only", () => {
+  it("includes offscreen fillable rows on checkout and product pages", () => {
     const last: WireRow = ["@e:ln", "t", "@last-name|v=offscreen|s=r"];
     const newsletter: WireRow = ["@e:em", "t", "@email|v=offscreen|s=r|a=signup|f=email"];
     expect(
@@ -2463,8 +2429,8 @@ describe("facts, fingerprint, compact merge", () => {
         [],
         "https://whitejade.xyz/products/the-glow-serum",
       ).map((c) => c.ref),
-    ).toEqual([]);
-    expect(driveCandidates([last, SUBMIT], false).map((c) => c.ref)).toEqual(["@e:go"]);
+    ).toEqual(["@e:em"]);
+    expect(driveCandidates([last, SUBMIT], false).map((c) => c.ref)).toEqual(["@e:ln", "@e:go"]);
   });
 
   it("withholds a disabled submit while a field is still empty", () => {
@@ -3141,8 +3107,8 @@ describe("drive aim ranking", () => {
     const remount: WireRow = ["@e:new", "b", "Log in"];
     const create: WireRow = ["@e:join", "b", "Create account"];
     const drive = { failedActionKeys: [] as string[] };
-    rememberFailedAction(drive, [first], "@e:old");
-    expect(drive.failedActionKeys).toEqual([actionFailureKey(first)]);
+    rememberFailedAction(drive, [first], "@e:old", "https://example.test/login");
+    expect(drive.failedActionKeys).toEqual([actionFailureKey(first, "https://example.test/login")]);
     const ranked = rankDriveCandidates([candidate(remount), candidate(create)], {
       rows: [remount, create],
       pageUrl: "https://example.test/login",
@@ -3163,7 +3129,7 @@ describe("drive aim ranking", () => {
     ).toEqual(["@e:a", "@e:b"]);
   });
 
-  it("ranks Create account ahead of Log in on a login URL when the goal is a signup", () => {
+  it("keeps login and account creation choices without goal-based ranking", () => {
     const login: WireRow = ["@e:in", "b", "Log in"];
     const join: WireRow = ["@e:join", "b", "Create account"];
     const sets = driveTargetSets(
@@ -3177,7 +3143,7 @@ describe("drive aim ranking", () => {
       [],
       { goal: "Sign up using the email/password form" },
     );
-    expect(sets.CLICK.map((entry) => entry.ref)).toEqual(["@e:join", "@e:in"]);
+    expect(sets.CLICK.map((entry) => entry.ref)).toEqual(["@e:in", "@e:join"]);
   });
 });
 
@@ -3202,7 +3168,6 @@ describe("third-party-only signup", () => {
   const google: WireRow = ["@e:g", "l", "Continue with Google"];
   const github: WireRow = ["@e:h", "l", "Continue with GitHub"];
   const email: WireRow = ["@e:email", "t", "Email|f=email"];
-  const signIn: WireRow = ["@e:in", "l", "Sign in"];
 
   it("reads OAuth providers from link and button rows alike", () => {
     expect(oauthProviderForRow(google)).toBe("google");
@@ -3211,20 +3176,17 @@ describe("third-party-only signup", () => {
     expect(oauthProviderForRow(email)).toBeUndefined();
   });
 
-  it("treats a page of only provider links as having no other sign-up path", () => {
-    expect(pageOffersOnlyThirdPartySignup([google, github])).toBe(true);
-    expect(pageOffersOnlyThirdPartySignup([google, github, signIn])).toBe(true);
-    expect(pageOffersOnlyThirdPartySignup([google, github, email])).toBe(false);
-    expect(pageOffersOnlyThirdPartySignup([email, SUBMIT])).toBe(false);
+  it("offers provider links alongside native fields", () => {
+    const sets = driveTargetSets([google, github, email], { email: "a@b.test" }, false);
+    expect(sets.CLICK.map((candidate) => candidate.ref)).toEqual(expect.arrayContaining(["@e:g", "@e:h"]));
+    expect(sets.TYPE_TEXT.map((candidate) => candidate.ref)).toContain("@e:email");
   });
 
-  it("detects a goal that excludes third-party sign-in without naming a host", () => {
-    expect(goalExcludesOauth("create an account with email, not Google or GitHub")).toBe(true);
-    expect(goalExcludesOauth("sign up without Google")).toBe(true);
-    expect(goalExcludesOauth("create an account using email only")).toBe(true);
-    expect(goalExcludesOauth("sign up with Google")).toBe(false);
-    expect(goalExcludesOauth("create an account")).toBe(false);
-    expect(noOtherSignupPathReason()).toMatch(/no other sign-up path/i);
+  it("does not remove provider links from the choices based on goal wording", () => {
+    const rows = [google, github];
+    const refs = (goal: string) => driveTargetSets(rows, {}, false, [], "", new Map(),
+      (text) => text, [], { goal }).CLICK.map((candidate) => candidate.ref);
+    expect(refs("sign up without Google")).toEqual(refs("sign up with Google"));
   });
 
   it("emits oauth_login for a provider link the same way as a provider button", () => {
@@ -3302,18 +3264,6 @@ describe("post-confirmation navigation", () => {
 
   it("treats a filter whose label shares the goal noun as a picker, not a destination", () => {
     expect(isListFilterRow(filter)).toBe(true);
-    expect(isGoalDestinationRow(keys)).toBe(true);
-    expect(isGoalDestinationRow(filter)).toBe(false);
-    expect(rowMatchesGoalSeek(filter, "extract an API key")).toBe(false);
-    expect(rowCarriesGoalNoun(settings, "extract an API key")).toBe(false);
-    expect(rowCarriesGoalNoun(keys, "extract an API key")).toBe(true);
-    expect(rowMatchesGoalSeek(keys, "extract an API key")).toBe(true);
-    expect(clickGoalSeekScore(filter, "extract an API key", "https://example.test/dashboard")).toBe(
-      0,
-    );
-    expect(clickGoalSeekScore(keys, "extract an API key", "https://example.test/dashboard")).toBe(
-      2,
-    );
     const sets = driveTargetSets(
       [filter, keys],
       {},
@@ -3326,7 +3276,7 @@ describe("post-confirmation navigation", () => {
       { goal: "sign up and extract an API key" },
     );
     expect(sets.CLICK.map((entry) => entry.ref)).toEqual(["@e:keys"]);
-    expect(sets.SELECT).toEqual([]);
+    expect(sets.SELECT.map((entry) => entry.ref)).toContain("@e:filter");
   });
 
   it("lists unvisited section tabs and skips the page the drive is already on", () => {
@@ -3474,7 +3424,7 @@ describe("post-confirmation navigation", () => {
       "@e:two",
       "@e:three",
     ]);
-    expect(offered.CLICK.map((entry) => entry.ref)).not.toContain("@e:acct");
+    expect(offered.CLICK.map((entry) => entry.ref)).toContain("@e:acct");
     const afterAccount = driveTargetSets(
       [...entries, account, billing, apps],
       {},
@@ -3486,7 +3436,7 @@ describe("post-confirmation navigation", () => {
       [],
       { goal: "extract an API key", visitedSectionKeys: [sectionIdentity(account, settingsUrl)] },
     );
-    expect(afterAccount.CLICK.map((entry) => entry.ref)).not.toContain("@e:acct");
+    expect(afterAccount.CLICK.map((entry) => entry.ref)).toContain("@e:acct");
     expect(afterAccount.CLICK.map((entry) => entry.ref)[0]).toBe("@e:one");
     expect(isRevealOrCopyRow(["@e:show", "b", "Reveal"])).toBe(true);
     expect(isRevealOrCopyRow(["@e:copy", "b", "Copy"])).toBe(true);
@@ -3527,92 +3477,18 @@ describe("post-confirmation navigation", () => {
       [],
       { goal: "extract an API key" },
     );
-    expect(sets.CLICK.map((entry) => entry.ref)[0]).toBe("@e:one");
+    expect(sets.CLICK.map((entry) => entry.ref)).toContain("@e:one");
     expect(sets.CLICK.map((entry) => entry.ref)).toContain("@e:new");
     expect(sets.TYPE_TEXT.map((entry) => entry.ref)).toEqual(["@e:name"]);
   });
 
-  it("names a pre-existing session instead of waiting on verification", () => {
+  it("leaves a pre-existing session and its logout control to the model", () => {
     expect(isLogoutRow(["@e:out", "l", "Log out"])).toBe(true);
-    expect(alreadySignedInReason()).toMatch(/already signed in/i);
-    expect(
-      inboxSpecialPlan(
-        [["@e:h", "h1", "Check your email"]],
-        "wait",
-        false,
-        0,
-        "https://app.example.test/register",
-        "Check your email",
-      ),
-    ).toBeUndefined();
-    const verifyRows: WireRow[] = [
-      ["@e:h", "h1", "Check your email"],
+    const rows: WireRow[] = [
+      ["@e:keys", "l", "API Keys"],
       ["@e:out", "l", "Log out"],
     ];
-    expect(
-      pageLooksLikeEmailVerification(
-        verifyRows,
-        "https://app.example.test/verifications",
-        "Check your email",
-      ),
-    ).toBe(true);
-    expect(
-      isPreexistingSessionPage({
-        rows: verifyRows,
-        pageUrl: "https://app.example.test/verifications",
-        pageText: "Check your email",
-        goal: "sign up and extract an API key",
-        submittedThisDrive: false,
-      }),
-    ).toBe(true);
-    const dashRows: WireRow[] = [
-      ["@e:keys", "l", "API Keys|u=https://app.example.test/keys"],
-      ["@e:out", "l", "Log out"],
-      ["@e:verify", "l", "Verify email|u=https://app.example.test/verifications"],
-    ];
-    expect(
-      isPreexistingSessionPage({
-        rows: dashRows,
-        pageUrl: "https://app.example.test/dashboard",
-        pageText: "Dashboard",
-        goal: "use Continue with Google with the account already signed in to this browser",
-        submittedThisDrive: false,
-      }),
-    ).toBe(false);
-    expect(
-      pageLooksLikeEmailVerification(
-        [
-          ["@e:out", "l", "Log out"],
-          ["@e:list", "l", "Requests"],
-        ],
-        "https://app.example.test/verifications",
-        "Identity verifications",
-      ),
-    ).toBe(false);
-    expect(
-      isPreexistingSessionPage({
-        rows: [
-          ["@e:out", "l", "Log out"],
-          ["@e:list", "l", "Requests"],
-        ],
-        pageUrl: "https://app.example.test/verifications",
-        pageText: "Identity verifications",
-        goal: "extract an API key",
-        submittedThisDrive: false,
-      }),
-    ).toBe(false);
-    expect(
-      goalSeeksThirdPartySignin(
-        "use Continue with Google with the account already signed in to this browser",
-      ),
-    ).toBe(true);
-    expect(
-      pageShowsForeignIdentity(
-        [["@e:who", "l", "ada@other.test"]],
-        "Signed in as ada@other.test",
-        "sign up as ada@example.test",
-      ),
-    ).toBe(true);
+    expect(driveTargetSets(rows, {}, false).CLICK.map((candidate) => candidate.ref)).toContain("@e:out");
     expect(invalidFieldReason([["@e:email", "t", "Email|f=email|s=i"]])).toMatch(
       /email was marked invalid/i,
     );
@@ -3645,7 +3521,7 @@ describe("post-confirmation navigation", () => {
     ]);
   });
 
-  it("keeps an in-app goal-noun link and drops docs, help, and code-sample controls", () => {
+  it("offers docs and code-looking controls alongside app navigation", () => {
     const inApp: WireRow = ["@e:keys", "l", "API Keys|u=https://app.example.test/keys"];
     const docs: WireRow = ["@e:docs", "l", "API keys|u=https://app.example.test/docs/api-keys"];
     const sample: WireRow = ["@e:post", "b", "POST Create API key"];
@@ -3664,10 +3540,10 @@ describe("post-confirmation navigation", () => {
       [],
       { goal: "open the API Keys page and create an API key" },
     );
-    expect(sets.CLICK.map((entry) => entry.ref)).toEqual(["@e:keys"]);
+    expect(sets.CLICK.map((entry) => entry.ref)).toEqual(["@e:docs", "@e:post", "@e:keys"]);
   });
 
-  it("drops Docs and environment pickers from a dashboard when Settings is untried", () => {
+  it("offers Docs and environment pickers beside Settings", () => {
     const docs: WireRow = ["@e:docs", "l", "Docs|u=https://app.example.test/docs"];
     const settings: WireRow = ["@e:set", "l", "Settings|u=https://app.example.test/settings"];
     const env: WireRow = ["@e:env", "s", "Environment"];
@@ -3686,11 +3562,11 @@ describe("post-confirmation navigation", () => {
       [],
       { goal: "extract an API key" },
     );
-    expect(sets.CLICK.map((entry) => entry.ref)).toEqual(["@e:set"]);
-    expect(sets.SELECT).toEqual([]);
+    expect(sets.CLICK.map((entry) => entry.ref)).toEqual(expect.arrayContaining(["@e:docs", "@e:logo", "@e:set"]));
+    expect(sets.SELECT.map((entry) => entry.ref)).toContain("@e:env");
   });
 
-  it("presents listed entries first and removes an already-clicked control", () => {
+  it("keeps visited entries and section links available to the model", () => {
     const settingsUrl = "https://app.example.test/settings";
     const entries: WireRow[] = [
       ["@e:one", "l", "payments-api|q=1/5"],
@@ -3743,12 +3619,10 @@ describe("post-confirmation navigation", () => {
         visitedSectionKeys: [sectionIdentity(entries[0]!, settingsUrl)],
       },
     );
-    expect(afterOne.CLICK.map((entry) => entry.ref)).toEqual([
-      "@e:two",
-      "@e:three",
-      "@e:four",
-      "@e:five",
-    ]);
+    expect(afterOne.CLICK.map((entry) => entry.ref)).toEqual(expect.arrayContaining([
+      "@e:one", "@e:two", "@e:three", "@e:four", "@e:five",
+      "@e:docs", "@e:acct", "@e:bill", "@e:rep",
+    ]));
   });
 
   it("clears cycle and dead-action memory when the goal text changes", () => {
@@ -3883,7 +3757,7 @@ describe("drive approval page texts", () => {
 });
 
 describe("dialog overlay secret and oauth bounce rules", () => {
-  it("does not offer existing-credential mutation controls for a key goal", () => {
+  it("offers mutation controls but identifies them for handback", () => {
     const rows: WireRow[] = [
       ["@e:reveal", "b", "Reveal key"],
       ["@e:rotate", "b", "Rotate key"],
@@ -3901,8 +3775,33 @@ describe("dialog overlay secret and oauth bounce rules", () => {
       { goal: "read an API key" },
     );
     expect(sets.CLICK.map((candidate) => candidate.ref)).toContain("@e:reveal");
-    expect(sets.CLICK.map((candidate) => candidate.ref)).not.toContain("@e:rotate");
-    expect(sets.CLICK.map((candidate) => candidate.ref)).not.toContain("@e:reset");
+    expect(sets.CLICK.map((candidate) => candidate.ref)).toContain("@e:rotate");
+    expect(sets.CLICK.map((candidate) => candidate.ref)).toContain("@e:reset");
+    expect(isExistingCredentialMutationRow(rows[1]!, "https://app.example.test/keys")).toBe(true);
+    expect(isExistingCredentialMutationRow(rows[2]!, "https://app.example.test/keys")).toBe(true);
+    expect(isExistingCredentialMutationRow(
+      ["@e:delete", "b", "Delete"],
+      "https://app.example.test/settings",
+      [["@e:heading", "h1", "API Keys"]],
+    )).toBe(true);
+    expect(isExistingCredentialMutationRow(
+      ["@e:delete", "b", "Delete"],
+      "https://app.example.test/settings",
+      [],
+      "",
+      ["API Keys"],
+    )).toBe(true);
+    expect(isExistingCredentialMutationRow(
+      ["@e:action", "s", "Action"],
+      "https://app.example.test/settings",
+      [["@e:heading", "h1", "API Keys"]],
+      "Revoke",
+    )).toBe(true);
+    expect(isExistingCredentialMutationRow(
+      ["@e:delete", "b", "Delete"],
+      "https://app.example.test/settings",
+      [["@e:heading", "h1", "Team members"]],
+    )).toBe(false);
   });
 
   it("drops occluded controls and keeps the layer's own dismiss", () => {
@@ -3925,7 +3824,7 @@ describe("dialog overlay secret and oauth bounce rules", () => {
       [],
       { goal: "extract an API key" },
     );
-    expect(sets.CLICK.map((entry) => entry.ref)).toEqual(["@e:copy", "@e:x"]);
+    expect(sets.CLICK.map((entry) => entry.ref)).toEqual(["@e:x", "@e:copy"]);
     expect(sets.CLICK.map((entry) => entry.ref)).not.toContain("@e:new");
   });
 

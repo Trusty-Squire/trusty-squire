@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { chromium, type Browser } from "playwright";
 import { BrowserController } from "../browser.js";
-import { driveKeyEvidence, driveKeyGoalComplete } from "../operate-drive.js";
+import { extractCredentials } from "../capture/capture.js";
 import { finishProvisionSession, startHarnessProvisionSession } from "../provision-session.js";
 
 let browser: Browser;
@@ -14,8 +14,8 @@ afterAll(async () => {
   await browser?.close();
 });
 
-describe("drive key-goal evidence", () => {
-  it("does not complete on a page that shows values but has no Copy-click key", async () => {
+describe("credential capture from a key page", () => {
+  it("does not extract a key from connection examples without a Copy source", async () => {
     const context = await browser.newContext();
     const page = await context.newPage();
     const html = `<!doctype html><main>
@@ -35,25 +35,12 @@ describe("drive key-goal evidence", () => {
       format: "compact",
     });
     try {
-      const evidence = await driveKeyEvidence(started.session_id);
+      const evidence = await extractCredentials(started.session_id);
       expect(evidence.credentials).toEqual({});
-      expect(driveKeyGoalComplete(evidence)).toBe(false);
     } finally {
       await finishProvisionSession(started.session_id);
       await context.close();
     }
   }, 30_000);
 
-  it("completes on any storable extracted value, whatever its shape", () => {
-    for (const value of [
-      "d7bd47d70c1e4f2a9b3c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f80bd4a",
-      "Ab3kZ9",
-    ])
-      expect(driveKeyGoalComplete({ credentials: { api_key: value } })).toBe(true);
-    expect(
-      driveKeyGoalComplete({
-        credentials: { project_id: "proj_abc123def456", api_key_truncated: "sk-…abcd" },
-      }),
-    ).toBe(false);
-  });
 });

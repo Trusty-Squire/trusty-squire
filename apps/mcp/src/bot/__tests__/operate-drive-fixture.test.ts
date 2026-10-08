@@ -1,6 +1,6 @@
 // Real-browser fixture for operate_drive: a multi-step signup completes in one
-// call; a missing fact returns needs_value naming the field; a no-op action
-// returns no_progress; resume with the value completes. Jev is mocked so the
+// call; a missing fact returns needs_value naming the field; resume with the
+// value completes. Jev is mocked so the
 // loop's wiring is under test; the credential-gated matrix replay covers live
 // Jev confidence.
 
@@ -13,7 +13,6 @@ import { BrowserController } from "../browser.js";
 import {
   JevUnavailableError,
   askJev,
-  type JevAnswer,
   type JevCallOutcome,
   type JevQuestion,
 } from "../jev-client.js";
@@ -437,6 +436,33 @@ function jevFromQuestions(
   return { attempts: 1, elapsedMs: 12, result: { answers } };
 }
 
+function jevChoose(
+  questions: Record<string, JevQuestion>,
+  operation: string,
+  targetLabel?: RegExp,
+): JevCallOutcome {
+  const result = jevFromQuestions(questions);
+  const operations = Object.keys(choiceCriteria(questions.operation));
+  if (!operations.includes(operation)) throw new Error(`${operation} was not offered`);
+  result.result.answers.operation = {
+    choice: operation,
+    confidence: 0.93,
+    probabilities: peaked(operations, operation),
+  };
+  if (targetLabel !== undefined) {
+    const targetName = `${operation}_target`;
+    const criteria = choiceCriteria(questions[targetName]);
+    const target = Object.keys(criteria).find((key) => targetLabel.test(criteria[key] ?? ""));
+    if (target === undefined) throw new Error(`No ${operation} target matched ${targetLabel}`);
+    result.result.answers[targetName] = {
+      choice: target,
+      confidence: 0.93,
+      probabilities: peaked(Object.keys(criteria), target),
+    };
+  }
+  return result;
+}
+
 function choiceCriteria(question: JevQuestion | undefined): Record<string, string> {
   return question?.type === "choice" ? question.criteria : {};
 }
@@ -796,7 +822,7 @@ describe("operate_drive real-browser fixture", () => {
     }
   }, 30_000);
 
-  it("finishes a third-party-only signup when the goal excludes those links", async () => {
+  it("lets the model block a third-party-only signup when the goal excludes those links", async () => {
     const html = `<!doctype html><meta charset="utf-8"><title>Signup</title>
 <main>
   <h1>Create account</h1>
@@ -805,7 +831,11 @@ describe("operate_drive real-browser fixture", () => {
 </main>`;
     const { context, started } = await openFixture(html, "oauth-links-excluded.test");
     try {
-      const dependencies = deps(async (_api, _state, questions) => jevFromQuestions(questions));
+      const offered: string[] = [];
+      const dependencies = deps(async (_api, _state, questions) => {
+        offered.push(...Object.values(choiceCriteria(questions.CLICK_target)));
+        return jevChoose(questions, "BLOCKED");
+      });
       dependencies.act = async () => {
         throw new Error("oauth_login must not run when the goal excludes third-party sign-in");
       };
@@ -820,7 +850,8 @@ describe("operate_drive real-browser fixture", () => {
         dependencies,
       );
       expect(result.status).toBe("stuck");
-      expect(result.reason).toMatch(/no other sign-up path/i);
+      expect(offered.some((value) => /Google/.test(value))).toBe(true);
+      expect(offered.some((value) => /GitHub/.test(value))).toBe(true);
       expect(result.steps).toBeLessThanOrEqual(4);
     } finally {
       await finishProvisionSession(started.session_id);
@@ -837,14 +868,20 @@ describe("operate_drive real-browser fixture", () => {
 </main>`;
     const { context, started } = await openFixture(html, "oauth-links-failed.test");
     try {
-      const dependencies = deps(async (_api, _state, questions) => jevFromQuestions(questions));
+      let attempts = 0;
+      const dependencies = deps(async (_api, _state, questions) =>
+        attempts > 0 ? jevChoose(questions, "BLOCKED") : jevFromQuestions(questions),
+      );
       // Force the drive executor to hand the OAuth act back, so the tools
       // fallback runs and refuses. The refusal must be recorded as a failed
       // step, never confused with the unchanged page.
-      dependencies.driveAct = async (sessionId, action) =>
-        action.kind === "oauth_login"
-          ? { kind: "unsupported" as const }
-          : await dispatchDriveAct(sessionId, action);
+      dependencies.driveAct = async (sessionId, action) => {
+        if (action.kind === "oauth_login") {
+          attempts += 1;
+          return { kind: "unsupported" as const };
+        }
+        return await dispatchDriveAct(sessionId, action);
+      };
       dependencies.act = async () => {
         throw new Error(
           'oauth_login: no element matched target "@e:f0d2". Re-observe and use the OAuth button ref.',
@@ -856,7 +893,7 @@ describe("operate_drive real-browser fixture", () => {
         undefined,
         dependencies,
       );
-      expect(["budget", "stuck", "no_progress"]).toContain(result.status);
+      expect(result.status).toBe("stuck");
       expect(result.trajectory.some((step) => step.action === "oauth_login")).toBe(true);
     } finally {
       await finishProvisionSession(started.session_id);
@@ -864,7 +901,7 @@ describe("operate_drive real-browser fixture", () => {
     }
   }, 30_000);
 
-  it("clicks a nav link over a filter that shares the goal noun", async () => {
+  it("offers a nav link and a filter with the same goal noun", async () => {
     const html = `<!doctype html><meta charset="utf-8"><title>Dashboard</title>
 <nav><a id="keys" href="/keys">API Keys</a></nav>
 <label>All API keys
@@ -877,7 +914,13 @@ describe("operate_drive real-browser fixture", () => {
       "/dashboard",
     );
     try {
-      const dependencies = deps(async (_api, _state, questions) => jevFromQuestions(questions));
+      const seen: Array<Record<string, string>> = [];
+      const dependencies = deps(async (_api, _state, questions) => {
+        seen.push(choiceCriteria(questions.SELECT_target));
+        return page.url().includes("/keys")
+          ? jevChoose(questions, "DONE")
+          : jevChoose(questions, "CLICK", /API Keys/);
+      });
       const result = await runOperateDrive(
         { session_id: started.session_id, goal: "sign up and extract an API key", max_steps: 6 },
         api(),
@@ -885,14 +928,15 @@ describe("operate_drive real-browser fixture", () => {
         dependencies,
       );
       expect(page.url()).toMatch(/\/keys/);
-      expect(result.trajectory.some((step) => step.action === "click")).toBe(true);
+      expect(result.status).toBe("complete");
+      expect(seen.some((options) => Object.values(options).some((value) => /All API keys/.test(value)))).toBe(true);
     } finally {
       await finishProvisionSession(started.session_id);
       await context.close();
     }
   }, 30_000);
 
-  it("opens unvisited section tabs until the goal noun appears", async () => {
+  it("lets the model open a section tab and follow the resulting key link", async () => {
     const settingsHtml = `<!doctype html><meta charset="utf-8"><title>Settings</title>
 <nav><a id="settings" href="/settings">Settings</a></nav>
 <div role="tablist">
@@ -918,7 +962,7 @@ describe("operate_drive real-browser fixture", () => {
     const page = await context.newPage();
     await page.route("**/*", (route) => {
       const url = route.request().url();
-      route.fulfill({
+      return route.fulfill({
         contentType: "text/html",
         body: url.includes("/keys") ? keysHtml : settingsHtml,
       });
@@ -932,7 +976,14 @@ describe("operate_drive real-browser fixture", () => {
       initialObservation: "standard",
     });
     try {
-      const dependencies = deps(async (_api, _state, questions) => jevFromQuestions(questions));
+      const dependencies = deps(async (_api, _state, questions) => {
+        if (page.url().includes("/keys")) return jevChoose(questions, "DONE");
+        const click = choiceCriteria(questions.CLICK_target);
+        if (Object.values(click).some((value) => /API Keys/.test(value))) {
+          return jevChoose(questions, "CLICK", /API Keys/);
+        }
+        return jevChoose(questions, "CLICK", /apps/i);
+      });
       const result = await runOperateDrive(
         { session_id: started.session_id, goal: "extract an API key", max_steps: 8 },
         api(),
@@ -942,14 +993,14 @@ describe("operate_drive real-browser fixture", () => {
       expect(page.url()).toMatch(/\/keys/);
       expect(
         result.trajectory.filter((step) => step.action === "click").length,
-      ).toBeGreaterThanOrEqual(4);
+      ).toBe(2);
     } finally {
       await finishProvisionSession(started.session_id);
       await context.close();
     }
   }, 30_000);
 
-  it("reaches a key section from a dashboard without re-entering logo or anchors", async () => {
+  it("lets the model reach a key section while logo and anchors remain offered", async () => {
     const dashboardHtml = `<!doctype html><meta charset="utf-8"><title>Dashboard</title>
 <a id="logo" href="/">Acme</a>
 <a id="primitives" href="#primitives">Primitives</a>
@@ -970,7 +1021,7 @@ describe("operate_drive real-browser fixture", () => {
         : url.includes("/settings")
           ? settingsHtml
           : dashboardHtml;
-      route.fulfill({ contentType: "text/html", body });
+      return route.fulfill({ contentType: "text/html", body });
     });
     const startUrl = "https://section-key.test/dashboard";
     await page.goto(startUrl);
@@ -982,9 +1033,12 @@ describe("operate_drive real-browser fixture", () => {
     });
     try {
       let jevCalls = 0;
+      const offered: string[] = [];
       const dependencies = deps(async (_api, _state, questions) => {
         jevCalls += 1;
-        return jevFromQuestions(questions);
+        offered.push(...Object.values(choiceCriteria(questions.CLICK_target)));
+        if (page.url().includes("/keys")) return jevChoose(questions, "DONE");
+        return jevChoose(questions, "CLICK", page.url().includes("/settings") ? /API Keys/ : /Settings/);
       });
       const result = await runOperateDrive(
         { session_id: started.session_id, goal: "extract an API key", max_steps: 8 },
@@ -994,6 +1048,8 @@ describe("operate_drive real-browser fixture", () => {
       );
       expect(page.url()).toMatch(/\/keys/);
       expect(hits.filter((path) => path === "/").length).toBe(0);
+      expect(offered.some((value) => /Acme/.test(value))).toBe(true);
+      expect(offered.some((value) => /Primitives/.test(value))).toBe(true);
       expect(
         result.trajectory.filter((step) => step.action === "click").length,
       ).toBeLessThanOrEqual(3);
@@ -1019,7 +1075,7 @@ describe("operate_drive real-browser fixture", () => {
     const page = await context.newPage();
     await page.route("**/*", (route) => {
       const url = route.request().url();
-      route.fulfill({
+      return route.fulfill({
         contentType: "text/html",
         body: url.includes("/beta") ? betaHtml : alphaHtml,
       });
@@ -1057,7 +1113,7 @@ describe("operate_drive real-browser fixture", () => {
     const page = await context.newPage();
     await page.route("**/*", (route) => {
       const url = route.request().url();
-      route.fulfill({
+      return route.fulfill({
         contentType: "text/html",
         body: url.includes("/settings") ? noticeHtml : dashHtml,
       });
@@ -1086,7 +1142,7 @@ describe("operate_drive real-browser fixture", () => {
     }
   }, 30_000);
 
-  it("chooses the in-app API Keys link over a docs link with the same noun", async () => {
+  it("offers both API Keys links and follows the one the model chooses", async () => {
     const html = `<!doctype html><meta charset="utf-8"><title>Dashboard</title>
 <nav><a id="keys" href="/keys">API Keys</a></nav>
 <aside><a id="docs" href="/docs/api-keys">API keys</a></aside>`;
@@ -1099,7 +1155,7 @@ describe("operate_drive real-browser fixture", () => {
     await page.route("**/*", (route) => {
       const url = route.request().url();
       const body = url.includes("/docs/") ? docsHtml : url.includes("/keys") ? keysHtml : html;
-      route.fulfill({ contentType: "text/html", body });
+      return route.fulfill({ contentType: "text/html", body });
     });
     const startUrl = "https://in-app-keys.test/dashboard";
     await page.goto(startUrl);
@@ -1110,7 +1166,13 @@ describe("operate_drive real-browser fixture", () => {
       initialObservation: "standard",
     });
     try {
-      const dependencies = deps(async (_api, _state, questions) => jevFromQuestions(questions));
+      const seen: string[] = [];
+      const dependencies = deps(async (_api, _state, questions) => {
+        seen.push(...Object.values(choiceCriteria(questions.CLICK_target)));
+        return page.url().includes("/keys")
+          ? jevChoose(questions, "DONE")
+          : jevChoose(questions, "CLICK", /^API Keys$/);
+      });
       await runOperateDrive(
         {
           session_id: started.session_id,
@@ -1123,6 +1185,7 @@ describe("operate_drive real-browser fixture", () => {
       );
       expect(page.url()).toMatch(/\/keys/);
       expect(page.url()).not.toMatch(/\/docs\//);
+      expect(seen.filter((value) => /^API Keys$/i.test(value))).toHaveLength(2);
     } finally {
       await finishProvisionSession(started.session_id);
       await context.close();
@@ -1152,7 +1215,7 @@ describe("operate_drive real-browser fixture", () => {
           : url.includes("/next")
             ? nextHtml
             : startHtml;
-      route.fulfill({ contentType: "text/html", body });
+      return route.fulfill({ contentType: "text/html", body });
     });
     const startUrl = "https://stale-ref.test/start";
     await page.goto(startUrl);
@@ -1222,7 +1285,7 @@ describe("operate_drive real-browser fixture", () => {
         : url.includes("/apps/")
           ? entryHtml
           : listHtml;
-      route.fulfill({ contentType: "text/html", body });
+      return route.fulfill({ contentType: "text/html", body });
     });
     const startUrl = "https://listed-entry.test/apps";
     await page.goto(startUrl);
@@ -1257,7 +1320,7 @@ describe("operate_drive real-browser fixture", () => {
     }
   }, 30_000);
 
-  it("decides on a settings page with entries before exploring a section", async () => {
+  it("offers listed entries and section navigation on settings", async () => {
     const settingsHtml = `<!doctype html><meta charset="utf-8"><title>Settings</title>
 <nav>
   <a id="settings" href="/settings">Settings</a>
@@ -1285,7 +1348,7 @@ describe("operate_drive real-browser fixture", () => {
         : url.includes("/apps/")
           ? entryHtml
           : settingsHtml;
-      route.fulfill({ contentType: "text/html", body });
+      return route.fulfill({ contentType: "text/html", body });
     });
     const startUrl = "https://settings-entries.test/settings";
     await page.goto(startUrl);
@@ -1296,7 +1359,13 @@ describe("operate_drive real-browser fixture", () => {
       initialObservation: "standard",
     });
     try {
-      const dependencies = deps(async (_api, _state, questions) => jevFromQuestions(questions));
+      const offered: string[] = [];
+      const dependencies = deps(async (_api, _state, questions) => {
+        offered.push(...Object.values(choiceCriteria(questions.CLICK_target)));
+        return page.url().includes("/apps/")
+          ? jevChoose(questions, "DONE")
+          : jevChoose(questions, "CLICK", /payments-api/);
+      });
       const result = await runOperateDrive(
         { session_id: started.session_id, goal: "extract an API key", max_steps: 8 },
         api(),
@@ -1305,13 +1374,15 @@ describe("operate_drive real-browser fixture", () => {
       );
       const firstClick = result.trajectory.find((step) => step.action === "click");
       expect(firstClick?.jev_ms).toBeGreaterThan(0);
+      expect(offered.some((value) => /Reputation/.test(value))).toBe(true);
+      expect(offered.some((value) => /payments-api/.test(value))).toBe(true);
     } finally {
       await finishProvisionSession(started.session_id);
       await context.close();
     }
   }, 30_000);
 
-  it("logs out of a pre-existing verification page or reports already signed in", async () => {
+  it("offers INBOX on a pre-existing verification page and follows the model's choice", async () => {
     const registerHtml = `<!doctype html><meta charset="utf-8"><title>Register</title>
 <main>
   <label>Email <input id="email" name="email" type="email"></label>
@@ -1330,14 +1401,12 @@ describe("operate_drive real-browser fixture", () => {
       const url = route.request().url();
       if (url.includes("/logged-out")) {
         signedIn = false;
-        route.fulfill({ contentType: "text/html", body: outHtml });
-        return;
+        return route.fulfill({ contentType: "text/html", body: outHtml });
       }
       if (url.includes("/register") && signedIn) {
-        route.fulfill({ contentType: "text/html", body: verifyHtml });
-        return;
+        return route.fulfill({ contentType: "text/html", body: verifyHtml });
       }
-      route.fulfill({
+      return route.fulfill({
         contentType: "text/html",
         body: url.includes("/register") ? registerHtml : verifyHtml,
       });
@@ -1355,20 +1424,15 @@ describe("operate_drive real-browser fixture", () => {
       const dependencies = deps(async (_api, _state, questions) => {
         const operation = questions.operation;
         if (operation?.type === "choice") offered.push(Object.keys(operation.criteria));
-        const result = jevFromQuestions(questions);
+        const result = signedIn
+          ? jevChoose(questions, "CLICK", /Log out/)
+          : jevChoose(questions, "NONE_OF_THESE");
         const emailCode = questions.email_code_field;
         if (emailCode?.type === "choice") {
           result.result.answers.email_code_field = {
             choice: "none",
             confidence: 0.93,
             probabilities: peaked(Object.keys(emailCode.criteria), "none"),
-          };
-        }
-        if (!signedIn && operation?.type === "choice") {
-          result.result.answers.operation = {
-            choice: "NONE_OF_THESE",
-            confidence: 0.93,
-            probabilities: peaked(Object.keys(operation.criteria), "NONE_OF_THESE"),
           };
         }
         return result;
@@ -1385,9 +1449,9 @@ describe("operate_drive real-browser fixture", () => {
         dependencies,
       );
       expect(Date.now() - startedAt).toBeLessThan(20_000);
-      expect(offered[0] ?? []).not.toContain("INBOX");
+      expect(offered[0] ?? []).toContain("INBOX");
       expect(result.trajectory.some((step) => step.action === "inbox")).toBe(false);
-      expect(!signedIn || result.reason?.match(/already signed in/i)).toBeTruthy();
+      expect(signedIn).toBe(false);
     } finally {
       await finishProvisionSession(started.session_id);
       await context.close();
@@ -1409,7 +1473,7 @@ describe("operate_drive real-browser fixture", () => {
     const page = await context.newPage();
     await page.route("**/*", (route) => {
       const url = route.request().url();
-      route.fulfill({
+      return route.fulfill({
         contentType: "text/html",
         body: url.includes("/keys") ? keysHtml : dashHtml,
       });
@@ -1540,7 +1604,7 @@ describe("operate_drive real-browser fixture", () => {
     }
   }, 30_000);
 
-  it("opens a listed entry and captures the revealed key", async () => {
+  it("opens a listed entry and reveals its key", async () => {
     const settingsHtml = `<!doctype html><meta charset="utf-8"><title>Settings</title>
 <div role="tablist">
   <button type="button" role="tab" id="apps">Apps</button>
@@ -1590,10 +1654,8 @@ describe("operate_drive real-browser fixture", () => {
       );
       expect(page.url()).toMatch(/\/settings\/apps\//);
       expect(await page.locator("#secret").innerText()).toBe(DRIVE_FIXTURE_KEY);
-      // A key shown only as text has no known source: the drive stops and
-      // asks the agent to point capture at it.
-      expect(result.status).toBe("stuck");
-      expect(result.reason).toContain("capture");
+      // Jev's DONE is trusted; source-gated capture remains separate.
+      expect(result.status).toBe("complete");
       expect(JSON.stringify(result)).not.toContain(DRIVE_FIXTURE_KEY);
       expect(JSON.stringify(result.observation?.safe_table)).toMatch(/@key-value\|secret=1\|len=/);
     } finally {
@@ -1602,7 +1664,7 @@ describe("operate_drive real-browser fixture", () => {
     }
   }, 30_000);
 
-  it("opens a listed entry before a second tab and captures the revealed key", async () => {
+  it("lets the model open a listed entry while section tabs stay offered", async () => {
     const settingsHtml = `<!doctype html><meta charset="utf-8"><title>Settings</title>
 <div role="tablist">
   <button type="button" role="tab" id="apps">Apps</button>
@@ -1668,7 +1730,16 @@ describe("operate_drive real-browser fixture", () => {
       initialObservation: "standard",
     });
     try {
-      const dependencies = deps(async (_api, _state, questions) => jevFromQuestions(questions));
+      const offered: string[] = [];
+      const dependencies = deps(async (_api, _state, questions) => {
+        offered.push(...Object.values(choiceCriteria(questions.CLICK_target)));
+        if (!page.url().includes("/settings/apps/")) {
+          return jevChoose(questions, "CLICK", /payments-api/);
+        }
+        return (await page.locator("#reveal").count()) > 0
+          ? jevChoose(questions, "CLICK", /Reveal/)
+          : jevChoose(questions, "DONE");
+      });
       const result = await runOperateDrive(
         { session_id: started.session_id, goal: "extract an API key", max_steps: 8 },
         api(),
@@ -1678,11 +1749,12 @@ describe("operate_drive real-browser fixture", () => {
       const tabClicks = await page.evaluate(
         () => JSON.parse(sessionStorage.getItem("tabClicks") || "[]") as string[],
       );
-      expect(tabClicks.length).toBeLessThan(2);
+      expect(tabClicks).toHaveLength(0);
+      expect(offered.some((value) => /Apps/.test(value))).toBe(true);
+      expect(offered.some((value) => /payments-api/.test(value))).toBe(true);
       expect(page.url()).toMatch(/\/settings\/apps\//);
       expect(await page.locator("#secret").innerText()).toBe(DRIVE_FIXTURE_KEY);
-      expect(result.status).toBe("stuck");
-      expect(result.reason).toContain("capture");
+      expect(result.status).toBe("complete");
       expect(JSON.stringify(result)).not.toContain(DRIVE_FIXTURE_KEY);
       expect(JSON.stringify(result.observation?.safe_table)).toMatch(/@key-value\|secret=1\|len=/);
     } finally {
@@ -1691,7 +1763,7 @@ describe("operate_drive real-browser fixture", () => {
     }
   }, 30_000);
 
-  it("never opens Docs from a dashboard that still has Settings and a filter picker", async () => {
+  it("offers Docs, Settings, and the environment picker to the model", async () => {
     const dashHtml = `<!doctype html><meta charset="utf-8"><title>Dashboard</title>
 <nav>
   <a id="docs" href="/docs">Docs</a>
@@ -1742,7 +1814,7 @@ describe("operate_drive real-browser fixture", () => {
           : url.includes("/settings")
             ? settingsHtml
             : dashHtml;
-      route.fulfill({ contentType: "text/html", body });
+      return route.fulfill({ contentType: "text/html", body });
     });
     const startUrl = "https://shape-candidates.test/dashboard";
     await page.goto(startUrl);
@@ -1753,7 +1825,18 @@ describe("operate_drive real-browser fixture", () => {
       initialObservation: "standard",
     });
     try {
-      const dependencies = deps(async (_api, _state, questions) => jevFromQuestions(questions));
+      const offered: string[] = [];
+      const selectOffered: string[] = [];
+      const dependencies = deps(async (_api, _state, questions) => {
+        offered.push(...Object.values(choiceCriteria(questions.CLICK_target)));
+        selectOffered.push(...Object.values(choiceCriteria(questions.SELECT_target)));
+        if (page.url().includes("/settings/apps/")) {
+          return (await page.locator("#reveal").count()) > 0
+            ? jevChoose(questions, "CLICK", /Reveal/)
+            : jevChoose(questions, "DONE");
+        }
+        return jevChoose(questions, "CLICK", page.url().includes("/settings") ? /payments-api/ : /Settings/);
+      });
       const result = await runOperateDrive(
         { session_id: started.session_id, goal: "extract an API key", max_steps: 8 },
         api(),
@@ -1761,10 +1844,11 @@ describe("operate_drive real-browser fixture", () => {
         dependencies,
       );
       expect(page.url()).not.toMatch(/\/docs/);
+      expect(offered.some((value) => /Docs/.test(value))).toBe(true);
+      expect(selectOffered.some((value) => /Production|Sandbox/.test(value))).toBe(true);
       expect(page.url()).toMatch(/\/settings\/apps\//);
       expect(await page.locator("#secret").innerText()).toBe(DRIVE_FIXTURE_KEY);
-      expect(result.status).toBe("stuck");
-      expect(result.reason).toContain("capture");
+      expect(result.status).toBe("complete");
       expect(JSON.stringify(result)).not.toContain(DRIVE_FIXTURE_KEY);
       expect(JSON.stringify(result.observation?.safe_table)).toMatch(/@key-value\|secret=1\|len=/);
     } finally {
@@ -1789,7 +1873,7 @@ describe("operate_drive real-browser fixture", () => {
     const page = await context.newPage();
     await page.route("**/*", (route) => {
       const url = route.request().url();
-      route.fulfill({
+      return route.fulfill({
         contentType: "text/html",
         body: url.includes("/keys") ? keysHtml : html,
       });
@@ -1842,7 +1926,7 @@ describe("operate_drive real-browser fixture", () => {
   document.getElementById("account").onclick = () => show("account");
   document.getElementById("apps").onclick = () => show("apps");
 </script>`;
-    const { context, page, started } = await openFixture(
+    const { context, started } = await openFixture(
       html,
       "goal-reset.test",
       "standard",
@@ -2113,6 +2197,7 @@ describe("operate_drive real-browser fixture", () => {
           "BLOCKED",
           "DONE",
           "GO_BACK",
+          "INBOX",
           "NONE_OF_THESE",
           "WAIT",
         ]);
@@ -2632,19 +2717,11 @@ describe("operate_drive real-browser fixture", () => {
           billing: { line1: "1 Main St", city: "Boston", postal_code: "02110", country: "US" },
         },
       };
-      // Jev only ever fills the iteration the stale act yields; every write
-      // under test comes from the drive's own expiry handling.
-      const dependencies = deps(async (_api, _state, questions) => {
-        const answers: Record<string, JevAnswer> = {};
-        for (const [name, question] of Object.entries(questions)) {
-          if (question.type !== "choice") continue;
-          const keys = Object.keys(question.criteria);
-          if (keys.length === 0) continue;
-          const pick = name === "operation" && keys.includes("WAIT") ? "WAIT" : keys[0]!;
-          answers[name] = { choice: pick, confidence: 0.93, probabilities: peaked(keys, pick) };
-        }
-        return { attempts: 1, elapsedMs: 12, result: { answers } };
-      });
+      // The expiry rewrite is an automatic correction. Jev ends each call
+      // once the drive has exhausted the available correction step.
+      const dependencies = deps(async (_api, _state, questions) =>
+        jevChoose(questions, "DONE"),
+      );
       let staled = 0;
       dependencies.driveAct = async (_sessionId, action) => {
         if (action.kind === "type" && action.text === "12/2030" && staled === 0) {
@@ -2885,19 +2962,10 @@ describe("operate_drive real-browser fixture", () => {
             },
           };
         }
-        return {
-          attempts: 1,
-          elapsedMs: 12,
-          result: {
-            answers: {
-              operation: {
-                choice: "BLOCKED",
-                confidence: 0.7,
-                probabilities: peaked(opKeys, "BLOCKED", 0.7),
-              },
-            },
-          },
-        };
+        return jevChoose(
+          questions,
+          (await page.getByText("Check your email").count()) > 0 ? "INBOX" : "WAIT",
+        );
       });
       dependencies.awaitVerification = async (sessionId) => ({
         session_id: sessionId,
@@ -2978,19 +3046,10 @@ describe("operate_drive real-browser fixture", () => {
             },
           };
         }
-        return {
-          attempts: 1,
-          elapsedMs: 12,
-          result: {
-            answers: {
-              operation: {
-                choice: "BLOCKED",
-                confidence: 0.7,
-                probabilities: peaked(opKeys, "BLOCKED", 0.7),
-              },
-            },
-          },
-        };
+        return jevChoose(
+          questions,
+          (await page.getByText("Check your email").count()) > 0 ? "INBOX" : "WAIT",
+        );
       });
       let inboxReads = 0;
       dependencies.awaitVerification = async (sessionId) => {
@@ -3080,19 +3139,10 @@ describe("operate_drive real-browser fixture", () => {
             },
           };
         }
-        return {
-          attempts: 1,
-          elapsedMs: 12,
-          result: {
-            answers: {
-              operation: {
-                choice: "BLOCKED",
-                confidence: 0.7,
-                probabilities: peaked(opKeys, "BLOCKED", 0.7),
-              },
-            },
-          },
-        };
+        return jevChoose(
+          questions,
+          (await page.getByText("Check your email").count()) > 0 ? "INBOX" : "WAIT",
+        );
       });
       dependencies.awaitVerification = async (sessionId) => ({
         session_id: sessionId,
@@ -3393,7 +3443,7 @@ describe("operate_drive real-browser fixture", () => {
     }
   }, 60_000);
 
-  it("bounds a two-page no-op loop when the model chooses DONE", async () => {
+  it("bounds a two-page no-op loop before a later DONE choice", async () => {
     const host = "cycle.test";
     const context = await browser.newContext();
     const page = await context.newPage();
@@ -3453,7 +3503,7 @@ describe("operate_drive real-browser fixture", () => {
         undefined,
         dependencies,
       );
-      expect(handoff.status).toBe("complete");
+      expect(handoff.status).toBe("no_progress");
       expect(handoff.steps).toBeLessThanOrEqual(8);
     } finally {
       await finishProvisionSession(started.session_id);
@@ -3519,7 +3569,7 @@ describe("operate_drive real-browser fixture", () => {
     }
   }, 60_000);
 
-  it("returns no_progress when the chosen action does not change the page", async () => {
+  it("trusts the model's DONE answer after a no-op action", async () => {
     const { context, started } = await openFixture(NOOP_HTML, "signup-noop.test");
     try {
       const handoff = await runOperateDrive(
@@ -3532,7 +3582,7 @@ describe("operate_drive real-browser fixture", () => {
         undefined,
         deps(async (_api, _state, questions) => jevFromQuestions(questions)),
       );
-      expect(handoff.status).toBe("no_progress");
+      expect(handoff.status).toBe("complete");
       expect(handoff.trajectory.length).toBeGreaterThanOrEqual(1);
     } finally {
       await finishProvisionSession(started.session_id);
@@ -4278,7 +4328,7 @@ describe("operate_drive real-browser fixture", () => {
     const page = await context.newPage();
     await page.route("**/*", (route) => {
       const url = route.request().url();
-      route.fulfill({
+      return route.fulfill({
         contentType: "text/html",
         body: url.includes("/settings/keys") ? keys : dash,
       });
@@ -4353,7 +4403,11 @@ describe("operate_drive real-browser fixture", () => {
       "/login",
     );
     try {
-      const dependencies = deps(async (_api, _state, questions) => jevFromQuestions(questions));
+      const dependencies = deps(async (_api, _state, questions) =>
+        page.url().includes("state=")
+          ? jevChoose(questions, "BLOCKED")
+          : jevFromQuestions(questions),
+      );
       dependencies.driveAct = async (sessionId, action) => {
         if (action.kind === "oauth_login") {
           await page.evaluate(() => {
@@ -4375,10 +4429,8 @@ describe("operate_drive real-browser fixture", () => {
       );
       const oauthSteps = result.trajectory.filter((step) => step.action === "oauth_login");
       expect(oauthSteps.length).toBeLessThanOrEqual(2);
-      // A bounce dispatched and changed the page, so a cycle finish is
-      // legitimate; the reason must still name the bounce, not the cycle.
-      expect(result.status).toBe("no_progress");
-      expect(result.reason ?? "").toMatch(/sign-in hand-off returned to the login page/);
+      expect(result.status).toBe("stuck");
+      expect(sessionForCall(started.session_id)?.drive?.outcomeTrail?.map((entry) => entry.outcome)).toContain("bounced_back");
     } finally {
       await finishProvisionSession(started.session_id);
       await context.close();
@@ -5017,7 +5069,9 @@ describe("operate_drive feedback loop", () => {
     );
     let bounce = 0;
     try {
-      const dependencies = deps(async (_api, _state, questions) => jevFromQuestions(questions));
+      const dependencies = deps(async (_api, _state, questions) =>
+        bounce > 0 ? jevChoose(questions, "BLOCKED") : jevFromQuestions(questions),
+      );
       dependencies.driveAct = async (sessionId, action) => {
         if (action.kind === "oauth_login") {
           bounce += 1;
@@ -5032,8 +5086,7 @@ describe("operate_drive feedback loop", () => {
         undefined,
         dependencies,
       );
-      expect(handoff.status).toBe("no_progress");
-      expect(handoff.reason).toMatch(/hand-off returned to the login page/i);
+      expect(handoff.status).toBe("stuck");
       expect(bounce).toBe(1);
       const trail = sessionForCall(started.session_id)?.drive?.outcomeTrail ?? [];
       expect(trail.map((entry) => entry.outcome)).toContain("bounced_back");
@@ -5044,7 +5097,7 @@ describe("operate_drive feedback loop", () => {
     }
   }, 30_000);
 
-  it("does not complete on a dashboard whose only secret-shaped text is a masked placeholder", async () => {
+  it("lets the model stop when a dashboard has only a masked placeholder", async () => {
     const html = `<!doctype html><meta charset="utf-8"><title>Overview</title>
 <main>
   <h1>Overview</h1>
@@ -5057,7 +5110,7 @@ describe("operate_drive feedback loop", () => {
     try {
       const dependencies = deps(async (_api, state, questions) => {
         seen.push(state as Record<string, unknown>);
-        const result = jevFromQuestions(questions, true);
+        const result = jevFromQuestions(questions);
         const emailCode = questions.email_code_field;
         if (emailCode?.type === "choice") {
           result.result.answers.email_code_field = {
@@ -5084,8 +5137,8 @@ describe("operate_drive feedback loop", () => {
         undefined,
         dependencies,
       );
-      // The placeholder is not a storable credential, so the drive never
-      // reports the goal complete at step 0.
+      // The model sees the empty field, tries Copy, then reports that no full
+      // credential appeared. The drive honors that judgment.
       expect(seen.length).toBeGreaterThanOrEqual(1);
       expect(handoff.status).not.toBe("complete");
       expect(handoff.status).toBe("stuck");
@@ -5436,8 +5489,7 @@ describe("capture flow key evidence", () => {
       expect(await page.locator("#modal").count()).toBe(0);
       expect(page.url()).toMatch(/\/settings\/keys/);
       expect(await page.locator("#secret").innerText()).toBe(DRIVE_FIXTURE_KEY);
-      expect(result.status).toBe("stuck");
-      expect(result.reason).toContain("capture");
+      expect(result.status).toBe("complete");
     } finally {
       await finishProvisionSession(started.session_id);
       await context.close();

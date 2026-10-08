@@ -9,8 +9,8 @@
 // facts bag. A search or query field may receive a phrase Jev assigns from the
 // goal's own words or the facts; nothing is composed.
 //
-// Confidence: no gates anywhere, including DONE. Validation of the answer
-// shape stays. The purchase approval is the payment gate. Safety net is
+// Confidence below DRIVE_CONFIDENCE_THRESHOLD hands control back to the
+// operator. Answer-shape validation and purchase approval stay. Safety net is
 // validate_choice, fingerprint-bound consume-once, and three consecutive
 // non-wait actions with no page change (re-snapshot once before a strike).
 
@@ -73,7 +73,7 @@ import {
   snapshotToObservation,
   type DriveSnapshot,
 } from "./drive-snapshot.js";
-import { DriveEvaluateTimeout, evaluateBound } from "./drive-evaluate.js";
+import { evaluateBound } from "./drive-evaluate.js";
 import { DriveRefBridge } from "./drive-ref-bridge.js";
 import type { Frame } from "playwright";
 import type { BrowserController } from "./browser.js";
@@ -108,7 +108,6 @@ import {
 } from "./captcha.js";
 import type { CaptchaSolveResult } from "./captcha.js";
 import { findCredentialTokens, isMaskedDisplay } from "./credential-shape.js";
-import { extractCredentials, storableCredentials } from "./capture/capture.js";
 import {
   DRIVE_FIXED_GO_BACK,
   DRIVE_FIXED_NONE_OF_THESE,
@@ -118,12 +117,9 @@ import {
   composeDrivePageText,
   feedbackPagePath,
   goalDoneWhen,
-  goalPhase,
   goalPhaseAndDoneWhen,
-  isKeyGoal,
   stripVolatileQuery,
   truncateDriveTrailText,
-  type DriveGoalPhase,
   type DriveTrailEntry,
 } from "./drive-feedback.js";
 
@@ -255,8 +251,8 @@ export const DRIVE_RULES: readonly string[] = [
   "If a needed control is covered, act on whatever covers it first.",
   "Prefer controls that match the current page phase implied by the URL and headings.",
   "A disabled submit means a required field is still empty until every fillable is populated. Disable is not a gate.",
-  "If the goal names an API key or token, open the control that leads there before stopping on onboarding or a dashboard.",
-  "The state names the current phase and the exact done_when condition; done_when is the only definition of complete.",
+  "Use the goal's full text to decide what result is required; no goal type is inferred for you.",
+  "The done_when condition includes every stated requirement in the goal.",
   "The trail records what each earlier action actually did. Do not repeat an action whose trail outcome is no_change, not_executed, or bounced_back.",
   "Pick NONE_OF_THESE instead of a low-confidence click when nothing on this page advances the goal.",
   "Pick GO_BACK when the trail shows this page was reached by mistake.",
@@ -1058,12 +1054,10 @@ export function cycleReason(url: string, repeated: readonly string[] = []): stri
   return `cycling through ${pagePathKey(url)}`;
 }
 
-export function isPendingPageAction(row: WireRow, goal: string = ""): boolean {
+export function isPendingPageAction(row: WireRow, _goal: string = ""): boolean {
   if (isRevealOrCopyRow(row) || isCreateEntryRow(row)) return true;
   if (isSubmitLikeRow(row) && !isProgressSubmitRow(row) && !isOauthChromeRow(row)) return true;
-  return (
-    goal.length > 0 && rowCarriesGoalNoun(row, goal) && isClickableRow(row) && !isSectionNavRow(row)
-  );
+  return false;
 }
 
 export function pageHasUntriedPendingAction(
@@ -1170,39 +1164,12 @@ export function inferPagePhase(url: string, headings: readonly string[] = []): D
   return "unknown";
 }
 
-function goalWantsSignup(goal: string | undefined): boolean {
-  if (goal === undefined || goal.length === 0) return false;
-  return /sign\s*up|register|create\s+(?:an?\s+)?account/.test(goal.toLowerCase());
-}
-
-function goalWantsKey(goal: string | undefined): boolean {
-  if (goal === undefined || goal.length === 0) return false;
-  return /api\s*key|access\s*token|credential/.test(goal.toLowerCase());
-}
-
 function isCreateAccountRow(row: WireRow): boolean {
-  const label = readableLabel(row).toLowerCase();
-  return /create\s+(?:an?\s+)?account|sign\s*up|register/.test(label);
+  return /create\s+(?:an?\s+)?account|sign\s*up|register/i.test(readableLabel(row));
 }
 
 function isLoginRow(row: WireRow): boolean {
-  const label = readableLabel(row).toLowerCase();
-  return /log\s*in|sign\s*in/.test(label) && !isCreateAccountRow(row);
-}
-
-function isKeyNavRow(row: WireRow): boolean {
-  if (isListFilterRow(row)) return false;
-  const label = readableLabel(row).toLowerCase();
-  return /api\s*key|access\s*token|create\s+(?:a\s+)?(?:key|token)|credentials?|settings/.test(
-    label,
-  );
-}
-
-function isNavChromeRow(row: WireRow): boolean {
-  if (isSubmitLikeRow(row) || isFillableRow(row) || isChoiceRow(row) || isConsentRow(row)) {
-    return false;
-  }
-  return row[1] === "l" || row[1] === "link" || row[1] === "tb" || row[1] === "tab";
+  return /log\s*in|sign\s*in/i.test(readableLabel(row)) && !isCreateAccountRow(row);
 }
 
 export function candidateAimScore(
@@ -1218,7 +1185,6 @@ export function candidateAimScore(
   },
 ): number {
   const row = candidate.row;
-  const phase = input.phase ?? inferPagePhase(input.pageUrl ?? "", input.headings ?? []);
   const filledIds = filledFormIds(input.rows, input.filledRefs ?? []);
   const formId = rowFormId(row);
   const occluder = rowOccluder(row);
@@ -1239,51 +1205,6 @@ export function candidateAimScore(
   if (failed.has(actionFailureKey(row, input.pageUrl ?? "")) || failed.has(row[0])) {
     score -= 70;
   }
-  if (phase === "signup") {
-    if (isSubmitLikeRow(row) || isFillableRow(row) || isChoiceRow(row)) score += 40;
-    if (isOauthChromeRow(row)) score -= 40;
-    if (isSearchRow(row) && rowListChoice(row) === undefined) score -= 30;
-    if (isLoginRow(row)) score -= 20;
-  } else if (phase === "login") {
-    if (goalWantsSignup(input.goal) && isCreateAccountRow(row)) score += 80;
-    else if (isLoginRow(row) || isSubmitLikeRow(row)) score += 20;
-    if (isOauthChromeRow(row) && goalWantsSignup(input.goal)) score -= 30;
-  } else if (phase === "verify") {
-    if (/verify|confirm|email|inbox|gmail|mail/.test(readableLabel(row).toLowerCase())) score += 50;
-  } else if (phase === "onboarding") {
-    if (isChoiceRow(row) || rowListChoice(row) !== undefined) score += 40;
-    if (isSearchRow(row) && rowListChoice(row) === undefined) score -= 40;
-  } else if (phase === "keys" || (phase === "unknown" && goalWantsKey(input.goal))) {
-    if (isKeyNavRow(row)) score += 80;
-  } else if (phase === "checkout") {
-    if (isButtonLikeRow(row) || isPaymentRow(row) || isCvvRow(row)) score += 40;
-  }
-  if (isNavChromeRow(row) && (phase === "signup" || phase === "onboarding" || phase === "login")) {
-    score -= 10;
-  }
-  if (isAlreadyHereNav(row, input.pageUrl ?? "")) score -= 80;
-  if (
-    isAppRootOrLogoRow(row, input.pageUrl ?? "") ||
-    isSamePageAnchorRow(row, input.pageUrl ?? "")
-  ) {
-    score -= 80;
-  }
-  if (isCreateEntryRow(row) && listedItemRows(input.rows, input.pageUrl ?? "").length > 0) {
-    score -= 50;
-  }
-  if (listedItemRows(input.rows, input.pageUrl ?? "").some((entry) => entry[0] === row[0])) {
-    score += 70;
-  }
-  if (isRevealOrCopyRow(row) && goalWantsKey(input.goal)) score += 80;
-  if (isListFilterRow(row) && goalWantsKey(input.goal)) score -= 50;
-  if (
-    goalWantsKey(input.goal) &&
-    isEligibleSectionNavRow(row, input.pageUrl ?? "") &&
-    !isAlreadyHereNav(row, input.pageUrl ?? "") &&
-    !rowMatchesGoalSeek(row, input.goal ?? "")
-  ) {
-    score += listedItemRows(input.rows, input.pageUrl ?? "").length > 0 ? -20 : 40;
-  }
   return score;
 }
 
@@ -1298,12 +1219,11 @@ export function rankDriveCandidates<T extends DriveCandidate>(
     goal?: string;
   },
 ): T[] {
-  const phase = inferPagePhase(input.pageUrl ?? "", input.headings ?? []);
   return candidates
     .map((candidate, index) => ({
       candidate,
       index,
-      score: candidateAimScore(candidate, { ...input, phase }),
+      score: candidateAimScore(candidate, input),
     }))
     .sort((left, right) => right.score - left.score || left.index - right.index)
     .map((entry) => entry.candidate);
@@ -1339,16 +1259,9 @@ export function isButtonLikeRow(row: WireRow): boolean {
   return BUTTON_LIKE_ROLES.has(row[1]);
 }
 
-/** Whether an offscreen row is still worth offering.
- *
- * Shopify parks "Pay now" below the fold (LIVE #6, top≈1458 in a 720px
- * viewport) and the act path scrolls, so a checkout's buttons stay reachable.
- * The page, not the label, is the test: a label allowlist would drop a
- * localized "Payer maintenant". Off a checkout no offscreen button is offered,
- * so a product page's own "Buy now" stays unclickable.
- */
-export function offscreenRowStaysOffered(row: WireRow, pageUrl: string): boolean {
-  return isButtonLikeRow(row) && isCheckoutUrl(pageUrl);
+/** The act path scrolls an offscreen target into view before acting. */
+export function offscreenRowStaysOffered(_row: WireRow, _pageUrl: string): boolean {
+  return true;
 }
 
 /** Whether the drive already asked to pay since the card went in.
@@ -1402,7 +1315,7 @@ export function pageHasListedWork(
  * call (a card-fill goal never submits at all).
  */
 function isPaymentSubstituteRow(row: WireRow): boolean {
-  return isClickableRow(row) && !isFillableRow(row) && !isOffscreenRow(row);
+  return isClickableRow(row) && !isFillableRow(row);
 }
 
 export function paymentSubmitControlMissing(input: {
@@ -1445,10 +1358,6 @@ function urlPathname(url: string): string {
 
 export function isCheckoutUrl(url: string): boolean {
   return /(?:^|\/)(?:checkouts?|payment)(?:\/|$)/.test(urlPathname(url));
-}
-
-export function goalSeeksKey(goal: string): boolean {
-  return /api\s*key|access\s*token|credential/.test(goal.toLowerCase());
 }
 
 export function isListFilterRow(row: WireRow): boolean {
@@ -1522,26 +1431,6 @@ export function isOffProductNavRow(row: WireRow, pageUrl: string): boolean {
   } catch {
     return /\/(?:docs?|documentation|reference|help|blog|guides?)(?:\/|$)/.test(href);
   }
-}
-
-export function isGoalDestinationRow(row: WireRow): boolean {
-  if (
-    isListFilterRow(row) ||
-    isContextPickerRow(row) ||
-    isFillableRow(row) ||
-    isConsentRow(row) ||
-    isCodeSampleRow(row)
-  ) {
-    return false;
-  }
-  return (
-    row[1] === "l" ||
-    row[1] === "link" ||
-    row[1] === "b" ||
-    row[1] === "button" ||
-    row[1] === "tb" ||
-    row[1] === "tab"
-  );
 }
 
 const SECTION_NAV_SKIP =
@@ -1730,29 +1619,6 @@ export function pageShowsRevealedKey(rows: readonly WireRow[], _pageText: string
   return rows.some((row) => rowShowsSecretEvidence(row));
 }
 
-/** The drive's key-goal evidence comes from the same capture flow as
- * `operate_extract`, which keeps only a value with a known source. */
-export interface DriveKeyEvidence {
-  credentials: Record<string, string>;
-}
-
-export function driveKeyGoalComplete(evidence: DriveKeyEvidence): boolean {
-  // DONE holds once the extraction yields a credential that operate_finish
-  // would store, whatever its shape.
-  return storableCredentials(evidence.credentials) !== null;
-}
-
-export async function driveKeyEvidence(sessionId: string): Promise<DriveKeyEvidence> {
-  try {
-    const extracted = await extractCredentials(sessionId);
-    return { credentials: extracted.credentials };
-  } catch {
-    // The completion check must never crash the loop; an unavailable page is
-    // simply "no credential yet", and the loop carries on.
-    return { credentials: {} };
-  }
-}
-
 export function isKeyCreateRow(row: WireRow): boolean {
   if (isFillableRow(row) || isConsentRow(row) || isOauthChromeRow(row)) return false;
   const label = readableLabel(row).toLowerCase().trim();
@@ -1764,13 +1630,29 @@ export function isKeyCreateRow(row: WireRow): boolean {
   return (create && thing) || (isCreateEntryRow(row) && thing);
 }
 
-/** An existing credential may be read, but the drive never mutates it. */
-function isExistingCredentialMutationRow(row: WireRow): boolean {
-  return /\b(?:regenerat\w*|rotat\w*|reset|revoke|delet\w*|remove)\b/i.test(readableLabel(row));
+/** Hand an existing credential mutation to the operator before dispatch. */
+export function isExistingCredentialMutationRow(
+  row: WireRow,
+  pageUrl: string,
+  rows: readonly WireRow[] = [],
+  selectedOption: string = "",
+  headings: readonly string[] = [],
+): boolean {
+  const label = `${readableLabel(row)} ${selectedOption}`;
+  if (!/\b(?:regenerat\w*|rotat\w*|reset|revoke|delet\w*|remove)\b/i.test(label)) {
+    return false;
+  }
+  const credentialNoun = /\b(?:(?:api[- ]?)?keys?|tokens?|secrets?|credentials?)\b/i;
+  return credentialNoun.test(label) ||
+    /(?:^|\/)(?:api[-_]?keys?|keys?|tokens?|credentials?)(?:\/|$)/.test(urlPathname(pageUrl)) ||
+    headings.some((heading) => credentialNoun.test(heading)) ||
+    rows.some((entry) =>
+      /^(?:h[1-6]|heading)$/.test(entry[1]) && credentialNoun.test(readableLabel(entry))
+    );
 }
 
-function isKeyCreateOpener(row: WireRow, goal: string): boolean {
-  return isKeyGoal(goal) && isKeyCreateRow(row) && rowFormId(row) === undefined;
+function isKeyCreateOpener(row: WireRow): boolean {
+  return isKeyCreateRow(row) && rowFormId(row) === undefined;
 }
 
 /** Map the act layer's own refusal reason to the trail's short vocabulary:
@@ -1931,79 +1813,11 @@ export function isLogoutRow(row: WireRow): boolean {
   return /log\s*out|sign\s*out|signout|logout/.test(readableLabel(row).toLowerCase());
 }
 
-export function alreadySignedInReason(): string {
-  return "already signed in as another account";
-}
-
-const EMAIL_IN_TEXT = /[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/gi;
-
-export function emailsInText(text: string): string[] {
-  const seen = new Set<string>();
-  const out: string[] = [];
-  for (const match of text.matchAll(EMAIL_IN_TEXT)) {
-    const email = match[0]!.toLowerCase();
-    if (seen.has(email)) continue;
-    seen.add(email);
-    out.push(email);
-  }
-  return out;
-}
-
-/** Goal asks to use an already-signed-in third-party identity. */
-export function goalSeeksThirdPartySignin(goal: string): boolean {
-  if (goalExcludesOauth(goal)) return false;
-  return /continue with (?:google|github)|sign(?:\s*up|\s*in) with (?:google|github)|third[- ]party sign-?in|account already signed in/.test(
-    goal.toLowerCase(),
-  );
-}
-
 export function shouldInspectSubmitResponse(
   action: ProvisionAction,
   row: WireRow | undefined,
 ): row is WireRow {
   return action.kind === "click" && row !== undefined && isSubmitLikeRow(row);
-}
-
-/**
- * A check-your-email / verify page — visible copy and OTP fields only.
- * The word "verif" in a URL or link label is not this: product sections
- * about identity verifications are ordinary signed-in pages.
- */
-export function pageLooksLikeEmailVerification(
-  rows: readonly WireRow[],
-  _pageUrl: string = "",
-  pageText: string = "",
-): boolean {
-  if (rows.some((row) => isOtpRow(row) && isFillableRow(row))) return true;
-  return emailVerificationCopy(`${pageText} ${headingCopy(rows)}`);
-}
-
-/** Page copy names an email the goal did not. Unknown or matching identity is not this. */
-export function pageShowsForeignIdentity(
-  rows: readonly WireRow[],
-  pageText: string,
-  goal: string,
-): boolean {
-  const wanted = emailsInText(goal);
-  if (wanted.length === 0) return false;
-  const wantedSet = new Set(wanted);
-  const pageEmails = emailsInText(`${pageText} ${rows.map((row) => readableLabel(row)).join(" ")}`);
-  return pageEmails.some((email) => !wantedSet.has(email));
-}
-
-export function isPreexistingSessionPage(input: {
-  rows: readonly WireRow[];
-  pageUrl: string;
-  pageText: string;
-  goal: string;
-  submittedThisDrive: boolean;
-}): boolean {
-  if (goalSeeksThirdPartySignin(input.goal)) return false;
-  if (pageShowsForeignIdentity(input.rows, input.pageText, input.goal)) return true;
-  return (
-    input.submittedThisDrive !== true &&
-    pageLooksLikeEmailVerification(input.rows, input.pageUrl, input.pageText)
-  );
 }
 
 export function invalidFieldReason(rows: readonly WireRow[]): string | undefined {
@@ -2129,62 +1943,11 @@ function shouldRecordVisit(row: WireRow, pageUrl: string): boolean {
   return kind === "l" || kind === "link" || kind === "tb" || kind === "tab";
 }
 
-function decisionIsActionable(
-  decision: DriveDecision,
-): decision is Extract<DriveDecision, { kind: "act" }> {
-  return decision.kind === "act";
-}
-
-export function rowCarriesGoalNoun(row: WireRow, goal: string): boolean {
-  if (!goalSeeksKey(goal) || isConsentRow(row) || isContextPickerRow(row)) return false;
-  const label = readableLabel(row).toLowerCase();
-  return /api\s*key|access\s*token|create\s+(?:a\s+)?(?:key|token)|credentials?|\b(?:api[-_]?keys?|tokens?)\b/.test(
-    label,
-  );
-}
-
-export function rowMatchesGoalSeek(row: WireRow, goal: string): boolean {
-  if (rowCarriesGoalNoun(row, goal)) return true;
-  if (!goalSeeksKey(goal) || isConsentRow(row) || isContextPickerRow(row)) return false;
-  return /\bsettings\b/.test(readableLabel(row).toLowerCase());
-}
-
-export function pageIsPostAuthSetup(url: string): boolean {
-  return /(?:^|\/)(?:welcome|onboarding|getting[-_]?started|confirm|dashboard|console|home|teams|app)(?:\/|$)/.test(
-    urlPathname(url),
-  );
-}
-
-export function pageLooksLikeKeyDestination(url: string): boolean {
-  return /(?:^|\/)(?:api[-_]?keys?|tokens?|credentials?|settings)(?:\/|$)/.test(urlPathname(url));
-}
-
-export function clickGoalSeekScore(row: WireRow, goal: string, pageUrl: string): number {
-  if (!goalSeeksKey(goal)) return 0;
-  const onSetup = pageIsPostAuthSetup(pageUrl);
-  const onKeys = pageLooksLikeKeyDestination(pageUrl);
-  if (!onSetup && !onKeys) return 0;
-  if (
-    isContextPickerRow(row) ||
-    isAlreadyHereNav(row, pageUrl) ||
-    isOffProductNavRow(row, pageUrl)
-  ) {
-    return 0;
-  }
-  if (isRevealOrCopyRow(row)) return 3;
-  if (isDeeperDestination(rowHref(row), pageUrl) || isListedEntityRow(row)) return 2;
-  if (rowMatchesGoalSeek(row, goal) && isGoalDestinationRow(row)) return 2;
-  if (rowMatchesGoalSeek(row, goal)) return 1;
-  if (onSetup && isSubmitLikeRow(row) && !isDisabledRow(row)) return 1;
-  return 0;
-}
-
 export function isCandidateRow(
   row: WireRow,
   includePayment: boolean,
-  pageUrl: string = "",
+  _pageUrl: string = "",
 ): boolean {
-  if (isOffscreenRow(row) && !offscreenRowStaysOffered(row, pageUrl)) return false;
   if (isDisabledRow(row) && !isSubmitLikeRow(row)) return false;
   if (!includePayment && (isPaymentRow(row) || isCvvRow(row))) return false;
   return true;
@@ -2354,39 +2117,6 @@ export function isOauthChromeRow(row: WireRow): boolean {
     /\/broker\/[^/]+\/login\b/i.test(row[2] ?? "");
 }
 
-/** Goal text that rules out third-party sign-in as the path to take. */
-export function goalExcludesOauth(goal: string): boolean {
-  const text = goal.toLowerCase();
-  if (
-    /\b(?:without|not|don't|dont|exclude|avoid|no)\b[\s\S]{0,48}\b(?:google|github|sso|oauth|third[- ]party)\b/.test(
-      text,
-    )
-  ) {
-    return true;
-  }
-  if (
-    /\b(?:google|github|sso|oauth|third[- ]party)\b[\s\S]{0,48}\b(?:excluded|forbidden|disabled)\b/.test(
-      text,
-    )
-  ) {
-    return true;
-  }
-  return (
-    /\b(?:email|password)\b/.test(text) &&
-    /\b(?:only|instead|without|not|exclude|avoid)\b/.test(text)
-  );
-}
-
-/** Sign-up chrome is only third-party links — no email, password, or native submit. */
-export function pageOffersOnlyThirdPartySignup(rows: readonly WireRow[]): boolean {
-  if (!rows.some((row) => isOauthChromeRow(row))) return false;
-  return formSurfaceRows(rows).length === 0;
-}
-
-export function noOtherSignupPathReason(): string {
-  return "The page offers no other sign-up path besides third-party sign-in links.";
-}
-
 export function isChoiceRow(row: WireRow): boolean {
   const role = row[1];
   return role === "c" || role === "checkbox" || role === "combobox" || isPickerRow(row);
@@ -2394,7 +2124,7 @@ export function isChoiceRow(row: WireRow): boolean {
 
 export function formSurfaceRows(rows: readonly WireRow[]): WireRow[] {
   return rows.filter((row) => {
-    if (isOauthChromeRow(row) || isOffscreenRow(row)) return false;
+    if (isOauthChromeRow(row)) return false;
     return isFillableRow(row) || isSubmitLikeRow(row) || isChoiceRow(row);
   });
 }
@@ -2838,7 +2568,7 @@ export function ensureGeneratedFacts(
   );
   if (
     phase !== "login" && (phase === "signup" || (!hasLoginAction && !hasLoginHeading)) &&
-    (phase === "signup" || hasSignupAction || hasConfirmPassword || goalWantsSignup(context.goal))
+    (phase === "signup" || hasSignupAction || hasConfirmPassword)
   ) {
     if (next.password === undefined && rows.some((row) =>
       isFillableRow(row) && !isActedRow(row) && !isPaymentRow(row) && !isCvvRow(row) &&
@@ -3155,17 +2885,15 @@ export function fillableCandidates(
   facts: Record<string, string>,
   includePayment: boolean,
   filledRefs: readonly string[] = [],
-  pageUrl: string = "",
+  _pageUrl: string = "",
 ): DriveCandidate[] {
   const filled = new Set(filledRefs);
   const used = new Set<string>();
   const candidates: DriveCandidate[] = [];
-  const allowOffscreen = pageUrl.length === 0 || isCheckoutUrl(pageUrl);
   for (const row of rows) {
     if (!isFillableRow(row) || isDisabledRow(row) || isActedRow(row)) continue;
     // An invalid field is not done even if we already typed it.
     if (filled.has(row[0]) && !isInvalidRow(row)) continue;
-    if (isOffscreenRow(row) && !allowOffscreen) continue;
     if (!includePayment && (isPaymentRow(row) || isCvvRow(row))) continue;
     if (isPaymentRow(row) || isCvvRow(row)) continue;
     if (isOtpRow(row) && matchingFactKeys(facts, row).length === 0) continue;
@@ -3204,11 +2932,9 @@ export function typeableCandidates(
   const used = new Set(typed.map((candidate) => candidate.slug));
   const extra: DriveCandidate[] = [];
   const filled = new Set(filledRefs);
-  const allowOffscreen = pageUrl.length === 0 || isCheckoutUrl(pageUrl);
   for (const row of rows) {
     if (!isFillableRow(row) || isSelectRow(row) || isDisabledRow(row) || isActedRow(row)) continue;
     if (filled.has(row[0]) || seen.has(row[0])) continue;
-    if (isOffscreenRow(row) && !allowOffscreen) continue;
     if (isPaymentRow(row) || isCvvRow(row)) continue;
     // A checkout site-search box is not a fill. Offering it after the card
     // is in play lets a planner dump the purchase goal into Search and then
@@ -3236,17 +2962,15 @@ export function selectCandidates(
   facts: Record<string, string>,
   includePayment: boolean,
   filledRefs: readonly string[] = [],
-  pageUrl: string = "",
+  _pageUrl: string = "",
 ): DriveCandidate[] {
   const filled = new Set(filledRefs);
   const used = new Set<string>();
   const candidates: DriveCandidate[] = [];
-  const allowOffscreen = pageUrl.length === 0 || isCheckoutUrl(pageUrl);
   for (const row of rows) {
     if (!isFillableRow(row) || !isSelectRow(row) || isDisabledRow(row) || isActedRow(row)) continue;
     if (filled.has(row[0])) continue;
     if (rowAlreadyShowsFact(row, facts, matchingFactKeys(facts, row))) continue;
-    if (isOffscreenRow(row) && !allowOffscreen) continue;
     if (isPaymentRow(row) || isCvvRow(row)) continue;
     const role = ROLE_LETTERS[row[1]] ?? row[1];
     const seed = `${row[2] ?? readableLabel(row)}_${role}`;
@@ -3476,7 +3200,7 @@ export function requiredFactComboboxAction(
   rows: readonly WireRow[],
   facts: Record<string, string>,
   filledRefs: readonly string[] = [],
-  pageUrl: string = "",
+  _pageUrl: string = "",
   _goal?: string,
 ): { target: string } | undefined {
   const filled = new Set(filledRefs);
@@ -3511,15 +3235,13 @@ export function requiredFillableMissingFact(
   rows: readonly WireRow[],
   facts: Record<string, string>,
   filledRefs: readonly string[] = [],
-  pageUrl: string = "",
+  _pageUrl: string = "",
   goal: string = "",
 ): DriveCandidate | undefined {
   const filled = new Set(filledRefs);
-  const allowOffscreen = pageUrl.length === 0 || isCheckoutUrl(pageUrl);
   for (const row of rows) {
     if (!isFillableRow(row) || isDisabledRow(row) || isActedRow(row) || filled.has(row[0]))
       continue;
-    if (isOffscreenRow(row) && !allowOffscreen) continue;
     if (isPaymentRow(row) || isCvvRow(row) || isOtpRow(row) || allowsGoalValueAssignment(row))
       continue;
     if (
@@ -3558,11 +3280,9 @@ export function compactRowsText(
 }
 
 export function nextActionInstructions(goal: string): string {
-  const phase = goalPhase(goal);
   const doneWhen = goalDoneWhen(goal);
   return (
     `You are driving a browser to: ${goal}. ` +
-    (phase === undefined ? "" : `Current phase: ${phase}. `) +
     `The goal is complete only when ${doneWhen}. ` +
     "Pick the single next operation that advances it. " +
     "Pick DONE only when that done_when condition is on the page now. " +
@@ -3611,7 +3331,7 @@ export interface DriveJevState {
     notices: string[];
     secrets_present: DriveSecretsPresent[];
   };
-  goal: { text: string; phase?: DriveGoalPhase; done_when: string };
+  goal: { text: string; done_when: string };
   elements: DriveStateElement[];
   trail: DriveTrailEntry[];
   tried_here: string[];
@@ -3793,35 +3513,24 @@ export function buildJevState(
 ): DriveJevState {
   const recent = history.slice(-DRIVE_HISTORY_CAP);
   const pageUrl = feedback.pageUrl ?? url;
-  const layerOpen = pageOcclusionLayer(candidates.map((candidate) => candidate.row)) !== undefined;
   const tried = new Set(feedback.triedHere ?? []);
   const seenElementIds = new Set<string>();
   const elements: DriveStateElement[] = candidates
-    .slice(0, DRIVE_MAX_CANDIDATES)
-    // Rows outside the main region only matter when a dialog or overlay is
-    // open. Hidden content is a distractor, not a lead.
-    .filter((candidate) => {
-      const region = driveElementLayer(candidate.row, pageUrl);
-      return layerOpen || (region !== "dialog" && region !== "overlay");
-    })
     .map((candidate) => {
       const leads = driveElementLeads(candidate.row, pageUrl);
-      seenElementIds.add(candidate.slug);
+      seenElementIds.add(candidate.ref);
       return elementState(candidate, {
         tried: tried.has(stableControlKey(candidate.row, pageUrl)),
         ...(leads === undefined ? {} : { leads }),
         layer: driveElementLayer(candidate.row, pageUrl),
       });
     });
-  // A control the loop already acted on is annotated `tried`, never silently
-  // pruned: the decider should see why the option is weak. The question
-  // criteria still withhold it, so it cannot be chosen again.
+  // Include every observed row. A row absent from the action choices still
+  // gives the decider page context, including disabled and previously tried
+  // controls, documentation links, and fields below the fold.
   for (const row of feedback.rows ?? []) {
-    if (!tried.has(stableControlKey(row, pageUrl))) continue;
     const region = driveElementLayer(row, pageUrl);
-    if (!layerOpen && (region === "dialog" || region === "overlay")) continue;
     if (seenElementIds.has(row[0])) continue;
-    if (elements.length >= DRIVE_MAX_CANDIDATES) break;
     const leads = driveElementLeads(row, pageUrl);
     seenElementIds.add(row[0]);
     elements.push(
@@ -3834,7 +3543,7 @@ export function buildJevState(
           row,
         },
         {
-          tried: true,
+          tried: tried.has(stableControlKey(row, pageUrl)),
           ...(leads === undefined ? {} : { leads }),
           layer: region,
         },
@@ -3870,7 +3579,7 @@ export function actionCriteria(
 export function operationCriteria(operations: readonly DriveOperation[]): Record<string, string> {
   const criteria: Record<string, string> = {};
   for (const operation of operations) {
-    if (operation === "CLICK") criteria.CLICK = "click a visible control";
+    if (operation === "CLICK") criteria.CLICK = "click a control on the page";
     else if (operation === "TYPE_TEXT") criteria.TYPE_TEXT = "type a provided fact into a field";
     else if (operation === "SELECT") criteria.SELECT = "choose an option in a dropdown";
     else if (operation === "SCROLL") criteria.SCROLL = "scroll to reveal an offscreen control";
@@ -3947,41 +3656,15 @@ export function driveTargetSets(
   skippedClickRefs: readonly string[] = [],
   aim: DriveAimContext = {},
 ): DriveTargetSets {
-  const remaining = { n: DRIVE_MAX_CANDIDATES };
+  // Bound each action family independently so a long form cannot consume the
+  // entire candidate budget and make another action kind disappear.
+  const candidateBudget = () => ({ n: DRIVE_MAX_CANDIDATES });
   const skipped = new Set(skippedClickRefs);
-  const offeredProviders = new Set(rows.map(oauthProviderForRow).filter((provider) => provider !== undefined));
-  const liveProviders = new Set(
-    [...offeredProviders].filter((provider) => aim.liveProviders?.includes(provider)),
-  );
-  const hideFilters = goalSeeksKey(aim.goal ?? "");
-  const hasInAppWork = rows.some(
-    (row) =>
-      isGoalDestinationRow(row) &&
-      !isOffProductNavRow(row, pageUrl) &&
-      !isAppRootOrLogoRow(row, pageUrl) &&
-      !isContextPickerRow(row),
-  );
-  const visited = aim.visitedSectionKeys ?? [];
-  const untriedEntries = hideFilters ? untriedListedItemRows(rows, visited, pageUrl) : [];
   const layer = pageOcclusionLayer(rows);
   const failed = new Set(aim.failedKeys ?? []);
   const keepRow = (row: WireRow): boolean => {
-    const provider = oauthProviderForRow(row);
-    if (
-      offeredProviders.size > 1 && liveProviders.size > 0 && isOauthChromeRow(row) &&
-      (provider === undefined || !liveProviders.has(provider))
-    ) return false;
-    if (isCodeSampleRow(row)) return false;
-    if (isKeyGoal(aim.goal ?? "") && isExistingCredentialMutationRow(row)) return false;
     if (failed.has(actionFailureKey(row, pageUrl)) || failed.has(row[0])) return false;
     if (layer !== undefined && !isLayerCandidateRow(row, rows, layer)) return false;
-    if (hideFilters && isContextPickerRow(row)) return false;
-    if (hasInAppWork && isOffProductNavRow(row, pageUrl)) return false;
-    if (isAppRootOrLogoRow(row, pageUrl) || isSamePageAnchorRow(row, pageUrl)) return false;
-    if (visited.includes(sectionIdentity(row, pageUrl))) return false;
-    if (hideFilters && untriedEntries.length > 0 && isSiblingSectionNavRow(row, pageUrl, rows)) {
-      return false;
-    }
     return true;
   };
   const aimInput = {
@@ -3999,7 +3682,7 @@ export function driveTargetSets(
       ),
       aimInput,
     ),
-    remaining,
+    candidateBudget(),
   );
   const select = takeCapped(
     rankDriveCandidates(
@@ -4013,7 +3696,7 @@ export function driveTargetSets(
       ),
       aimInput,
     ),
-    remaining,
+    candidateBudget(),
   );
   const click = takeCapped(
     rankDriveCandidates(
@@ -4021,50 +3704,19 @@ export function driveTargetSets(
         (candidate) => keepRow(candidate.row),
       ),
       aimInput,
-    )
-      .map((candidate, index) => ({
-        candidate,
-        index,
-        score: clickGoalSeekScore(candidate.row, aim.goal ?? "", pageUrl),
-      }))
-      .sort((left, right) => right.score - left.score || left.index - right.index)
-      .map((entry) => entry.candidate),
-    remaining,
+    ),
+    candidateBudget(),
   );
-  const scroll = takeCapped(rankDriveCandidates(scrollTargets(rows), aimInput), remaining);
+  const scroll = takeCapped(rankDriveCandidates(scrollTargets(rows), aimInput), candidateBudget());
   const operations: DriveOperation[] = [];
   if (click.length > 0) operations.push("CLICK");
   if (typeText.length > 0) operations.push("TYPE_TEXT");
   if (select.length > 0) operations.push("SELECT");
   if (scroll.length > 0) operations.push("SCROLL");
-  // Listed work only counts while some of it is actually offered: when every
-  // candidate is suppressed, withholding WAIT and BLOCKED too would leave DONE
-  // as the only admissible answer and force a false "complete".
-  const goalWork =
-    (pageIsPostAuthSetup(pageUrl) || pageLooksLikeKeyDestination(pageUrl)) &&
-    rows.some(
-      (row) =>
-        !isDisabledRow(row) &&
-        !isOffscreenRow(row) &&
-        rowMatchesGoalSeek(row, aim.goal ?? "") &&
-        click.some((candidate) => candidate.ref === row[0]),
-    );
-  const listedWork =
-    operations.length > 0 && (pageHasListedWork(rows, typeText.length, select.length) || goalWork);
-  const pageText = (aim.headings ?? []).join(" ");
-  const inboxReady =
-    !skipped.has("INBOX") &&
-    aim.submittedThisDrive === true &&
-    (pageSuggestsInboxWait(rows, pageUrl, pageText) ||
-      (goalSeeksVerification(aim.goal ?? "") && !listedWork));
-  if (inboxReady) operations.push("INBOX");
-  // WAIT is withheld only where the repeat-cap recorded it as dead — a
-  // model-chosen wait that left a page with rows unchanged. An empty snapshot
-  // never records one, so a payment settling behind a blank processor screen
-  // keeps its wait for as long as the budgets allow.
-  if (!listedWork && !inboxReady && !skipped.has("WAIT")) operations.push("WAIT");
+  if (!skipped.has("INBOX")) operations.push("INBOX");
+  if (!skipped.has("WAIT")) operations.push("WAIT");
   operations.push("DONE");
-  if (!listedWork && !inboxReady) operations.push("BLOCKED");
+  operations.push("BLOCKED");
   return { operations, TYPE_TEXT: typeText, SELECT: select, CLICK: click, SCROLL: scroll };
 }
 
@@ -4098,7 +3750,6 @@ export function emailCodeCandidates(
         isFillableRow(row) &&
         !isSelectRow(row) &&
         !isDisabledRow(row) &&
-        !isOffscreenRow(row) &&
         !isActedRow(row) &&
         !filled.has(row[0]) &&
         rowValueMissing(row) &&
@@ -4394,12 +4045,6 @@ export function pageSuggestsInboxWait(
   return emailVerificationCopy(hay) || /open gmail|#search\//.test(hay);
 }
 
-export function goalSeeksVerification(goal: string): boolean {
-  return /verif(?:y|ication)|confirm(?:ation)?(?:\s+your)?\s+e-?mail|check your e-?mail/.test(
-    goal.toLowerCase(),
-  );
-}
-
 export function inboxSpecialPlan(
   rows: readonly WireRow[],
   decisionKind: DriveDecision["kind"],
@@ -4407,7 +4052,7 @@ export function inboxSpecialPlan(
   remainingFillCount: number,
   pageUrl: string = "",
   pageText: string = "",
-  goal: string = "",
+  _goal: string = "",
   submittedThisDrive: boolean = false,
 ): InboxSpecialPlan | undefined {
   if (decisionKind !== "stuck" && decisionKind !== "wait") return undefined;
@@ -4438,10 +4083,8 @@ export function inboxSpecialPlan(
         !isOffscreenRow(row),
     )
   ) {
-    if (submittedThisDrive && goalSeeksVerification(goal)) return { kind: "link" };
     return undefined;
   }
-  if (submittedThisDrive && goalSeeksVerification(goal)) return { kind: "link" };
   return undefined;
 }
 
@@ -6153,47 +5796,11 @@ async function driveLoop(input: {
       const completeSnap = await snapshotOrTimeout(framesIfNeeded());
       if (completeSnap !== "ok") return completeSnap;
       const fresh = driveProgressFingerprint(observation, rows, drive, session);
-      // Completion for a key goal is decided from fresh extraction below. A
-      // binding from the preceding page must not veto a readable credential.
       if (
-        !isKeyGoal(drive.goal) &&
         drive.boundFingerprint !== null &&
         fresh !== drive.boundFingerprint
       ) {
         drive.consumedActionKey = null;
-        automaticDecisionRefused = true;
-        return "continue";
-      }
-      // A key goal requires a storable credential from the same capture flow
-      // as operate_extract. The model decides whether it satisfies the goal.
-      const keyEvidence = isKeyGoal(drive.goal) ? await driveKeyEvidence(sessionId) : undefined;
-      if (keyEvidence !== undefined && !driveKeyGoalComplete(keyEvidence)) {
-        noteOutcome({
-          beforeUrl: observation.url,
-          afterUrl: observation.url,
-          action: "DONE",
-          step: drive.trajectory.length,
-          executed: false,
-          notExecutedReason: "refused",
-          beforeFingerprint: drive.boundFingerprint ?? fresh,
-          afterFingerprint: fresh,
-        });
-        drive.history.push("DONE refused: no Copy click yielded a key to store");
-        drive.consumedActionKey = null;
-        const stallKey = pageProgressKey(
-          observation.url,
-          rows,
-          drive.filledRefs,
-          observation.semantic?.headings ?? [],
-        );
-        drive.stallKeys ??= [];
-        if (drive.stallKeys.includes(stallKey)) {
-          return finish("stuck", {
-            reason:
-              "no key with a known source: read the page with operate_observe and point capture at the key",
-          });
-        }
-        drive.stallKeys.push(stallKey);
         automaticDecisionRefused = true;
         return "continue";
       }
@@ -6498,6 +6105,21 @@ async function driveLoop(input: {
       );
       automaticDecisionRefused = true;
       return "continue";
+    }
+    if (
+      (decision.action.kind === "click" || decision.action.kind === "select") &&
+      liveRow !== undefined &&
+      isExistingCredentialMutationRow(
+        liveRow,
+        observation.url,
+        rows,
+        decision.action.kind === "select" ? decision.action.text : "",
+        observation.semantic?.headings ?? [],
+      )
+    ) {
+      return finish("stuck", {
+        reason: `operator decision required before ${readableLabel(liveRow)} on ${observation.url}; no action was dispatched`,
+      });
     }
     if (
       (decision.action.kind === "click" || decision.action.kind === "oauth_login") &&
@@ -6994,7 +6616,7 @@ async function driveLoop(input: {
         if (
           clicked !== undefined &&
           isSubmitLikeRow(clicked) &&
-          !isKeyCreateOpener(clicked, drive.goal)
+          !isKeyCreateOpener(clicked)
         ) {
           captchaAfterSubmit = true;
           drive.submitBeforeText = textBeforeClick;
@@ -7039,7 +6661,7 @@ async function driveLoop(input: {
       }
       if (
         shouldInspectSubmitResponse(decision.action, clickedBefore) &&
-        !isKeyCreateOpener(clickedBefore, drive.goal)
+        !isKeyCreateOpener(clickedBefore)
       ) {
         const navigated = pagePathKey(observation.url) !== pagePathKey(urlBeforeClick);
         const fieldError = invalidFieldReason(rows);
@@ -7141,7 +6763,7 @@ async function driveLoop(input: {
           binding: decisionTargetBinding(clicked, urlBeforeClick),
           url: urlBeforeClick,
         };
-        if (isSubmitLikeRow(clicked) && !isKeyCreateOpener(clicked, drive.goal)) {
+        if (isSubmitLikeRow(clicked) && !isKeyCreateOpener(clicked)) {
           drive.submittedThisDrive = true;
         }
       }
@@ -7323,12 +6945,6 @@ async function driveLoop(input: {
       drive.filledRefs,
       pageUrl,
     );
-    let hasGoalDestination = rows.some(
-      (row) =>
-        rowCarriesGoalNoun(row, args.goal) &&
-        isGoalDestinationRow(row) &&
-        !isOffProductNavRow(row, pageUrl),
-    );
     let terminalOnly = false;
     // A rejected pre-act choice must reach the model on the refreshed page.
     // None of the automatic choices below may consume that opportunity.
@@ -7455,49 +7071,6 @@ async function driveLoop(input: {
         });
       }
 
-      if (
-        isPreexistingSessionPage({
-          rows,
-          pageUrl,
-          pageText: pageTextFromObservation(observation, [observation.dom ?? ""]),
-          goal: args.goal,
-          submittedThisDrive: drive.submittedThisDrive === true,
-        })
-      ) {
-        if (
-          drive.preexistingRestarted === true ||
-          rows.find((row) => isLogoutRow(row)) === undefined
-        ) {
-          return finish("stuck", { reason: alreadySignedInReason() });
-        }
-        const logout = rows.find((row) => isLogoutRow(row));
-        if (logout === undefined) {
-          return finish("stuck", { reason: alreadySignedInReason() });
-        }
-        drive.preexistingRestarted = true;
-        drive.boundFingerprint = driveProgressFingerprint(observation, rows, drive, session);
-        drive.consumedActionKey = null;
-        const applied = await applyDecision({
-          kind: "act",
-          action: { kind: "click", target: logout[0] },
-          actionKey: logout[0],
-          confidence: 1,
-        });
-        if (applied !== "continue") return applied;
-        if (automaticDecisionRefused) break automaticDecisions;
-        const safe = await actSafely(dependencies, sessionId, {
-          kind: "goto",
-          url: session.startUrl,
-        });
-        drive.lastDispatchFailure = safe.dispatchFailure ?? null;
-        drive.lastOauthBounceReason = null;
-        observation = safe.observation;
-        if (observation.needs_user !== undefined) return finishOnWall(observation.needs_user);
-        const restarted = await snapshotOrTimeout(framesIfNeeded());
-        if (restarted !== "ok") return restarted;
-        spendStep("preexisting_restart");
-        continue;
-      }
       // A same-document stage swap (Shopify one-page checkout) and a hydrating
       // checkout both leave the snapshot empty for a while, so spend the
       // re-observation budget before asking anything. Past it the ordinary
@@ -7789,10 +7362,6 @@ async function driveLoop(input: {
         return finish("stuck", { reason: missingPay });
       }
 
-      if (goalExcludesOauth(args.goal) && pageOffersOnlyThirdPartySignup(rows)) {
-        return finish("stuck", { reason: noOtherSignupPathReason() });
-      }
-
       drive.awaitingDecideAfterExplore = false;
 
       // Rule 1: undo a narrowing input the drive itself typed before the loop
@@ -7817,12 +7386,6 @@ async function driveLoop(input: {
       );
       pageOptions =
         lastSelectOptions.get(session) ?? selectOptionsFromElements(session.lastElements);
-      hasGoalDestination = rows.some(
-        (row) =>
-          rowCarriesGoalNoun(row, args.goal) &&
-          isGoalDestinationRow(row) &&
-          !isOffProductNavRow(row, pageUrl),
-      );
       terminalOnly = false;
     }
 
@@ -8040,75 +7603,6 @@ async function driveLoop(input: {
       jev_question_count: questionCount,
       jev_state_bytes: stateBytes,
     };
-    const inboxPlan = inboxSpecialPlan(
-      rows,
-      decision.kind,
-      lastNonWaitWasClick(drive.trajectory),
-      remainingFills.length,
-      observation.url,
-      pageTextFromObservation(observation, [observation.dom ?? ""]),
-      drive.goal,
-      drive.submittedThisDrive === true,
-    );
-    if (inboxPlan !== undefined) {
-      const lastClick = [...drive.trajectory]
-        .reverse()
-        .find((step) => step.action === "click" || step.action === "oauth_login");
-      const applied = await applyDecision(
-        {
-          kind: "act",
-          action:
-            inboxPlan.kind === "otp"
-              ? { kind: "type", target: inboxPlan.target, text: "" }
-              : { kind: "click", target: lastClick?.target ?? "inbox_link" },
-          actionKey: inboxPlan.kind === "otp" ? inboxPlan.target : "inbox_link",
-          confidence: 1,
-          special: "inbox",
-        },
-        jevMs,
-      );
-      if (applied !== "continue") return applied;
-      spendStep("inbox_plan");
-      continue;
-    }
-    if (goalSeeksKey(args.goal) && !pageShowsRevealedKey(rows)) {
-      const visited = drive.visitedSectionKeys ?? [];
-      const untriedEntries = untriedListedItemRows(rows, visited, pageUrl);
-      const nextSection = nextExploreRow(rows, visited, pageUrl);
-      const picked = decisionIsActionable(decision)
-        ? findRow(rows, decision.actionKey, pageUrl)
-        : undefined;
-      const pickedIsReveal = picked !== undefined && isRevealOrCopyRow(picked);
-      const pickedIsPending = picked !== undefined && isPendingPageAction(picked, args.goal);
-      const pickedIsUntriedEntry =
-        picked !== undefined && untriedEntries.some((entry) => entry[0] === picked[0]);
-      const pickedVisitedTab =
-        picked !== undefined &&
-        isSiblingSectionNavRow(picked, pageUrl, rows) &&
-        visited.includes(sectionIdentity(picked, pageUrl));
-      const takeExplore =
-        nextSection !== undefined &&
-        !pickedIsPending &&
-        ((untriedEntries.length > 0 && !pickedIsUntriedEntry && !pickedIsReveal) ||
-          pickedVisitedTab ||
-          (!decisionIsActionable(decision) && !hasGoalDestination));
-      if (takeExplore && nextSection !== undefined) {
-        const applied = await applyDecision({
-          kind: "act",
-          action: { kind: "click", target: nextSection[0] },
-          actionKey: nextSection[0],
-          confidence: 1,
-        });
-        if (applied !== "continue") return applied;
-        drive.boundFingerprint = driveProgressFingerprint(observation, rows, drive, session);
-        drive.consumedActionKey = null;
-        spendStep("explore");
-        continue;
-      }
-      if (!decisionIsActionable(decision) && !hasGoalDestination && visited.length > 0) {
-        return finish("no_progress", { reason: sectionsTriedReason(visited) });
-      }
-    }
     const applied = await applyDecision(decision, jevMs, true);
     if (applied !== "continue") return applied;
     spendStep("model_decision");
