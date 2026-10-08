@@ -686,14 +686,15 @@ function maskCardValues<T>(session: Session, value: T): T {
     : value;
 }
 
-function maskDriveOutput<T>(session: Session, value: T): T {
+/** Trace files can outlive the session audience, so screen their contents. */
+function maskPersistedDriveTrace<T>(session: Session, value: T): T {
   return redactSecretShapedValue(maskCardValues(session, value), session.id);
 }
 
 function appendDriveTrace(session: Session, entry: Record<string, unknown>): void {
   const path = process.env.DRIVE_TRACE_PATH;
   if (path === undefined || path.length === 0) return;
-  appendFileSync(path, `${JSON.stringify(maskDriveOutput(session, entry))}\n`);
+  appendFileSync(path, `${JSON.stringify(maskPersistedDriveTrace(session, entry))}\n`);
 }
 
 async function nativeSelectSnapshot(
@@ -4767,7 +4768,7 @@ function publicDriveHandoff(session: Session, handoff: DriveHandoff): DriveHando
     }
     return value;
   };
-  return maskDriveOutput(session, visit(handoff) as DriveHandoff);
+  return maskCardValues(session, visit(handoff) as DriveHandoff);
 }
 
 function maskedRefsOf(drive: SessionDriveState): string[] {
