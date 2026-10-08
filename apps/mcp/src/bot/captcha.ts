@@ -641,18 +641,17 @@ export async function detectCaptchaVariant(
     const raw = await page.evaluate(() => {
       const present = (sel: string): boolean => document.querySelector(sel) !== null;
       const visible = (sel: string): boolean => {
-        const el = document.querySelector(sel);
-        if (el === null) return false;
-        const r = el.getBoundingClientRect();
-        if (r.width <= 30 || r.height <= 30) return false;
-        // A challenge frame parked off-screen still has size: reCAPTCHA
-        // pre-positions its hidden bframe at top:-9999px on embeds like
-        // Kaggle's signup, so a bare checkbox must not read as a rendered
-        // challenge here — the auto-solver only escalates (and only spends
-        // the funded key) once the grid actually overlaps the viewport.
-        return (
-          r.bottom > 0 && r.right > 0 && r.top < window.innerHeight && r.left < window.innerWidth
-        );
+        return Array.from(document.querySelectorAll(sel)).some((el) => {
+          if (!el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })) return false;
+          const r = el.getBoundingClientRect();
+          if (r.width <= 30 || r.height <= 30) return false;
+          // reCAPTCHA can keep a sized bframe parked off-screen while a
+          // different widget's image grid is displayed. Check each frame's
+          // viewport overlap, not just the first matching iframe.
+          return (
+            r.bottom > 0 && r.right > 0 && r.top < window.innerHeight && r.left < window.innerWidth
+          );
+        });
       };
       const challengeFrameVisible = visible('iframe[src*="recaptcha/api2/bframe"]');
       // The image-grid challenge frame: reCAPTCHA's `bframe`, or
@@ -729,6 +728,41 @@ export async function detectCaptchaVariant(
     // the solver only escalates once the image grid exists.
     let variant = isCaptchaVariant(raw.variant) ? raw.variant : "unknown";
     const recaptcha = raw.recaptcha;
+    // A challenge iframe can also sit inside another frame or an open shadow
+    // root, beyond the main document's querySelectorAll. Playwright's frame
+    // element box is in main-viewport coordinates and respects collapsed
+    // ancestors, so this is the same rendered-grid test for those embeds.
+    if (!recaptcha.challengeFrameVisible) {
+      const viewport =
+        page.viewportSize() ??
+        (await page.evaluate(() => ({
+          width: window.innerWidth,
+          height: window.innerHeight,
+        })));
+      for (const frame of page.frames()) {
+        if (
+          frame.isDetached() ||
+          !/\/recaptcha\/(?:api2|enterprise)\/bframe(?:[?#]|$)/.test(frame.url())
+        )
+          continue;
+        const element = await frame.frameElement().catch(() => null);
+        if (element === null) continue;
+        const box = await element.boundingBox().catch(() => null);
+        await element.dispose().catch(() => undefined);
+        if (
+          box !== null &&
+          box.width > 30 &&
+          box.height > 30 &&
+          box.x + box.width > 0 &&
+          box.y + box.height > 0 &&
+          box.x < viewport.width &&
+          box.y < viewport.height
+        ) {
+          recaptcha.challengeFrameVisible = true;
+          break;
+        }
+      }
+    }
     if (variant === "unknown") {
       const classified = classifyRecaptchaVariant(recaptcha);
       if (classified !== null) variant = classified;
@@ -753,7 +787,8 @@ export async function detectCaptchaVariant(
     }
     return {
       variant,
-      challengeRendered: raw.challengeRendered || hcaptchaChallengeFrameRendered,
+      challengeRendered:
+        raw.challengeRendered || recaptcha.challengeFrameVisible || hcaptchaChallengeFrameRendered,
       recaptcha,
     };
   } catch {

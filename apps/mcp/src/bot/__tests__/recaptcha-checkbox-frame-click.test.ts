@@ -32,7 +32,9 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { detectCaptchaVariant } from "../captcha.js";
+import { detectCaptchaVariant, TwoCaptchaSolver } from "../captcha.js";
+import { attemptOperateCaptchaAutoSolve } from "../captcha-solve.js";
+import type { Session } from "../session/model.js";
 import { actInternally } from "../act/act.js";
 import { installBrokerBrowserCustody } from "../broker/custody.js";
 import { finishProvisionSession, startProvisionSession } from "../session/lifecycle.js";
@@ -47,10 +49,9 @@ vi.mock("../oauth-login.js", async (importOriginal) => ({
 
 import type * as OauthLoginModule from "../oauth-login.js";
 
-const GOOGLE_ANCHOR_URL =
-  "https://www.google.com/recaptcha/api2/anchor?ar=1&k=6Ltestsitekey0000000000000000&co=aHR0cHM&hl=en";
-const GOOGLE_BFRAME_URL =
-  "https://www.google.com/recaptcha/api2/bframe?ar=1&k=6Ltestsitekey0000000000000000&hl=en";
+const SITEKEY = "6LftmFkUAAAAADydGEH99T-xmZoK69ErtRCzfVFf";
+const GOOGLE_ANCHOR_URL = `https://www.google.com/recaptcha/api2/anchor?ar=1&k=${SITEKEY}&co=aHR0cHM&hl=en`;
+const GOOGLE_BFRAME_URL = `https://www.google.com/recaptcha/api2/bframe?ar=1&k=${SITEKEY}&hl=en`;
 
 const ANCHOR_HTML = `<!doctype html><html><body style="margin:0">
 <button id="recaptcha-anchor" role="checkbox" aria-checked="false"
@@ -211,14 +212,91 @@ describe.skipIf(!available)("recaptcha v2 checkbox frame click (Kaggle shape)", 
     await page.close();
   }, 120_000);
 
+  it("escalates a visible image grid after a hidden bframe, but not a collapsed grid", async () => {
+    const page = await context.newPage();
+    const solve = vi
+      .spyOn(TwoCaptchaSolver.prototype, "solveRecaptchaV2")
+      .mockResolvedValue({ kind: "solver_error", reason: "fixture stop" });
+    try {
+      await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
+      await page.evaluate((src) => {
+        const frame = document.createElement("iframe");
+        frame.id = "visible-bframe";
+        frame.title = "recaptcha challenge expires in two minutes";
+        frame.src = src;
+        frame.style.cssText = "position:fixed;top:120px;left:120px;width:400px;height:580px";
+        document.body.append(frame);
+      }, GOOGLE_BFRAME_URL);
+      await expect
+        .poll(() => page.frames().filter((f) => f.url() === GOOGLE_BFRAME_URL).length)
+        .toBe(2);
+      const controller = BrowserController.fromHarnessPage(page);
+      const session = () =>
+        ({
+          id: "fixture-recaptcha",
+          browser: controller,
+          releasedPaymentCard: null,
+          api: {
+            listCredentials: async () => ({ credentials: [{ service: "2captcha" }] }),
+            useCredential: async () => {
+              throw new Error("unexpected network request");
+            },
+          },
+        }) as unknown as Session;
+
+      expect(await detectCaptchaVariant(controller, page)).toMatchObject({
+        variant: "recaptcha_v2",
+        challengeRendered: true,
+        recaptcha: { challengeFrameVisible: true },
+      });
+
+      // Move the displayed frame into a shadow root: the main-document
+      // selector now sees only the parked bframe, while the frame tree still
+      // exposes the displayed grid.
+      await page.evaluate(() => {
+        const host = document.createElement("div");
+        document.body.append(host);
+        host.attachShadow({ mode: "open" }).append(document.querySelector("#visible-bframe")!);
+      });
+      expect(await detectCaptchaVariant(controller, page)).toMatchObject({
+        variant: "recaptcha_v2",
+        challengeRendered: true,
+        recaptcha: { challengeFrameVisible: true },
+      });
+      expect(await attemptOperateCaptchaAutoSolve(session(), page)).toBe("fetch_started");
+      await expect.poll(() => solve.mock.calls.length).toBe(1);
+
+      await page.locator("#visible-bframe").evaluate((frame) => {
+        (frame as HTMLElement).style.display = "none";
+      });
+      expect(await detectCaptchaVariant(controller, page)).toMatchObject({
+        variant: "recaptcha_v2",
+        challengeRendered: false,
+        recaptcha: { challengeFrameVisible: false },
+      });
+      expect(await attemptOperateCaptchaAutoSolve(session(), page)).toBe("no_challenge");
+      expect(solve).toHaveBeenCalledTimes(1);
+    } finally {
+      solve.mockRestore();
+      await page.close();
+    }
+  }, 60_000);
+
   it("clicks an hCaptcha checkbox ref after its iframe remounts", async () => {
     const page = await context.newPage();
     const hcaptchaUrl = "https://newassets.hcaptcha.com/captcha/v1/checkbox.html?sitekey=fixture";
     await context.route("**://newassets.hcaptcha.com/captcha/v1/checkbox.html**", (route) =>
-      route.fulfill({ contentType: "text/html", body: '<button id="checkbox" role="checkbox" aria-checked="false">Verify you are human</button><script>document.querySelector("button").onclick = () => document.querySelector("button").setAttribute("aria-checked", "true")</script>' }),
+      route.fulfill({
+        contentType: "text/html",
+        body: '<button id="checkbox" role="checkbox" aria-checked="false">Verify you are human</button><script>document.querySelector("button").onclick = () => document.querySelector("button").setAttribute("aria-checked", "true")</script>',
+      }),
     );
-    await page.setContent(`<iframe id="hc" title="hCaptcha checkbox" src="${hcaptchaUrl}"></iframe>`);
-    await expect.poll(async () => page.frames().some((frame) => frame.url() === hcaptchaUrl)).toBe(true);
+    await page.setContent(
+      `<iframe id="hc" title="hCaptcha checkbox" src="${hcaptchaUrl}"></iframe>`,
+    );
+    await expect
+      .poll(async () => page.frames().some((frame) => frame.url() === hcaptchaUrl))
+      .toBe(true);
     const controller = BrowserController.fromHarnessPage(page);
     const captured = await controller.extractBrowserUseObservation(page, false);
     const checkbox = captured.elements.find((element) => element.id === "checkbox");
@@ -233,16 +311,22 @@ describe.skipIf(!available)("recaptcha v2 checkbox frame click (Kaggle shape)", 
       if (handle !== null && !remounted) {
         remounted = true;
         await page.locator("#hc").evaluate((frame) => frame.replaceWith(frame.cloneNode(true)));
-        await expect.poll(async () => {
-          const frame = page.frames().find((candidate) => candidate.url() === hcaptchaUrl);
-          return frame !== undefined && (await frame.locator("#checkbox").count()) > 0;
-        }).toBe(true);
+        await expect
+          .poll(async () => {
+            const frame = page.frames().find((candidate) => candidate.url() === hcaptchaUrl);
+            return frame !== undefined && (await frame.locator("#checkbox").count()) > 0;
+          })
+          .toBe(true);
       }
       return handle;
     };
     await controller.click({
       kind: "frame",
-      frame: { framePath: checkbox!.framePath!, frameOrigin: checkbox!.frameOrigin!, frameUrl: checkbox!.frameUrl ?? "" },
+      frame: {
+        framePath: checkbox!.framePath!,
+        frameOrigin: checkbox!.frameOrigin!,
+        frameUrl: checkbox!.frameUrl ?? "",
+      },
       selector: checkbox!.selector,
       method: "click",
     });
