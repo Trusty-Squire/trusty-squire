@@ -750,7 +750,10 @@ describe("connect --target=<agent> writes a valid config", () => {
         reason: string | null;
         terminal: boolean;
       }>();
-      expect(lines[0]).toMatchObject({ state: "needs-sign-in", terminal: false });
+      expect(lines[0]).toMatchObject({ state: "connecting", terminal: false });
+      expect(lines.find((line) => line.state === "needs-sign-in")).toMatchObject({
+        terminal: false,
+      });
       expect(lines.filter((line) => line.terminal)).toHaveLength(1);
       const report = machine.terminal<{
         state: string;
@@ -986,10 +989,10 @@ describe("connect --target=<agent> writes a valid config", () => {
         state: string;
         sign_in_url: string | null;
       }>();
-      const first = lines[0];
-      expect(first?.terminal).toBe(false);
-      expect(first?.state).toBe("needs-sign-in");
-      expect(first?.sign_in_url).toBe("https://test.invalid/install?token=test_setup_code");
+      expect(lines[0]).toMatchObject({ state: "connecting", terminal: false });
+      const signIn = lines.find((line) => line.state === "needs-sign-in");
+      expect(signIn?.terminal).toBe(false);
+      expect(signIn?.sign_in_url).toBe("https://test.invalid/install?token=test_setup_code");
       // Exactly one line ends the run, and it is the last one.
       expect(lines.filter((line) => line.terminal)).toHaveLength(1);
       expect(lines.at(-1)?.terminal).toBe(true);

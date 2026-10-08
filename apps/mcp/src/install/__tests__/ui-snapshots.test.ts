@@ -9,7 +9,7 @@
 //   - Divider renders as a hairline `─` run
 //   - link() produces OSC 8 escape codes when stdout is TTY, raw
 //     URL when piped
-//   - panel() emits a single-border box with the supplied body
+//   - panel() emits clack-style linework with the supplied body
 
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import chalk from "chalk";
@@ -132,13 +132,13 @@ describe("ui.link — OSC 8 hyperlinks", () => {
 });
 
 describe("ui.panel", () => {
-  it("renders a hairline box around the body", () => {
+  it("renders clack-style note linework around the body", () => {
     ui.panel("hello");
     expect(warned).toHaveLength(1);
     const out = warned[0]!;
-    // single-border (─│) per Linear/Obsidian aesthetic
-    expect(out).toContain("─");
+    expect(out).toContain("┌");
     expect(out).toContain("│");
+    expect(out).toContain("└");
     expect(out).toContain("hello");
   });
 

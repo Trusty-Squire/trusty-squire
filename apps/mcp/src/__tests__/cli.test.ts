@@ -228,16 +228,16 @@ describe("resolveConnectTargetContext", () => {
 // is observable. Returns the message printed to the user, so a caller can
 // assert WHICH replacement the removal points at.
 async function expectDeprecatedExit(argv: string[]): Promise<string> {
-  const error = vi.spyOn(console, "error").mockImplementation(() => {});
+  const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
   const exit = vi.spyOn(process, "exit").mockImplementation((code?: string | number | null) => {
     throw new Error(`exit:${code}`);
   });
   try {
     await expect(runCli(argv)).rejects.toThrow("exit:64");
-    expect(error).toHaveBeenCalledWith(expect.stringContaining("[trusty-squire]"));
-    return String(error.mock.calls.at(-1)?.[0] ?? "");
+    expect(warning).toHaveBeenCalledWith(expect.stringContaining("✗"));
+    return String(warning.mock.calls.at(-1)?.[0] ?? "");
   } finally {
     exit.mockRestore();
-    error.mockRestore();
+    warning.mockRestore();
   }
 }

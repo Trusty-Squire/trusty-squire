@@ -35,3 +35,22 @@ npx -y @trusty-squire/mcp@latest connect --target=codex
 On Linux, connect registers and starts a systemd user service; on macOS, a launchd user agent. A working user service manager is required. MCP clients connect to that broker and report "broker not running" after bounded retries if it is stopped. Installer-written client entries use `@trusty-squire/mcp@latest`.
 
 Works with Claude Code, Codex, Cursor, OpenCode, Goose, Cline, Continue, and Hermes.
+
+### CLI commands and options
+
+| Command or option | Purpose |
+| --- | --- |
+| `connect` | Set up this machine; the default when no command is given. |
+| `settings` | Edit registry and email verification choices. |
+| `logout [--account=<id>]` | Clear one local account session. |
+| `help`, `--help`, `-h` | Show CLI help. |
+| `--target=<agent>` | Choose a coding agent instead of detecting one. |
+| `--api-base=<url>` | Use a different Trusty Squire API. |
+| `--account=<id>` | Select the local account session to clear with `logout`. |
+| `--force-relogin[=google\|github]` | Reopen sign-in for the account or one provider. |
+| `--skip-browser` | Hand off the sign-in URL to a separate browser for scripted setup. |
+| `--no-registry` | Disable managed skill registry participation. |
+| `--no-interactive` | Skip terminal setup prompts. |
+| `--json` | Stream machine-readable connect reports; implies `--no-interactive`. |
+
+Run `npx -y @trusty-squire/mcp@latest --help` for the full command reference. The interactive setup also offers an optional 2Captcha key, stored in your vault.

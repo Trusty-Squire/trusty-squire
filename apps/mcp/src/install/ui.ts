@@ -6,9 +6,8 @@
 // All helpers gracefully degrade in non-TTY contexts:
 //   - chalk auto-detects color support; .hex() falls back to nearest
 //     256-color, then 16-color, then plain text.
-//   - ora detects !isTTY and renders a single line per "spinner"
-//     transition (no escape sequences, no redraw).
-//   - boxen still emits a bordered panel; see panel() for sizing.
+//   - progress prints durable lines on stderr, including in piped logs.
+//   - panels use the same light linework as clack's note primitive.
 //   - OSC 8 hyperlink wrapping is gated on isTTY — pipes / logs get
 //     plain text, no garbage escape codes.
 //
@@ -17,9 +16,7 @@
 // these helpers see argv, so this module is install-CLI only by
 // construction.
 
-import boxen from "boxen";
 import chalk from "chalk";
-import ora, { type Ora } from "ora";
 
 // Wine — the single brand accent from the PWA design system. Used on
 // links, primary CTAs, focus, and at most one focal figure per view.
@@ -39,8 +36,6 @@ export function accentBold(text: string): string {
 }
 
 // Current terminal width (or 80 as a sane default for non-TTY pipes).
-// Used to size boxen + dividers. boxen reads this internally too —
-// passed explicitly so our overlays use the same value the CLI feels.
 export function termWidth(): number {
   return process.stdout.columns ?? 80;
 }
@@ -83,8 +78,7 @@ export function divider(): void {
   console.warn(chalk.dim("─".repeat(w)));
 }
 
-// Render a hairline-bordered panel. Reserve for at most ONE focal
-// element per command (the install-complete summary).
+// Render a clack-style note on stderr so --json keeps stdout machine-only.
 // Default border is wine; pass color: 'dim' for an inert/contextual
 // panel.
 export interface PanelOpts {
@@ -96,58 +90,35 @@ export interface PanelOpts {
   align?: "left" | "center";
 }
 export function panel(body: string, opts: PanelOpts = {}): void {
-  const color = opts.color ?? "wine";
-  const borderColor =
-    color === "wine" ? WINE : color === "dim" ? "#555" : color === "yellow" ? "yellow" : "red";
-  // Beeline parses the printed install URL, so non-TTY panels must keep it
-  // contiguous: wrapping can truncate its token and cause `not_found`.
-  // Include side padding and borders when sizing to the longest body line;
-  // interactive terminals retain the compact width. The piped-URL regression
-  // is covered in __tests__/ui-snapshots.test.ts.
-  const width = process.stdout.isTTY
-    ? Math.min(termWidth() - 2, 78)
-    : Math.max(termWidth() - 2, ...body.split("\n").map((line) => line.length + 4));
-  // Tighter padding than the design's previous round-border default:
-  // hairline border + 1 column of side padding reads as a Linear-style
-  // panel rather than a heavy boxed callout.
-  console.warn(
-    boxen(body, {
-      ...(opts.title !== undefined ? { title: opts.title, titleAlignment: "left" } : {}),
-      padding: { top: 0, bottom: 0, left: 1, right: 1 },
-      borderStyle: "single",
-      borderColor,
-      ...(opts.align !== undefined ? { textAlignment: opts.align } : {}),
-      width,
-    }),
-  );
+  const lines = body.split("\n");
+  console.warn([`┌  ${opts.title ?? ""}`, ...lines.map((line) => `│  ${line}`), "└"].join("\n"));
 }
 
-// Run an async task with a wine-colored spinner. On success it
-// converts to a green ✓ + `done` (or `start` if `done` isn't given);
-// on failure it converts to a red ✗ + the error message. In non-TTY
-// each transition is one line — same information, no escape codes.
+// Durable clack-style progress lines keep long broker and network waits
+// visible even in a log or when a terminal does not support redraws.
 export async function withSpinner<T>(opts: {
   start: string;
   done?: string;
   fail?: (err: unknown) => string;
   task: () => Promise<T>;
 }): Promise<T> {
-  // ora supports a hex color via its color option string when passed
-  // a chalk-recognised color name. For wine we override the spinner
-  // frame color via chalk after-the-fact by wrapping the text. The
-  // simplest path that respects ora's internal redraw is the
-  // 'magenta' fallback — closest stock name to wine. The text label
-  // colors don't carry the brand here, only the rotating glyph.
-  const spinner: Ora = ora({ text: opts.start, color: "magenta" }).start();
+  step(opts.start);
+  let elapsed = 0;
+  const ticker = setInterval(() => {
+    elapsed += 3;
+    info(`${opts.start}… ${elapsed}s`);
+  }, 3_000);
   try {
     const result = await opts.task();
-    spinner.succeed(opts.done ?? opts.start);
+    success(opts.done ?? opts.start);
     return result;
   } catch (err) {
-    spinner.fail(
+    fail(
       opts.fail !== undefined ? opts.fail(err) : err instanceof Error ? err.message : String(err),
     );
     throw err;
+  } finally {
+    clearInterval(ticker);
   }
 }
 
