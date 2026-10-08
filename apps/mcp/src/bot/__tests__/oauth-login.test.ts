@@ -109,7 +109,10 @@ async function routeSignedInGoogleFixture(
 ): Promise<void> {
   await context.route("**/*", async (route) => {
     if (new URL(route.request().url()).hostname === "myaccount.google.com") {
-      await route.fulfill({ contentType: "text/html", body: await googleIdentityFixtureBody(context) });
+      await route.fulfill({
+        contentType: "text/html",
+        body: await googleIdentityFixtureBody(context),
+      });
       return;
     }
     await handler(route);
@@ -2720,7 +2723,12 @@ describe("BrowserController OAuth popup lifecycle", () => {
       await context.route("https://mail.google.com/mail/u/0/**", (route) =>
         route.fulfill({
           contentType: "text/html",
-          body: `<div role="link" id="mail-row" onclick="location.hash = 'search/verification/abcdefghijkl'">Verification message for the newly created operator account</div><main>Your verification code is 481920. This verification message remains available while the account setup finishes, so return to the operator after entering the code and continue configuring the new workspace.</main>`,
+          body: `<div role="link" id="mail-row">Verification message for the newly created operator account</div><div id="conversation"></div><script>
+            document.getElementById("mail-row").addEventListener("click", () => {
+              document.getElementById("conversation").innerHTML = '<div class="adn"><div class="gD">Operator &lt;verify@example.test&gt;</div><div class="ii">Your verification code is 481920. This verification message remains available while the account setup finishes, so return to the operator after entering the code and continue configuring the new workspace.</div></div>';
+              location.hash = 'all/abcdefghijkl';
+            });
+          </script>`,
         }),
       );
       await product.goto(productUrl);
@@ -2778,7 +2786,8 @@ describe("BrowserController OAuth popup lifecycle", () => {
       const result = await verification;
       inboxGotoSpy.mockRestore();
 
-      expect(result).toMatchObject({ found: true, code: "481920" });
+      expect(result).toMatchObject({ found: true, code: null });
+      expect(result.messages?.some((message) => message.codes.includes("481920"))).toBe(true);
       // The mailbox read never touched the source page: it stays on the OAuth
       // return URL with its controls live (navigating it to Gmail resets the
       // waiting signup form — the Proton gauntlet failure).

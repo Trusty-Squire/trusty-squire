@@ -260,33 +260,41 @@ async function harness(fixture: Fixture): Promise<{ context: BrowserContext }> {
 // Multi-row fixture: every row opens ITS OWN conversation card.
 function multiRowHandler(): (url: string) => string {
   return (_url) => {
+    const cards = JSON.stringify({
+      "row-proton": STALE_PROTON_CARD,
+      "row-calcom":
+        '<div class="adn"><div class="gD">Cal.com &lt;no-reply@cal.com&gt;</div><div class="ii">Please verify your email address by clicking the button below.</div></div>',
+      "row-craigslist": CRAIGSLIST_CARD,
+    });
     const openScript = `<script>
-      for (const [id, conv, hash] of [
-        ["row-proton", "conv-proton", "inbox/11aa22bb33cc44dd55e6"],
-        ["row-calcom", "conv-calcom", "inbox/22bb33cc44dd55e6ff17"],
-        ["row-craigslist", "conv-craigslist", "inbox/33cc44dd55e6ff170a28"],
+      const cards = ${cards};
+      const list = document.getElementById("list");
+      const conversation = document.getElementById("conversation");
+      for (const [id, hash] of [
+        ["row-proton", "inbox/11aa22bb33cc44dd55e6"],
+        ["row-calcom", "inbox/22bb33cc44dd55e6ff17"],
+        ["row-craigslist", "inbox/33cc44dd55e6ff170a28"],
       ]) {
         document.getElementById(id).addEventListener("click", () => {
-          document.getElementById("list").hidden = true;
-          // Gmail renders only the OPENED conversation's cards — the other
-          // conversations are gone from the DOM, not merely hidden. Without
-          // this removal the body extraction would read every card in the
-          // document and the stale Proton card would leak into the parse.
-          for (const c of document.querySelectorAll("[id^=conv-]")) {
-            if (c.id !== conv) c.remove();
-          }
-          document.getElementById(conv).hidden = false;
+          list.hidden = true;
+          // Only the opened conversation's card exists in the DOM.
+          conversation.innerHTML = cards[id];
           location.hash = hash;
         });
       }
+      // Gmail restores the results list when navigating back to All Mail.
+      // A hash-only navigation does not re-request this routed fixture.
+      window.addEventListener("hashchange", () => {
+        if (location.hash !== "#all") return;
+        conversation.innerHTML = "";
+        list.hidden = false;
+      });
     </script>`;
     return (
       `<!doctype html><html><head><title>Gmail</title></head><body>` +
       GMAIL_CHROME_HTML +
       `<div id="list" role="main">${LIST_FILLER}${MULTI_ROW_LIST}</div>` +
-      `<div id="conv-proton" hidden>${STALE_PROTON_CARD}</div>` +
-      `<div id="conv-calcom" hidden><div class="adn"><div class="gD">Cal.com &lt;no-reply@cal.com&gt;</div><div class="ii">Please verify your email address by clicking the button below.</div></div></div>` +
-      `<div id="conv-craigslist" hidden>${CRAIGSLIST_CARD}</div>` +
+      `<div id="conversation"></div>` +
       openScript +
       `</body></html>`
     );
