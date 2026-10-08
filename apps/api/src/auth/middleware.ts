@@ -23,7 +23,6 @@ export interface AuthDeps {
 }
 
 const BEARER_PREFIX = "Bearer mcp_session_";
-const ACCOUNT_RATE_LIMIT_EXEMPT_ROUTES = new Set(["/v1/decide", "/v1/vault/use"]);
 
 export function makeAuthMiddleware(deps: AuthDeps) {
   const now = (): Date => deps.now?.() ?? new Date();
@@ -72,35 +71,6 @@ export function makeAuthMiddleware(deps: AuthDeps) {
     if (req.auth === undefined) await attachAgentSession(req);
   }
 
-  // Per-account rolling-hour rate limit on the authed control plane — a DoS
-  // backstop so one token can't hammer vault store/list, grant mint, etc.
-  // Generous (the deployed-app egress PROXY runs on a SEPARATE grant-token path
-  // with an optional per-grant cap, so this won't throttle workloads). In-memory /
-  // single-instance, like the grant limiter. `<= 0` disables it.
-  const ACCOUNT_HOURLY_LIMIT = Number.parseInt(process.env.API_ACCOUNT_HOURLY_LIMIT ?? "1000", 10);
-  const accountHits = new Map<string, number[]>();
-  function overAccountRate(accountId: string): boolean {
-    if (ACCOUNT_HOURLY_LIMIT <= 0) return false;
-    const t = now().getTime();
-    const cutoff = t - 3_600_000;
-    const arr = (accountHits.get(accountId) ?? []).filter((x) => x > cutoff);
-    if (arr.length >= ACCOUNT_HOURLY_LIMIT) {
-      accountHits.set(accountId, arr);
-      return true;
-    }
-    arr.push(t);
-    accountHits.set(accountId, arr);
-    return false;
-  }
-  function rateLimited(reply: FastifyReply): FastifyReply {
-    reply.code(429).send({
-      error: "rate_limited",
-      scope: "account",
-      limit_per_hour: ACCOUNT_HOURLY_LIMIT,
-    });
-    return reply;
-  }
-
   return {
     resolveAuth,
 
@@ -110,7 +80,6 @@ export function makeAuthMiddleware(deps: AuthDeps) {
         reply.code(401).send({ error: "web_session_required" });
         return reply;
       }
-      if (overAccountRate(req.auth.account_id)) return rateLimited(reply);
     },
 
     async requireAgent(req: FastifyRequest, reply: FastifyReply): Promise<void> {
@@ -119,13 +88,6 @@ export function makeAuthMiddleware(deps: AuthDeps) {
         reply.code(401).send({ error: "agent_session_required" });
         return reply;
       }
-      // Server-side-use routes spend a platform or vaulted credential only
-      // inside the API's outbound executor. Counting these workload calls
-      // would throttle legitimate drives without limiting secret disclosure.
-      // Route identity is server-owned, so clients cannot opt other calls out.
-      const routeUrl = req.routeOptions.url;
-      if (routeUrl !== undefined && ACCOUNT_RATE_LIMIT_EXEMPT_ROUTES.has(routeUrl)) return;
-      if (overAccountRate(req.auth.account_id)) return rateLimited(reply);
     },
 
     async requireAny(req: FastifyRequest, reply: FastifyReply): Promise<void> {
@@ -134,7 +96,6 @@ export function makeAuthMiddleware(deps: AuthDeps) {
         reply.code(401).send({ error: "authentication_required" });
         return reply;
       }
-      if (overAccountRate(req.auth.account_id)) return rateLimited(reply);
     },
   };
 }

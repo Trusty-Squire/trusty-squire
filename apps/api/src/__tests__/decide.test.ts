@@ -81,7 +81,6 @@ const QUESTIONS = {
 
 describe("POST /v1/decide", () => {
   const prevKey = process.env.TYPESAFE_API_KEY;
-  const prevLimit = process.env.API_ACCOUNT_HOURLY_LIMIT;
   let server: FastifyInstance;
   let deps: ApiDeps;
   let captured: Captured[];
@@ -99,8 +98,6 @@ describe("POST /v1/decide", () => {
     await server.close();
     if (prevKey === undefined) delete process.env.TYPESAFE_API_KEY;
     else process.env.TYPESAFE_API_KEY = prevKey;
-    if (prevLimit === undefined) delete process.env.API_ACCOUNT_HOURLY_LIMIT;
-    else process.env.API_ACCOUNT_HOURLY_LIMIT = prevLimit;
   });
 
   it("requires agent auth", async () => {
@@ -277,36 +274,6 @@ describe("POST /v1/decide", () => {
     expect(ledger.events[0]?.latency_ms).toBeGreaterThanOrEqual(0);
   });
 
-  it("still performs server-side decisions after 1000 account-scoped requests", async () => {
-    process.env.API_ACCOUNT_HOURLY_LIMIT = "1000";
-    await server.close();
-    deps = buildInMemoryDeps({ sessionSecret: SESSION_SECRET });
-    ledger = new InMemoryDecisionEventStore();
-    deps.decisionEventStore = ledger;
-    server = await buildServer({ deps, proxyExecutor: fakeExecutor(captured) });
-
-    const account = await deps.accountStore.createAccount("rl@example.test", "RL");
-    const token = await agentToken(deps, account.id);
-    const vaultHit = () =>
-      server.inject({
-        method: "GET",
-        url: "/v1/vault/credentials",
-        headers: { authorization: `Bearer ${token}` },
-      });
-    for (let i = 0; i < 1000; i++) {
-      expect((await vaultHit()).statusCode).toBe(200);
-    }
-    expect((await vaultHit()).statusCode).toBe(429);
-
-    const decide = await server.inject({
-      method: "POST",
-      url: "/v1/decide",
-      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-      payload: { state: "page", questions: QUESTIONS },
-    });
-    expect(decide.statusCode).toBe(200);
-    expect((await vaultHit()).statusCode).toBe(429);
-  });
 });
 
 describe("GET /v1/usage", () => {
