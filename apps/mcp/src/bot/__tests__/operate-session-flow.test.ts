@@ -2228,10 +2228,9 @@ describe("Compact V2 action-map boundary", () => {
       }).success,
     ).toBe(true);
     expect(operateSelectTool.description).toContain("selections map");
-    expect(provisionObserveTool.description).toContain(
-      "`[@e:...]<tag attributes />` identifies a control",
-    );
-    expect(provisionObserveTool.description).toContain("including off-viewport controls");
+    expect(provisionObserveTool.description).toContain("safe_table` pages controls");
+    expect(provisionObserveTool.description).toContain("`[@e:...]` controls");
+    expect(provisionObserveTool.description).toContain("including offscreen ones");
   });
 
   it("retains only sealed inventory after a V2 observation", async () => {
@@ -4889,7 +4888,7 @@ describe("operate session — operation-scoped Google gate", () => {
     await finishProvisionSession(started.session_id);
   });
 
-  it("defers the general observation when the drive loop owns first perception", async () => {
+  it("defers general observation but dismisses consent before the drive's first perception", async () => {
     const started = await startProvisionSession({
       serviceUrl: "https://app.example.com/drive",
       initialObservation: "drive",
@@ -4901,7 +4900,7 @@ describe("operate session — operation-scoped Google gate", () => {
     expect(started).not.toHaveProperty("safe_table");
     expect(started).not.toHaveProperty("dom");
     expect(h.extractInteractiveElementsCalls).toBe(0);
-    expect(h.consentDismissCalls).toBe(0);
+    expect(h.consentDismissCalls).toBe(2);
     await finishProvisionSession(started.session_id);
   });
 

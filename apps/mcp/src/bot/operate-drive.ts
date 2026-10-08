@@ -107,6 +107,7 @@ import {
 } from "./captcha.js";
 import type { CaptchaSolveResult } from "./captcha.js";
 import { findCredentialTokens, isMaskedDisplay } from "./credential-shape.js";
+import { extractCredentials, storableCredentials } from "./capture/capture.js";
 import {
   DRIVE_FIXED_GO_BACK,
   DRIVE_FIXED_NONE_OF_THESE,
@@ -1608,6 +1609,17 @@ export function rowShowsSecretEvidence(row: WireRow): boolean {
 
 export function pageShowsRevealedKey(rows: readonly WireRow[], _pageText: string = ""): boolean {
   return rows.some((row) => rowShowsSecretEvidence(row));
+}
+
+function pageShowsCredentialValue(rows: readonly WireRow[]): boolean {
+  if (pageShowsRevealedKey(rows)) return true;
+  // A labeled value can be a key even when it has no recognizable prefix or
+  // length. Shape is never the criterion for capturing or storing it.
+  return rows.some((row) => {
+    if (!/^(?:api[- ]?key|access token|token|secret)$/i.test(readableLabel(row))) return false;
+    const value = /(?:^|\|)n=([^|]+)/.exec(row[2] ?? "")?.[1];
+    return value !== undefined && value.length > 0 && !isMaskedDisplay(value);
+  });
 }
 
 export function isKeyCreateRow(row: WireRow): boolean {
@@ -5118,6 +5130,44 @@ async function actSafely(
   }
 }
 
+function resumeAllowsRow(
+  row: WireRow,
+  rows: readonly WireRow[],
+  liveProviders?: readonly OAuthProviderId[],
+): boolean {
+  const liveProviderOffered = rows.some((candidate) => {
+    const provider = oauthProviderForRow(candidate);
+    return provider !== undefined && liveProviders?.includes(provider) === true;
+  });
+  if (!liveProviderOffered || !isOauthChromeRow(row)) return true;
+  const provider = oauthProviderForRow(row);
+  return provider !== undefined && liveProviders?.includes(provider) === true;
+}
+
+function resumeTargetSets(
+  rows: readonly WireRow[],
+  facts: Record<string, string>,
+  goal: string,
+  includePayment: boolean,
+  pageUrl: string,
+  liveProviders?: readonly OAuthProviderId[],
+): DriveTargetSets {
+  const sets = driveTargetSets(rows, facts, includePayment, [], pageUrl, new Map(), (text) => text, [], {
+    goal,
+    ...(liveProviders === undefined ? {} : { liveProviders }),
+  });
+  // Jev sees every row. The human handoff offers only providers already live
+  // in this browser when one of those providers is present on the page.
+  const click = sets.CLICK.filter((candidate) => resumeAllowsRow(candidate.row, rows, liveProviders));
+  return {
+    ...sets,
+    CLICK: click,
+    operations: click.length === 0
+      ? sets.operations.filter((operation) => operation !== "CLICK")
+      : sets.operations,
+  };
+}
+
 export function resumeAnswerOptions(
   rows: readonly WireRow[],
   facts: Record<string, string>,
@@ -5126,10 +5176,7 @@ export function resumeAnswerOptions(
   pageUrl: string,
   liveProviders?: readonly OAuthProviderId[],
 ): Record<string, string> {
-  const sets = driveTargetSets(rows, facts, includePayment, [], pageUrl, new Map(), (text) => text, [], {
-    goal,
-    ...(liveProviders === undefined ? {} : { liveProviders }),
-  });
+  const sets = resumeTargetSets(rows, facts, goal, includePayment, pageUrl, liveProviders);
   // The question builder applies the decision-budget cap to these same sets.
   // A handoff must offer exactly the target keys its resume validator accepts.
   buildDriveQuestions(rows, facts, goal, includePayment, [], pageUrl, new Map(), sets);
@@ -5158,34 +5205,17 @@ export function resumeAction(
   }
   if (answer === "WAIT" || answer === "wait") return { kind: "wait", confidence: 1 };
   const includePayment = cardRef !== undefined;
-  const sets = driveTargetSets(
-    rows,
-    facts,
-    includePayment,
-    [],
-    pageUrl,
-    new Map(),
-    (text) => text,
-    [],
-    {
-      goal,
-      ...(liveProviders === undefined ? {} : { liveProviders }),
-    },
-  );
+  const sets = resumeTargetSets(rows, facts, goal, includePayment, pageUrl, liveProviders);
   const questions = buildDriveQuestions(rows, facts, goal, includePayment, [], pageUrl, new Map(), sets);
   const validKeys = Object.keys(resumeAnswerOptions(rows, facts, goal, includePayment, pageUrl, liveProviders));
   const offered = [...sets.CLICK, ...sets.TYPE_TEXT, ...sets.SELECT].find(
     (entry) => entry.slug === answer || entry.ref === answer,
   );
   const fallbackRow = findRow(rows, answer, pageUrl);
-  const provider = fallbackRow === undefined ? undefined : oauthProviderForRow(fallbackRow);
-  const liveProviderOffered = rows.some((row) => {
-    const offeredProvider = oauthProviderForRow(row);
-    return offeredProvider !== undefined && liveProviders?.includes(offeredProvider) === true;
-  });
   const row = offered?.row ?? (
-    fallbackRow !== undefined && isOauthChromeRow(fallbackRow) && liveProviderOffered &&
-    (provider === undefined || !liveProviders?.includes(provider)) ? undefined : fallbackRow
+    fallbackRow !== undefined && resumeAllowsRow(fallbackRow, rows, liveProviders)
+      ? fallbackRow
+      : undefined
   );
   if (row === undefined) {
     return {
@@ -5446,7 +5476,7 @@ async function driveLoop(input: {
   const detectOfferedProviderSessions = async (): Promise<void> => {
     if (
       liveProviders === undefined &&
-      new Set(rows.map(oauthProviderForRow).filter((provider) => provider !== undefined)).size > 1
+      rows.filter(isOauthChromeRow).length > 1
     ) {
       liveProviders = await liveProviderSessionsForSession(sessionId);
     }
@@ -5775,6 +5805,32 @@ async function driveLoop(input: {
         drive.consumedActionKey = null;
         automaticDecisionRefused = true;
         return "continue";
+      }
+      // A visible credential is only an observation. Completion cannot claim
+      // it was captured until the source-based extraction can obtain a value.
+      // This checks page evidence, not a guessed goal type or value shape.
+      if (pageShowsCredentialValue(rows)) {
+        const extracted = await extractCredentials(sessionId).catch(() => null);
+        if (storableCredentials(extracted?.credentials ?? {}) === null) {
+          drive.history.push("DONE refused: a visible credential has no captured source");
+          drive.consumedActionKey = null;
+          const stallKey = pageProgressKey(
+            observation.url,
+            rows,
+            drive.filledRefs,
+            observation.semantic?.headings ?? [],
+          );
+          drive.stallKeys ??= [];
+          if (drive.stallKeys.includes(stallKey)) {
+            return finish("stuck", {
+              reason:
+                "no key with a known source: read the page with operate_observe and point capture at the key",
+            });
+          }
+          drive.stallKeys.push(stallKey);
+          automaticDecisionRefused = true;
+          return "continue";
+        }
       }
       return finish("complete");
     }

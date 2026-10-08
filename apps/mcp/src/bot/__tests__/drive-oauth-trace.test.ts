@@ -75,7 +75,7 @@ describe("drive OAuth trace", () => {
     expect(resumeAction("@microsoft", rows, {}, "Sign in to Neon", undefined, "https://console.neon.tech/login", ["google"]).kind).toBe("invalid_answer");
   });
 
-  it("offers the live Google provider instead of signed-out GitHub on a login page", async () => {
+  it("shows all providers to Jev while allowing it to choose the live Google provider", async () => {
     const context = await browser.newContext();
     await context.route("https://myaccount.google.com/**", (route) =>
       route.fulfill({
@@ -102,7 +102,10 @@ describe("drive OAuth trace", () => {
           const operation = questions.operation;
           if (click?.type !== "choice" || operation?.type !== "choice") throw new Error("No OAuth choices");
           offered.push(Object.values(click.criteria));
-          const first = Object.keys(click.criteria)[0]!;
+          const google = Object.entries(click.criteria).find(([, label]) =>
+            label.includes("Continue with Google"),
+          )?.[0];
+          if (google === undefined) throw new Error("Google provider was not offered");
           return {
             attempts: 1,
             elapsedMs: 1,
@@ -114,9 +117,9 @@ describe("drive OAuth trace", () => {
                   probabilities: peakedProbabilities(Object.keys(operation.criteria), "CLICK"),
                 },
                 CLICK_target: {
-                  choice: first,
+                  choice: google,
                   confidence: 0.95,
-                  probabilities: peakedProbabilities(Object.keys(click.criteria), first),
+                  probabilities: peakedProbabilities(Object.keys(click.criteria), google),
                 },
               },
             },
@@ -138,7 +141,7 @@ describe("drive OAuth trace", () => {
       };
       await runOperateDrive({ session_id: started.session_id, goal: "Sign in to Neon", max_steps: 2 }, {} as ApiClient, undefined, deps);
       expect(offered[0]).toContain("Continue with Google");
-      expect(offered[0]).not.toContain("Continue with GitHub");
+      expect(offered[0]).toContain("Continue with GitHub");
       expect(actions).toEqual(["google"]);
       expect(await page.locator('input[type="password"]').inputValue()).toBe("");
     } finally {
