@@ -156,11 +156,11 @@ silent failures.
      the machine — binds the install to the account, writes the
      account-bound `agent_session_token` to the local session file.
   3. Establishes the provider session in the bot's Chrome profile as part of
-     that same sign-in, and reports success ONLY after re-probing the profile
-     and seeing it live. A `--skip-browser` ceremony reports the install as
-     incomplete only when it leaves no live provider session in the bot's
-     Chrome, because the bot never observed that sign-in. The
-     [README install section](README.md#install)
+     that same sign-in. A successful in-profile Google claim establishes the
+     Google session without a post-sign-in probe. A `--skip-browser` ceremony
+     still checks the bot profile because the claim happened in another
+     browser, and reports an incomplete install when that session is absent.
+     The [README install section](README.md#install)
      owns the supported interactive-login environments; automated operator launch
      constraints live in [`AGENTS.md`](AGENTS.md#browser-launch-posture).
      Every install is account-bound — there is no anonymous tier.

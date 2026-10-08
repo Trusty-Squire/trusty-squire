@@ -86,6 +86,21 @@ describe("buildConnectReport", () => {
     expect(afterCeremony.sign_in_url).toBeNull();
   });
 
+  it("reports an in-profile claim as connected without cookie evidence", () => {
+    const report = classify({
+      outcome: {
+        kind: "ceremony_complete",
+        account_id: "acc_1",
+        providers: null,
+        in_profile_ceremony: true,
+      },
+      browser_location: { kind: "virtual", url: "https://example.test/novnc" },
+    });
+    expect(report.state).toBe("connected");
+    expect(report.reason).toBeNull();
+    expect(report.account).toEqual({ id: "acc_1", providers: ["google"] });
+  });
+
   it("never reports connected from an unverified machine claim", () => {
     const report = classify({
       outcome: { kind: "unverified", account_id: null },
@@ -97,7 +112,7 @@ describe("buildConnectReport", () => {
     expect(report.sign_in_url).toBeNull();
   });
 
-  it("fails closed when the post-ceremony probe itself failed", () => {
+  it("fails closed when the --skip-browser post-ceremony probe itself failed", () => {
     expect(decideConnectComplete(null)).toEqual({ ok: false, reason: "probe_failed" });
     const report = classify({
       outcome: {
@@ -342,7 +357,7 @@ describe("human copy renders from the same facts", () => {
 
   it("keeps the incomplete-reason sentences", () => {
     expect(connectIncompleteMessage("no_google_session", true)).toContain("--skip-browser");
-    expect(connectIncompleteMessage("probe_failed", false)).toContain("won't call this connected");
+    expect(connectIncompleteMessage("probe_failed", true)).toContain("could not be verified");
   });
 });
 
@@ -387,8 +402,6 @@ describe("snapshotConnectHolder", () => {
       child.kill("SIGKILL");
     }
   });
-
-
 });
 
 // The report is best-effort output. A caller that closed the pipe it was

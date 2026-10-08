@@ -13,8 +13,8 @@
 //           the user's account, and
 //       (b) the bot's Chrome profile gains a provider session it can
 //           ride on future signups (Resend, Postmark, etc.).
-//     One Google login, both jobs done — and connect only reports success
-//     once it has re-probed the profile and seen that session LIVE.
+//     One Google login, both jobs done. The completed in-profile ceremony
+//     establishes the Google session without a second profile probe.
 //
 //   npx @trusty-squire/mcp connect --force-relogin[=google|github]
 //     Re-auth. Clears the selected provider (or the whole profile) and
@@ -999,48 +999,49 @@ async function runConnectInstall(
   args.noRegistry = session.consent_skillify_telemetry !== true;
   args.consentOperatorInboxOtp = session.consent_operator_inbox_otp !== false;
 
-  // Probe the real profile. A cookie snapshot may establish that a candidate
-  // session reached disk; the broker checks whether Google still accepts it.
-  // This probe is also the SUCCESS GATE: the machine claim alone proves the
-  // account plumbing, not that the bot can wear the user's identity at a third-
-  // party site. After a broker-hosted ceremony the broker's Chrome still holds
-  // the profile, so the live probe busy-fails: probeProviderSessionsAfterCeremony
-  // falls back to the committed-cookie snapshot (polling past Chrome's ~30s
-  // commit lag), then confirms Google through a temporary broker tab.
-  // `null` means the probe itself failed, which is not a pass.
-  let providers: OAuthProviderId[] | null = null;
-  try {
-    providers = await ui.withSpinner({
-      start: "Checking provider sessions",
-      done: "Provider sessions checked",
-      fail: () => "Provider session check failed",
-      task: () =>
-        probeProviderSessionsAfterCeremony(profileDir, {
-          awaitProviders: providersConnectMustAwait(args.forceReloginProvider),
-        }),
-    });
-    if (providers !== null) {
-      providers = await confirmLiveGoogleProviderSnapshot(profileDir, providers);
+  // A successful Google claim made inside the bot's Chrome establishes that
+  // profile's Google session. The cookie store can still be uncommitted while
+  // the broker holds Chrome, so a second probe would create a false negative.
+  // --skip-browser claims the account in a different browser; only that path
+  // needs to inspect the bot profile after the claim.
+  let providers: OAuthProviderId[] | null = ["google"];
+  if (claim.requestedProviderObserved) providers.push("github");
+  if (args.skipBrowser) {
+    providers = null;
+    try {
+      providers = await ui.withSpinner({
+        start: "Checking provider sessions",
+        done: "Provider sessions checked",
+        fail: () => "Provider session check failed",
+        task: () =>
+          probeProviderSessionsAfterCeremony(profileDir, {
+            awaitProviders: providersConnectMustAwait(args.forceReloginProvider),
+          }),
+      });
+      if (providers !== null) {
+        providers = await confirmLiveGoogleProviderSnapshot(profileDir, providers);
+      }
+    } catch (err) {
+      console.error(
+        `[connect] provider-session probe failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
-  } catch (err) {
-    console.error(
-      `[connect] provider-session probe failed: ${err instanceof Error ? err.message : String(err)}`,
-    );
   }
 
-  printProviderState(providers ?? []);
+  printProviderState(providers, args.skipBrowser || args.forceReloginProvider === "github");
 
   // Config + key land either way: the session is real and re-running connect
   // must be able to pick up from here. Only the SUCCESS claim is gated.
   await writeAgentConfig(target, agent, args, session, { profileDir, agentIdentity });
   await maybeStoreTwoCaptchaKey(args, session);
 
-  const complete = decideConnectComplete(providers, args.forceReloginProvider);
+  const complete = decideConnectComplete(providers, args.forceReloginProvider, !args.skipBrowser);
   emitConnectStatus(args, {
     outcome: {
       kind: "ceremony_complete",
       account_id: session.account_id ?? "",
       providers,
+      in_profile_ceremony: !args.skipBrowser,
       ...(args.forceReloginProvider !== undefined
         ? { requested_provider: args.forceReloginProvider }
         : {}),
@@ -1081,12 +1082,17 @@ async function hydrateArgsFromStoredPreferences(args: Argv, accountId?: string):
   }
 }
 
-function printProviderState(providers: OAuthProviderId[]): void {
-  const have = new Set(providers);
-  ui.hint(
-    `  Provider sessions: Google ${have.has("google") ? "connected" : "not connected"}; ` +
-      `GitHub ${have.has("github") ? "connected" : "not connected"}`,
-  );
+function printProviderState(providers: OAuthProviderId[] | null, githubChecked = true): void {
+  const have = new Set(providers ?? []);
+  const google =
+    providers === null ? "not checked" : have.has("google") ? "connected" : "not connected";
+  const github =
+    providers === null || !githubChecked
+      ? "not checked"
+      : have.has("github")
+        ? "connected"
+        : "not connected";
+  ui.hint(`  Provider sessions: Google ${google}; GitHub ${github}`);
 }
 
 // Runs the browser-based install confirm flow.
@@ -1368,7 +1374,12 @@ interface BrowserPlacementSlot {
 }
 
 type InstallClaimResult =
-  | { kind: "claimed"; session: SessionData; browser_location: ConnectBrowserLocation }
+  | {
+      kind: "claimed";
+      session: SessionData;
+      browser_location: ConnectBrowserLocation;
+      requestedProviderObserved: boolean;
+    }
   | { kind: "unclaimed"; confirm_url: string; browser_location: ConnectBrowserLocation }
   | { kind: "expired"; browser_location: ConnectBrowserLocation }
   | {
@@ -1426,6 +1437,7 @@ async function runInstallClaim(
   // Wrapper object so TS can narrow `state.value` after a `=== null`
   // check at the call site — bare closure-captured `let` doesn't.
   const state: { value: ClaimResult | null } = { value: null };
+  let requestedProviderObserved = false;
   // The wizard's Finish button invokes the nonce-scoped loopback callback,
   // which closes the page early. It is a courtesy, not the completion gate:
   // the claim polled from the API is authoritative, so an install completes as
@@ -1461,6 +1473,7 @@ async function runInstallClaim(
       observedProviders = await detectProviderSessionsFromProfile(options.profileDir).catch(
         () => [],
       );
+      requestedProviderObserved = observedProviders.includes("github");
     }
     if (
       shouldCompleteInstallClaim(
@@ -1521,6 +1534,7 @@ async function runInstallClaim(
     return {
       kind: "claimed",
       browser_location: handoff,
+      requestedProviderObserved: false,
       session: {
         ...applyInstallPreferences(baseSession, ok.preferences, options.applyServerPrefs),
         api_base_url: apiBase,
@@ -1584,6 +1598,7 @@ async function runInstallClaim(
   return {
     kind: "claimed",
     browser_location,
+    requestedProviderObserved,
     session: {
       ...applyInstallPreferences(baseSession, state.value.preferences, options.applyServerPrefs),
       api_base_url: apiBase,

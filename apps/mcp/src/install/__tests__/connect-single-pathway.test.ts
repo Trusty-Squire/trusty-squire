@@ -3,9 +3,8 @@
 // Two defects are pinned here:
 //  1. Nothing may hand a user (or a host agent) the removed `login` command —
 //     not the CLI dispatcher, not a help line, not a runtime remedy string.
-//  2. connect must not report success on the machine claim alone. The claim
-//     proves the account plumbing; only the post-ceremony LIVE provider probe
-//     proves the bot can wear the user's identity at a third-party site.
+//  2. An in-profile Google claim establishes the bot's Google session. A claim
+//     in another browser still needs the bot profile to be checked.
 
 import { describe, expect, it, vi } from "vitest";
 import { runCli } from "../cli.js";
@@ -76,12 +75,12 @@ describe("decideConnectPreflight", () => {
   });
 });
 
-// The probe's wait list and the gate's demand list are the same contract seen
-// from two sides. When they drifted, a run whose Google sign-in had just
+// The external-browser probe's wait list and the gate's demand list are the
+// same contract seen from two sides. When they drifted, a run whose Google sign-in had just
 // succeeded was rejected `no_google_session`: the probe stopped at the first
 // non-empty read — GitHub cookies already on disk from an earlier run — while
 // Google's were still inside Chrome's commit window.
-describe("providersConnectMustAwait matches what the success gate demands", () => {
+describe("providersConnectMustAwait matches the external-browser success gate", () => {
   const cases: Array<undefined | "google" | "github"> = [undefined, "google", "github"];
 
   it("waits for exactly the providers that would satisfy the gate", () => {
@@ -115,12 +114,21 @@ describe("providersConnectMustAwait matches what the success gate demands", () =
 });
 
 describe("decideConnectComplete (connect's success gate)", () => {
-  it("passes only with a live Google session", () => {
+  it("accepts a completed in-profile ceremony without a post-claim probe", () => {
+    expect(decideConnectComplete(null, undefined, true)).toEqual({ ok: true });
+    expect(decideConnectComplete([], "google", true)).toEqual({ ok: true });
+    expect(decideConnectComplete([], "github", true)).toEqual({
+      ok: false,
+      reason: "requested_provider_missing",
+    });
+  });
+
+  it("passes an external-browser claim only with a live Google session", () => {
     expect(decideConnectComplete(["google"])).toEqual({ ok: true });
     expect(decideConnectComplete(["google", "github"])).toEqual({ ok: true });
   });
 
-  it("fails when the ceremony left no live Google session", () => {
+  it("fails when an external-browser ceremony left no live Google session", () => {
     expect(decideConnectComplete([])).toEqual({ ok: false, reason: "no_google_session" });
     expect(decideConnectComplete(["github"])).toEqual({
       ok: false,
@@ -128,7 +136,7 @@ describe("decideConnectComplete (connect's success gate)", () => {
     });
   });
 
-  it("fails closed when the live probe itself failed", () => {
+  it("fails closed when the external-browser probe itself failed", () => {
     // Unverifiable is not verified: reporting success here is exactly how an
     // install ended up "connected" with no session behind it.
     expect(decideConnectComplete(null)).toEqual({ ok: false, reason: "probe_failed" });
