@@ -98,9 +98,7 @@ per-account ceiling of 100 retrievals per rolling hour. There is no human-only
 bypass. Server-side proxy use is exempt: the API uses the credential inside
 its outbound executor without returning the plaintext to the caller. Proxy
 calls do not consume that retrieval allowance and can continue after it is
-exhausted; host allowlists and proxy auditing still apply. The separate API
-control-plane limit is documented under `API_ACCOUNT_HOURLY_LIMIT` in
-[`CLAUDE.md`](../CLAUDE.md).
+exhausted; host allowlists and proxy auditing still apply.
 
 ## Reading the audit trail (`audit_log`)
 

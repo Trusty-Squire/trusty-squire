@@ -102,6 +102,18 @@ describe("payment approval relay", () => {
     };
   }
 
+  it("allows more than 1000 authenticated approval polls in one hour", async () => {
+    const created = await createApproval();
+    for (let i = 0; i < 1001; i++) {
+      const response = await server.inject({
+        method: "GET",
+        url: `/v1/pay/approvals/${created.id}`,
+        headers: { authorization: `Bearer ${agentToken}` },
+      });
+      expect(response.statusCode).toBe(200);
+    }
+  });
+
   async function createCardlessApproval(): Promise<{ id: string }> {
     const response = await server.inject({
       method: "POST",
