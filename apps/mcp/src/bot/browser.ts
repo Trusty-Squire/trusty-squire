@@ -50,6 +50,7 @@ import {
   markOperatorMutationDispatchAttempted,
 } from "./request-cancellation.js";
 import { BrowserProcessOwner } from "./browser-process-owner.js";
+import { resizeCeremonyWindow, type CeremonyDisplayClip } from "./ceremony-window.js";
 import { PageDriver } from "./page-driver.js";
 import type { ActiveOAuthAttempt } from "./oauth-login.js";
 import { type ProfileCloseState } from "./profile.js";
@@ -418,6 +419,23 @@ export const DRIVE_DISPATCH_PACING: DispatchPacing = {
 };
 
 export class BrowserController implements BrowserDriver {
+  private ceremonyWindowRestore: (() => Promise<void>) | null = null;
+
+  async showPhoneCeremonyWindow(): Promise<CeremonyDisplayClip> {
+    if (this.page === null) throw new Error("ceremony tab is closed");
+    if (this.ceremonyWindowRestore !== null) throw new Error("ceremony window is already resized");
+    const resized = await resizeCeremonyWindow(this.page);
+    this.ceremonyWindowRestore = resized.restore;
+    return resized.clip;
+  }
+
+  async restoreCeremonyWindow(): Promise<void> {
+    const restore = this.ceremonyWindowRestore;
+    if (restore === null) return;
+    await restore();
+    this.ceremonyWindowRestore = null;
+  }
+
   get context(): BrowserContext | null {
     return this.processOwner.context;
   }
@@ -636,6 +654,7 @@ export class BrowserController implements BrowserDriver {
   // multisession identity except whichever one's finish empties the group
   // (which still runs the real close()); see session/lifecycle.ts.
   async closeOwnPagesOnly(): Promise<ProfileCloseState> {
+    await this.restoreCeremonyWindow().catch(() => undefined);
     // Snapshot the whole tab family — the OAuth recovery tab and any adopted
     // popups live in OwnedPages, not just in `page` — BEFORE
     // disposeRegistrations() drops the only map that can enumerate them.
@@ -6575,6 +6594,7 @@ export class BrowserController implements BrowserDriver {
 
   async close(options: { cancelStart?: boolean } = {}): Promise<ProfileCloseState> {
     if (this.isSatelliteAttachment) return await this.closeOwnPagesOnly();
+    await this.restoreCeremonyWindow().catch(() => undefined);
     return await this.processOwner.close(options);
   }
   async waitForCancelledStartQuiescence(): Promise<void> {
@@ -6583,6 +6603,7 @@ export class BrowserController implements BrowserDriver {
   }
   async forceCloseOwnedProcessTree(): Promise<ProfileCloseState> {
     if (this.isSatelliteAttachment) return await this.closeOwnPagesOnly();
+    await this.restoreCeremonyWindow().catch(() => undefined);
     return await this.processOwner.forceCloseOwnedProcessTree();
   }
 }

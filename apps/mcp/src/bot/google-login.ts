@@ -55,6 +55,7 @@ import {
   type RemoteLoginRig,
 } from "./remote-login-display.js";
 import { drawsWindowsNatively, hasDisplay } from "./display-env.js";
+import type { CeremonyDisplayClip } from "./ceremony-window.js";
 export { extractOAuthScopes, scopesAreBasic, scrapeGoogleScopePhrases } from "./oauth-scope.js";
 
 const require = createRequire(import.meta.url);
@@ -644,6 +645,10 @@ export type SharedCeremonyExposure =
 export async function exposeSharedBrokerCeremonyDisplay(
   profileDir: string,
   onExpired?: (ownBrowserPid: number | null) => void,
+  windowControl?: {
+    showPhone: () => Promise<CeremonyDisplayClip>;
+    restore: () => Promise<void>;
+  },
 ): Promise<SharedCeremonyExposure> {
   const holder = holderCeremonyDisplay(profileDir);
   // Nothing to name. Where windows are drawn natively there is no X display to
@@ -668,6 +673,7 @@ export async function exposeSharedBrokerCeremonyDisplay(
     };
   const authFile = holder.authFile;
   let rig: RemoteLoginRig | undefined;
+  let clip: CeremonyDisplayClip | undefined;
   try {
     rig = createRemoteLoginRig();
     // FRESH VNC secrets of our own — createRemoteLoginSecrets would also mint
@@ -676,23 +682,26 @@ export async function exposeSharedBrokerCeremonyDisplay(
     createRemoteLoginVncSecrets(rig);
     rig.display = holder.display;
     rig.authFile = authFile;
+    clip = await windowControl?.showPhone();
   } catch (err) {
     if (rig !== undefined) await teardownRemoteLoginRig(rig).catch(() => undefined);
+    await windowControl?.restore().catch(() => undefined);
     return {
       kind: "unshowable",
       reason: `preparing the noVNC rig failed (${err instanceof Error ? err.message : String(err)})`,
     };
   }
   const exposureRig = rig;
-  const removeCleanup = registerRemoteLoginRigCleanup(exposureRig, () => undefined, {
+  const removeCleanup = registerRemoteLoginRigCleanup(exposureRig, () => windowControl?.restore, {
     onExpired: () => onExpired?.(null),
   });
   let url: string;
   try {
-    url = await exposeRemoteLoginDisplay(rig);
+    url = await exposeRemoteLoginDisplay(rig, clip);
   } catch (err) {
     removeCleanup();
     await teardownRemoteLoginRig(rig).catch(() => undefined);
+    await windowControl?.restore().catch(() => undefined);
     return {
       kind: "unshowable",
       reason: `the noVNC attach failed (${err instanceof Error ? err.message : String(err)})`,
@@ -704,7 +713,11 @@ export async function exposeSharedBrokerCeremonyDisplay(
     stop: async () => {
       // Helpers only: the display and the browser belong to the broker daemon.
       removeCleanup();
-      await teardownRemoteLoginRig(exposureRig);
+      try {
+        await teardownRemoteLoginRig(exposureRig);
+      } finally {
+        await windowControl?.restore();
+      }
     },
   };
 }
@@ -1006,6 +1019,32 @@ export async function runCeremonyInSharedBroker(opts: RunInBotChromeOpts): Promi
     const exposure = await exposeSharedBrokerCeremonyDisplay(
       opts.profileDir,
       opts.onCeremonyExpired,
+      {
+        showPhone: async () => {
+          const clip = await operateCommand(client, sessionId!, "operate_ceremony_window", {
+            action: "show_phone",
+          });
+          if (
+            clip === null ||
+            typeof clip !== "object" ||
+            !["left", "top", "width", "height"].every((key) =>
+              Number.isInteger((clip as Record<string, unknown>)[key]),
+            ) ||
+            (clip as CeremonyDisplayClip).left < 0 ||
+            (clip as CeremonyDisplayClip).top < 0 ||
+            (clip as CeremonyDisplayClip).width <= 0 ||
+            (clip as CeremonyDisplayClip).height <= 0
+          ) {
+            throw new Error("broker did not return ceremony window bounds");
+          }
+          return clip as CeremonyDisplayClip;
+        },
+        restore: async () => {
+          await operateCommand(client, sessionId!, "operate_ceremony_window", {
+            action: "restore",
+          });
+        },
+      },
     );
     if (exposure.kind === "unshowable") {
       opts.onBrowserPlacement?.({ kind: "unreachable", reason: exposure.reason }, null);
