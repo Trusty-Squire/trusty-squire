@@ -284,16 +284,13 @@ describe("explicit mutation capture", () => {
     });
     expect(state.capture).not.toHaveBeenCalled();
     expect(store).not.toHaveBeenCalled();
-    await expect(
-      operateClickTool.handler(
-        operateClickTool.inputSchema.parse({
-          session_id: "session",
-          ref: "@create",
-          capture: { ...capture, write_id: "old" },
-        }),
-        api(store),
-      ),
-    ).rejects.toThrow("extraction-only recovery");
+    expect(
+      operateClickTool.inputSchema.safeParse({
+        session_id: "session",
+        ref: "@create",
+        capture: { ...capture, write_id: "old" },
+      }).success,
+    ).toBe(false);
   });
   it("preserves human outcome booleans on an unresolved action identity", async () => {
     state.action.mockImplementation(async () => {

@@ -39,8 +39,8 @@ list_credentials to see a credential's field names. Pass \`service\` or
 \`reference\` plus the HTTP fields (method, url, headers, body). Prefer this
 over fetch_credential for every "call an API with the key" task: the value
 never enters your context, and no human approval is needed.
-For APIs that authenticate via a query-string key (e.g. FRED's
-\`api_key\`), put the secret in \`query\` — \`query: { api_key: "\${SECRET}" }\`
+For APIs that authenticate via a query-string key, put the secret in
+\`query\` — \`query: { api_key: "\${SECRET}" }\`
 — NOT in the url (a \${SECRET} in the url is rejected; the server injects
 query params after the host check so the key never lands in a log).
 The target host must be on the credential's allowed_hosts (editable with
