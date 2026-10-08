@@ -32,12 +32,42 @@ import {
   injectTurnstileToken,
   waitForCaptchaResponseToken,
   withTimeout,
+  solveVisibleCaptcha,
 } from "./captcha.js";
-import type { CaptchaVariant, TwoCaptchaResult } from "./captcha.js";
+import type { CaptchaSolveResult, CaptchaVariant, TwoCaptchaResult } from "./captcha.js";
 import type { ApiClient } from "../api-client.js";
 import type { BrowserController } from "./browser.js";
 import type { Session } from "./session/model.js";
 import { audit } from "./session/lifecycle.js";
+
+/** The checkbox and token entry points shared by drive and the direct tool. */
+export async function runOperateCaptchaSolve(
+  session: Session,
+  options: {
+    pressCheckbox?: boolean;
+    autoSolve?: boolean;
+    pressTimeoutMs?: number;
+    page?: Page | undefined;
+    attemptAutoSolve?: ((session: Session, page?: Page) => Promise<string>) | undefined;
+    pressCheckboxChallenge?: ((session: Session, page?: Page) => Promise<CaptchaSolveResult>) | undefined;
+  } = {},
+): Promise<{ outcome: string; checkbox?: CaptchaSolveResult }> {
+  const page = options.page ?? session.browser.page ?? undefined;
+  const checkbox = options.pressCheckbox
+    ? await (options.pressCheckboxChallenge ??
+        ((s: Session, p?: Page) =>
+          solveVisibleCaptcha(s.browser, options.pressTimeoutMs ?? 30_000, p)))(session, page)
+    : undefined;
+  const outcome =
+    options.autoSolve === false
+      ? checkbox?.found && checkbox.solved
+        ? "ok"
+        : checkbox?.found
+          ? "checkbox_unsolved"
+          : "no_checkbox"
+      : await (options.attemptAutoSolve ?? attemptOperateCaptchaAutoSolve)(session, page);
+  return { outcome, ...(checkbox === undefined ? {} : { checkbox }) };
+}
 
 // A TwoCaptchaVaultProxy backed by the MCP api-client: every 2Captcha call is
 // routed through use_credential against the vaulted "2captcha" credential, so
