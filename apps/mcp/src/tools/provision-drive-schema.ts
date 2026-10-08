@@ -171,7 +171,7 @@ const captureClickSchema = captureSchema.omit({ write_id: true });
 const captureActionSchema = captureClickSchema.extend({
   source: captureSourceSchema.refine(
     (source) => !("clipboard" in source),
-    "clipboard capture requires operate_click",
+    "capture.source.clipboard is only valid on operate_click",
   ),
 });
 
