@@ -1422,20 +1422,20 @@ export const operateWaitTool: Tool<z.infer<typeof waitSchema>> = {
 // the emailed value is never navigated.
 const readInboxSchema = z.object({
   session_id: z.string().min(1),
+  query: z.string().min(1).max(500).optional(),
   sender: z.string().min(1).max(200).optional(),
   recipient: z.string().min(3).max(320).optional(),
   into_slot: z.string().min(1).max(120).optional(),
+  pick: z.number().int().min(0).max(9).optional(),
   grant_inbox_consent: z.boolean().optional(),
 });
 
 export const operateReadInboxTool: Tool<z.infer<typeof readInboxSchema>> = {
   name: "operate_read_inbox",
   description:
-    "Read verification mail in a separate tab without changing the live form. Returns {code, link, source_from} or needs_user. " +
-    "The default search uses the session recipient and service host; sender and recipient narrow it. " +
-    "For an IP or localhost start URL, host scoping is unavailable: check source_from before using the result. " +
-    "It checks search and All Mail because Gmail search can lag. A miss reports the query; retry after a few seconds. " +
-    "into_slot keeps a found code in a session slot for operate_type; grant_inbox_consent overrides consent for this call. " +
+    "List up to 10 newest Gmail messages in a separate tab without changing the live form. Each message has from, subject, received_at, body, codes, and links; choose the relevant message yourself. " +
+    "Optional query is passed to Gmail search verbatim; All Mail is also checked because search can lag. sender and recipient are compatibility search aliases. " +
+    "To seal a code, pass into_slot and the message's pick index, then use the slot with operate_type. grant_inbox_consent overrides consent for this session. " +
     "If needs_user reports wall:google_session, ask the user to run connect; polling will not clear it.",
   inputSchema: readInboxSchema,
   jsonInputSchema: {
@@ -1443,18 +1443,22 @@ export const operateReadInboxTool: Tool<z.infer<typeof readInboxSchema>> = {
     required: ["session_id"],
     properties: {
       session_id: { type: "string" },
+      query: { type: "string" },
       sender: { type: "string" },
       recipient: { type: "string" },
       into_slot: { type: "string" },
+      pick: { type: "integer" },
       grant_inbox_consent: { type: "boolean" },
     },
   },
   annotations: { readOnlyHint: true },
   async handler(args) {
     return await awaitVerification(args.session_id, {
+      ...(args.query !== undefined ? { query: args.query } : {}),
       ...(args.sender !== undefined ? { sender: args.sender } : {}),
       ...(args.recipient !== undefined ? { recipient: args.recipient } : {}),
       ...(args.into_slot !== undefined ? { intoSlot: args.into_slot } : {}),
+      ...(args.pick !== undefined ? { pick: args.pick } : {}),
       ...(args.grant_inbox_consent !== undefined ? { grantConsent: args.grant_inbox_consent } : {}),
     });
   },

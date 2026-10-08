@@ -51,6 +51,7 @@ import {
   inboxSpecialPlan,
   pageSuggestsInboxWait,
   inboxVerificationDecision,
+  driveInboxValue,
   snapshotNeedsSettle,
   pageHasListedWork,
   isSubmitLikeRow,
@@ -2160,6 +2161,20 @@ describe("form-fill assignment helpers", () => {
       "needs_code",
     );
   });
+
+  it("takes the newest listed code for an automatic OTP step", () => {
+    const listing = {
+      found: true,
+      code: null,
+      link: null,
+      messages: [
+        { index: 0, from: "noreply@dev.tiktok.com", subject: "Code", received_at: "2026-10-08", body: "Code 614208", codes: ["614208"], links: [] },
+        { index: 1, from: "other@example.com", subject: "Old code", received_at: "2026-10-07", body: "Code 123456", codes: ["123456"], links: [] },
+      ],
+    };
+    expect(inboxVerificationDecision(listing, "otp")).toBe("type_code");
+    expect(driveInboxValue(listing).code).toBe("614208");
+  });
 });
 
 describe("handoff shape", () => {
@@ -3028,18 +3043,9 @@ describe("drive aim ranking", () => {
 });
 
 describe("inboxPollMissReason", () => {
-  it("names the recipient and service host that a silent poll searched for", () => {
-    expect(
-      inboxPollMissReason({
-        query: "to:ada+run1@example.test (subject:(verify OR confirm) OR newer_than:1d)",
-        recipient: "ada+run1@example.test",
-        sender: "app.example.test",
-      }),
-    ).toBe(
-      "inbox poll found nothing (query=to:ada+run1@example.test (subject:(verify OR confirm) OR newer_than:1d) to=ada+run1@example.test host=app.example.test)",
-    );
-    expect(inboxPollMissReason({ query: "newer_than:1d" })).toBe(
-      "inbox poll found nothing (query=newer_than:1d)",
+  it("names the broad listing used by drive", () => {
+    expect(inboxPollMissReason({ query: "All Mail" })).toBe(
+      "inbox poll found nothing (query=All Mail)",
     );
   });
 });

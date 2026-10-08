@@ -36,7 +36,7 @@ import {
   type Observation,
   type ProvisionAction,
 } from "./provision-session.js";
-import { resolveInboxSearch } from "./capture/verification.js";
+import type { VerificationResult } from "./capture/verification.js";
 import { liveProviderSessionsForSession, sessionForCall } from "./session/lifecycle.js";
 import type { OAuthProviderId } from "./oauth-providers.js";
 import {
@@ -189,13 +189,8 @@ export function widgetUnreadySolveReason(outcome: string): string {
 export const DRIVE_INBOX_POLL_MS = 45_000;
 export function inboxPollMissReason(search: {
   query: string;
-  recipient?: string;
-  sender?: string;
 }): string {
-  const bits = [`query=${search.query}`];
-  if (search.recipient !== undefined) bits.push(`to=${search.recipient}`);
-  if (search.sender !== undefined) bits.push(`host=${search.sender}`);
-  return `inbox poll found nothing (${bits.join(" ")})`;
+  return `inbox poll found nothing (query=${search.query})`;
 }
 export const DRIVE_STALE_LIMIT = 3;
 export const DRIVE_EXHAUSTED_ACTION_LIMIT = 5;
@@ -4000,13 +3995,26 @@ export function inboxSpecialPlan(
 }
 
 export function inboxVerificationDecision(
-  verification: { found: boolean; code: string | null; link: string | null },
+  verification: Pick<VerificationResult, "found" | "code" | "link" | "messages">,
   planKind: InboxSpecialPlan["kind"],
 ): "type_code" | "goto_link" | "retry" | "needs_code" {
-  if (planKind === "otp" && verification.found && verification.code !== null) return "type_code";
-  if (verification.found && verification.link !== null) return "goto_link";
-  if (verification.found && verification.code !== null) return "needs_code";
+  const { code, link } = driveInboxValue(verification);
+  if (planKind === "otp" && code !== null) return "type_code";
+  if (link !== null) return "goto_link";
+  if (code !== null) return "needs_code";
   return "retry";
+}
+
+/** Drive has no model pick between reads, so use the newest returned value. */
+export function driveInboxValue(
+  verification: Pick<VerificationResult, "code" | "link" | "messages">,
+): { code: string | null; link: string | null } {
+  if (verification.messages === undefined)
+    return { code: verification.code, link: verification.link };
+  return {
+    code: verification.messages.find((message) => message.codes.length > 0)?.codes[0] ?? null,
+    link: verification.messages.find((message) => message.links.length > 0)?.links[0]?.url ?? null,
+  };
 }
 
 export function senderHost(url: string): string | undefined {
@@ -6237,14 +6245,11 @@ async function driveLoop(input: {
     }
 
     if (decision.special === "inbox") {
-      const search = resolveInboxSearch(session);
+      const search = { query: "All Mail" };
       const planKind = decision.action.kind === "type" ? "otp" : "link";
       const clock = dependencies.now ?? Date.now;
       const deadline = clock() + DRIVE_INBOX_POLL_MS;
-      const inboxArgs = {
-        ...(search.sender === undefined ? {} : { sender: search.sender }),
-        ...(search.recipient === undefined ? {} : { recipient: search.recipient }),
-      };
+      const inboxArgs = {};
       let verification = await dependencies.awaitVerification(sessionId, inboxArgs);
       let inboxNext = inboxVerificationDecision(verification, planKind);
       while (inboxNext === "retry") {
@@ -6278,13 +6283,13 @@ async function driveLoop(input: {
       }
       if (
         inboxNext === "type_code" &&
-        verification.code !== null &&
+        driveInboxValue(verification).code !== null &&
         decision.action.kind === "type"
       ) {
         const typed: ProvisionAction = {
           kind: "type",
           target: decision.action.target,
-          text: verification.code,
+          text: driveInboxValue(verification).code!,
         };
         const acted = await actDriveSafely(session, sessionId, typed, dependencies);
         if (acted.kind !== "ok") {
@@ -6298,10 +6303,10 @@ async function driveLoop(input: {
           const page = session.browser.page;
           if (page !== null) await settleDriveStep(page, acted.combobox);
         }
-      } else if (inboxNext === "goto_link" && verification.link !== null) {
+      } else if (inboxNext === "goto_link" && driveInboxValue(verification).link !== null) {
         const safe = await actSafely(dependencies, sessionId, {
           kind: "goto",
-          url: verification.link,
+          url: driveInboxValue(verification).link!,
         });
         if (safe.dispatchFailure === undefined) dispatchedActs += 1;
         drive.lastDispatchFailure = safe.dispatchFailure ?? null;

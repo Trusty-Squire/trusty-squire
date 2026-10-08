@@ -573,29 +573,13 @@ before touching this area. Credential selection is a separate contract owned by
 The canonical DOM capture, identity, query, and fixture contracts live in
 [`docs/browser-use-serializer-port.md`](docs/browser-use-serializer-port.md).
 
-### 17. `await_verification` must score link-picking on anchor TEXT too, and must retry through Gmail's own transient backend error
+### 17. Gmail search can transiently report no messages
 
-Two failure modes measured live during a Xata Keycloak account-link signup
-(rc.25), both in `pickVerificationLink`/`awaitVerification`
-(`apps/mcp/src/bot/email-verification.ts`, `apps/mcp/src/bot/provision-session.ts`):
-
-- A verification email's action link is often rewritten by the sender's ESP
-  into an opaque, per-recipient click-tracking URL (SendGrid/Mailgun/
-  Customer.io/Postmark-style) — no verify/login/token vocabulary survives in
-  the href at all. `pickVerificationLink` takes an optional
-  `VerificationLinkCandidate {url, text}` and scores the anchor's visible
-  text/label the same way it scores the href, so the button's own words
-  ("Link your Google account") still resolve it. Any caller reading real
-  DOM links must pass the anchor text, not just the href — a bare
-  `string[]` of hrefs silently loses this signal.
-- Gmail's own search backend intermittently throws "...encountered a
-  problem (#2014) - Retrying in Ns" and can render "No messages matched
-  your search" during that window even though the message exists.
-  `awaitVerification`'s inbox read detects that banner (`isGmailTransientErrorText`)
-  and an accompanying empty-looking render (`isEmptyGmailResultText`) and
-  retries with bounded backoff (`gmailTransientBackoffMs`, capped at 4s)
-  before accepting a result as final. Do not treat a single empty/erroring
-  Gmail search read as proof the message hasn't arrived.
+Gmail can show its #2014 retry banner or a spurious empty search result while
+a message exists. `operate_read_inbox` retries those reads with bounded backoff
+(`apps/mcp/src/bot/capture/verification.ts`) and also lists All Mail. Returned
+links include their visible anchor text because an email action may use an
+opaque tracking URL; the agent chooses the relevant link.
 
 ### 18. `fetch_credential` is the ONLY raw-value path, and it is not the agent's to open
 
@@ -762,29 +746,17 @@ is 120s — a `token_expired` diag means the observer's cadence, not the
 solver, missed the window. A risk engine (Kaggle) can also stop issuing
 challenges entirely after repeated cycles; no challenge, no solve.
 
-### 22. Inbox reader: listing rows omit To and group conversations
+### 22. Inbox reader lists mail for the agent to choose
 
-`operate_read_inbox` (`awaitVerification` in
-`apps/mcp/src/bot/capture/verification.ts`) runs in the **broker** process —
-a local MCP `server` forwards the tool, so a worktree fix is invisible until
-that broker is rebuilt. Listing rows do not show To and one row can group
-many same-subject messages. Open a to:-scoped or same-registrable-domain
-row; pick the opened message whose To/body is the session recipient.
-`mailRowMatchesSender` matches the page host to From on eTLD+1 (and the
-display-name SLD), not a substring of `app.service.test`. Host scoping is
-skipped — and only skipped — when the session's service host is unmatchable by
-construction: an IP literal or `localhost`, which no From address can ever
-contain, so scoping there would drop every row and protect nothing.
-`scopeableServiceHost` is the single normalization every consumer of the
-service host goes through; a single-label intranet name such as `gitlab` IS
-matchable and keeps its scoping. A row admitted only by that skip is not
-evidence of a stale match (`mailRowMatchedSession`), so a genuine miss on an
-IP/localhost host returns the generic hand-back, not the stale-match one.
-`mailRowPredatesSession` floors session start to the minute. Recipient-scoped
-reads do not veto a predating listing row — the plus-address pick happens
-after open. `TRUSTY_SQUIRE_INBOX_READER_DIAG=1` logs `[inbox-reader-diag]`
-to broker stderr (listing, per-row candidate/predates, which row opened,
-opened-view yield). No bodies, links, codes, or full From addresses.
+`operate_read_inbox` (`apps/mcp/src/bot/capture/verification.ts`) reads Gmail
+in a utility tab in the broker process, leaving the waiting form open. It
+returns up to ten recent message entries, including sender, subject, received
+time, bounded body text, codes, and links. Gmail search is optional and passed
+through as a query; All Mail supplements search because Gmail indexing can lag.
+The agent chooses the relevant message. `into_slot` requires its `pick` index;
+`operate_drive` uses the newest returned value when it reads automatically.
+The session consent and live Google identity gates still apply. A worktree
+change is invisible to a running broker until that broker is rebuilt.
 
 ### 23. A claimed enrollment completes on the claim alone, and the shared-display warning prints only where it is true
 
