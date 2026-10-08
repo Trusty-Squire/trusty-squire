@@ -20,7 +20,7 @@ still require another observation or an explicit wait.
 | Drive ordinary UI | `operate_navigate`, `operate_click`, `operate_type`, `operate_select`, `operate_press`, `operate_scroll`, `operate_wait` |
 | Email verification read | `operate_read_inbox` |
 | Login | `operate_login` |
-| Vault-aware browser work | `operate_fill_credential`, `operate_extract` |
+| Vault-aware browser work | `operate_login({action:"load_saved"})`, `operate_extract` |
 | Payments and vault lists | `inject_card`, `list_credentials`, `list_payment_cards`, `edit_payment_card` |
 
 For a signup, checkout, or other goal-shaped website task, call `operate_drive`
@@ -566,7 +566,7 @@ job without exposing plaintext to the agent.
   OAuth automatically after an uncertain result.
 - `operate_type` accepts exactly one of literal `text` or a protected `slot`.
   For a saved login, read the selected credential's `field_names` with
-  `list_credentials`, then call `operate_fill_credential` with `session_id`,
+  `list_credentials`, then call `operate_login` with `action:"load_saved"`, `session_id`,
   `reference` (or `service`), and those exact names as `fields`. Use each returned
   slot with `operate_type(ref, slot)` on its matching form control; vault values
   are not returned. The installed schema documents the field defaults and naming

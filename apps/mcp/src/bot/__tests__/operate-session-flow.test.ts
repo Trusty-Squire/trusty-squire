@@ -1309,7 +1309,6 @@ import {
   operateWaitTool,
   operateFinishTool,
   provisionExtractTool,
-  operateFillCredentialTool,
   operateLoginTool,
   provisionObserveTool,
   storedExtractResult,
@@ -6492,22 +6491,17 @@ describe("operate session — PR3c username/password login (capture-at-login sou
         fields: [loginField, "password"],
         slot_prefix: "signin",
       };
-      const legacy = (await operateFillCredentialTool.handler(args, api)) as {
-        reference: string;
-        slots: Record<string, { slot: string }>;
-      };
       const consolidated = (await operateLoginTool.handler(
         { action: "load_saved", ...args },
         api,
-      )) as typeof legacy;
+      )) as { reference: string; slots: Record<string, { slot: string }> };
       const viaAct = (await operateLoginTool.handler(
         operateLoginTool.inputSchema.parse({ ...args, action: "load_saved" }),
         api,
-      )) as typeof legacy;
+      )) as typeof consolidated;
 
-      expect(consolidated).toEqual(legacy);
-      expect(viaAct).toEqual(legacy);
-      expect(captured).toHaveLength(3);
+      expect(viaAct).toEqual(consolidated);
+      expect(captured).toHaveLength(2);
       for (const call of captured) {
         expect(call).toMatchObject({
           current_host: "https://app.example.com/login",
@@ -6516,11 +6510,11 @@ describe("operate session — PR3c username/password login (capture-at-login sou
         });
         expect(call.encrypted_response_public_key).toContain("BEGIN PUBLIC KEY");
       }
-      expect(legacy.reference).toBe("vault://acct/login1");
-      expect(legacy.slots[loginField]?.slot).toBe(`signin_${loginField}`);
-      expect(legacy.slots.password?.slot).toBe("signin_password");
-      expect(JSON.stringify({ legacy, consolidated })).not.toContain("ada@example.com");
-      expect(JSON.stringify({ legacy, consolidated })).not.toContain("correct-horse");
+      expect(consolidated.reference).toBe("vault://acct/login1");
+      expect(consolidated.slots[loginField]?.slot).toBe(`signin_${loginField}`);
+      expect(consolidated.slots.password?.slot).toBe("signin_password");
+      expect(JSON.stringify({ consolidated, viaAct })).not.toContain("ada@example.com");
+      expect(JSON.stringify({ consolidated, viaAct })).not.toContain("correct-horse");
 
       h.elements = [elem({ visibleText: "Email", selector: "#email" })];
       const emailRef = domRefs(await observe(obs.session_id))[0]!;
@@ -7706,22 +7700,19 @@ it("missing login slots explain the vault field names and supported fill flow in
   const ref = (started as unknown as { safe_table: Array<[string, string]> }).safe_table[0]![0];
   await expect(
     operateTypeTool.handler({ session_id: started.session_id, ref, slot: "password" }, null),
-  ).rejects.toThrow(/operate_fill_credential.*list_credentials.*field_names.*operate_type/);
+  ).rejects.toThrow(/operate_login.*load_saved.*list_credentials.*field_names.*operate_type/);
   expect(h.typed).toEqual([]);
 });
 
 it("documents the saved-login fields default and both supported naming conventions", () => {
   const args = { session_id: "test-session", reference: "vault://test/login" };
-  expect(operateFillCredentialTool.inputSchema.parse(args).fields).toEqual(["login", "password"]);
   expect(operateLoginTool.inputSchema.parse({ ...args, action: "load_saved" })).toHaveProperty(
     "fields",
     ["login", "password"],
   );
-  for (const tool of [operateFillCredentialTool, operateLoginTool]) {
-    const schema = JSON.stringify(tool.jsonInputSchema);
-    expect(schema).toContain("field_names from list_credentials");
-    expect(schema).toContain('"default":["login","password"]');
-    expect(schema).toContain("username");
-    expect(schema).toContain("operate_type");
-  }
+  const schema = JSON.stringify(operateLoginTool.jsonInputSchema);
+  expect(schema).toContain("field_names from list_credentials");
+  expect(schema).toContain('"default":["login","password"]');
+  expect(schema).toContain("username");
+  expect(schema).toContain("operate_type");
 });

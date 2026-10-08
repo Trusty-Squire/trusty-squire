@@ -8,7 +8,7 @@ import { BrowserController } from "../browser.js";
 import { finishProvisionSession, startHarnessProvisionSession } from "../provision-session.js";
 import {
   provisionObserveTool,
-  operateFillCredentialTool,
+  operateLoginTool,
   operateTypeTool,
   operateClickTool,
 } from "../../tools/provision-drive.js";
@@ -64,7 +64,7 @@ it("reads current login controls repeatedly and fills the matching saved fields 
     }
     transcript.push({ tool: "operate_type", arguments: args, error: guidance });
     expect(guidance).toMatch(
-      /operate_fill_credential.*list_credentials.*field_names.*operate_type/,
+      /operate_login.*load_saved.*list_credentials.*field_names.*operate_type/,
     );
     expect(await page.locator("#password").inputValue()).toBe("");
     const api = {
@@ -93,16 +93,17 @@ it("reads current login controls repeatedly and fills the matching saved fields 
         };
       },
     } as unknown as ApiClient;
-    const loadArgs = operateFillCredentialTool.inputSchema.parse({
+    const loadArgs = operateLoginTool.inputSchema.parse({
+      action: "load_saved",
       session_id: sessionId,
       reference: "vault://synthetic/login",
       fields: ["username", "password"],
     });
-    const loaded = (await operateFillCredentialTool.handler(loadArgs, api)) as {
+    const loaded = (await operateLoginTool.handler(loadArgs, api)) as {
       slots: Record<string, { slot: string }>;
     };
     transcript.push({
-      tool: "operate_fill_credential (synthetic encrypted vault response)",
+      tool: "operate_login load_saved (synthetic encrypted vault response)",
       arguments: loadArgs,
       response: loaded,
     });

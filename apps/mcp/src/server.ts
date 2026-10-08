@@ -208,6 +208,12 @@ export async function buildServer(
   server.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
     const tool = findTool(req.params.name, tools);
     if (tool === null) {
+      if (req.params.name === "operate_fill_credential") {
+        return errorContent(
+          "unknown_tool",
+          "unknown tool 'operate_fill_credential'; use operate_login with action='load_saved' instead",
+        );
+      }
       return errorContent("unknown_tool", `unknown tool '${req.params.name}'`);
     }
     // Parse before checking account state. A malformed call is always a local,

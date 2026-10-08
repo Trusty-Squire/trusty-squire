@@ -962,19 +962,12 @@ const sealVaultCredentialBaseSchema = z.object({
   slot_prefix: z.string().min(1).max(60).default("vault"),
 });
 
-const sealVaultCredentialSchema = sealVaultCredentialBaseSchema.refine(
-  (b) => b.reference !== undefined || b.service !== undefined,
-  {
-    message: "one of reference or service is required",
-  },
-);
-
 async function handleSealVaultCredential(
-  args: z.infer<typeof sealVaultCredentialSchema>,
+  args: z.infer<typeof sealVaultCredentialBaseSchema>,
   api: ApiClient | null,
 ) {
   if (api === null) {
-    throw new Error("operate_seal_vault_credential requires an active Trusty Squire session");
+    throw new Error("operate_login load_saved requires an active Trusty Squire session");
   }
   const current = currentProvisionUrl(args.session_id);
   const { publicKey, privateKey } = generateKeyPairSync("rsa", {
@@ -1007,29 +1000,6 @@ async function handleSealVaultCredential(
     slots,
   };
 }
-
-export const operateFillCredentialTool: Tool<z.infer<typeof sealVaultCredentialSchema>> = {
-  name: "operate_fill_credential",
-  description:
-    "For a sign-in page, retrieve a username/password credential only if the " +
-    "current browser host is allowed for login, then seal requested fields into " +
-    "session slots. Raw values are never returned; use operate_type with slot " +
-    "with the returned slot names to fill the page.",
-  inputSchema: sealVaultCredentialSchema,
-  jsonInputSchema: {
-    type: "object",
-    required: ["session_id"],
-    anyOf: [{ required: ["reference"] }, { required: ["service"] }],
-    properties: {
-      session_id: { type: "string" },
-      reference: { type: "string" },
-      service: { type: "string" },
-      fields: vaultCredentialFieldsJson,
-      slot_prefix: { type: "string" },
-    },
-  },
-  handler: handleSealVaultCredential,
-};
 
 const loginPrepareSignupSchema = prepareLoginSchema.extend({
   action: z.literal("prepare_signup"),
@@ -1285,7 +1255,7 @@ export const operateTypeTool: Tool<z.infer<typeof typeSchema>> = {
   name: "operate_type",
   description:
     ACTION_FORMAT_NOTE +
-    "Fill a control with text, or a session slot returned by operate_login, operate_fill_credential, or operate_extract. Provide exactly one of text or slot. submit presses Enter after a successful fill.",
+    "Fill a control with text, or a session slot returned by operate_login or operate_extract. Provide exactly one of text or slot. submit presses Enter after a successful fill.",
   inputSchema: typeSchema,
   jsonInputSchema: {
     type: "object",
@@ -1692,7 +1662,6 @@ export const OPERATE_TOOLS: Tool[] = [
   operateWaitTool,
   operateReadInboxTool,
   operateLoginTool,
-  operateFillCredentialTool,
   provisionExtractTool,
 ] as Tool[];
 

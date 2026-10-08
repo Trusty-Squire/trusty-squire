@@ -290,7 +290,6 @@ describe("characterization: registered operator tool surface", () => {
       "operate_wait",
       "operate_read_inbox",
       "operate_login",
-      "operate_fill_credential",
       "operate_extract",
     ]);
   });

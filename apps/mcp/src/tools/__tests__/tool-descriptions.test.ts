@@ -15,7 +15,6 @@ import {
   operateDriveTool,
   operateLoginTool,
   provisionScreenshotTool,
-  operateFillCredentialTool,
   provisionStartTool,
 } from "../provision-drive.js";
 import { injectCardTool } from "../inject-card.js";
@@ -180,15 +179,6 @@ describe("capture schemas match their handlers", () => {
 // The sentences describing behaviour that DOES still exist, quoted, so the next
 // description rewrite cannot take them with it.
 describe("still-true contracts survive the cleanup", () => {
-  it("operate_seal_vault_credential still describes the login-host gate and the slots", () => {
-    const description = operateFillCredentialTool.description;
-    expect(description).toContain(
-      "retrieve a username/password credential only if the current browser host is allowed for login",
-    );
-    expect(description).toContain("Raw values are never returned");
-    expect(description).toContain("operate_type with slot");
-  });
-
   it("operate_login still describes all three sealed lifecycle actions", () => {
     const description = operateLoginTool.description;
     expect(description).toContain("without exposing raw values");

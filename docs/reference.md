@@ -285,7 +285,7 @@ in [browser-use-serializer-port.md](docs/browser-use-serializer-port.md).
   pickers, follow the [picker and popup guidance](docs/operator-tool-surface.md#pickers-and-popup-return).
   Use `operate_login` for atomic OAuth and the username/password lifecycle,
   `operate_extract` to [capture credentials](docs/operator-tool-surface.md#credential-capture-and-retrieval),
-  and `operate_fill_credential` to load protected slots. The only mailbox
+  and `operate_login({action:"load_saved"})` to load protected slots. The only mailbox
   access is `operate_read_inbox`, the consent-gated Gmail verification read;
   CAPTCHA solving, general inbox polling, local upload, and specialized cart
   mutation are not operator verbs; inspect and drive the page's ordinary UI or
