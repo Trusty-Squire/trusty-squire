@@ -22,8 +22,12 @@ export const captureSourceSchema = z.union([
       container: captureContainerSchema,
     })
     .strict(),
+  // The value a click newly writes to the browser clipboard (a "Copy API key"
+  // button whose key never enters the DOM). Valid only on operate_click.
+  z.object({ clipboard: z.literal(true) }).strict(),
 ]);
 export type CaptureSource = z.infer<typeof captureSourceSchema>;
+export type ElementCaptureSource = Exclude<CaptureSource, { clipboard: true }>;
 
 /** Describe the requested source as a fallback when the pinned element's
  * descriptor is unavailable. This does not inspect the resolved element. */
@@ -32,7 +36,9 @@ export function describeCaptureSource(source: CaptureSource): {
   name?: string;
   selector?: string;
   container?: { role: string; name?: string };
+  clipboard?: true;
 } {
+  if ("clipboard" in source) return { clipboard: true };
   const container =
     source.container === undefined
       ? undefined
