@@ -1506,10 +1506,13 @@ describe("decideAfterJev stop reasons", () => {
     ]);
     const url = "https://example.test/cart";
     const options = resumeAnswerOptions(rows, {}, "Open the cart", false, url);
-    const targetKeys = Object.keys(options).filter((key) => !["DONE", "BLOCKED", "WAIT"].includes(key));
+    const targetKeys = Object.keys(options).filter((key) => !["DONE", "BLOCKED", "NONE_OF_THESE", "WAIT"].includes(key));
     expect(targetKeys.length).toBeGreaterThan(0);
     for (const key of targetKeys) {
       expect(resumeAction(key, rows, {}, "Open the cart", undefined, url), key).toMatchObject({ kind: "act" });
+    }
+    for (const key of ["BLOCKED", "NONE_OF_THESE"]) {
+      expect(resumeAction(key, rows, {}, "Open the cart", undefined, url)).toMatchObject({ kind: "operator_handoff" });
     }
     const invalid = resumeAction("missing_key", rows, {}, "Open the cart", undefined, url);
     expect(invalid).toMatchObject({ kind: "invalid_answer" });

@@ -103,6 +103,7 @@ import {
   RES_POLL_INTERVAL_MS,
   RES_TIMEOUT_MS,
   hasVisibleCheckboxCaptchaWidget,
+  isCaptchaFrameUrl,
   solveVisibleCaptcha,
 } from "./captcha.js";
 import type { CaptchaSolveResult } from "./captcha.js";
@@ -417,6 +418,7 @@ const defaultDependencies: DriveDependencies = {
 };
 
 export function resetDriveGoalMemory(drive: SessionDriveState): void {
+  drive.lastQuestion = null;
   drive.seenProgressKeys = [];
   drive.leftProgressKeys = [];
   drive.progressReturnCounts = {};
@@ -3935,6 +3937,7 @@ export function confidenceOf(answer: JevAnswer | undefined): number {
 export type DriveDecision =
   | { kind: "complete"; confidence: number }
   | { kind: "stuck"; confidence: number }
+  | { kind: "operator_handoff"; confidence: number }
   | { kind: "wait"; confidence: number }
   | { kind: "no_progress" }
   | { kind: "none_of_these"; confidence: number; reason: string }
@@ -4926,18 +4929,23 @@ async function captureDriveSession(
   const coveredByLayer = main.elements.some(
     (element) => element.occludedBy === "overlay" || element.occludedBy === "dialog",
   );
-  if (needFrames || coveredByLayer) {
+  const frames = page.frames();
+  // Captcha controls can live in a cross-origin frame even without a card or
+  // covering layer. Keep the normal frame walk narrow for other pages.
+  if (needFrames || coveredByLayer || frames.some((frame) => isCaptchaFrameUrl(frame.url()))) {
     const cache = driveFrameCache.get(session) ?? new Map();
-    const frames = page.frames();
     for (let index = 1; index < frames.length; index += 1) {
       const frame = frames[index]!;
-      const signature = await frameDynamicsSignature(frame);
+      const captchaFrame = isCaptchaFrameUrl(frame.url());
+      if (!needFrames && !coveredByLayer && !captchaFrame) continue;
+      const signature = captchaFrame ? "" : await frameDynamicsSignature(frame);
       const key = `${index}:${frame.url()}:${keepOffscreenButtons}`;
       const cached = cache.get(key);
       // A layer can reveal a one-time value without changing any input. Do
       // not reuse a frame snapshot while the main page is covered.
       if (
         !coveredByLayer &&
+        !captchaFrame &&
         cached !== undefined &&
         cached.frame === frame &&
         cached.signature === signature
@@ -5187,8 +5195,15 @@ export function resumeAnswerOptions(
     ...criteriaFromCandidates(sets.SELECT),
     DONE: "The goal is complete",
     BLOCKED: "No control can advance the goal",
+    NONE_OF_THESE: "I am taking over because none of the current controls can advance the goal",
     WAIT: "Wait for the page to change",
   };
+}
+
+function isOperatorHandoffAnswer(answer: string): boolean {
+  return [DRIVE_FIXED_STUCK, DRIVE_FIXED_NONE_OF_THESE, "STUCK", "TAKE_OVER", "I AM TAKING OVER"].includes(
+    answer.trim().toUpperCase(),
+  );
 }
 
 export function resumeAction(
@@ -5201,8 +5216,8 @@ export function resumeAction(
   liveProviders?: readonly OAuthProviderId[],
 ): DriveDecision {
   if (answer === DRIVE_FIXED_DONE || answer === "done") return { kind: "complete", confidence: 1 };
-  if (answer === DRIVE_FIXED_STUCK || answer === "stuck") {
-    return { kind: "stuck", confidence: 1 };
+  if (isOperatorHandoffAnswer(answer)) {
+    return { kind: "operator_handoff", confidence: 1 };
   }
   if (answer === "WAIT" || answer === "wait") return { kind: "wait", confidence: 1 };
   const includePayment = cardRef !== undefined;
@@ -5414,6 +5429,23 @@ async function driveLoop(input: {
   if (drive.resumeCompactRows === undefined) {
     drive.resumeCompactRows = mergeCompactTable([], priorCompact ?? {});
   }
+  // A takeover answer is a terminal instruction, independent of the last
+  // model question. Do not re-snapshot or inject a pending captcha token before
+  // returning the last public observation to the operator.
+  if (args.answer !== undefined && isOperatorHandoffAnswer(args.answer)) {
+    drive.lastQuestion = null;
+    return buildHandoff({
+      status: "stuck",
+      sessionId,
+      ...(priorCompact == null ? {} : { observation: priorCompact as Observation }),
+      trajectory: drive.trajectory,
+      goal: drive.goal,
+      steps: 0,
+      seconds: elapsed(),
+      jevCalls: drive.jevCalls,
+      reason: "Operator reported the drive blocked and is taking over from this observation",
+    });
+  }
   const includePaymentAtStart = drive.facts.card_ref !== undefined;
   const firstSnap = await snapshotDriveSession(
     session,
@@ -5530,6 +5562,21 @@ async function driveLoop(input: {
       jevCalls: drive.jevCalls,
       ...extra,
     });
+
+  const rememberQuestion = (question: DriveHandoffQuestion): DriveHandoff | undefined => {
+    const previous = drive.lastQuestion;
+    if (
+      previous !== null &&
+      previous.question === question.question &&
+      JSON.stringify(previous.options) === JSON.stringify(question.options)
+    ) {
+      return finish("stuck", {
+        reason: "Drive already asked this unchanged question; operator can take over from the current observation",
+      });
+    }
+    drive.lastQuestion = question;
+    return undefined;
+  };
 
   // An operation-scoped wall (the Google identity hand-back) reaches the loop
   // as an observation, not an exception. Surface its message instead of driving
@@ -5795,6 +5842,12 @@ async function driveLoop(input: {
     jevMs?: number,
     modelChosen = false,
   ): Promise<DriveHandoff | "continue"> => {
+    if (decision.kind === "operator_handoff") {
+      drive.lastQuestion = null;
+      return finish("stuck", {
+        reason: "Operator reported the drive blocked and is taking over from this observation",
+      });
+    }
     if (decision.kind === "complete") {
       const completeSnap = await snapshotOrTimeout(framesIfNeeded());
       if (completeSnap !== "ok") return completeSnap;
@@ -5915,20 +5968,22 @@ async function driveLoop(input: {
       return "continue";
     }
     if (decision.kind === "stuck") {
-      drive.lastQuestion = {
+      const question = {
         question: nextActionInstructions(drive.goal),
         options: actionCriteria(rows, drive.facts.card_ref !== undefined),
       };
-      return finish("stuck", { question: drive.lastQuestion });
+      const repeated = rememberQuestion(question);
+      return repeated ?? finish("stuck", { question });
     }
     if (decision.kind === "needs_value") {
-      drive.lastQuestion = {
+      const question = {
         question: `Missing value for ${decision.field}`,
         options: Object.fromEntries(
           Object.keys(drive.facts).map((key) => [key, `the provided ${key} value`]),
         ),
       };
-      return finish("needs_value", { field: decision.field, question: drive.lastQuestion });
+      const repeated = rememberQuestion(question);
+      return repeated ?? finish("needs_value", { field: decision.field, question });
     }
     if (decision.kind === "no_progress") {
       return finish("no_progress");
@@ -6002,18 +6057,21 @@ async function driveLoop(input: {
       return await noteProgress(beforeFingerprint, afterFingerprint, "GO_BACK");
     }
     if (decision.kind === "low_confidence") {
-      drive.lastQuestion = {
-        question: "Choose one current target key, or DONE, BLOCKED, or WAIT.",
+      const question = {
+        question: "Choose one current target key, or DONE, BLOCKED, NONE_OF_THESE, or WAIT.",
         options: resumeAnswerOptions(rows, drive.facts, drive.goal, drive.facts.card_ref !== undefined, observation.url, liveProviders),
       };
+      const repeated = rememberQuestion(question);
+      if (repeated !== undefined) return repeated;
       return finish("low_confidence", {
-        question: drive.lastQuestion,
+        question,
         confidence: decision.confidence,
         reason: `model confidence is below the drive threshold on ${observation.url}`,
       });
     }
     if (decision.kind === "invalid_answer") {
-      drive.lastQuestion = decision.question;
+      const repeated = rememberQuestion(decision.question);
+      if (repeated !== undefined) return repeated;
       return finish("invalid_answer", {
         question: decision.question,
         confidence: decision.confidence,
@@ -7148,8 +7206,7 @@ async function driveLoop(input: {
         return finish("stuck", { reason });
       };
       // A checkbox challenge ("Verify you are human" / "I'm not a robot") whose
-      // widget is cross-origin: its frame is skipped from the row map by design,
-      // so the decider has no control to click and hands the challenge back.
+      // cross-origin widget may not expose a usable control in the row map.
       // Press the widget itself with the humanized pointer and let the next
       // snapshot say whether it settled, once per page state. A rendered image
       // grid is excluded — that needs a token, and the widget_unready branch

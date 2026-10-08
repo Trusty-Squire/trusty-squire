@@ -5248,6 +5248,182 @@ describe("operate_drive feedback loop", () => {
       await context.close();
     }
   }, 30_000);
+
+  it.each(["BLOCKED", "NONE_OF_THESE"])(
+    "ends a low-confidence resume when the operator answers %s",
+    async (answer) => {
+      const html = `<!doctype html><meta charset="utf-8"><title>Challenge</title>
+<main><h1>Complete verification</h1><button>Go back</button></main>`;
+      const { context, started } = await openFixture(html, "blocked-resume.test");
+      try {
+        const dependencies = deps(async (_api, _state, questions) => {
+          const result = jevFromQuestions(questions);
+          setChoice(questions, "operation", "CLICK", result);
+          result.result.answers.operation!.confidence = 0.41;
+          return result;
+        });
+        const snapshots = vi.fn();
+        dependencies.onSnapshot = snapshots;
+        const input = {
+          session_id: started.session_id,
+          goal: "Complete verification",
+          max_steps: 4,
+        };
+        const low = await runOperateDrive(input, api(), undefined, dependencies);
+        expect(low.status).toBe("low_confidence");
+        expect(low.options).toHaveProperty(answer);
+        const beforeResume = snapshots.mock.calls.length;
+        const handback = await runOperateDrive(
+          { ...input, answer },
+          api(),
+          undefined,
+          dependencies,
+        );
+        expect(handback.status).toBe("stuck");
+        expect(handback.question).toBeUndefined();
+        expect(handback.options).toBeUndefined();
+        expect(handback.reason).toMatch(/operator|blocked|taking over/i);
+        expect(handback.observation?.url).toBe("https://blocked-resume.test/");
+        expect(handback.steps).toBe(0);
+        expect(snapshots).toHaveBeenCalledTimes(beforeResume);
+        const repeated = await runOperateDrive(
+          { ...input, answer },
+          api(),
+          undefined,
+          dependencies,
+        );
+        expect(repeated.status).toBe("stuck");
+        expect(repeated.question).toBeUndefined();
+        expect(repeated.options).toBeUndefined();
+        expect(snapshots).toHaveBeenCalledTimes(beforeResume);
+      } finally {
+        await finishProvisionSession(started.session_id);
+        await context.close();
+      }
+    },
+    30_000,
+  );
+
+  it.each(["BLOCKED", "NONE_OF_THESE"])(
+    "ends a stuck-schema resume when the operator answers %s",
+    async (answer) => {
+      const html = `<!doctype html><meta charset="utf-8"><title>Challenge</title>
+<main><h1>Complete verification</h1><button>Go back</button></main>`;
+      const { context, started } = await openFixture(html, "stuck-resume.test");
+      try {
+        const dependencies = deps(async (_api, _state, questions) =>
+          jevChoose(questions, "BLOCKED"),
+        );
+        const input = {
+          session_id: started.session_id,
+          goal: "Complete verification",
+          max_steps: 4,
+        };
+        const stuck = await runOperateDrive(input, api(), undefined, dependencies);
+        expect(stuck.status).toBe("stuck");
+        expect(stuck.question).toBeDefined();
+        expect(stuck.options).toHaveProperty(answer);
+        const handback = await runOperateDrive(
+          { ...input, answer },
+          api(),
+          undefined,
+          dependencies,
+        );
+        expect(handback.status).toBe("stuck");
+        expect(handback.question).toBeUndefined();
+        expect(handback.options).toBeUndefined();
+        expect(handback.steps).toBe(0);
+      } finally {
+        await finishProvisionSession(started.session_id);
+        await context.close();
+      }
+    },
+    30_000,
+  );
+
+  it("does not reissue an identical low-confidence prompt on resume", async () => {
+    const html = `<!doctype html><meta charset="utf-8"><title>Challenge</title>
+<main><h1>Complete verification</h1><button>Go back</button></main>`;
+    const { context, page, started } = await openFixture(html, "repeat-prompt.test");
+    try {
+      const dependencies = deps(async (_api, _state, questions) => {
+        const result = jevFromQuestions(questions);
+        setChoice(questions, "operation", "CLICK", result);
+        result.result.answers.operation!.confidence = 0.41;
+        return result;
+      });
+      const input = { session_id: started.session_id, goal: "Complete verification", max_steps: 4 };
+      const first = await runOperateDrive(input, api(), undefined, dependencies);
+      expect(first.status).toBe("low_confidence");
+      const repeated = await runOperateDrive(input, api(), undefined, dependencies);
+      expect(repeated.status).toBe("stuck");
+      expect(repeated.question).toBeUndefined();
+      expect(repeated.options).toBeUndefined();
+      expect(repeated.reason).toMatch(/unchanged question/i);
+      const repeatedAgain = await runOperateDrive(input, api(), undefined, dependencies);
+      expect(repeatedAgain.question).toBeUndefined();
+      await page.getByRole("button").evaluate((button) => {
+        button.textContent = "Continue";
+      });
+      const changed = await runOperateDrive(input, api(), undefined, dependencies);
+      expect(changed.status).toBe("low_confidence");
+      expect(changed.options).not.toEqual(first.options);
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
+  it("includes a cross-origin hCaptcha iframe in drive's handback observation", async () => {
+    const html = `<!doctype html><meta charset="utf-8"><title>Challenge</title>
+<main><h1>Complete verification</h1><button>Go back</button>
+<iframe id="captcha" title="hCaptcha" src="about:blank" width="300" height="80"></iframe></main>`;
+    const { context, page, started } = await openFixture(html, "captcha-parent.test");
+    try {
+      const childUrl = "https://newassets.hcaptcha.com/captcha/v1/fixture";
+      await page.route(childUrl, (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: '<!doctype html><label><input type="checkbox" aria-label="I am human">I am human</label>',
+        }),
+      );
+      await page.locator("#captcha").evaluate((frame, url) => {
+        (frame as HTMLIFrameElement).src = url;
+      }, childUrl);
+      await page.frameLocator("#captcha").getByRole("checkbox").waitFor();
+      const ordinary = await observe(started.session_id, "compact");
+      expect(JSON.stringify(ordinary.safe_table)).toContain("i-am-human");
+      const dependencies = deps(async (_api, _state, questions) => {
+        const result = jevFromQuestions(questions);
+        setChoice(questions, "operation", "CLICK", result);
+        result.result.answers.operation!.confidence = 0.41;
+        return result;
+      });
+      dependencies.pressCheckboxChallenge = async () => ({ found: false });
+      const handoff = await runOperateDrive(
+        { session_id: started.session_id, goal: "Complete verification", max_steps: 4 },
+        api(),
+        undefined,
+        dependencies,
+      );
+      expect(handoff.status).toBe("low_confidence");
+      expect(JSON.stringify(handoff.observation?.safe_table)).toMatch(/i-am-human.*x=x/);
+      await page.frameLocator("#captcha").getByRole("checkbox").evaluate((checkbox) => {
+        checkbox.setAttribute("aria-label", "Verify challenge");
+        checkbox.parentElement!.lastChild!.textContent = "Verify challenge";
+      });
+      const updated = await runOperateDrive(
+        { session_id: started.session_id, goal: "Complete verification", max_steps: 4 },
+        api(),
+        undefined,
+        dependencies,
+      );
+      expect(updated.observation?.dom).toContain("Verify challenge");
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
 });
 
 describe("capture flow key evidence", () => {

@@ -166,6 +166,12 @@ export function inferFieldFromControl(input: {
 
 export function driveRowsFromSnapshot(snapshot: DriveSnapshot): SnapshotRow[] {
   const rows: SnapshotRow[] = [];
+  let mainOrigin = "";
+  try {
+    mainOrigin = new URL(snapshot.url).origin;
+  } catch {
+    // An incomplete snapshot has no comparable page origin.
+  }
   const optionParents = new Map<string, DriveSnapshotElement[]>();
   for (const element of snapshot.elements) {
     if (element.role !== "option") continue;
@@ -204,6 +210,13 @@ export function driveRowsFromSnapshot(snapshot: DriveSnapshot): SnapshotRow[] {
     }
     if (states.length > 0) facts.push(`s=${states.join("")}`);
     if (element.offscreen === true) facts.push("v=offscreen");
+    if (
+      mainOrigin.length > 0 &&
+      element.frameOrigin !== undefined &&
+      element.frameOrigin !== mainOrigin
+    ) {
+      facts.push("x=x");
+    }
     if (element.picker === true) facts.push("a=picker");
     if (element.value !== undefined && element.value.length > 0) {
       facts.push(`n=${element.value.replace(/\|/g, " ").slice(0, 80)}`);
