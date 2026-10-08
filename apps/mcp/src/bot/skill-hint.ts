@@ -6,8 +6,9 @@ export function loginSessionGuidance(): string {
   return (
     `- login: use whichever method the page offers (Google / GitHub / Microsoft / ` +
     `email). The account may already exist — log IN, don't re-sign-up.\n` +
-    `- goal: for a signup or checkout goal, call operate_drive with the goal and ` +
-    `facts rather than driving each click/type yourself; resume the same session ` +
-    `with answer and/or added facts if it hands back.`
+    `- goal: for a known multi-step goal, start with operate_drive(url, goal, facts); ` +
+    `use operate_start when you want to inspect the first page. This session is ` +
+    `already open: call operate_drive(session_id, goal, facts) here, then resume ` +
+    `the same session with answer and/or added facts if drive hands back.`
   );
 }

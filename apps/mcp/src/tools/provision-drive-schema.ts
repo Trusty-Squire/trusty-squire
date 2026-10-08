@@ -504,7 +504,7 @@ export const provisionStartTool: Tool = {
     CONTROL_QUERY_CONTRACT +
     'Use `format:"full"` only when the page DOM and text are needed. A released card\'s PAN (complete ordinary spellings and prefixes of at least eight digits) and security code are masked; all other emitted content stays verbatim. ' +
     DOM_OBSERVATION_CONTRACT +
-    "Use operate_drive for a multi-step goal when a time-bounded handoff is useful; " +
+    "Use operate_start when you want to inspect the first page before choosing steps. For a known multi-step goal, call operate_drive with url, goal, and facts directly. " +
     "operate_click, operate_type, operate_select, operate_navigate, operate_scroll, and operate_login " +
     "complete individual steps. Resume a drive handoff on the same session with answer or added facts. " +
     "inject_card releases a saved card into pan/cvv refs and exposes masked {{pan}}/{{cvv}} per-digit tokens for operate_type placement. " +
@@ -1006,7 +1006,7 @@ export const operateDriveTool: Tool = {
   name: "operate_drive",
   description:
     "Drive a multi-step signup, checkout, or other website goal and hand back when complete, blocked, or out of budget. " +
-    "Pass an open session_id or url to open and drive. goal states the task; facts provides values to type. " +
+    "For a known multi-step goal, pass url, goal, and all known facts directly; this skips the initial general observation. Use session_id to resume the same session. " +
     "Identity and payment values must come from facts; a search phrase may come from the goal. " +
     "Amount_cents is in the currency's smallest unit: USD $12.34 -> 1234; JPY ¥65,800 -> 65800 (do not multiply by 100); KRW works like JPY. " +
     "The loop can handle Google sign-in, verification mail, captcha, and card release. " +
