@@ -238,21 +238,14 @@ page already past the payment form — a processing path or a completed checkout
 — do not stop this way. Reachability and refusal regressions live in
 [`checkout-pay-submit-fixture.test.ts`](../apps/mcp/src/bot/__tests__/checkout-pay-submit-fixture.test.ts).
 
-`operate_read_inbox` reads the session's signed-in Gmail inbox for a
-verification email in dedicated utility tabs that are closed when the read
-finishes, so the page waiting for the code never navigates away. Because
-Gmail's search index is eventually consistent (it can lack freshly delivered
-mail for minutes), the read cross-checks the search listing AND the real-time
-All Mail listing and opens the genuinely newest matching row on the page it
-was extracted from. A matching row dated before the session started is a
-previous task's mail — its single-use link is already consumed or expired —
-so it is never returned; when only such pre-session matches are seen, the
-read reports an honest `found: false` with retry guidance instead of a dead
-link. When the opened message renders, its text and links are read from the
-message's own cards rather than the whole page, and Gmail's own chrome
-(account-menu, mailbox, and support links) is dropped before scoring; the
-remaining mail links are read verbatim from the DOM, not from the
-size-capped interactive inventory.
+`operate_read_inbox` lists up to ten recent messages from the session's
+signed-in Gmail in a utility tab, leaving the page waiting for a code open.
+Each entry includes sender, subject, received time, bounded body text, codes,
+and full links. The agent chooses the relevant message; the reader does not
+match senders or service hosts. An optional `query` is passed to Gmail search
+unchanged, with All Mail included because search indexing can lag. To put a
+code in a protected session slot, pass `into_slot` and the selected message's
+`pick` index. The inbox consent and live Google session gates still apply.
 
 Use an action `ref` from the current observation. `operate_start` and
 `operate_observe` default to `format: "compact"`, a paged control map;

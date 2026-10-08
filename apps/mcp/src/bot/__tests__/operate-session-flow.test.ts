@@ -4915,407 +4915,108 @@ describe("operate session — operation-scoped Google gate", () => {
 
 // Physical profile election, launch failure and sibling custody are tested in
 // broker-discovery, broker-runtime and broker-daemon; session handlers never launch.
-describe("operate session — await_verification into_slot (T3 fix: OTP never round-trips)", () => {
-  it("seals a found OTP into a slot (masked handle, no raw code) and type_secret enters it", async () => {
+describe("operate session — inbox listing", () => {
+  it("lists the newest ten across senders, including a TikTok code, and passes a query to Gmail", async () => {
     const obs = await startProvisionSession({
-      serviceUrl: "https://app.example.com/",
+      serviceUrl: "https://www.tiktok.com/signup",
       consentInboxRead: true,
     });
-    const sid = obs.session_id;
-    h.visibleText = "Your verification code is 481920. It expires in 10 minutes.";
-    h.openFirstMailResult = true;
-    const res = (await awaitVerification(sid, { intoSlot: "otp" })) as Awaited<
-      ReturnType<typeof awaitVerification>
-    >;
-
-    expect(res.found).toBe(true);
-    expect(res.sealed).toBe(true);
-    expect(res.code).toBeNull(); // the raw code is NOT returned to the host
-    expect(res.slot?.preview).not.toContain("481920");
-
-    // The host enters it by slot — the real digits reach the page, not the host.
-    h.elements = [elem({ visibleText: "Code", selector: "#code" })];
-    const codeRef = domRefs(await observe(sid))[0]!;
-    await act(sid, { kind: "type_secret", slot: "otp", target: codeRef });
-    expect(h.typed.some((t) => t.text === "481920")).toBe(true);
-  });
-
-  it("returns the code normally when into_slot is NOT requested", async () => {
-    const canonical = "/tmp/trusty-squire-unit-canonical-gmail-read";
-    const googleState = {
-      cookies: [
+    const session = sessionForCall(obs.session_id)!;
+    const rows = Array.from({ length: 12 }, (_, i) => ({
+      selector: `row-${i}`,
+      fromEmail: i === 11 ? "noreply@dev.tiktok.com" : `sender${i}@example.com`,
+      fromName: null,
+      subject: i === 11 ? "TikTok sign-up code" : `Other message ${i}`,
+      dateTitle: new Date(Date.UTC(2026, 9, 8, 12, i)).toISOString(),
+      visibleText: `Message ${i}`,
+    }));
+    let opened = rows[0]!;
+    Object.assign(session.browser, {
+      extractMailResultRows: async (page: { url: () => string }) =>
+        page.url().includes("#search/") ? rows.slice(0, 1) : rows,
+      openMailResultRow: async (_page: unknown, selector: string) => {
+        opened = rows.find((row) => row.selector === selector)!;
+        return true;
+      },
+      expandCollapsedMailMessages: async () => 0,
+      extractOpenedMailMessages: async () => [
         {
-          name: "SID",
-          value: "live-google-session-for-gmail",
-          domain: ".google.com",
-          path: "/",
-        },
-      ],
-      origins: [{ origin: "https://mail.google.com", localStorage: [] }],
-    };
-    h.storageStates.set(canonical, googleState);
-    const obs = await startProvisionSession({
-      serviceUrl: "https://app.example.com/",
-      consentInboxRead: true,
-      profileDir: canonical,
-    });
-    h.currentUrl = "https://app.example.com/verify-email";
-    h.visibleText = "Your verification code is 481920.";
-    h.openFirstMailResult = true;
-    h.captureStorageStates.set(1, {
-      ...googleState,
-      origins: [
-        {
-          origin: "https://mail.google.com",
-          localStorage: [{ name: "state", value: "x".repeat(4 * 1024 * 1024) }],
+          fromEmail: opened.fromEmail,
+          fromName: null,
+          dateTitle: opened.dateTitle,
+          toEmails: [],
+          text: `Your code is ${100000 + Number(opened.selector.slice(4))}.`,
+          links: [{ url: `https://example.com/open/${opened.selector}`, text: "Open" }],
         },
       ],
     });
-    const res = await awaitVerification(obs.session_id, {});
-    expect(res.code).toBe("481920");
-    expect(res.sealed).toBeUndefined();
-    expect(h.seededStorageStates).toEqual([undefined]);
-    expect(h.connections[0]).toBe(true);
-    // The mailbox read runs in a dedicated utility tab; the operation page is
-    // never navigated to Gmail (navigating away and back resets the form that
-    // is waiting for the code).
-    expect(h.currentUrl).toBe("https://app.example.com/verify-email");
-    expect(h.gotos.filter((u) => u.includes("mail.google.com")).length).toBeGreaterThan(0);
-    expect(h.utilityTabsOpened).toBe(1);
-    expect(h.utilityTabsClosed).toBe(1);
-    expect(h.storageStateWrites).toEqual([]);
-    expect(h.storageStates.get(canonical)).toEqual(googleState);
+    h.currentUrl = "https://www.tiktok.com/signup/code";
+    const res = await awaitVerification(obs.session_id, { query: "from:dev.tiktok.com" });
+    expect(res.messages).toHaveLength(10);
+    expect(res.messages?.[0]).toMatchObject({
+      index: 0,
+      from: "noreply@dev.tiktok.com",
+      subject: "TikTok sign-up code",
+      codes: ["100011"],
+    });
+    expect(res.messages?.[0]?.links[0]?.url).toBe("https://example.com/open/row-11");
+    expect(res.messages?.some((message) => message.from === "sender0@example.com")).toBe(true);
+    expect(h.gotos).toContain("https://mail.google.com/mail/u/0/#search/from%3Adev.tiktok.com");
+    expect(h.gotos).toContain("https://mail.google.com/mail/u/0/#all");
+    expect(h.currentUrl).toBe("https://www.tiktok.com/signup/code");
   });
 
-  it("reads the mailbox in a dedicated utility tab and leaves the waiting page untouched", async () => {
+  it("lists mail in a utility tab and leaves the waiting form untouched", async () => {
     const obs = await startProvisionSession({
       serviceUrl: "https://account.proton.me/",
       consentInboxRead: true,
     });
-    // The operation page is mid-signup, dialog open, waiting for the code.
     h.currentUrl = "https://account.proton.me/signup";
-    // #975 verifies an explicit sender against From on the opened message.
-    // The mock has no row extractors, so From must be in the opened body.
     h.visibleText = "From: Proton <noreply@proton.me>\nYour verification code is 481920.";
     h.openFirstMailResult = true;
-    const res = await awaitVerification(obs.session_id, { sender: "proton.me" });
-    expect(res.found).toBe(true);
-    expect(res.code).toBe("481920");
-    expect(h.gotos.some((u) => u.includes("mail.google.com"))).toBe(true);
-    // The signup page kept its URL — and therefore its dialog state — for the
-    // whole read; navigating it to Gmail would reset the form (Proton gap).
+    const res = await awaitVerification(obs.session_id);
+    expect(res.messages?.[0]).toMatchObject({ from: "noreply@proton.me", codes: ["481920"] });
+    expect(res.code).toBeNull();
     expect(h.currentUrl).toBe("https://account.proton.me/signup");
-    // The utility tab is short-lived: opened for the read, closed on return.
     expect(h.utilityTabsOpened).toBe(1);
     expect(h.utilityTabsClosed).toBe(1);
   });
 
-  it("returns long verification links verbatim, not truncated", async () => {
+  it("seals only the agent-picked message's code", async () => {
     const obs = await startProvisionSession({
-      serviceUrl: "https://cal.com/",
-      consentInboxRead: true,
-    });
-    const longToken = "t".repeat(400) + "end";
-    const longHref = `https://cal.com/api/auth/verify-email?token=${longToken}&callbackUrl=%2Fsignup`;
-    h.visibleText =
-      "From: Cal.com <hello@cal.com>\nVerify your email address to finish creating your account.";
-    h.elements = [elem({ tag: "a", role: "link", href: longHref, visibleText: "Verify email" })];
-    h.openFirstMailResult = true;
-    const res = await awaitVerification(obs.session_id, { sender: "cal.com" });
-    expect(res.found).toBe(true);
-    // The full href survives — the 300-char inventory cap must not truncate it
-    // into a URL whose token no longer works (Cal.com gap).
-    expect(res.link).toBe(longHref);
-  });
-
-  it("returns delegated verification results verbatim in both formats", async () => {
-    const rawCode = "481920";
-    const rawSender = "private.sender@example.com";
-    const rawLink = "https://app.example.com/verify?token=private-link-token-123456789";
-
-    const legacy = await startProvisionSession({
       serviceUrl: "https://app.example.com/",
       consentInboxRead: true,
     });
-    h.visibleText = `From: Sender <${rawSender}>\nYour verification code is ${rawCode}.`;
-    h.elements = [elem({ tag: "a", role: "link", href: rawLink, visibleText: "Confirm" })];
-    h.openFirstMailResult = true;
-    const legacyResult = await awaitVerification(legacy.session_id, {});
-
-    expect(legacyResult).toMatchObject({
-      code: rawCode,
-      link: rawLink,
-      source_from: rawSender,
-    });
-    await finishProvisionSession(legacy.session_id);
-
-    const compact = await startProvisionSession({
-      serviceUrl: "https://app.example.com/",
-      consentInboxRead: true,
-    });
-    h.visibleText = `From: Sender <${rawSender}>\nYour verification code is ${rawCode}.`;
-    h.elements = [elem({ tag: "a", role: "link", href: rawLink, visibleText: "Confirm" })];
-    h.openFirstMailResult = true;
-    const compactResult = await awaitVerification(compact.session_id, {});
-
-    expect(compactResult).toMatchObject({
-      found: true,
-      code: rawCode,
-      link: rawLink,
-      source_from: rawSender,
-    });
-  });
-
-  it("reads the inbox by default when no consent option is supplied", async () => {
-    const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
     h.visibleText = "Your verification code is 481920.";
     h.openFirstMailResult = true;
-    const res = await awaitVerification(obs.session_id, {});
-    expect(res.found).toBe(true);
-    expect(res.code).toBe("481920");
+    const res = await awaitVerification(obs.session_id, { intoSlot: "otp", pick: 0 });
+    expect(res.sealed).toBe(true);
+    expect(res.slot?.preview).not.toContain("481920");
+    expect(JSON.stringify(res)).not.toContain("481920");
+    h.elements = [elem({ visibleText: "Code", selector: "#code" })];
+    const codeRef = domRefs(await observe(obs.session_id))[0]!;
+    await act(obs.session_id, { kind: "type_secret", slot: "otp", target: codeRef });
+    expect(h.typed.some((t) => t.text === "481920")).toBe(true);
   });
 
-  it("detects the live identity once per session, not once per gated operation", async () => {
-    h.providers = ["google"];
-    h.liveGoogleEmail = "captain@example.test";
-    h.visibleText = "Your verification code is 481920.";
-    h.openFirstMailResult = true;
-    const first = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
-
-    expect((await awaitVerification(first.session_id, {})).found).toBe(true);
-    expect((await awaitVerification(first.session_id, {})).found).toBe(true);
-    expect(h.identityProbeCalls).toBe(1);
-
-    const second = await startProvisionSession({ serviceUrl: "https://app.example.com/two" });
-    expect((await awaitVerification(second.session_id, {})).found).toBe(true);
-    expect(h.identityProbeCalls).toBe(2);
-
-    await finishProvisionSession(second.session_id);
-    await finishProvisionSession(first.session_id);
-  });
-
-  it("re-probes the same session after a refusal, so connect clears the wall", async () => {
-    h.providers = [];
-    h.liveGoogleEmail = null;
-    h.visibleText = "Your verification code is 481920.";
-    h.openFirstMailResult = true;
+  it("keeps the consent gate and session-only regrant", async () => {
     const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
-
-    const refused = await awaitVerification(obs.session_id, {});
-    expect(refused.needs_user?.wall).toBe("google_session");
-    expect(refused.found).toBe(false);
-
-    h.providers = ["google"];
-    h.liveGoogleEmail = "captain@example.test";
-    const retried = await awaitVerification(obs.session_id, {});
-    expect(retried.needs_user).toBeUndefined();
-    expect(retried.found).toBe(true);
-    expect(retried.code).toBe("481920");
-
-    await finishProvisionSession(obs.session_id);
-  });
-
-  it("emits the captured identity email on a later observation, never at start", async () => {
-    h.providers = ["google"];
-    h.liveGoogleEmail = "captain@example.test";
-    const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
-    expect(obs).not.toHaveProperty("user_email");
-
-    h.visibleText = "Your verification code is 481920.";
+    h.visibleText = "Your code is 481920.";
     h.openFirstMailResult = true;
-    const res = await awaitVerification(obs.session_id, {});
-    expect(res.found).toBe(true);
-
-    expect(await observe(obs.session_id)).toMatchObject({ user_email: "captain@example.test" });
-    await finishProvisionSession(obs.session_id);
-  });
-
-  it("returns the unchanged google_session wall before a Gmail read without a live session", async () => {
-    h.providers = [];
-    h.liveGoogleEmail = null;
-    const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
-
-    const res = await awaitVerification(obs.session_id, {});
-
-    const expected = googleSessionGate([]);
-    expect(expected.ok).toBe(false);
-    if (!expected.ok) expect(res.needs_user).toEqual(expected.needs_user);
-    expect(res.found).toBe(false);
+    const refused = await awaitVerification(obs.session_id, { grantConsent: false });
+    expect(refused.needs_user?.wall).toBe("verification_code");
     expect(h.utilityTabsOpened).toBe(0);
+    const granted = await awaitVerification(obs.session_id, { grantConsent: true });
+    expect(granted.messages?.[0]?.codes).toEqual(["481920"]);
   });
 
-  it("returns the Google session wall when Gmail redirects to an account chooser", async () => {
-    h.providers = ["google"];
-    h.liveGoogleEmail = "captain@example.test";
-    h.utilityTabRedirect = "https://accounts.google.com/v3/signin/accountchooser";
-    h.visibleText = "Choose an account " + "padding".repeat(40);
+  it("keeps the google_session wall without opening Gmail", async () => {
+    h.providers = [];
+    h.liveGoogleEmail = null;
     const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
-
-    const res = await awaitVerification(obs.session_id, { recipient: "captain@example.test" });
-
-    expect(res.found).toBe(false);
+    const res = await awaitVerification(obs.session_id);
     expect(res.needs_user?.wall).toBe("google_session");
-    expect(res.needs_user?.message).toContain("Gmail redirected to Google sign-in");
-    expect(h.utilityTabsOpened).toBe(1);
-    expect(h.utilityTabsClosed).toBe(1);
-  });
-
-  it("allows an explicit opt-out and a later session-only opt-in", async () => {
-    const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
-    const sid = obs.session_id;
-    h.visibleText = "Your verification code is 481920.";
-    h.openFirstMailResult = true;
-    // Explicit false wins over the default-on preference.
-    const optedOut = await awaitVerification(sid, { grantConsent: false });
-    expect(optedOut.found).toBe(false);
-    expect(optedOut.needs_user?.message).toContain("disabled");
-    // A later explicit true restores access for this session.
-    const granted = await awaitVerification(sid, { grantConsent: true });
-    expect(granted.found).toBe(true);
-    expect(granted.code).toBe("481920");
-    // Remembered for the session: a later await needs no re-grant.
-    expect((await awaitVerification(sid, {})).found).toBe(true);
-  });
-
-  it("seals sender text before writing a Compact V2 verification audit", async () => {
-    const privateSender = "private.sender@example.com";
-    const obs = await startProvisionSession({
-      serviceUrl: "https://app.example.com/",
-      consentInboxRead: true,
-    });
-    h.visibleText = `From: Sender <${privateSender}>\nYour verification code is 481920.`;
-    h.openFirstMailResult = true;
-    const stderrWrite = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-
-    try {
-      const result = await awaitVerification(obs.session_id, {});
-      const auditLine = stderrWrite.mock.calls
-        .map(([line]) => String(line))
-        .find((line) => line.includes('"event":"await_verification"'));
-
-      expect(result.source_from).toBe(privateSender);
-      expect(auditLine).toBeDefined();
-      expect(auditLine).not.toContain(privateSender);
-      expect(auditLine).toContain('"source_from":"<sealed>"');
-    } finally {
-      stderrWrite.mockRestore();
-    }
-  });
-
-  it("populates link for a link-only verification email whose action button is text, not href, keyed (Xata Keycloak account-link)", async () => {
-    // The real Xata email: a Keycloak "Link Google account" email whose CTA
-    // href is an opaque per-recipient click-tracking URL (no verify/login/
-    // token vocabulary survives in it at all) — only the button's visible
-    // text carries the signal. #644 handled a bare href carrying that
-    // vocabulary; this covers the href carrying NONE of it.
-    const obs = await startProvisionSession({
-      serviceUrl: "https://app.example.com/",
-      consentInboxRead: true,
-    });
-    const trackingHref = "https://click.mailtrack.example.net/wf/click?upn=abc123opaque";
-    h.visibleText = "Xata wants to link your Google account. No code needed.";
-    h.elements = [
-      elem({
-        tag: "a",
-        role: "link",
-        href: "https://xata.io/unsubscribe?u=1",
-        visibleText: "Unsubscribe",
-      }),
-      elem({ tag: "a", role: "link", href: trackingHref, visibleText: "Link your Google account" }),
-    ];
-    h.openFirstMailResult = true;
-
-    const res = await awaitVerification(obs.session_id, {});
-
-    expect(res.found).toBe(true);
-    expect(res.code).toBeNull();
-    expect(res.link).toBe(trackingHref);
-  });
-
-  it("never returns an unsubscribe/footer link even when it is the only href present", async () => {
-    const obs = await startProvisionSession({
-      serviceUrl: "https://app.example.com/",
-      consentInboxRead: true,
-    });
-    h.visibleText = "Manage your email preferences below.";
-    h.elements = [
-      elem({
-        tag: "a",
-        role: "link",
-        href: "https://click.mailtrack.example.net/wf/click?upn=xyz",
-        visibleText: "Unsubscribe from marketing emails",
-      }),
-    ];
-    h.openFirstMailResult = true;
-
-    const res = await awaitVerification(obs.session_id, {});
-
-    expect(res.link).toBeNull();
-    expect(res.found).toBe(false);
-  });
-});
-
-describe("await_verification — Gmail transient #2014 backend error resilience", () => {
-  it("detects the #2014 banner and Gmail's 'encountered a problem' / 'Retrying' text", () => {
-    expect(
-      isGmailTransientErrorText(
-        "Oops... the system encountered a problem (#2014) - Retrying in 5s.",
-      ),
-    ).toBe(true);
-    expect(isGmailTransientErrorText("Retrying in 12 seconds")).toBe(true);
-    expect(isGmailTransientErrorText("Your inbox — 3 unread messages")).toBe(false);
-  });
-
-  it("detects Gmail's empty-search-result banner", () => {
-    expect(isEmptyGmailResultText("No messages matched your search.")).toBe(true);
-    expect(isEmptyGmailResultText("1 of 1 message shown")).toBe(false);
-  });
-
-  it("backs off with a bounded, increasing schedule", () => {
-    expect(gmailTransientBackoffMs(0)).toBe(800);
-    expect(gmailTransientBackoffMs(1)).toBe(1600);
-    expect(gmailTransientBackoffMs(2)).toBe(3200);
-    // Capped, not unbounded exponential growth.
-    expect(gmailTransientBackoffMs(5)).toBeLessThanOrEqual(4000);
-  });
-
-  it("retries past a transient #2014 banner instead of giving up, and still finds the code", async () => {
-    const obs = await startProvisionSession({
-      serviceUrl: "https://app.example.com/",
-      consentInboxRead: true,
-    });
-    const banner =
-      "Oops... the system encountered a problem (#2014) - Retrying in 5s. " + "pad".repeat(80);
-    const real = "Your verification code is 481920. " + "pad".repeat(80);
-    // First search read hits the transient banner; the retry-with-backoff
-    // re-issues the search and the second read is the real content.
-    h.visibleTextQueue = [banner, real];
-    h.visibleText = real; // fallback once the queue is drained (the opened-mail read)
-    h.openFirstMailResult = true;
-
-    const res = await awaitVerification(obs.session_id, {});
-
-    expect(res.found).toBe(true);
-    expect(res.code).toBe("481920");
-    // The search page was re-navigated to recover from the transient error.
-    expect(h.gotos.filter((u) => u.includes("mail.google.com")).length).toBeGreaterThan(1);
-  });
-
-  it("still concludes not-found after bounded retries on a genuinely empty, non-errored inbox", async () => {
-    const obs = await startProvisionSession({
-      serviceUrl: "https://app.example.com/",
-      consentInboxRead: true,
-    });
-    const empty = "No messages matched your search. " + "pad".repeat(80);
-    h.visibleText = empty;
-    h.openFirstMailResult = false;
-
-    const res = await awaitVerification(obs.session_id, {});
-
-    expect(res.found).toBe(false);
-    expect(res.code).toBeNull();
-    expect(res.link).toBeNull();
-    expect(res.needs_user).toBeDefined();
+    expect(h.utilityTabsOpened).toBe(0);
   });
 });
 
