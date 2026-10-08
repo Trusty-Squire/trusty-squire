@@ -213,7 +213,7 @@ try {
   await Promise.all(peers.map(tools));
   assert.deepEqual(brokers(), [firstPid]);
   const upgraded = client(secondEntry);
-  assert.equal(await initialize(upgraded), "0.0.0-acceptance.2");
+  assert.equal(await initialize(upgraded), "0.0.0-acceptance.1");
   await tools(upgraded);
   upgraded.child.stdin.end();
   await upgraded.exited;
@@ -234,6 +234,11 @@ try {
   assert.ok(run("ps", ["-p", String(restartedPid), "-o", "args="]).includes(secondEntry));
   await Promise.all(peers.map(tools));
   assert.deepEqual(brokers(), [restartedPid]);
+  const restarted = client(secondEntry);
+  assert.equal(await initialize(restarted), "0.0.0-acceptance.2");
+  await tools(restarted);
+  restarted.child.stdin.end();
+  await restarted.exited;
   console.log(
     `BBC-1 native ${process.platform} restart: two clients reconnected; exactly one broker PID=${restartedPid}`,
   );
