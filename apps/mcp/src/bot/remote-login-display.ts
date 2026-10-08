@@ -37,6 +37,7 @@ import {
   waitForOwnerTrackedHelperExit,
 } from "./owner-process-reaper.js";
 import { LOGIN_RIG_OWNED_LIFETIME_MS } from "../pairing-ttl.js";
+import type { CeremonyDisplayClip } from "./ceremony-window.js";
 
 const LOGIN_WIDTH = Number(process.env.BOT_NOVNC_W) || 720;
 const LOGIN_HEIGHT = Number(process.env.BOT_NOVNC_H) || 1280;
@@ -651,7 +652,10 @@ export function generateVncPassword(): string {
   return randomBytes(6).toString("base64url");
 }
 
-export async function exposeRemoteLoginDisplay(rig: RemoteLoginRig): Promise<string> {
+export async function exposeRemoteLoginDisplay(
+  rig: RemoteLoginRig,
+  clip?: CeremonyDisplayClip,
+): Promise<string> {
   if (rig.display === undefined) {
     throw new Error("remote login display has not been started");
   }
@@ -682,6 +686,9 @@ export async function exposeRemoteLoginDisplay(rig: RemoteLoginRig): Promise<str
       [
         "-display",
         rig.display,
+        ...(clip === undefined
+          ? []
+          : ["-clip", `${clip.width}x${clip.height}+${clip.left}+${clip.top}`]),
         "-rfbport",
         String(vncPort),
         "-passwdfile",

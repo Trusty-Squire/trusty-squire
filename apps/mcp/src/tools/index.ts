@@ -24,6 +24,7 @@ import { deleteCredentialTool, editCredentialTool } from "./credential-mutations
 import { editPaymentCardTool } from "./card-mutations.js";
 import { fetchCredentialTool } from "./fetch-credential.js";
 import { operateFetchTextTool } from "./operate-fetch-text.js";
+import { operateCeremonyWindowTool } from "./operate-ceremony-window.js";
 
 export interface Tool<TArgs extends Record<string, unknown> = Record<string, unknown>> {
   name: string;
@@ -110,12 +111,15 @@ export function buildToolRegistry(env: NodeJS.ProcessEnv = process.env): Tool[] 
 // buildServer() resolves the environment-aware registry once at startup.
 export const TOOLS: Tool[] = buildToolRegistry({});
 
-// The broker accepts one command the agent-facing registry does not carry:
-// `operate_fetch_text`, an internal read the connect preflight's Google probe
-// rides to ask the profile's own browser context. It is deliberately absent
-// from buildToolRegistry so no host agent can call it through the MCP server.
+// The broker accepts two commands the agent-facing registry does not carry:
+// the connect preflight's cookie-jar read and the ceremony's window geometry
+// control. Neither is available through the host agent's MCP server.
 export function buildBrokerToolRegistry(env: NodeJS.ProcessEnv = process.env): Tool[] {
-  return [...buildToolRegistry(env), operateFetchTextTool as Tool];
+  return [
+    ...buildToolRegistry(env),
+    operateFetchTextTool as Tool,
+    operateCeremonyWindowTool as Tool,
+  ];
 }
 
 export function findTool(name: string, tools: readonly Tool[] = TOOLS): Tool | null {
