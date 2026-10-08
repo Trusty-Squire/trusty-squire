@@ -112,6 +112,42 @@ it("trusts DONE on a copy-capable page despite a binding from the previous page"
   });
 }, 15_000);
 
+it("captures a Copy source on DONE even when the value has no recognized shape", async () => {
+  const plainKey = "Ab3kZ9";
+  await withKeyPage(`<main><dialog open aria-label="API key created">
+    <p>${plainKey}</p>
+    <button type="button" onclick="navigator.clipboard.writeText('${plainKey}')">Copy</button>
+  </dialog></main>`, async (sessionId) => {
+    const askJev = vi.fn<DriveDependencies["askJev"]>(async (_api, _state, questions) => ({
+      attempts: 1,
+      elapsedMs: 1,
+      result: {
+        answers: Object.fromEntries(
+          Object.entries(questions).flatMap(([name, question]) => {
+            if (question.type !== "choice") return [];
+            const keys = Object.keys(question.criteria);
+            const choice = name === "operation" ? "DONE" : keys[0]!;
+            return [[name, {
+              choice,
+              confidence: 1,
+              probabilities: Object.fromEntries(keys.map((key) => [key, key === choice ? 1 : 0])),
+            }]];
+          }),
+        ),
+      },
+    }));
+    const result = await runOperateDrive(
+      { session_id: sessionId, goal: "extract an API key", max_steps: 3, max_seconds: 10 },
+      api,
+      undefined,
+      dependencies(askJev),
+    );
+    expect(result.status).toBe("complete");
+    const session = sessionForCall(sessionId)!;
+    expect(await session.browser.readClipboard(session.browser.page!)).toBe(plainKey);
+  });
+}, 15_000);
+
 it("trusts the model's DONE on a page without a key", async () => {
   await withKeyPage("<main><h1>API keys</h1><button>Create key</button><p>No key yet</p></main>", async (sessionId) => {
     const session = sessionForCall(sessionId)!;
