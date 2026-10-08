@@ -101,6 +101,24 @@ it("registers Linux once, starts through systemctl, and probes both sockets", as
     false,
   );
 });
+it("leaves an unchanged active Linux unit alone", async () => {
+  await installBrokerService(profile);
+  const name = brokerServiceName(profile);
+  vi.mocked(execFileSync)
+    .mockClear()
+    .mockReturnValue(
+      `Id=${name}.service\nActiveState=active\nEnvironment=TRUSTY_SQUIRE_PROFILE_DIR=${profile}\n`,
+    );
+  await installBrokerService(profile);
+  expect(vi.mocked(execFileSync).mock.calls.map((call) => call[1])).not.toContainEqual(
+    expect.arrayContaining(["daemon-reload"]),
+  );
+  expect(
+    vi
+      .mocked(execFileSync)
+      .mock.calls.some((call) => call[1]?.includes("restart") || call[1]?.includes("--now")),
+  ).toBe(false);
+});
 it("Reproduction BBC-CI3: accepts systemctl's empty fresh-install unit inventory", async () => {
   vi.mocked(execFileSync).mockImplementation((_command, args) => {
     if (args?.includes("list-unit-files"))
@@ -161,7 +179,7 @@ it("reuses an existing stopped Beeline unit and its custom socket without overwr
   expect(liveUnixSocket).toHaveBeenCalledWith(socket);
   expect(await readFile(unitPath, "utf8")).toBe("# maintained by Beeline\n");
 });
-it("Reproduction BBC-R1: replaces an installer-owned Linux entry on a version upgrade", async () => {
+it("keeps an active Linux broker and its sessions when a new entry is installed", async () => {
   const name = brokerServiceName(profile);
   const unitPath = join(process.env.XDG_CONFIG_HOME!, "systemd", "user", `${name}.service`);
   const oldEntry = join(
@@ -190,13 +208,14 @@ it("Reproduction BBC-R1: replaces an installer-owned Linux entry on a version up
   );
   await installBrokerService(profile);
   expect(await readFile(unitPath, "utf8")).not.toContain(oldEntry);
-  expect(execFileSync).toHaveBeenCalledWith(
-    "systemctl",
-    ["--user", "restart", `${name}.service`],
-    expect.anything(),
-  );
+  expect(
+    vi
+      .mocked(execFileSync)
+      .mock.calls.some((call) => call[1]?.includes("restart") || call[1]?.includes("--now")),
+  ).toBe(false);
+  expect(liveUnixSocket).toHaveBeenCalledTimes(2);
 });
-it("Reproduction BBC-R1: reloads an installer-owned macOS entry on a version upgrade", async () => {
+it("keeps a loaded macOS broker and its sessions when a new entry is installed", async () => {
   Object.defineProperty(process, "platform", { value: "darwin" });
   const name = brokerServiceName(profile);
   const plistPath = join(homedir(), "Library", "LaunchAgents", `ai.trustysquire.${name}.plist`);
@@ -210,27 +229,20 @@ it("Reproduction BBC-R1: reloads an installer-owned macOS entry on a version upg
       environment: { HOME: homedir(), TRUSTY_SQUIRE_PROFILE_DIR: profile },
     }),
   );
-  let bootstraps = 0;
-  vi.mocked(execFileSync).mockImplementation((_command, args) => {
-    if (args?.includes("bootstrap") && ++bootstraps === 1)
-      throw new Error("Bootstrap failed: 5: Input/output error");
-    return "";
-  });
   await installBrokerService(profile);
-  expect(bootstraps).toBe(2);
-  const domain = `gui/${process.getuid?.()}`;
-  const target = `${domain}/ai.trustysquire.${name}`;
-  expect(execFileSync).toHaveBeenCalledWith("launchctl", ["bootout", target], expect.anything());
-  expect(execFileSync).toHaveBeenCalledWith(
-    "launchctl",
-    ["bootstrap", domain, plistPath],
-    expect.anything(),
-  );
-  expect(execFileSync).toHaveBeenCalledWith(
-    "launchctl",
-    ["kickstart", "-k", target],
-    expect.anything(),
-  );
+  expect(await readFile(plistPath, "utf8")).not.toContain("/old-version/dist/bin.js");
+  const target = `gui/${process.getuid?.()}/ai.trustysquire.${name}`;
+  expect(execFileSync).toHaveBeenCalledWith("launchctl", ["print", target], expect.anything());
+  expect(
+    vi
+      .mocked(execFileSync)
+      .mock.calls.some(
+        (call) =>
+          call[1]?.includes("bootout") ||
+          call[1]?.includes("bootstrap") ||
+          call[1]?.includes("kickstart"),
+      ),
+  ).toBe(false);
 });
 it("reuses an installed but unloaded service instead of overwriting its entry", async () => {
   const socket = join(profile, "unloaded.sock");
@@ -246,7 +258,7 @@ it("reuses an installed but unloaded service instead of overwriting its entry", 
     vi.mocked(execFileSync).mock.calls.some((call) => call[1]?.includes("daemon-reload")),
   ).toBe(false);
 });
-it("bounds macOS upgrade retries and reports a persistent bootstrap failure", async () => {
+it("bounds macOS bootstrap retries and reports a persistent failure", async () => {
   Object.defineProperty(process, "platform", { value: "darwin" });
   const name = brokerServiceName(profile);
   const plist = join(homedir(), "Library", "LaunchAgents", `ai.trustysquire.${name}.plist`);
@@ -261,6 +273,7 @@ it("bounds macOS upgrade retries and reports a persistent bootstrap failure", as
     }),
   );
   vi.mocked(execFileSync).mockImplementation((_command, args) => {
+    if (args?.includes("print")) throw new Error("not loaded");
     if (args?.includes("bootstrap")) throw new Error("Bootstrap failed: 5: Input/output error");
     return "";
   });

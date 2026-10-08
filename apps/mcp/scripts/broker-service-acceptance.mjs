@@ -209,30 +209,39 @@ try {
   await rm(second.cache, { recursive: true });
   const secondEntry = firstEntry.replace("acceptance.1", "acceptance.2");
   assert.ok((await readFile(registration, "utf8")).includes(secondEntry));
-  const secondPid = await waitFor(() => {
-    const pid = managerPid();
-    assert.notEqual(pid, firstPid);
-    return pid;
-  }, "Upgrade replaced broker PID");
+  assert.equal(managerPid(), firstPid, "connect must preserve the running broker PID");
   await Promise.all(peers.map(tools));
-  assert.deepEqual(brokers(), [secondPid]);
+  assert.deepEqual(brokers(), [firstPid]);
   const upgraded = client(secondEntry);
-  assert.equal(await initialize(upgraded), "0.0.0-acceptance.2");
+  assert.equal(await initialize(upgraded), "0.0.0-acceptance.1");
+  await tools(upgraded);
   upgraded.child.stdin.end();
   await upgraded.exited;
   console.log(
-    `BBC-R1 native ${process.platform} upgrade: version=0.0.0-acceptance.2; new entry; PID=${secondPid}; two clients reconnected; one broker`,
+    `native ${process.platform} upgrade: new entry staged; PID=${firstPid} and two connected clients preserved`,
   );
 
   if (process.platform === "linux") run("systemctl", ["--user", "restart", unit]);
-  else run("launchctl", ["kickstart", "-k", target]);
+  else {
+    run("launchctl", ["bootout", target]);
+    await waitFor(
+      () => run("launchctl", ["bootstrap", domain, registration]),
+      "Launchd rebootstrap after bootout",
+    );
+  }
   const restartedPid = await waitFor(() => {
     const pid = managerPid();
-    assert.notEqual(pid, secondPid);
+    assert.notEqual(pid, firstPid);
     return pid;
   }, "Manager restart replaced broker PID");
+  assert.ok(run("ps", ["-p", String(restartedPid), "-o", "args="]).includes(secondEntry));
   await Promise.all(peers.map(tools));
   assert.deepEqual(brokers(), [restartedPid]);
+  const restarted = client(secondEntry);
+  assert.equal(await initialize(restarted), "0.0.0-acceptance.2");
+  await tools(restarted);
+  restarted.child.stdin.end();
+  await restarted.exited;
   console.log(
     `BBC-1 native ${process.platform} restart: two clients reconnected; exactly one broker PID=${restartedPid}`,
   );
