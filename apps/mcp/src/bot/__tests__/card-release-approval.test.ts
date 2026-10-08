@@ -133,6 +133,55 @@ it("returns a new approval link before polling, then waits on the resumed call",
   expect(sleep).toHaveBeenCalled();
 });
 
+it("starts the next held read immediately after a full pending long poll", async () => {
+  let now = 0;
+  const controller = new AbortController();
+  const sleep = vi.fn(async (ms: number) => { now += ms; });
+  const waits: number[] = [];
+  const api = {
+    createPaymentApproval: vi.fn(async () => ({
+      id: "held-approval",
+      nonce: "nonce",
+      agent: "agent",
+      account_binding: "account",
+      expires_at: new Date(60_000).toISOString(),
+    })),
+    getPaymentApproval: vi.fn(async (id: string, held?: boolean, waitMs?: number) => {
+      if (held === true && waitMs !== undefined) {
+        waits.push(waitMs);
+        now += waitMs;
+        if (waits.length === 2) controller.abort();
+      }
+      return {
+        id, status: "pending" as const, card_ref: "saved-card",
+        expires_at: new Date(60_000).toISOString(), jws: null, sealed_card: null,
+      };
+    }),
+  } as unknown as ApiClient;
+  const request = {
+    merchant: CHECKOUT.merchant, amount_cents: CHECKOUT.amount_cents,
+    currency: CHECKOUT.currency, card_ref: "saved-card", item: "item", reason: "reason",
+  };
+  const browser: CardReleaseBrowser = {
+    currentUrl: () => `${CHECKOUT.checkout_origin}/checkout`,
+    injectCardFields: async () => { throw new Error("card must not release"); },
+  };
+  const pending: PendingApprovalWait[] = [];
+  const shared = {
+    now: () => now, sleep, pollIntervalMs: 3_000, pollBudgetMs: 35_000,
+    signal: controller.signal, vouchflowExpectedAudience: "customer_test",
+    surfaceApprovalUrl: vi.fn(),
+    onApprovalPending: (state: PendingApprovalWait) => pending.push(state),
+  };
+  await executeCardReleaseApproval(request, api, browser, shared);
+  const result = await executeCardReleaseApproval(request, api, browser, {
+    ...shared, resumeFrom: pending[0]!,
+  });
+  expect(result).toMatchObject({ status: "approval_pending", approval_id: "held-approval" });
+  expect(waits).toEqual([15_000, 15_000]);
+  expect(sleep).not.toHaveBeenCalled();
+});
+
 it.each([
   ["amount", { amount_cents: 2700 }],
   ["merchant", { merchant: "New Merchant" }],

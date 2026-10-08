@@ -715,6 +715,10 @@ export async function executeCardReleaseApproval(
       iteration++;
       const remainingPollMs = Math.max(Math.min(callDeadline, deadline) - deps.now(), 0);
       const candidateRead = remainingPollMs > 0 ? true : "immediate";
+      const heldWaitMs = candidateRead === true
+        ? Math.min(Math.max(remainingPollMs - PAYMENT_APPROVAL_RESPONSE_RESERVE_MS, 0), 15_000)
+        : 0;
+      const readStartedAt = deps.now();
       let approval: PaymentApproval;
       try {
         approval =
@@ -722,10 +726,7 @@ export async function executeCardReleaseApproval(
             ? await api.getPaymentApproval(
                 approvalId,
                 true,
-                Math.min(
-                  Math.max(remainingPollMs - PAYMENT_APPROVAL_RESPONSE_RESERVE_MS, 0),
-                  15_000,
-                ),
+                heldWaitMs,
                 remainingPollMs,
               )
             : await api.getPaymentApproval(approvalId, "immediate");
@@ -914,7 +915,11 @@ export async function executeCardReleaseApproval(
         }
       }
       if (!shouldKeepPolling()) break;
-      await deps.sleep(deps.pollIntervalMs);
+      // A full server-held pending read already paced the loop. Back off only
+      // when it returned early (or an already-rejected candidate reappeared).
+      const fullHeldRead = candidateRead === true && heldWaitMs > 0 &&
+        deps.now() - readStartedAt >= Math.max(heldWaitMs - 500, heldWaitMs * 0.9);
+      if (!fullHeldRead || hasCandidate) await deps.sleep(deps.pollIntervalMs);
     }
     if (approved === undefined) {
       if (budgetExhausted) {
