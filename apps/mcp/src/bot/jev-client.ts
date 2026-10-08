@@ -83,6 +83,13 @@ export class JevRequestError extends Error {
   }
 }
 
+export class JevInvalidResponseError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "JevInvalidResponseError";
+  }
+}
+
 function sleep(ms: number, signal: AbortSignal | undefined): Promise<void> {
   if (signal?.aborted)
     return Promise.reject(signal.reason ?? new Error("operator_request_cancelled"));
@@ -249,20 +256,25 @@ function parseJevResult(body: string): JevResult {
   try {
     parsed = JSON.parse(body);
   } catch {
-    throw new Error(
+    throw new JevInvalidResponseError(
       `jev_invalid_response: TypeSafe System One returned non-JSON body: ${bodySnippet(body)}`,
     );
   }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new JevInvalidResponseError(
+      `jev_invalid_response: TypeSafe System One response has no answers object: ${bodySnippet(body)}`,
+    );
+  }
   const answers = (parsed as { answers?: unknown }).answers;
-  if (typeof answers !== "object" || answers === null) {
-    throw new Error(
+  if (typeof answers !== "object" || answers === null || Array.isArray(answers)) {
+    throw new JevInvalidResponseError(
       `jev_invalid_response: TypeSafe System One response has no answers object: ${bodySnippet(body)}`,
     );
   }
   const record = answers as Record<string, unknown>;
   for (const [name, value] of Object.entries(record)) {
-    if (typeof value !== "object" || value === null) {
-      throw new Error(
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      throw new JevInvalidResponseError(
         `jev_invalid_response: answer ${JSON.stringify(name)} is not an object: ${bodySnippet(body)}`,
       );
     }

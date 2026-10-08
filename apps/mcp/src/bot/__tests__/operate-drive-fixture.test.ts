@@ -12,6 +12,7 @@ import type { ApiClient } from "../../api-client.js";
 import { BrowserController } from "../browser.js";
 import {
   JevUnavailableError,
+  askJev,
   type JevAnswer,
   type JevCallOutcome,
   type JevQuestion,
@@ -3686,6 +3687,33 @@ describe("operate_drive real-browser fixture", () => {
       );
       expect(handoff.status).toBe("jev_unavailable");
       expect(handoff.jev_retried).toContain("503");
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
+  it.each([
+    ["non-JSON", "<html>oops</html>"],
+    ["wrong-shape", '{"model":"jev-latest"}'],
+  ])("returns resumable jev_unavailable for a %s Jev reply", async (_kind, body) => {
+    const { context, started } = await openFixture(NOOP_HTML, "signup-jev-invalid.test");
+    const jevApi = {
+      listCredentials: vi.fn().mockResolvedValue({ credentials: [] }),
+      decide: vi.fn().mockResolvedValue({ status: 200, body }),
+    } as unknown as ApiClient;
+    try {
+      const handoff = await runOperateDrive(
+        { session_id: started.session_id, goal: "anything" },
+        jevApi,
+        undefined,
+        deps(askJev),
+      );
+      expect(handoff.status).toBe("jev_unavailable");
+      expect(handoff.reason).toContain("jev_invalid_response");
+      expect(handoff.reason).toContain(body);
+      expect(handoff.session_id).toBe(started.session_id);
+      expect(jevApi.decide).toHaveBeenCalledTimes(1);
     } finally {
       await finishProvisionSession(started.session_id);
       await context.close();
