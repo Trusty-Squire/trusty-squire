@@ -660,6 +660,80 @@ describe("operate_drive real-browser fixture", () => {
     }
   }, 30_000);
 
+  it("dismisses a cookie banner on a drive start before its first snapshot", async () => {
+    const html = `<main><form><label>Search <input type="search" name="q"></label></form></main>
+      <div id="consent" style="position:fixed;inset:0;background:white;z-index:10">
+        <button onclick="document.querySelector('#consent').remove()">Accept all cookies</button>
+      </div>`;
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await page.route("**/*", (route) => route.fulfill({ contentType: "text/html", body: html }));
+    let sessionId: string | undefined;
+    try {
+      const dependencies = deps(async (_api, _state, questions) =>
+        jevFromQuestions(questions, true),
+      );
+      dependencies.startSession = async (options) => {
+        const started = await startHarnessProvisionSession({
+          ...options,
+          browser: BrowserController.fromHarnessPage(page),
+        });
+        sessionId = started.session_id;
+        return started;
+      };
+      await runOperateDrive(
+        { url: "https://consent-drive.test/", goal: "inspect the page" },
+        api(),
+        undefined,
+        dependencies,
+      );
+      expect(await page.locator("#consent").count()).toBe(0);
+    } finally {
+      if (sessionId !== undefined) await finishProvisionSession(sessionId);
+      await context.close();
+    }
+  }, 30_000);
+
+  it("submits a search field with Enter after typing on a drive start", async () => {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await page.route("**/*", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: `<form onsubmit="event.preventDefault();document.querySelector('#result').textContent='submitted'">
+          <label>Search <input type="search" name="q"></label></form><p id="result"></p>`,
+      }),
+    );
+    let sessionId: string | undefined;
+    try {
+      const dependencies = deps(async (_api, _state, questions) => jevFromQuestions(questions));
+      dependencies.startSession = async (options) => {
+        const started = await startHarnessProvisionSession({
+          ...options,
+          browser: BrowserController.fromHarnessPage(page),
+        });
+        sessionId = started.session_id;
+        return started;
+      };
+      await runOperateDrive(
+        {
+          url: "https://search-drive.test/",
+          goal: "search for widgets",
+          facts: { q: "widgets", search: "widgets" },
+          max_steps: 2,
+        },
+        api(),
+        undefined,
+        dependencies,
+      );
+      expect(await page.locator('input[name="q"]').inputValue()).toBe("widgets");
+      expect(await page.locator("#result").textContent()).toBe("submitted");
+    } finally {
+      if (sessionId !== undefined) await finishProvisionSession(sessionId);
+      await context.close();
+    }
+  }, 30_000);
+
   it("ends the drive on the Google wall an act hands back", async () => {
     const html = `<main><button id="google">Continue with Google</button></main>`;
     const { context, started } = await openFixture(html, "google-wall.test");
