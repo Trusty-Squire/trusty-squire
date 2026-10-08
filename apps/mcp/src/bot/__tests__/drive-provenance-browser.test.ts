@@ -172,10 +172,11 @@ it("sends page content to Jev without pattern masking", async () => {
   });
 }, 30_000);
 
-it("stops a key-goal drive on a plain-text key and asks for capture", async () => {
+it.each([
+  ["prefixed", "sk" + "_live_fixturekey0123456789abcdef"],
+  ["unprefixed", "Ab3kZ9"],
+])("stops a key-goal drive on a plain-text %s key and asks for capture", async (_name, key) => {
   // No Copy click and no target: the drive never guesses which text is the key.
-  // Assembled at runtime so secret scanning does not flag fixture data.
-  const key = "sk" + "_live_fixturekey0123456789abcdef";
   const html = `<!doctype html><main><h1>API keys</h1>
     <label>API key <input readonly value="${key}"></label></main>`;
   await withPage(html, async (sessionId) => {
