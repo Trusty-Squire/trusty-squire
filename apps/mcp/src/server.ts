@@ -74,7 +74,7 @@ export function shutdownDeadlineMs(): number {
 // the routing between store / use / request so the agent reaches for
 // the right credential tool without the user spelling it out.
 export const SERVER_INSTRUCTIONS = `Trusty Squire drives signup, provisioning, and checkout in a real browser
-(\`operate_start\`/\`operate_observe\`/\`operate_click\`/\`operate_type\`/
+(\`operate_start\`/\`operate_observe\`/\`operate_click\`/\`operate_type\`/\`operate_upload\`/
 \`inject_card\`/\`operate_finish\`) with a write-only credential vault.
 Secrets live encrypted in the vault;
 they are NOT in the conversation context. Reading one back is possible but

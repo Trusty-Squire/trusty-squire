@@ -276,8 +276,9 @@ in [browser-use-serializer-port.md](docs/browser-use-serializer-port.md).
   one call) instead of planning each click and type yourself; resume that
   session with `answer` and/or added facts if it hands back. Drive ordinary
   controls with `operate_click`, `operate_type`,
-  `operate_select`, `operate_press`, and `operate_scroll`; use
-  `operate_navigate` for scoped navigation. Acting tools target a current `ref`.
+  `operate_select`, `operate_upload`, `operate_press`, and `operate_scroll`; use
+  `operate_navigate` for scoped navigation. Acting tools target a current
+  observation ref; `operate_upload` calls this argument `target`.
   `operate_type` accepts either literal `text` or a protected session `slot`,
   never both. `operate_click` alone may use its guarded internal DOM-dispatch
   fallback after a proven non-dispatch; it is not a public alternative action.
