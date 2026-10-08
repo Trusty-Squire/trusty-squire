@@ -481,7 +481,7 @@ describe("TOOLS registry", () => {
     >;
     expect(finishProperties.outcome).toMatchObject({
       type: "string",
-      enum: ["none", "credentials", "result"],
+      enum: ["none", "result", "credentials"],
     });
 
     const names = TOOLS.map((tool) => tool.name);

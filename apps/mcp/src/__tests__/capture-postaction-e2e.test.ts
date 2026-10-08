@@ -172,11 +172,11 @@ it("captures a created key through MCP and recovers an unchanged source without 
       expect.objectContaining({ value: "gsk_fixture_recovered", write_id }),
     );
     expect(state.action).toHaveBeenCalledTimes(4);
-    // Finish is the terminal: it proceeds (no custody fence), vaults nothing
-    // on a candidate-free page, and retires the session — so it comes last.
+    // The removed combined finish directs the caller to extract first.
     await page.setContent("<h1>Done</h1>");
     const finish = await call("operate_finish", { outcome: "credentials", store: capture.store });
-    expect(finish.isError, JSON.stringify(finish)).not.toBe(true);
+    expect(finish.isError).toBe(true);
+    expect(JSON.stringify(finish)).toContain("operate_extract");
     expect(storeCredential).toHaveBeenCalledTimes(2);
     if (evidence)
       await writeFile(

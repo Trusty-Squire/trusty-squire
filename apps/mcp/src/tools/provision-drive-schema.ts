@@ -141,10 +141,11 @@ const storeShape = z.object({
   label: z.string().min(1).max(60).optional(),
   env_var_suggestion: z.string().min(1).max(120).optional(),
   type: z.string().min(1).max(60).optional(),
-  // Explicit egress hosts: where this key may LATER be sent by the proxy.
+  // Explicit API hosts: where this key may LATER be sent by the proxy.
   // Read them off the API base URL the page/SDK snippet shows — a grounded
   // read, not a guess. Unioned with the service-default + start/auto_widen
   // scope (never mid_session task scope). Omit for a single-service key.
+  api_hosts: z.array(z.string().min(1).max(253)).max(10).optional(),
   egress_hosts: z.array(z.string().min(1).max(253)).max(10).optional(),
   auth_shape: z
     .string()
@@ -168,15 +169,11 @@ const captureSchema = z
 
 const captureClickSchema = captureSchema.omit({ write_id: true });
 
-const captureActionSchema = captureClickSchema.extend({
+const captureExtractSchema = captureSchema.extend({
   source: captureSourceSchema.refine(
     (source) => !("clipboard" in source),
     "capture.source.clipboard is only valid on operate_click",
   ),
-});
-
-const captureExtractSchema = captureSchema.extend({
-  source: captureActionSchema.shape.source,
 });
 
 const captureJson = {
@@ -192,7 +189,13 @@ const captureJson = {
         label: { type: "string" },
         env_var_suggestion: { type: "string" },
         type: { type: "string" },
-        egress_hosts: { type: "array", items: { type: "string" } },
+        api_hosts: { type: "array", items: { type: "string" } },
+        egress_hosts: {
+          type: "array",
+          items: { type: "string" },
+          deprecated: true,
+          description: "Deprecated alias for api_hosts; removed next minor",
+        },
         auth_shape: { type: "string" },
       },
     },
@@ -256,6 +259,7 @@ const captureJsonFor = (toolName: string) => {
 
 const CAPTURE_NOTE =
   " Optional capture:{store,source:{role,name?,container?}|{selector,container?}} stores one revealed value after the action and returns metadata, not the value; resolved_source names the element. " +
+  "Use store.api_hosts for API hosts this credential may be sent to; store.egress_hosts is a deprecated alias removed next minor. " +
   "Role and value-free CSS selector sources can cross open shadow roots; a unique secret-shaped textbox can match without an id. " +
   "capture_unresolved returns candidate_count 0 and found roles/names; capture_ambiguous means several matches. " +
   "An unresolved capture does not block unrelated actions. Never paste a secret into a page field to read it.";
@@ -272,7 +276,13 @@ const storeJsonProps = {
   label: { type: "string" },
   env_var_suggestion: { type: "string" },
   type: { type: "string" },
-  egress_hosts: { type: "array", items: { type: "string" } },
+  api_hosts: { type: "array", items: { type: "string" } },
+  egress_hosts: {
+    type: "array",
+    items: { type: "string" },
+    deprecated: true,
+    description: "Deprecated alias for api_hosts; removed next minor",
+  },
   auth_shape: { type: "string" },
 } as const;
 
@@ -400,7 +410,7 @@ const typeSchema = z
     text: z.string().max(4096).optional(),
     slot: z.string().min(1).max(60).optional(),
     submit: z.boolean().optional(),
-    capture: captureActionSchema.optional(),
+    capture: z.unknown().optional(),
     format: actionFormatSchema.optional(),
   })
   .refine((args) => (args.text !== undefined) !== (args.slot !== undefined), {
@@ -413,7 +423,7 @@ const selectSchema = z
     ref: refSchema.optional(),
     values: z.array(z.string().min(1).max(4096)).length(1).optional(),
     selections: formSelectionsSchema.optional(),
-    capture: captureActionSchema.optional(),
+    capture: z.unknown().optional(),
     country: z.string().min(1).max(60).optional(),
     format: actionFormatSchema.optional(),
   })
@@ -433,7 +443,7 @@ const selectSchema = z
 const pressSchema = z.object({
   ...sessionShape,
   key: z.string().min(1).max(40),
-  capture: captureActionSchema.optional(),
+  capture: z.unknown().optional(),
   format: actionFormatSchema.optional(),
 });
 
@@ -461,13 +471,11 @@ const publicFinishSchema = z
   .object({
     ...sessionShape,
     outcome: z.enum(["none", "credentials", "result"]).default("none"),
-    store: storeShape.optional(),
+    store: z.unknown().optional(),
     summary: z.string().max(4000).optional(),
     data: finishDataSchema.optional(),
   })
   .superRefine((args, ctx) => {
-    if (args.outcome === "credentials" && args.store === undefined)
-      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "credentials outcome requires store" });
     if (args.outcome === "result" && args.summary === undefined && args.data === undefined)
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -652,14 +660,7 @@ export const provisionExtractTool: Tool = {
       store: {
         type: "object",
         required: ["service"],
-        properties: {
-          service: { type: "string" },
-          label: { type: "string" },
-          env_var_suggestion: { type: "string" },
-          type: { type: "string" },
-          egress_hosts: { type: "array", items: { type: "string" } },
-          auth_shape: { type: "string" },
-        },
+        properties: storeJsonProps,
       },
     },
   },
@@ -972,23 +973,29 @@ export const operateFinishTool: Tool = {
     additionalProperties: true,
   },
   description:
-    "Finish the task and close its session. outcome='none' closes without a reported outcome; 'credentials' extracts and vault-stores using store; 'result' reports summary or data — the reported outcome is recorded as-is. Successful completion saves eligible login state through the existing teardown.",
+    "Finish the task and close its session. outcome='none' closes without a reported outcome; 'result' reports summary or data — the reported outcome is recorded as-is. Extract and store credentials with operate_extract({store}) before calling operate_finish. Deprecated outcome='credentials' returns an error and will be removed next minor. Successful completion saves eligible login state through the existing teardown.",
   inputSchema: publicFinishSchema,
   jsonInputSchema: {
     type: "object",
     required: ["session_id"],
     properties: {
       ...sessionJson,
-      outcome: { type: "string", enum: ["none", "credentials", "result"], default: "none" },
-      store: { type: "object", required: ["service"], properties: storeJsonProps },
+      outcome: {
+        type: "string",
+        enum: ["none", "result", "credentials"],
+        default: "none",
+        description:
+          "credentials is deprecated and rejected; use operate_extract({store}) then operate_finish",
+      },
+      store: {
+        type: "object",
+        deprecated: true,
+        description: "Deprecated with outcome=credentials; removed next minor",
+      },
       summary: { type: "string" },
       data: { type: "object" },
     },
     allOf: [
-      {
-        if: { required: ["outcome"], properties: { outcome: { const: "credentials" } } },
-        then: { required: ["store"] },
-      },
       {
         if: { required: ["outcome"], properties: { outcome: { const: "result" } } },
         then: { anyOf: [{ required: ["summary"] }, { required: ["data"] }] },
@@ -1111,13 +1118,24 @@ for (const tool of OPERATE_TOOLS) {
   )
     continue;
   const properties = tool.jsonInputSchema.properties;
+  const supportsCapture = tool.name === "operate_click" || tool.name === "operate_extract";
   if (properties !== null && typeof properties === "object")
-    Object.assign(properties, { capture: captureJsonFor(tool.name) });
-  tool.description +=
-    CAPTURE_NOTE +
-    (tool.name === "operate_click" ? CLICK_CAPTURE_NOTE : "") +
-    (tool.name === "operate_extract" ? EXTRACT_CAPTURE_NOTE : "");
-  tool.jsonOutputSchema = captureOutputSchema;
+    Object.assign(properties, {
+      capture: supportsCapture
+        ? captureJsonFor(tool.name)
+        : {
+            type: "object",
+            deprecated: true,
+            description:
+              "Deprecated and rejected; perform the action, then call operate_extract({capture}). Removed next minor.",
+          },
+    });
+  tool.description += supportsCapture
+    ? CAPTURE_NOTE +
+      (tool.name === "operate_click" ? CLICK_CAPTURE_NOTE : "") +
+      (tool.name === "operate_extract" ? EXTRACT_CAPTURE_NOTE : "")
+    : " Deprecated capture is rejected; perform the action, then call operate_extract({capture}). Removed next minor.";
+  if (supportsCapture) tool.jsonOutputSchema = captureOutputSchema;
 }
 
 // Keep the additive click receipt discoverable alongside the shared capture result.

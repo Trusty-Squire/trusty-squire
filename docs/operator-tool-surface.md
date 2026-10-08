@@ -371,21 +371,17 @@ recognition and sealing, and the purchase's single human approval are unchanged.
 ```json
 {
   "session_id": "session-id",
-  "outcome": "credentials",
-  "store": { "service": "Example Service" }
-}
-```
-
-```json
-{
-  "session_id": "session-id",
   "outcome": "result",
   "summary": "Provider setup reached its reported completion page.",
   "data": { "provider_reported": true }
 }
 ```
 
-`credentials` requires `store`; `result` requires `summary` or `data`.
+`result` requires `summary` or `data`. To store credentials, call
+`operate_extract({session_id, store})` and inspect its storage result before
+calling `operate_finish`. The deprecated `outcome:"credentials"` spelling
+returns a migration error without closing the session; it will be removed in
+the next minor release.
 Agent-supplied data is reported data, not proof that login, provisioning, or a
 mutation completed. Preserve booleans as booleans in result data.
 
@@ -425,17 +421,15 @@ after an `operate_click`) stores the pointed value as is.
 
 `operate_extract(store=...)` sends the value directly to the write-only vault
 and returns storage metadata, not the secret. Without `store`, it returns the
-value. `operate_finish(outcome="credentials")` uses the same extraction and
-returns `stored_credential: null` with the same `error` when nothing had a known
-source. Observation and screenshot reads remain verbatim; extraction does not
+value. If extraction fails, the session stays open for another observation or
+capture. Observation and screenshot reads remain verbatim; extraction does not
 redact those surfaces.
 
-`operate_click`, `operate_type`, `operate_select`, and `operate_press` accept an
-optional `capture` field:
+`operate_click` and `operate_extract` accept an optional `capture` field:
 
 ```json
 {
-  "store": { "service": "Example Service", "label": "fresh-key" },
+  "store": { "service": "Example Service", "label": "fresh-key", "api_hosts": ["api.example.com"] },
   "source": {
     "role": "textbox",
     "name": "API key",
@@ -443,6 +437,18 @@ optional `capture` field:
   }
 }
 ```
+
+`api_hosts` names API hosts this credential may be sent to. It is unioned with
+the same session-observed hosts and service defaults as before. `store_credential`
+also accepts `api_hosts`; `login_hosts` remains the separate browser sign-in
+allowlist. The former public names `observed_hosts` on `store_credential` and
+`egress_hosts` in extraction and capture stores remain accepted as deprecated
+aliases for one release and are removed next minor. When both spellings are
+supplied, their host lists are merged and deduplicated.
+
+`operate_type`, `operate_select`, and `operate_press` reject deprecated `capture`
+with an error directing the caller to perform the action, then call
+`operate_extract({capture})`. Their `capture` aliases are removed next minor.
 
 The source role is `textbox` or `code`. For a plain-text copy field without
 those roles, use `source: {"selector": "<observed CSS selector>"}` instead of
@@ -495,8 +501,8 @@ original value and refuses rotation of an existing credential slot.
 Pending capture storage permits unrelated plain actions and reads, including
 `operate_click`, `operate_type`, `operate_observe`, and `operate_extract` without
 `capture` or `store`. A new vaulting attempt (including top-level
-`operate_extract.store`) and `operate_finish(outcome="credentials")` remain
-fenced; extraction with the original `capture.write_id` remains available.
+`operate_extract.store`) remains fenced; extraction with the original
+`capture.write_id` remains available.
 This exception does not relax other unresolved-mutation guards. Broker recovery
 records are audit-only and preserve the capture's prior admission state, including
 across delivery acknowledgement. See the recovery-transition coverage in

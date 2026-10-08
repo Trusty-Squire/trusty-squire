@@ -93,8 +93,9 @@ To have generalized steps to serve, the operate_* flow must produce the capture
 (Codex's original recommendation), now safe because the output is consumed as
 guidance, not blind-replayed.
 
-- **Hook:** `operate_finish` with the flat `outcome="credentials"` and a
-  `store` descriptor (`handleFinishOutcome` in `provision-drive.ts`).
+- **Hook:** `operate_extract` with a `store` descriptor, followed by a plain
+  `operate_finish` after the storage result is checked (`handleExtract` in
+  `provision-drive.ts`).
 - **Verified-success gate:** produce only when `stored_credential != null` AND
   `blocked_reason == undefined` AND a `verifyPostcondition` check passes
   (`provision-session.ts:1552`, reused on the just-extracted field). A skill from
@@ -106,7 +107,7 @@ guidance, not blind-replayed.
   the parent provision.
 
 ```
-operate_finish outcome=credentials (verified success)
+operate_extract store=... (verified success) → operate_finish
       │
       ├─ promoteToSkill(capture)  →  generalize volatile fields  →  POST /skills (pending-review)
       │                                                                    │

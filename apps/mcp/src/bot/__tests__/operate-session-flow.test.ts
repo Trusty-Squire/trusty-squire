@@ -4658,18 +4658,20 @@ describe("operate_extract — stores by source, never by shape", () => {
       { session_id: started.session_id, store: { service: "example" } },
       api,
     );
-    const finished = await operateFinishTool.handler(
-      operateFinishTool.inputSchema.parse({
-        session_id: started.session_id,
-        outcome: "credentials",
-        store: { service: "example" },
-      }),
-      api,
-    );
+    await expect(
+      operateFinishTool.handler(
+        operateFinishTool.inputSchema.parse({
+          session_id: started.session_id,
+          outcome: "credentials",
+          store: { service: "example" },
+        }),
+        api,
+      ),
+    ).rejects.toThrow(/operate_extract\(\{store\}\) then operate_finish/);
     expect(storeCredential).not.toHaveBeenCalled();
     expect(stored).toMatchObject({ credentials: {}, error: extracted.error });
     expect(JSON.stringify(stored)).not.toContain(realKey);
-    expect(finished).toMatchObject({ stored_credential: null, error: extracted.error });
+    expect(h.closeCalls).toBe(0);
   });
 
   it("seals no slot without a Copy click", async () => {
@@ -5977,58 +5979,29 @@ function normalizeFinishReceipt(value: unknown): Record<string, unknown> {
 }
 
 describe("operate_finish lifecycle consolidation", () => {
-  it("owns the session before outcome extraction begins", async () => {
-    const previousAutoPromote = process.env.TRUSTY_SQUIRE_AUTO_PROMOTE;
-    process.env.TRUSTY_SQUIRE_AUTO_PROMOTE = "0";
-    let releaseExtraction: (() => void) | undefined;
+  it("rejects deprecated credential finish before extraction or teardown", async () => {
     await showCopyDialog("https://app.example.com/api-keys", sk("live-finish-exclusive-123456789"));
-    const storeCredential = vi.fn().mockResolvedValue({
-      reference: "vault://acct/finish-exclusive",
-      service: "example",
-      label: "default",
-      field_names: ["api_key"],
-      allowed_hosts: ["app.example.com"],
-      created_at: "now",
-      updated: false,
-    });
+    const storeCredential = vi.fn();
     const api = { storeCredential } as unknown as ApiClient;
     const started = await startProvisionSession({
       serviceUrl: "https://app.example.com/api-keys",
     });
-    h.clipboardGate = new Promise<void>((resolve) => {
-      releaseExtraction = resolve;
-    });
-
-    try {
-      const finishing = operateFinishTool.handler(
+    await expect(
+      operateFinishTool.handler(
         {
           session_id: started.session_id,
           outcome: "credentials",
           store: { service: "example" },
         },
         api,
-      );
-      await vi.waitFor(() => expect(h.readClipboardCalls).toBeGreaterThan(0));
-
-      await expect(
-        operateFinishTool.handler(
-          operateFinishTool.inputSchema.parse({ session_id: started.session_id, outcome: "none" }),
-          null,
-        ),
-      ).resolves.toMatchObject({ closed: false, cleanup: "closing", execution: "pending" });
-      expect(h.closeCalls).toBe(0);
-
-      releaseExtraction?.();
-      await expect(finishing).resolves.toMatchObject({
-        kind: "credentials",
-        stored_credential: { reference: "vault://acct/finish-exclusive" },
-      });
-      expect(h.closeCalls).toBe(1);
-    } finally {
-      releaseExtraction?.();
-      if (previousAutoPromote === undefined) delete process.env.TRUSTY_SQUIRE_AUTO_PROMOTE;
-      else process.env.TRUSTY_SQUIRE_AUTO_PROMOTE = previousAutoPromote;
-    }
+      ),
+    ).rejects.toThrow(/operate_extract\(\{store\}\) then operate_finish/);
+    expect(h.readClipboardCalls).toBe(0);
+    expect(h.closeCalls).toBe(0);
+    expect(storeCredential).not.toHaveBeenCalled();
+    await expect(
+      operateFinishTool.handler({ session_id: started.session_id, outcome: "none" }, null),
+    ).resolves.toMatchObject({ closed: true });
   });
 
   it("keeps the no-outcome close shape identical with explicit or omitted kind=none", async () => {
@@ -6059,7 +6032,7 @@ describe("operate_finish lifecycle consolidation", () => {
     expect(h.destroyedProfiles).toEqual([]);
   });
 
-  it("preserves prior state when an explicit credential outcome fails", async () => {
+  it("preserves prior state when deprecated credential finish is rejected", async () => {
     const canonical = "/tmp/trusty-squire-unit-canonical-failed-outcome";
     const prior = { cookies: [{ name: "SID", value: "prior" }], origins: [] };
     h.storageStates.set(canonical, prior);
@@ -6070,17 +6043,19 @@ describe("operate_finish lifecycle consolidation", () => {
       profileDir: canonical,
     });
 
-    const result = await operateFinishTool.handler(
-      operateFinishTool.inputSchema.parse({
-        session_id: session.session_id,
-        outcome: "credentials",
-        store: { service: "example" },
-      }),
-      { storeCredential } as unknown as ApiClient,
-    );
+    await expect(
+      operateFinishTool.handler(
+        operateFinishTool.inputSchema.parse({
+          session_id: session.session_id,
+          outcome: "credentials",
+          store: { service: "example" },
+        }),
+        { storeCredential } as unknown as ApiClient,
+      ),
+    ).rejects.toThrow(/operate_extract\(\{store\}\) then operate_finish/);
 
-    expect(result).toMatchObject({ kind: "credentials", stored_credential: null });
     expect(storeCredential).not.toHaveBeenCalled();
+    expect(h.closeCalls).toBe(0);
     expect(h.storageStateWrites).toEqual([]);
     expect(h.storageStates.get(canonical)).toBe(prior);
   });
@@ -6177,7 +6152,7 @@ describe("operate_finish lifecycle consolidation", () => {
     });
   });
 
-  it("returns the legacy credential result without leaking the extracted value", async () => {
+  it("stores through extract before finishing without leaking the extracted value", async () => {
     const secret = sk("live-finish-parity-secret-123456789");
     const previousAutoPromote = process.env.TRUSTY_SQUIRE_AUTO_PROMOTE;
     process.env.TRUSTY_SQUIRE_AUTO_PROMOTE = "0";
@@ -6194,38 +6169,24 @@ describe("operate_finish lifecycle consolidation", () => {
       const api = { storeCredential } as unknown as ApiClient;
 
       await showCopyDialog("https://app.example.com/api-keys", secret);
-      const legacySession = await startProvisionSession({
+      const session = await startProvisionSession({
         serviceUrl: "https://app.example.com/api-keys",
       });
-      const legacy = await operateFinishTool.handler(
-        operateFinishTool.inputSchema.parse({
-          session_id: legacySession.session_id,
-          store: { service: "example" },
-          outcome: "credentials",
-        }),
+      const extracted = await provisionExtractTool.handler(
+        { session_id: session.session_id, store: { service: "example" } },
         api,
       );
-
-      await showCopyDialog("https://app.example.com/api-keys", secret);
-      const consolidatedSession = await startProvisionSession({
-        serviceUrl: "https://app.example.com/api-keys",
-      });
-      const consolidated = await operateFinishTool.handler(
-        operateFinishTool.inputSchema.parse({
-          session_id: consolidatedSession.session_id,
-          outcome: "credentials",
-          store: { service: "example" },
-        }),
-        api,
-      );
-
-      expect(normalizeFinishReceipt(consolidated)).toEqual(normalizeFinishReceipt(legacy));
-      expect(consolidated).toMatchObject({
-        kind: "credentials",
+      expect(extracted).toMatchObject({
         stored_credential: { reference: "vault://acct/finish-parity" },
       });
-      expect(storeCredential).toHaveBeenCalledTimes(2);
-      expect(JSON.stringify({ legacy, consolidated })).not.toContain(secret);
+      expect(h.closeCalls).toBe(0);
+      const finished = await operateFinishTool.handler(
+        operateFinishTool.inputSchema.parse({ session_id: session.session_id, outcome: "none" }),
+        null,
+      );
+      expect(finished).toMatchObject({ closed: true });
+      expect(storeCredential).toHaveBeenCalledTimes(1);
+      expect(JSON.stringify({ extracted, finished })).not.toContain(secret);
     } finally {
       if (previousAutoPromote === undefined) delete process.env.TRUSTY_SQUIRE_AUTO_PROMOTE;
       else process.env.TRUSTY_SQUIRE_AUTO_PROMOTE = previousAutoPromote;
@@ -6238,7 +6199,7 @@ describe("operate_finish lifecycle consolidation", () => {
         session_id: "session_1",
         outcome: "credentials",
       }).success,
-    ).toBe(false);
+    ).toBe(true);
     expect(
       operateFinishTool.inputSchema.safeParse({
         session_id: "session_1",
@@ -6316,20 +6277,46 @@ describe("operate session — PR3c username/password login (capture-at-login sou
   it("prepares and stores the plus alias actually typed into a signup field", async () => {
     withEmail("ada@example.com");
     const alias = "ada+cal-signup@example.com";
-    h.elements = [elem({ tag: "input", type: "email", role: "textbox", labelText: "Email", selector: "#email" })];
-    const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/signup", profileDir });
+    h.elements = [
+      elem({
+        tag: "input",
+        type: "email",
+        role: "textbox",
+        labelText: "Email",
+        selector: "#email",
+      }),
+    ];
+    const obs = await startProvisionSession({
+      serviceUrl: "https://app.example.com/signup",
+      profileDir,
+    });
     await act(obs.session_id, { kind: "type", target: domRefs(obs)[0]!, text: alias });
     const prepared = (await operateLoginTool.handler(
-      { action: "prepare_signup", session_id: obs.session_id }, null,
+      { action: "prepare_signup", session_id: obs.session_id },
+      null,
     )) as { slots: { login: { length: number } } };
     expect(prepared.slots.login.length).toBe(alias.length);
     const stored: string[] = [];
-    const api = { storeCredential: async (input: { fields: { login: string } }) => {
-      stored.push(input.fields.login);
-      return { reference: "vault://alias", service: "cal.com", field_names: ["login", "password"], login_hosts: ["app.example.com"], updated: false };
-    } } as unknown as ApiClient;
+    const api = {
+      storeCredential: async (input: { fields: { login: string } }) => {
+        stored.push(input.fields.login);
+        return {
+          reference: "vault://alias",
+          service: "cal.com",
+          field_names: ["login", "password"],
+          login_hosts: ["app.example.com"],
+          updated: false,
+        };
+      },
+    } as unknown as ApiClient;
     await operateLoginTool.handler(
-      { action: "store_signup", session_id: obs.session_id, service: "cal.com", login_hosts: ["app.example.com"] }, api,
+      {
+        action: "store_signup",
+        session_id: obs.session_id,
+        service: "cal.com",
+        login_hosts: ["app.example.com"],
+      },
+      api,
     );
     expect(stored).toEqual([alias]);
   });
@@ -7433,96 +7420,94 @@ describe("flat operator verbs", () => {
     expect(fullMany.observation.format).toBe("browser-use-dom");
   });
 
-  it.each([
-    ["click", operateClickTool, { ref: "@continue" }],
-    ["type", operateTypeTool, { ref: "@name", text: "Ada" }],
-    ["press", operatePressTool, { key: "Tab" }],
-    ["select", operateSelectTool, { ref: "@region", values: ["US"] }],
-    ["select many", operateSelectTool, { selections: { "@region": "US" } }],
-  ] as const)("resends controls discarded by %s capture", async (_name, tool, args) => {
-    h.elements = [
-      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
-      elem({ tag: "input", role: "textbox", ariaLabel: "Name", selector: "#name" }),
-      elem({ tag: "select", role: "select", labelText: "Region", selector: "#region" }),
-    ];
-    const started = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
-    const browser = await chromium.launch({ headless: true, args: ["--no-sandbox"] });
-    const page = await browser.newPage();
-    h.capturePage = page;
-    const storeCredential = vi.fn().mockResolvedValue({ reference: "vault://acct/captured" });
-    const api = { storeCredential } as unknown as ApiClient;
-    const outcomes =
-      _name === "click"
-        ? (["stored", "ambiguous", "missing", "unresolved", "unchanged"] as const)
-        : (["stored", "ambiguous", "missing", "unresolved"] as const);
-    for (const outcome of outcomes) {
-      await observe(started.session_id, "compact");
-      h.elements.push(
-        elem({ tag: "button", role: "button", visibleText: outcome, selector: `#${outcome}` }),
-      );
-      // Exercise real pinned handles and descriptors. Click capture must see
-      // a changed document; the unchanged case must never reach vault storage.
-      const before = '<input aria-label="API key" value="pre-action-value">';
-      const after =
-        outcome === "ambiguous"
-          ? '<input value="captured-secret"><input value="another-secret">'
-          : outcome === "missing"
-            ? "<p>No key available</p>"
-            : '<input aria-label="API key" value="captured-secret">';
-      await page.setContent(_name === "click" ? before : after);
-      h.captureClick =
-        outcome === "unchanged"
-          ? null
-          : async () => {
-              await page.setContent(after);
-            };
-      const writesBefore = storeCredential.mock.calls.length;
-      if (outcome === "unresolved") storeCredential.mockRejectedValueOnce(new Error("offline"));
-      const captured = await tool.handler(
-        tool.inputSchema.parse({
-          session_id: started.session_id,
-          ...args,
-          capture: { store: { service: "example" }, source: { role: "textbox" } },
-        }) as never,
-        api,
-      );
-      expect(captured).toMatchObject({ closed: false, stored: outcome === "stored" });
-      if (outcome !== "stored")
-        expect(captured).toHaveProperty(
-          "error",
+  it.each([["click", operateClickTool, { ref: "@continue" }]] as const)(
+    "resends controls discarded by %s capture",
+    async (_name, tool, args) => {
+      h.elements = [
+        elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
+        elem({ tag: "input", role: "textbox", ariaLabel: "Name", selector: "#name" }),
+        elem({ tag: "select", role: "select", labelText: "Region", selector: "#region" }),
+      ];
+      const started = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+      const browser = await chromium.launch({ headless: true, args: ["--no-sandbox"] });
+      const page = await browser.newPage();
+      h.capturePage = page;
+      const storeCredential = vi.fn().mockResolvedValue({ reference: "vault://acct/captured" });
+      const api = { storeCredential } as unknown as ApiClient;
+      const outcomes =
+        _name === "click"
+          ? (["stored", "ambiguous", "missing", "unresolved", "unchanged"] as const)
+          : (["stored", "ambiguous", "missing", "unresolved"] as const);
+      for (const outcome of outcomes) {
+        await observe(started.session_id, "compact");
+        h.elements.push(
+          elem({ tag: "button", role: "button", visibleText: outcome, selector: `#${outcome}` }),
+        );
+        // Exercise real pinned handles and descriptors. Click capture must see
+        // a changed document; the unchanged case must never reach vault storage.
+        const before = '<input aria-label="API key" value="pre-action-value">';
+        const after =
           outcome === "ambiguous"
-            ? "capture_ambiguous"
-            : outcome === "unchanged"
-              ? "capture_pre_action_only"
-              : "capture_unresolved",
+            ? '<input value="captured-secret"><input value="another-secret">'
+            : outcome === "missing"
+              ? "<p>No key available</p>"
+              : '<input aria-label="API key" value="captured-secret">';
+        await page.setContent(_name === "click" ? before : after);
+        h.captureClick =
+          outcome === "unchanged"
+            ? null
+            : async () => {
+                await page.setContent(after);
+              };
+        const writesBefore = storeCredential.mock.calls.length;
+        if (outcome === "unresolved") storeCredential.mockRejectedValueOnce(new Error("offline"));
+        const captured = await tool.handler(
+          tool.inputSchema.parse({
+            session_id: started.session_id,
+            ...args,
+            capture: { store: { service: "example" }, source: { role: "textbox" } },
+          }) as never,
+          api,
         );
-      if (outcome === "stored") {
-        expect(captured).toHaveProperty("resolved_source", {
-          tag: "input",
-          role: "textbox",
-          name: "API key",
-        });
-      }
-      if (outcome === "stored" || outcome === "unresolved") {
-        expect(storeCredential).toHaveBeenCalledTimes(writesBefore + 1);
-        expect(storeCredential).toHaveBeenLastCalledWith(
-          expect.objectContaining({ value: "captured-secret" }),
+        expect(captured).toMatchObject({ closed: false, stored: outcome === "stored" });
+        if (outcome !== "stored")
+          expect(captured).toHaveProperty(
+            "error",
+            outcome === "ambiguous"
+              ? "capture_ambiguous"
+              : outcome === "unchanged"
+                ? "capture_pre_action_only"
+                : "capture_unresolved",
+          );
+        if (outcome === "stored") {
+          expect(captured).toHaveProperty("resolved_source", {
+            tag: "input",
+            role: "textbox",
+            name: "API key",
+          });
+        }
+        if (outcome === "stored" || outcome === "unresolved") {
+          expect(storeCredential).toHaveBeenCalledTimes(writesBefore + 1);
+          expect(storeCredential).toHaveBeenLastCalledWith(
+            expect.objectContaining({ value: "captured-secret" }),
+          );
+        } else {
+          expect(storeCredential).toHaveBeenCalledTimes(writesBefore);
+        }
+        if (outcome === "missing")
+          expect(captured).toMatchObject({ candidate_count: 0, found: [] });
+        expect(captured).not.toHaveProperty("safe_table");
+        expect(captured).not.toHaveProperty("observation");
+        const next = await operateScrollTool.handler(
+          { session_id: started.session_id, direction: "bottom" },
+          null,
         );
-      } else {
-        expect(storeCredential).toHaveBeenCalledTimes(writesBefore);
+        expect(next).not.toHaveProperty("delta");
+        expect((next as { safe_table: unknown[] }).safe_table).toHaveLength(h.elements.length);
       }
-      if (outcome === "missing") expect(captured).toMatchObject({ candidate_count: 0, found: [] });
-      expect(captured).not.toHaveProperty("safe_table");
-      expect(captured).not.toHaveProperty("observation");
-      const next = await operateScrollTool.handler(
-        { session_id: started.session_id, direction: "bottom" },
-        null,
-      );
-      expect(next).not.toHaveProperty("delta");
-      expect((next as { safe_table: unknown[] }).safe_table).toHaveLength(h.elements.length);
-    }
-    expect(storeCredential).toHaveBeenCalledTimes(2);
-  });
+      expect(storeCredential).toHaveBeenCalledTimes(2);
+    },
+  );
 
   it("resends controls after discarded fill observations and filtered queries", async () => {
     h.elements = [elem({ tag: "input", role: "textbox", ariaLabel: "Name", selector: "#name" })];

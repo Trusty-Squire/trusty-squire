@@ -117,7 +117,7 @@ describe("store_credential (upsert)", () => {
     expect(JSON.stringify(result)).not.toContain("shared-test-value");
   });
 
-  it("forwards observed_hosts so captured keys do not land with an empty allowlist", async () => {
+  it("maps api_hosts and deprecated observed_hosts to the same vault allowlist input", async () => {
     let seen: unknown;
     const api = mockApi({
       storeCredential: async (input) => {
@@ -136,17 +136,30 @@ describe("store_credential (upsert)", () => {
         };
       },
     });
-    await storeCredentialTool.handler(
-      {
+    for (const hosts of [
+      { api_hosts: ["resend.com", "api.resend.com"] },
+      { observed_hosts: ["resend.com", "api.resend.com"] },
+    ]) {
+      const args = storeCredentialTool.inputSchema.parse({
         service: "Resend",
         value: "re_x",
+        ...hosts,
+      });
+      await storeCredentialTool.handler(args, api);
+      expect(seen).toMatchObject({
+        service: "Resend",
         observed_hosts: ["resend.com", "api.resend.com"],
-      },
-      api,
-    );
-    expect(seen).toMatchObject({
+      });
+    }
+    const combined = storeCredentialTool.inputSchema.parse({
       service: "Resend",
-      observed_hosts: ["resend.com", "api.resend.com"],
+      value: "re_x",
+      api_hosts: ["api.resend.com", "shared.test"],
+      observed_hosts: ["shared.test", "other.test"],
+    });
+    await storeCredentialTool.handler(combined, api);
+    expect(seen).toMatchObject({
+      observed_hosts: ["api.resend.com", "shared.test", "other.test"],
     });
   });
 

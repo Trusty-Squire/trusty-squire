@@ -102,24 +102,26 @@ describe("capture schemas match their handlers", () => {
     const tool = OPERATE_TOOLS.find((entry) => entry.name === name)!;
     return (tool.jsonInputSchema.properties as Record<string, unknown>).capture as {
       properties: {
+        store?: unknown;
         write_id?: unknown;
         source: { oneOf: unknown[]; properties: Record<string, unknown> };
       };
     };
   };
 
-  it("offers write_id only on operate_extract and clipboard only on operate_click", () => {
-    for (const name of [
-      "operate_click",
-      "operate_type",
-      "operate_select",
-      "operate_press",
-      "operate_extract",
-    ]) {
+  it("offers capture details only on operate_click and operate_extract", () => {
+    for (const name of ["operate_click", "operate_extract"]) {
       const capture = captureFor(name);
       expect("write_id" in capture.properties).toBe(name === "operate_extract");
       expect("clipboard" in capture.properties.source.properties).toBe(name === "operate_click");
       expect(capture.properties.source.oneOf).toHaveLength(name === "operate_click" ? 3 : 2);
+      expect(capture.properties.store).toBeDefined();
+    }
+    for (const name of ["operate_type", "operate_select", "operate_press"]) {
+      const tool = OPERATE_TOOLS.find((entry) => entry.name === name)!;
+      const capture = (tool.jsonInputSchema.properties as Record<string, unknown>).capture;
+      expect(capture).toMatchObject({ deprecated: true });
+      expect(capture).not.toHaveProperty("properties");
     }
   });
 
@@ -139,14 +141,15 @@ describe("capture schemas match their handlers", () => {
         tool.inputSchema.safeParse({ ...inputs[name], capture: { store, source: element } })
           .success,
       ).toBe(true);
-      expect(
-        tool.inputSchema.safeParse({
-          ...inputs[name],
-          capture: { store, source: element, write_id: "old" },
-        }).success,
-      ).toBe(false);
+      if (name === "operate_click")
+        expect(
+          tool.inputSchema.safeParse({
+            ...inputs[name],
+            capture: { store, source: element, write_id: "old" },
+          }).success,
+        ).toBe(false);
     }
-    for (const name of ["operate_type", "operate_select", "operate_press", "operate_extract"]) {
+    for (const name of ["operate_extract"]) {
       const tool = OPERATE_TOOLS.find((entry) => entry.name === name)!;
       expect(
         tool.inputSchema.safeParse({
@@ -167,6 +170,22 @@ describe("capture schemas match their handlers", () => {
         capture: { store, source: element, write_id: "old" },
       }).success,
     ).toBe(true);
+  });
+
+  it("rejects deprecated mutation capture before dispatch with the replacement call", async () => {
+    const inputs: Record<string, Record<string, unknown>> = {
+      operate_type: { session_id: "session", ref: "e1", text: "value" },
+      operate_select: { session_id: "session", ref: "e1", values: ["one"] },
+      operate_press: { session_id: "session", key: "Enter" },
+    };
+    for (const name of Object.keys(inputs)) {
+      const tool = OPERATE_TOOLS.find((entry) => entry.name === name)!;
+      const args = tool.inputSchema.parse({
+        ...inputs[name],
+        capture: { store: { service: "x" } },
+      });
+      await expect(tool.handler(args, null)).rejects.toThrow(/operate_extract\(\{capture\}\)/);
+    }
   });
 
   it("navigation does not promise a control-plane restriction", () => {
