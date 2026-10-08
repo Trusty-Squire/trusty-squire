@@ -224,7 +224,10 @@ try {
   if (process.platform === "linux") run("systemctl", ["--user", "restart", unit]);
   else {
     run("launchctl", ["bootout", target]);
-    run("launchctl", ["bootstrap", domain, registration]);
+    await waitFor(
+      () => run("launchctl", ["bootstrap", domain, registration]),
+      "Launchd rebootstrap after bootout",
+    );
   }
   const restartedPid = await waitFor(() => {
     const pid = managerPid();
