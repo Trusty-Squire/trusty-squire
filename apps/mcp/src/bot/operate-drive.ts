@@ -20,6 +20,7 @@ import type { ApiClient } from "../api-client.js";
 import {
   JevUnavailableError,
   JevRequestError,
+  JevInvalidResponseError,
   askJev,
   type JevAnswer,
   type JevCallOutcome,
@@ -7276,8 +7277,12 @@ async function driveLoop(input: {
       drive.jevCalls += 1;
       return jev;
     } catch (error) {
-      if (error instanceof JevUnavailableError || error instanceof JevRequestError) {
-        return finish("jev_unavailable", { jevRetried: error.message });
+      if (
+        error instanceof JevUnavailableError ||
+        error instanceof JevRequestError ||
+        error instanceof JevInvalidResponseError
+      ) {
+        return finish("jev_unavailable", { jevRetried: error.message, reason: error.message });
       }
       throw error;
     }

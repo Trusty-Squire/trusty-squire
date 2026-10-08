@@ -22,7 +22,19 @@ for (const base of ["provision-drive", "inject-card"]) {
     }
   }
   const referenced = new Set();
-  if (base === "provision-drive") referenced.add("captureJson");
+  if (base === "provision-drive") {
+    for (const name of [
+      "captureJson",
+      "captureClickSchema",
+      "captureActionSchema",
+      "captureExtractSchema",
+      "captureJsonFor",
+      "CAPTURE_NOTE",
+      "CLICK_CAPTURE_NOTE",
+      "EXTRACT_CAPTURE_NOTE",
+    ])
+      referenced.add(name);
+  }
   const visit = (node) => {
     if (ts.isIdentifier(node)) referenced.add(node.text);
     ts.forEachChild(node, visit);
@@ -70,19 +82,21 @@ for (const base of ["provision-drive", "inject-card"]) {
     );
     // The source applies shared capture metadata after declaring its tools.
     pieces.push(
-      `const captureOutputSchema = ${source.slice(source.indexOf("const captureOutputSchema = ") + "const captureOutputSchema = ".length, source.indexOf("\n\nfor (const tool of OPERATE_TOOLS)"))}`,
+      source.slice(
+        source.indexOf("const captureOutputSchema = "),
+        source.indexOf("  const handler = tool.handler;"),
+      ) + "}\n",
     );
-    pieces.push(`for (const tool of OPERATE_TOOLS) {
-      if (!["operate_click", "operate_type", "operate_select", "operate_press", "operate_extract"].includes(tool.name)) continue;
-      const properties = tool.jsonInputSchema.properties;
-      if (properties !== null && typeof properties === "object") Object.assign(properties, { capture: captureJson });
-      tool.description += " Optional capture:{store,source:{role,name?,container?}|{selector,container?}} vaults exactly one revealed source and returns metadata only; the source is resolved against the document AFTER the action's mutation settles, and a stored result names the resolved element in resolved_source. Use a value-free CSS selector for a plain-text copy field without a textbox/code role. Resolution pierces open shadow roots: a bare selector, a role, or a cross-shadow [container] descendant selector all reach shadow-hosted fields (e.g. Groq's id-less created-key <input> inside an open shadow root); when the role is textbox, an id-less text input whose value looks secret-shaped also matches if it is the only textbox in the container/document. A source matching nothing returns error capture_unresolved with candidate_count 0 and a found list of the roles/names that DID render (never values) — use it to pick the next source; capture_ambiguous is reserved for more than one match. If storage is unresolved, retry operate_extract with capture.write_id. An unresolved capture does not block unrelated actions.";
-      tool.jsonOutputSchema = captureOutputSchema;
-    }`);
     pieces.push(source.slice(source.indexOf("// Keep the additive click receipt"), source.length));
   }
+  const outputPath = resolve(root, `${base}-schema.ts`);
+  const prettierConfig =
+    base === "provision-drive" ? ((await prettier.resolveConfig(outputPath)) ?? {}) : {};
   writeFileSync(
-    resolve(root, `${base}-schema.ts`),
-    await prettier.format(pieces.join("\n\n") + "\n", { parser: "typescript" }),
+    outputPath,
+    await prettier.format(pieces.join("\n\n") + "\n", {
+      ...prettierConfig,
+      parser: "typescript",
+    }),
   );
 }

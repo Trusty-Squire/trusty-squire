@@ -745,6 +745,14 @@ function submitsOnEnter(el: InteractiveElement, ariaLabel: string): boolean {
   );
 }
 
+async function submitTypedField(
+  browser: BrowserController,
+  page: Page | undefined,
+  submit: boolean,
+): Promise<void> {
+  if (submit) await browser.press("Enter", page);
+}
+
 function scopeForElement(page: Page, el: InteractiveElement): Page | Frame {
   if (el.framePath === undefined || el.framePath === null || el.framePath.length === 0) return page;
   let frame: Frame = page.mainFrame();
@@ -1048,6 +1056,7 @@ async function executeAct(
           }
           try {
             await browser.typeHandle(resolved.handle, value, true);
+            await submitTypedField(browser, compactV2ActionPage, action.submit === true);
           } finally {
             await resolved.handle.dispose().catch(() => undefined);
           }
@@ -1075,6 +1084,7 @@ async function executeAct(
         // Type the REAL value into the page. It crosses only browser↔page; the
         // value is never returned to the host and never logged.
         await actType(actDriverTarget(el), value, true);
+        await submitTypedField(browser, compactV2ActionPage, action.submit === true);
         audit(sessionId, "type_secret", {
           slot: action.slot,
           target: auditTarget,
@@ -1195,7 +1205,10 @@ async function executeAct(
                     method: action.kind,
                   });
                 })) ?? actionPageAfter;
-            } else await actType({ kind: "handle", handle: resolved.handle }, typedText!, false);
+            } else {
+              await actType({ kind: "handle", handle: resolved.handle }, typedText!, false);
+              await submitTypedField(browser, compactV2ActionPage, action.submit === true);
+            }
           } finally {
             await resolved.handle.dispose().catch(() => undefined);
           }
@@ -1301,17 +1314,15 @@ async function executeAct(
             await compactV2ActionPage.keyboard.press("ControlOrMeta+a");
             await compactV2ActionPage.keyboard.insertText(typedText ?? "");
             await waitForOverlayOptionsToChange(compactV2ActionPage, overlayBefore);
-            if (submitsOnEnter(el, ariaLabelAttribute)) {
-              await compactV2ActionPage.keyboard.press("Enter").catch(() => undefined);
-            }
           } else {
             await actType(actTarget, typedText!, false);
-            if (options?.drive === true && submitsOnEnter(el, ariaLabelAttribute)) {
-              await (compactV2ActionPage ?? browser.page)?.keyboard
-                .press("Enter")
-                .catch(() => undefined);
-            }
           }
+          await submitTypedField(
+            browser,
+            compactV2ActionPage,
+            action.submit === true ||
+              (options?.drive === true && submitsOnEnter(el, ariaLabelAttribute)),
+          );
           // #635 fix (not a gate on typing): Shopify only enables delivery-rate
           // selection after the required address line is committed by
           // blur/change, not merely after the raw keystrokes land.
@@ -1499,7 +1510,11 @@ async function executeAct(
             actionObservationPage,
             true,
             outputFormat,
-            outputFormat === "compact",
+            outputFormat === "compact" &&
+              !(
+                (action.kind === "type" || action.kind === "type_secret") &&
+                action.submit === true
+              ),
             compactMapEmitted,
             undefined,
             // E4: echo the acted control's current row (w=acted) in the delta

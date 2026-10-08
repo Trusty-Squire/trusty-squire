@@ -76,30 +76,104 @@ describe("the raw-value path is steered as the last resort", () => {
   });
 });
 
-// A screenshot is a full image — by far the most expensive thing on this tool
-// surface. The description is the only place that cost is visible to the model
-// before it spends it, so the steering is pinned here. It is a WARNING, not a
-// ban: the 3DS/captcha frame capture the tool exists for stays available.
-describe("the screenshot path is steered as expensive, not forbidden", () => {
+// Screenshots cost more context than DOM reads, but remain a normal way to
+// observe a bank challenge or target a visible control.
+describe("the screenshot path is steered for visual state", () => {
   const description = provisionScreenshotTool.description;
 
-  it("warns that a screenshot is expensive", () => {
-    expect(description).toContain("EXPENSIVE");
-    expect(description).toMatch(/costs far more context/i);
+  it("states its context cost", () => {
+    expect(description).toMatch(/costs more context than operate_observe/i);
   });
 
-  it("names DOM serialization as the route to try first", () => {
-    expect(description).toMatch(/DOM tree/);
+  it("offers visual and bank-challenge checks", () => {
     expect(description).toContain("operate_observe");
-    expect(description).toContain("query/cursor");
-    expect(description).toMatch(/ONLY when/);
-    expect(description).toMatch(/NOT sufficient/);
+    expect(description).toContain("bank approval");
+    expect(description).toContain("coordinate click");
   });
 
-  it("stays a warning — the debugging capture it exists for is still offered", () => {
+  it("offers isolated challenge frames", () => {
     expect(description).toContain("frame_url_contains");
     expect(description).toMatch(/3-D Secure ACS frame/);
     expect(description).not.toMatch(/refus/i);
+  });
+});
+
+describe("capture schemas match their handlers", () => {
+  const captureFor = (name: string) => {
+    const tool = OPERATE_TOOLS.find((entry) => entry.name === name)!;
+    return (tool.jsonInputSchema.properties as Record<string, unknown>).capture as {
+      properties: {
+        write_id?: unknown;
+        source: { oneOf: unknown[]; properties: Record<string, unknown> };
+      };
+    };
+  };
+
+  it("offers write_id only on operate_extract and clipboard only on operate_click", () => {
+    for (const name of [
+      "operate_click",
+      "operate_type",
+      "operate_select",
+      "operate_press",
+      "operate_extract",
+    ]) {
+      const capture = captureFor(name);
+      expect("write_id" in capture.properties).toBe(name === "operate_extract");
+      expect("clipboard" in capture.properties.source.properties).toBe(name === "operate_click");
+      expect(capture.properties.source.oneOf).toHaveLength(name === "operate_click" ? 3 : 2);
+    }
+  });
+
+  it("rejects unusable capture inputs before dispatch", () => {
+    const store = { service: "example" };
+    const element = { selector: "input" };
+    const inputs: Record<string, Record<string, unknown>> = {
+      operate_click: { session_id: "session", ref: "e1" },
+      operate_type: { session_id: "session", ref: "e1", text: "value" },
+      operate_select: { session_id: "session", ref: "e1", values: ["one"] },
+      operate_press: { session_id: "session", key: "Enter" },
+      operate_extract: { session_id: "session" },
+    };
+    for (const name of ["operate_click", "operate_type", "operate_select", "operate_press"]) {
+      const tool = OPERATE_TOOLS.find((entry) => entry.name === name)!;
+      expect(
+        tool.inputSchema.safeParse({ ...inputs[name], capture: { store, source: element } })
+          .success,
+      ).toBe(true);
+      expect(
+        tool.inputSchema.safeParse({
+          ...inputs[name],
+          capture: { store, source: element, write_id: "old" },
+        }).success,
+      ).toBe(false);
+    }
+    for (const name of ["operate_type", "operate_select", "operate_press", "operate_extract"]) {
+      const tool = OPERATE_TOOLS.find((entry) => entry.name === name)!;
+      expect(
+        tool.inputSchema.safeParse({
+          ...inputs[name],
+          capture: { store, source: { clipboard: true } },
+        }).success,
+      ).toBe(false);
+    }
+    expect(
+      operateClickTool.inputSchema.safeParse({
+        ...inputs.operate_click,
+        capture: { store, source: { clipboard: true } },
+      }).success,
+    ).toBe(true);
+    expect(
+      OPERATE_TOOLS.find((entry) => entry.name === "operate_extract")!.inputSchema.safeParse({
+        ...inputs.operate_extract,
+        capture: { store, source: element, write_id: "old" },
+      }).success,
+    ).toBe(true);
+  });
+
+  it("navigation does not promise a control-plane restriction", () => {
+    expect(
+      OPERATE_TOOLS.find((entry) => entry.name === "operate_navigate")!.description,
+    ).not.toMatch(/control-plane|refused/);
   });
 });
 

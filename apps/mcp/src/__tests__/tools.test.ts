@@ -512,10 +512,10 @@ describe("TOOLS registry", () => {
       const description = TOOLS.find((tool) => tool.name === name)?.description ?? "";
       expect(description).toContain("browser-use-dom");
       expect(description).toContain("delta:true");
-      expect(description).toContain("replaces the entire prior tree");
-      expect(description).toContain("when omitted retain the prior tree");
+      expect(description).toContain("a present `dom` replaces the prior tree");
+      expect(description).toContain("otherwise keep it");
       expect(description).toContain("removed");
-      expect(description).toContain("reset the prior view");
+      expect(description).toContain("reset the view");
       expect(description).toContain("Refs stay usable on the same document");
     }
     const start = TOOLS.find((tool) => tool.name === "operate_start")?.description ?? "";

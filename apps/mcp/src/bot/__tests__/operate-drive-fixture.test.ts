@@ -12,6 +12,7 @@ import type { ApiClient } from "../../api-client.js";
 import { BrowserController } from "../browser.js";
 import {
   JevUnavailableError,
+  askJev,
   type JevAnswer,
   type JevCallOutcome,
   type JevQuestion,
@@ -655,6 +656,80 @@ describe("operate_drive real-browser fixture", () => {
       expect(JSON.stringify(handoff.observation?.safe_table)).toContain("@company");
     } finally {
       if (started !== undefined) await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
+  it("dismisses a cookie banner on a drive start before its first snapshot", async () => {
+    const html = `<main><form><label>Search <input type="search" name="q"></label></form></main>
+      <div id="consent" style="position:fixed;inset:0;background:white;z-index:10">
+        <button onclick="document.querySelector('#consent').remove()">Accept all cookies</button>
+      </div>`;
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await page.route("**/*", (route) => route.fulfill({ contentType: "text/html", body: html }));
+    let sessionId: string | undefined;
+    try {
+      const dependencies = deps(async (_api, _state, questions) =>
+        jevFromQuestions(questions, true),
+      );
+      dependencies.startSession = async (options) => {
+        const started = await startHarnessProvisionSession({
+          ...options,
+          browser: BrowserController.fromHarnessPage(page),
+        });
+        sessionId = started.session_id;
+        return started;
+      };
+      await runOperateDrive(
+        { url: "https://consent-drive.test/", goal: "inspect the page" },
+        api(),
+        undefined,
+        dependencies,
+      );
+      expect(await page.locator("#consent").count()).toBe(0);
+    } finally {
+      if (sessionId !== undefined) await finishProvisionSession(sessionId);
+      await context.close();
+    }
+  }, 30_000);
+
+  it("submits a search field with Enter after typing on a drive start", async () => {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await page.route("**/*", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: `<form onsubmit="event.preventDefault();document.querySelector('#result').textContent='submitted'">
+          <label>Search <input type="search" name="q"></label></form><p id="result"></p>`,
+      }),
+    );
+    let sessionId: string | undefined;
+    try {
+      const dependencies = deps(async (_api, _state, questions) => jevFromQuestions(questions));
+      dependencies.startSession = async (options) => {
+        const started = await startHarnessProvisionSession({
+          ...options,
+          browser: BrowserController.fromHarnessPage(page),
+        });
+        sessionId = started.session_id;
+        return started;
+      };
+      await runOperateDrive(
+        {
+          url: "https://search-drive.test/",
+          goal: "search for widgets",
+          facts: { q: "widgets", search: "widgets" },
+          max_steps: 2,
+        },
+        api(),
+        undefined,
+        dependencies,
+      );
+      expect(await page.locator('input[name="q"]').inputValue()).toBe("widgets");
+      expect(await page.locator("#result").textContent()).toBe("submitted");
+    } finally {
+      if (sessionId !== undefined) await finishProvisionSession(sessionId);
       await context.close();
     }
   }, 30_000);
@@ -3611,6 +3686,33 @@ describe("operate_drive real-browser fixture", () => {
       );
       expect(handoff.status).toBe("jev_unavailable");
       expect(handoff.jev_retried).toContain("503");
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
+  it.each([
+    ["non-JSON", "<html>oops</html>"],
+    ["wrong-shape", '{"model":"jev-latest"}'],
+  ])("returns resumable jev_unavailable for a %s Jev reply", async (_kind, body) => {
+    const { context, started } = await openFixture(NOOP_HTML, "signup-jev-invalid.test");
+    const jevApi = {
+      listCredentials: vi.fn().mockResolvedValue({ credentials: [] }),
+      decide: vi.fn().mockResolvedValue({ status: 200, body }),
+    } as unknown as ApiClient;
+    try {
+      const handoff = await runOperateDrive(
+        { session_id: started.session_id, goal: "anything" },
+        jevApi,
+        undefined,
+        deps(askJev),
+      );
+      expect(handoff.status).toBe("jev_unavailable");
+      expect(handoff.reason).toContain("jev_invalid_response");
+      expect(handoff.reason).toContain(body);
+      expect(handoff.session_id).toBe(started.session_id);
+      expect(jevApi.decide).toHaveBeenCalledTimes(1);
     } finally {
       await finishProvisionSession(started.session_id);
       await context.close();
