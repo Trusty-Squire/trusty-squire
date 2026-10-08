@@ -17,10 +17,7 @@ import { writeSync } from "node:fs";
 import { hostname } from "node:os";
 import type { CeremonyBrowserPlacement } from "../bot/google-login.js";
 import type { OAuthProviderId } from "../bot/oauth-providers.js";
-import {
-  profileOperationIsLocked,
-  readLockHolder,
-} from "../bot/profile.js";
+import { profileOperationIsLocked, readLockHolder } from "../bot/profile.js";
 import type { SessionData } from "../session.js";
 
 export const CONNECT_STATES = ["connected", "needs-sign-in", "busy", "no-browser"] as const;
@@ -60,9 +57,9 @@ export type ConnectBrowserLocation =
 
 export interface ConnectAccount {
   id: string;
-  // What the run's provider probe actually saw. `[]` means it read the profile
-  // and found nothing; `null` means it could not read the profile at all, which
-  // is a different answer and must not be flattened into "none".
+  // Providers established by this run. An in-profile Google ceremony proves
+  // Google directly; --skip-browser and preflight use the profile probe.
+  // `null` means the probe could not read the profile at all.
   providers: OAuthProviderId[] | null;
 }
 
@@ -85,9 +82,9 @@ interface ConnectReportFields {
  * nowhere to send anyone. A `no-browser` run may also still hold a live URL (the ceremony
  * could not be shown here, but the install is still open). `account` is set
  * whenever the run proved which account this machine is bound to, which is
- * not only when it ends `connected`, and its `providers` says what the probe
- * saw — `null` when it could not look; `reason` is null when the other fields
- * already say everything there is to say.
+ * not only when it ends `connected`. Its `providers` names sessions established
+ * by the in-profile ceremony or observed by a profile probe; `null` means the
+ * probe could not look. `reason` is null when the other fields suffice.
  */
 export type ConnectReport =
   | (ConnectReportFields & { state: "needs-sign-in"; sign_in_url: string })
@@ -108,6 +105,7 @@ export type ConnectOutcome =
       kind: "ceremony_complete";
       account_id: string;
       providers: OAuthProviderId[] | null;
+      in_profile_ceremony?: boolean;
       requested_provider?: OAuthProviderId;
     }
   | { kind: "profile_busy" }
@@ -189,32 +187,37 @@ export function buildConnectReport(input: ConnectReportInput): ConnectReport {
         account: connectedAccount(outcome.account_id, outcome.providers),
       });
     case "ceremony_complete": {
-      const gate = decideConnectComplete(outcome.providers, outcome.requested_provider);
+      const providers: OAuthProviderId[] | null = outcome.in_profile_ceremony
+        ? ["google", ...(outcome.providers ?? []).filter((provider) => provider !== "google")]
+        : outcome.providers;
+      const gate = decideConnectComplete(
+        providers,
+        outcome.requested_provider,
+        outcome.in_profile_ceremony === true,
+      );
       if (gate.ok) {
         return settled("connected", null, input, {
-          account: connectedAccount(outcome.account_id, outcome.providers),
+          account: connectedAccount(outcome.account_id, providers),
         });
       }
-      // The ceremony claimed the install and the session was written, so the
-      // binding is proven even though the probe could not read the profile.
+      // The external-browser claim bound the account, but the bot profile
+      // could not be checked.
       if (gate.reason === "probe_failed") {
         return settled("busy", "profile_unverifiable", input, {
-          account: connectedAccount(outcome.account_id, outcome.providers),
+          account: connectedAccount(outcome.account_id, providers),
         });
       }
       // The run fails and exits non-zero on this gate, so the machine channel
-      // must not answer `connected`: the browser is not signed in the way the
-      // caller asked for, and the reason names the gap.
+      // must not answer `connected` for a missing requested provider.
       if (gate.reason === "requested_provider_missing") {
         return settled("no-browser", "requested_provider_missing", input, {
-          account: connectedAccount(outcome.account_id, outcome.providers),
+          account: connectedAccount(outcome.account_id, providers),
         });
       }
-      // The session was written and the agent config rebound before the probe
-      // ran, so this machine IS bound to that account — the empty provider
-      // list is the observation, not a reason to drop the binding.
+      // The external-browser session was written before the profile probe,
+      // so the account binding remains known even when Google is absent.
       return settled("no-browser", "provider_session_missing", input, {
-        account: connectedAccount(outcome.account_id, outcome.providers),
+        account: connectedAccount(outcome.account_id, providers),
       });
     }
     case "unverified":
@@ -270,9 +273,9 @@ export function connectIncompleteMessage(
   switch (reason) {
     case "probe_failed":
       return (
-        `This machine is bound to your account, but I couldn't verify a live Google session ` +
-        `in the bot's Chrome profile, so I won't call this connected. ` +
-        `Close any other Trusty Squire session and re-run ${retry}.`
+        `This machine is bound to your account and its session was saved, but the Google ` +
+        `session in the bot's Chrome profile could not be verified. ` +
+        `Re-run ${retry} without --skip-browser to sign in there.`
       );
     case "no_google_session":
       return (
@@ -356,10 +359,9 @@ export function decideConnectPreflight(
 }
 
 /**
- * The providers the post-ceremony probe must wait for before it may answer.
+ * The providers the --skip-browser post-ceremony probe must wait for.
  *
- * This is exactly what `decideConnectComplete` goes on to DEMAND, and the two
- * must not drift: Google is required on every run, plus an explicitly
+ * Google is required on the external-browser path, plus an explicitly
  * requested `--force-relogin=<provider>`. Awaiting only the requested one let
  * the snapshot answer on cookies that were already on disk — a profile with
  * GitHub committed from an earlier run returns `["github"]` on the first read
@@ -375,12 +377,21 @@ export function providersConnectMustAwait(requestedProvider?: OAuthProviderId): 
 export function decideConnectComplete(
   providers: OAuthProviderId[] | null,
   requestedProvider?: OAuthProviderId,
+  inProfileCeremony = false,
 ): { ok: true } | { ok: false; reason: ConnectIncompleteReason } {
-  if (providers === null) return { ok: false, reason: "probe_failed" };
-  if (!providers.includes("google")) return { ok: false, reason: "no_google_session" };
+  // The successful claim in bot Chrome proves Google there. Only a claim in
+  // another browser needs the post-ceremony profile probe to establish it.
+  if (!inProfileCeremony) {
+    if (providers === null) return { ok: false, reason: "probe_failed" };
+    if (!providers.includes("google")) return { ok: false, reason: "no_google_session" };
+  }
   // A scoped --force-relogin=<provider> is an explicit ask; silently landing
   // only Google would report success for work the user didn't get.
-  if (requestedProvider !== undefined && !providers.includes(requestedProvider)) {
+  if (
+    requestedProvider !== undefined &&
+    requestedProvider !== "google" &&
+    !providers?.includes(requestedProvider)
+  ) {
     return { ok: false, reason: "requested_provider_missing" };
   }
   return { ok: true };

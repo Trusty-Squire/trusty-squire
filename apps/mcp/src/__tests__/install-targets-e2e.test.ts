@@ -74,7 +74,7 @@ vi.mock("../bot/google-login.js", async (importOriginal) => {
   return {
     ...actual,
     ensureOAuthSession: vi.fn(async () => ({ status: "logged_in" as const })),
-    // connect's success gate probes live provider cookies through
+    // --skip-browser probes provider cookies through
     // probeProviderSessionsAfterCeremony, whose own default reaches
     // detectActiveProviderSessions and launches a REAL persistent-context
     // Chrome on the bot profile. In a test that contends with any running
@@ -361,6 +361,59 @@ describe("connect --target=<agent> writes a valid config", () => {
     expect(session?.agent_session_token).toBe("ts_agent_test_token");
   });
 
+  it("accepts an in-profile Google claim without a post-ceremony probe", async () => {
+    vi.mocked(probeProviderSessionsAfterCeremony).mockClear();
+    const channel = captureMachineChannel();
+    try {
+      await connect({
+        command: "connect",
+        target: "hermes",
+        apiBase: "https://test.invalid",
+        skipBrowser: false,
+        forceRelogin: false,
+        noRegistry: false,
+        noInteractive: true,
+        json: true,
+      });
+      expect(probeProviderSessionsAfterCeremony).not.toHaveBeenCalled();
+      expect(channel.terminal()).toMatchObject({
+        state: "connected",
+        reason: null,
+        account: { providers: ["google"] },
+      });
+    } finally {
+      channel.restore();
+    }
+  });
+
+  it("still checks the bot profile after a --skip-browser claim", async () => {
+    vi.mocked(probeProviderSessionsAfterCeremony).mockClear();
+    vi.mocked(probeProviderSessionsAfterCeremony).mockResolvedValueOnce([]);
+    const channel = captureMachineChannel();
+    try {
+      await expect(
+        connect({
+          command: "connect",
+          target: "hermes",
+          apiBase: "https://test.invalid",
+          skipBrowser: true,
+          forceRelogin: false,
+          noRegistry: false,
+          noInteractive: true,
+          json: true,
+        }),
+      ).rejects.toThrow('process.exit unexpectedly called with "1"');
+      expect(probeProviderSessionsAfterCeremony).toHaveBeenCalledOnce();
+      expect(channel.terminal()).toMatchObject({
+        state: "no-browser",
+        reason: "provider_session_missing",
+        account: { providers: [] },
+      });
+    } finally {
+      channel.restore();
+    }
+  });
+
   it("--no-registry omits TRUSTY_SQUIRE_REGISTRY_URL from the config", async () => {
     await connect({
       command: "connect",
@@ -464,7 +517,8 @@ describe("connect --target=<agent> writes a valid config", () => {
     }
   });
 
-  it("reconnects Hermes in its recorded profile from lock through browser and success probe", async () => {
+  it("reconnects Hermes in its recorded profile from lock through browser", async () => {
+    vi.mocked(probeProviderSessionsAfterCeremony).mockClear();
     const hermesProfile = path.join(tmpHome, "profiles", "hermes");
     const codexProfile = path.join(tmpHome, "profiles", "codex");
     await AGENTS.hermes.writeConfig({
@@ -514,9 +568,7 @@ describe("connect --target=<agent> writes a valid config", () => {
       expect(openInstallConfirmInBotChrome).toHaveBeenCalledWith(
         expect.objectContaining({ profileDir: hermesProfile }),
       );
-      expect(probeProviderSessionsAfterCeremony).toHaveBeenLastCalledWith(hermesProfile, {
-        awaitProviders: ["google"],
-      });
+      expect(probeProviderSessionsAfterCeremony).not.toHaveBeenCalled();
       // The profile operation guard now belongs to the ceremony launcher
       // itself (launchCeremonyBrowserContext / the broker's own custody),
       // not to the connect flow around it — the ceremony this suite mocks

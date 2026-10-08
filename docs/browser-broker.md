@@ -254,18 +254,19 @@ broker or touching sibling operator tabs.
 An unreadable snapshot or failed live check reports `unverified`; a rejected
 Google session enters the ordinary Google refresh ceremony on plain `connect`.
 
-After the ceremony, `probeProviderSessionsAfterCeremony` first tries a live
-probe. If the broker still holds the profile, it polls committed-cookie
-snapshots for up to 45 seconds, awaiting Google and any explicitly requested
-provider before accepting early. The Google marker is then confirmed through
-the broker. Unreadable snapshots are unknown, not proof of sign-out; no
-provider list is persisted in the account session file. The ceremony
-completes as soon as the server claims the install (and any explicitly
-requested provider session is observed), closing its tab and noVNC exposure;
-the browser's nonce-scoped Finish callback is a courtesy that closes the page
-early, never a completion gate. A scoped GitHub refresh waits for its provider
-session to appear before the claim completes the ceremony. The post-ceremony
-provider gate reports any missing session.
+An in-profile ceremony's successful Google claim establishes the Google
+session in the bot's Chrome. Connect reports it directly: a post-ceremony
+cookie snapshot can still be empty while the broker holds Chrome and must not
+turn that claim into a negative. No provider list is persisted in the account
+session file. A scoped GitHub refresh waits for its provider session during
+the ceremony and reports a missing requested session. The ceremony closes its
+tab and noVNC exposure after the claim completes; the browser's nonce-scoped
+Finish callback is a courtesy that closes the page early, never a completion
+gate. With `--skip-browser`, the claim happens in a different browser, so
+`probeProviderSessionsAfterCeremony` still checks the bot profile afterward.
+It may poll committed-cookie snapshots for up to 45 seconds, awaiting Google
+and any explicitly requested provider. An unreadable snapshot is unknown,
+not proof of sign-out.
 
 When an install does need the login ceremony, the ceremony opens the confirm
 page as a TAB in the shared broker browser — an ordinary `open` on a
