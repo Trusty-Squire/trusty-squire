@@ -66,7 +66,7 @@ export function PasskeySetup({
     <div>
       {error !== null && <div className="form-err">{error}</div>}
       {recoveryRequired ? (
-        <div style={{ display: "flex", gap: "var(--s-3)", flexWrap: "wrap" }}>
+        <div className="approval-actions">
           <button className="btn-primary" type="button" disabled={disabled} onClick={() => void setup(false)}>
             {disabled ? "Recovering…" : "Use your existing passkey"}
           </button>

@@ -449,19 +449,20 @@ export default function PaymentApprovalPage() {
           <p className="pay-anchor">
             Pay with <span className="mono">{cardLine}</span> · {amountLabel} to {approval.merchant}
           </p>
-          <div style={{ display: "grid", gap: "10px" }}>
-            {needsCard ? null : jitReviewBlocked ? (
-              <div className="app-banner err">
-                {jitBindingMismatch
-                  ? "This payment was attached to a different card than the one you added."
-                  : (cardMetadataError ?? "We couldn't load the saved card for this payment.")}
-                {!jitBindingMismatch && (
-                  <button className="linkbtn" type="button" onClick={() => void refreshCeremony()}>
-                    Retry
-                  </button>
-                )}
-              </div>
-            ) : needsPasskeySetup ? (
+          {!needsCard && jitReviewBlocked && (
+            <div className="app-banner err">
+              {jitBindingMismatch
+                ? "This payment was attached to a different card than the one you added."
+                : (cardMetadataError ?? "We couldn't load the saved card for this payment.")}
+              {!jitBindingMismatch && (
+                <button className="linkbtn" type="button" onClick={() => void refreshCeremony()}>
+                  Retry
+                </button>
+              )}
+            </div>
+          )}
+          <div className="approval-actions">
+            {needsCard || jitReviewBlocked ? null : needsPasskeySetup ? (
               <PasskeySetup onSetup={setUpPasskey} busy={busy} cardName={cardLine} />
             ) : (
               <button
@@ -473,16 +474,14 @@ export default function PaymentApprovalPage() {
                 {busy ? "Working…" : "Approve payment"}
               </button>
             )}
-            <div>
-              <button
-                className="btn-secondary"
-                type="button"
-                onClick={() => void denyApproval()}
-                disabled={busy}
-              >
-                Deny payment
-              </button>
-            </div>
+            <button
+              className="btn-secondary"
+              type="button"
+              onClick={() => void denyApproval()}
+              disabled={busy}
+            >
+              Deny payment
+            </button>
           </div>
         </section>
       )}

@@ -167,6 +167,13 @@ describe("card mutation approval page", () => {
     expect((screen.getByLabelText("City") as HTMLInputElement).value).toBe("Testville");
   });
 
+  it("lets a visitor leave the edit form without submitting a card mutation", async () => {
+    const user = await openEditor();
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(router.push).toHaveBeenCalledWith("/");
+    expect(api.apiPost).not.toHaveBeenCalled();
+  });
+
   it("corrects a malformed stored expiry in place and submits the re-encrypted card", async () => {
     const user = await openEditor();
     const expiry = screen.getByLabelText("Expiration") as HTMLInputElement;

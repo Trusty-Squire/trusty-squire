@@ -330,7 +330,9 @@ describe("credential fetch approval page", () => {
     const user = userEvent.setup();
     await user.click(await screen.findByRole("button", { name: "Approve reveal" }));
 
-    await waitFor(() => expect(screen.getByText(/credential_fetch_approval_expired/)).toBeTruthy());
+    await waitFor(() =>
+      expect(screen.getByText("This approval has expired. Ask the agent to request a new one.")).toBeTruthy(),
+    );
     expect(router.replace).not.toHaveBeenCalled();
   });
 
@@ -344,7 +346,7 @@ describe("credential fetch approval page", () => {
 
     render(<CredentialFetchApprovalPage />);
     await waitFor(() =>
-      expect(screen.getByText(/credential_fetch_approval_not_found/)).toBeTruthy(),
+      expect(screen.getByText("This approval link is invalid or was already used.")).toBeTruthy(),
     );
     expect(router.replace).not.toHaveBeenCalled();
     expect(api.apiPost).not.toHaveBeenCalled();

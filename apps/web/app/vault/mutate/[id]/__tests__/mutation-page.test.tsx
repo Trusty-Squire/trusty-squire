@@ -16,7 +16,7 @@ const api = vi.hoisted(() => {
 
   return { ApiError, apiGet: vi.fn(), apiPost: vi.fn() };
 });
-const router = vi.hoisted(() => ({ replace: vi.fn() }));
+const router = vi.hoisted(() => ({ push: vi.fn(), replace: vi.fn() }));
 const vouchflow = vi.hoisted(() => ({ signPayload: vi.fn() }));
 const pairing = vi.hoisted(() => ({
   getPairingState: vi.fn(),
@@ -113,7 +113,7 @@ describe("credential mutation approval page", () => {
     render(<CredentialMutationApprovalPage />);
 
     await waitFor(() =>
-      expect(screen.getByText(/credential_mutation_approval_not_found/)).toBeTruthy(),
+      expect(screen.getByText("This approval link is invalid or was already used.")).toBeTruthy(),
     );
     expect(router.replace).not.toHaveBeenCalled();
     expect(api.apiPost).not.toHaveBeenCalled();
@@ -126,6 +126,13 @@ describe("credential mutation approval page", () => {
     expect(screen.getByText("vault://account/subscription/credential")).toBeTruthy();
     expect(screen.getByText("api.openai.com")).toBeTruthy();
     expect(screen.getByText("api.openai.com, uploads.openai.com")).toBeTruthy();
+  });
+
+  it("lets a visitor leave without submitting a mutation", async () => {
+    render(<CredentialMutationApprovalPage />);
+    await userEvent.setup().click(await screen.findByRole("button", { name: "Cancel" }));
+    expect(router.push).toHaveBeenCalledWith("/");
+    expect(api.apiPost).not.toHaveBeenCalled();
   });
 
   it("signs with the credential-mutation context and submits only the JWS", async () => {

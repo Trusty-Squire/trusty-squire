@@ -223,23 +223,37 @@ export default function CredentialMutationApprovalPage() {
             </div>
           )}
 
-          {ceremony.status === "pending" &&
-            (needsPasskeySetup ? (
-              <PasskeySetup onSetup={setUpPasskey} busy={busy} />
-            ) : (
-              <button
-                className="btn-primary"
-                type="button"
-                onClick={() => void approve()}
-                disabled={busy}
-              >
-                {busy
-                  ? "Approving…"
-                  : ceremony.operation === "delete"
-                    ? "Approve deletion"
-                    : "Approve edit"}
-              </button>
-            ))}
+          {ceremony.status === "pending" && (
+            <>
+              <div className="approval-actions">
+                {needsPasskeySetup ? (
+                  <PasskeySetup onSetup={setUpPasskey} busy={busy} />
+                ) : (
+                  <button
+                    className="btn-primary"
+                    type="button"
+                    onClick={() => void approve()}
+                    disabled={busy}
+                  >
+                    {busy
+                      ? "Approving…"
+                      : ceremony.operation === "delete"
+                        ? "Approve deletion"
+                        : "Approve edit"}
+                  </button>
+                )}
+                <button
+                  className="btn-secondary"
+                  type="button"
+                  onClick={() => router.push("/")}
+                  disabled={busy}
+                >
+                  Cancel
+                </button>
+              </div>
+              <p className="app-sub">Cancel leaves this request pending until it expires.</p>
+            </>
+          )}
         </section>
       )}
     </AppShell>
