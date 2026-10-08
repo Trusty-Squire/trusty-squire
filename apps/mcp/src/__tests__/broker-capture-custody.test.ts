@@ -127,14 +127,15 @@ it("keeps ordinary actions and vaulting usable while a capture is unresolved", a
     expect(storeWriteIds[1]).not.toBe(write_id);
     expect(storeWriteIds[2]).toBe(write_id);
     expect(state.action).toHaveBeenCalledTimes(3);
-    // Finish is the terminal: it proceeds (no custody fence) and retires the
-    // session, so it must come last.
+    // The removed combined finish returns migration guidance without another
+    // vault write or a session teardown.
     const finish = await client.callTool({
       name: "operate_finish",
       arguments: { session_id: sessionId, outcome: "credentials", store: { service: "Example" } },
     });
-    expect(finish.isError).not.toBe(true);
-    expect(storeCredential).toHaveBeenCalledTimes(4); // + finish's own vault store
+    expect(finish.isError).toBe(true);
+    expect(JSON.stringify(finish)).toContain("operate_extract");
+    expect(storeCredential).toHaveBeenCalledTimes(3);
   } finally {
     await client.close();
     await server.close();

@@ -26,7 +26,6 @@ for (const base of ["provision-drive", "inject-card"]) {
     for (const name of [
       "captureJson",
       "captureClickSchema",
-      "captureActionSchema",
       "captureExtractSchema",
       "captureJsonFor",
       "CAPTURE_NOTE",

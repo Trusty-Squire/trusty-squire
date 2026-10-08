@@ -369,19 +369,13 @@ it("roundtrips flat finish schemas and typed receipts through the MCP SDK", asyn
     const finish = listed.tools.find((tool) => tool.name === "operate_finish");
     expect(finish?.inputSchema.properties?.outcome).toMatchObject({
       type: "string",
-      enum: ["none", "credentials", "result"],
+      enum: ["none", "result", "credentials"],
     });
     expect(finish?.outputSchema).toMatchObject({
       type: "object",
       properties: { closed: { type: "boolean" } },
     });
-    for (const name of [
-      "operate_click",
-      "operate_type",
-      "operate_select",
-      "operate_press",
-      "operate_extract",
-    ]) {
+    for (const name of ["operate_click", "operate_extract"]) {
       const tool = listed.tools.find((tool) => tool.name === name);
       expect(tool?.inputSchema.properties?.capture).toMatchObject({
         type: "object",
@@ -395,6 +389,14 @@ it("roundtrips flat finish schemas and typed receipts through the MCP SDK", asyn
           closed: { type: "boolean" },
         },
       });
+    }
+    for (const name of ["operate_type", "operate_select", "operate_press"]) {
+      const tool = listed.tools.find((candidate) => candidate.name === name);
+      expect(tool?.inputSchema.properties?.capture).toMatchObject({
+        type: "object",
+        deprecated: true,
+      });
+      expect(tool?.outputSchema).toBeUndefined();
     }
     const result = await client.callTool({
       name: "operate_finish",
@@ -485,7 +487,7 @@ it("publishes literal role constraints matching the observe runtime validator", 
   }
 });
 
-it("publishes action format and capture-role enums matching the runtime validators", async () => {
+it("publishes action format and capture migration schemas matching the runtime validators", async () => {
   const client = await connectedClient();
   const cases = [
     [operateClickTool, { session_id: "fixture", ref: "@continue" }],
@@ -519,7 +521,7 @@ it("publishes action format and capture-role enums matching the runtime validato
       }
     }
 
-    for (const [runtimeTool, baseArgs] of cases.slice(0, 4)) {
+    for (const [runtimeTool, baseArgs] of cases.slice(0, 1)) {
       const published = listed.tools.find((candidate) => candidate.name === runtimeTool.name)!;
       const capture = published.inputSchema.properties?.capture as
         | {
@@ -549,6 +551,16 @@ it("publishes action format and capture-role enums matching the runtime validato
           accepted,
         );
       }
+    }
+    for (const [runtimeTool, baseArgs] of cases.slice(1, 4)) {
+      const published = listed.tools.find((candidate) => candidate.name === runtimeTool.name)!;
+      expect(published.inputSchema.properties?.capture).toMatchObject({ deprecated: true });
+      const validate = new AjvJsonSchemaValidator().getValidator(
+        published.inputSchema as JsonSchemaType,
+      );
+      const args = { ...baseArgs, capture: { store: { service: "Fixture" } } };
+      expect(validate(args).valid).toBe(true);
+      expect(runtimeTool.inputSchema.safeParse(args).success).toBe(true);
     }
   } finally {
     await client.close();
