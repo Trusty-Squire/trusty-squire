@@ -77,13 +77,11 @@ describe("flat operator workflow routing", () => {
     mocks.extractCredentials.mockResolvedValue({
       session_id: "session-extract",
       url: "https://example.test/keys",
-      credentials: { client_secret: rawSecret },
-      candidate_count: 1,
+      credentials: { api_key: rawSecret },
     });
     const legacyInput = {
       session_id: "session-extract",
       into_slot: "sealed_secret",
-      secret_label: "client secret",
     };
 
     const consolidated = await provisionExtractTool.handler(
@@ -102,7 +100,6 @@ describe("flat operator workflow routing", () => {
       session_id: "session-store",
       url: "https://example.test/keys",
       credentials: { api_key: rawSecret },
-      candidate_count: 1,
     });
     const storeCredential = vi.fn().mockResolvedValue({
       reference: "vault://acct/cred_1",

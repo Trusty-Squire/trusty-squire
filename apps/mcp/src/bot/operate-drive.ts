@@ -106,14 +106,8 @@ import {
   solveVisibleCaptcha,
 } from "./captcha.js";
 import type { CaptchaSolveResult } from "./captcha.js";
-import {
-  findCredentialTokens,
-  isMaskedDisplay,
-  looksLikeCredentialValue,
-  pickRelaxedNearCopyCredential,
-} from "./credential-shape.js";
-import { extractApiKeyFromText } from "./credential-text.js";
-import { extractCredentials } from "./capture/capture.js";
+import { findCredentialTokens, isMaskedDisplay } from "./credential-shape.js";
+import { extractCredentials, storableCredentials } from "./capture/capture.js";
 import {
   DRIVE_FIXED_GO_BACK,
   DRIVE_FIXED_NONE_OF_THESE,
@@ -688,12 +682,15 @@ export function redactSecretShapedValue<T>(value: T, sessionId: string): T {
   return value;
 }
 
+/** Exact-value card mask only. This is all the model (Jev) input carries. */
+function maskCardValues<T>(session: Session, value: T): T {
+  return typeof session.browser.maskOperatorOutput === "function"
+    ? session.browser.maskOperatorOutput(value)
+    : value;
+}
+
 function maskDriveOutput<T>(session: Session, value: T): T {
-  const cardMasked =
-    typeof session.browser.maskOperatorOutput === "function"
-      ? session.browser.maskOperatorOutput(value)
-      : value;
-  return redactSecretShapedValue(cardMasked, session.id);
+  return redactSecretShapedValue(maskCardValues(session, value), session.id);
 }
 
 function appendDriveTrace(session: Session, entry: Record<string, unknown>): void {
@@ -1733,45 +1730,26 @@ export function pageShowsRevealedKey(rows: readonly WireRow[], _pageText: string
 }
 
 /** The drive's key-goal evidence comes from the same capture flow as
- * `operate_extract`. Named fields may include connection metadata, so only a
- * secret-shaped value can satisfy DONE. */
+ * `operate_extract`, which keeps only a value with a known source. */
 export interface DriveKeyEvidence {
   credentials: Record<string, string>;
-  /** Credential-shaped values that were still masked after the reveal pass. */
-  maskedRemaining: string[];
 }
 
 export function driveKeyGoalComplete(evidence: DriveKeyEvidence): boolean {
-  // Existing keys may stay masked on a list after a newly created key is
-  // shown once. A full captured secret satisfies this goal independently of
-  // those unread older entries.
-  return Object.entries(evidence.credentials).some(
-    ([field, value]) =>
-      looksLikeCredentialValue(value) ||
-      extractApiKeyFromText(value) === value ||
-      (field === "api_key" && pickRelaxedNearCopyCredential([value]) === value),
-  );
+  // DONE holds once the extraction yields a credential that operate_finish
+  // would store, whatever its shape.
+  return storableCredentials(evidence.credentials) !== null;
 }
 
 export async function driveKeyEvidence(sessionId: string): Promise<DriveKeyEvidence> {
   try {
     const extracted = await extractCredentials(sessionId);
-    return {
-      credentials: extracted.credentials,
-      maskedRemaining: extracted.masked_remaining ?? [],
-    };
+    return { credentials: extracted.credentials };
   } catch {
     // The completion check must never crash the loop; an unavailable page is
     // simply "no credential yet", and the loop carries on.
-    return { credentials: {}, maskedRemaining: [] };
+    return { credentials: {} };
   }
-}
-
-/** "still masked: a, b" for a stuck reason, or undefined when nothing was. */
-export function maskedRemainingReason(evidence: DriveKeyEvidence): string | undefined {
-  return evidence.maskedRemaining.length > 0
-    ? `still masked: ${evidence.maskedRemaining.join(", ")}`
-    : undefined;
 }
 
 export function isKeyCreateRow(row: WireRow): boolean {
@@ -1910,40 +1888,21 @@ export function attachRevealedSecretMarker(
     return { observation, rows: [...rows], attached: false };
   }
   const length = lengths.length > 0 ? Math.max(...lengths) : 16;
-  const redact = (text: string): string => redactSecretShapedTokens(text).text;
-  const nextRows = rows.map((row) => {
-    const role = redact(row[1]);
-    const facts = row[2] === undefined ? undefined : redact(row[2]);
-    if (role === row[1] && facts === row[2]) return row;
-    return (facts === undefined ? [row[0], role] : [row[0], role, facts]) as WireRow;
-  });
+  // The marker tells the model a key is on the page; the page content itself
+  // reaches it unaltered.
+  const nextRows = [...rows];
   if (!nextRows.some((row) => row[0] === REVEALED_SECRET_REF)) {
     nextRows.push(revealedSecretMarkerRow(length, tokens.size));
   }
   const headings = [
-    ...(observation.semantic?.headings ?? []).map(redact),
+    ...(observation.semantic?.headings ?? []),
     revealedSecretMarkerRow(length, tokens.size)[2]!,
   ];
   return {
     observation: {
       ...observation,
-      ...(observation.dom === undefined ? {} : { dom: redact(observation.dom) }),
       safe_table: nextRows as unknown as NonNullable<Observation["safe_table"]>,
-      semantic: {
-        ...observation.semantic,
-        ...(observation.semantic?.title === undefined
-          ? {}
-          : { title: redact(observation.semantic.title) }),
-        headings,
-        ...(observation.semantic?.blockers === undefined
-          ? {}
-          : {
-              blockers: observation.semantic.blockers.map((blocker) => ({
-                ...blocker,
-                text: redact(blocker.text),
-              })),
-            }),
-      },
+      semantic: { ...observation.semantic, headings },
     },
     rows: nextRows,
     attached: true,
@@ -3321,7 +3280,7 @@ export function selectTargets(
     const addOption = (text: string) => {
       if (texts.has(text)) return;
       texts.add(text);
-      const label = redactSecretShapedTokens(maskText(text)).text;
+      const label = maskText(text);
       const optionSlug = uniqueCriteriaSlug(label, used);
       used.add(optionSlug);
       targets.push({
@@ -6204,7 +6163,7 @@ async function driveLoop(input: {
         automaticDecisionRefused = true;
         return "continue";
       }
-      // A key goal requires a secret-shaped value from the same capture flow
+      // A key goal requires a storable credential from the same capture flow
       // as operate_extract. The model decides whether it satisfies the goal.
       const keyEvidence = isKeyGoal(drive.goal) ? await driveKeyEvidence(sessionId) : undefined;
       if (keyEvidence !== undefined && !driveKeyGoalComplete(keyEvidence)) {
@@ -6218,12 +6177,7 @@ async function driveLoop(input: {
           beforeFingerprint: drive.boundFingerprint ?? fresh,
           afterFingerprint: fresh,
         });
-        const masked = maskedRemainingReason(keyEvidence);
-        drive.history.push(
-          masked === undefined
-            ? "DONE refused: extraction found no secret-shaped credential"
-            : `DONE refused: ${masked}`,
-        );
+        drive.history.push("DONE refused: no Copy click yielded a key to store");
         drive.consumedActionKey = null;
         const stallKey = pageProgressKey(
           observation.url,
@@ -6234,7 +6188,8 @@ async function driveLoop(input: {
         drive.stallKeys ??= [];
         if (drive.stallKeys.includes(stallKey)) {
           return finish("stuck", {
-            reason: masked ?? "no stored credential is on the page",
+            reason:
+              "no key with a known source: read the page with operate_observe and point capture at the key",
           });
         }
         drive.stallKeys.push(stallKey);
@@ -7314,8 +7269,8 @@ async function driveLoop(input: {
     try {
       const jev = await dependencies.askJev(
         api!,
-        maskDriveOutput(session, state),
-        maskDriveOutput(session, questions),
+        maskCardValues(session, state),
+        maskCardValues(session, questions),
         context?.signal,
       );
       drive.jevCalls += 1;
@@ -7891,7 +7846,7 @@ async function driveLoop(input: {
       drive.filledRefs,
       pageUrl,
       pageOptions,
-      (text) => maskDriveOutput(session, text),
+      (text) => maskCardValues(session, text),
       skippedActions,
       {
         headings: observation.semantic?.headings ?? [],

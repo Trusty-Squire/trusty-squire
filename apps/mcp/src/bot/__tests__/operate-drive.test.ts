@@ -3512,7 +3512,7 @@ describe("post-confirmation navigation", () => {
     );
     expect(attached.attached).toBe(true);
     expect(pageShowsRevealedKey(attached.rows)).toBe(true);
-    expect(JSON.stringify(attached.observation)).not.toContain("sk_live_fixturekey01");
+    expect(JSON.stringify(attached.observation)).toContain("sk_live_fixturekey01");
     expect(JSON.stringify(attached.rows)).toMatch(/@key-value\|secret=1\|len=20/);
     expect(isEntityNameRow(name)).toBe(true);
     expect(matchingFactKeys({ company: "Acme" }, name)).toContain("company");
@@ -3998,7 +3998,7 @@ describe("dialog overlay secret and oauth bounce rules", () => {
     expect(sets.CLICK.map((entry) => entry.ref)).toContain("@e:x");
   });
 
-  it("masks a secret-shaped select option label", () => {
+  it("keeps a secret-shaped select option label unaltered for the model", () => {
     const select: WireRow = ["@e:tok", "s", "Token"];
     const targets = selectTargets(
       [
@@ -4013,7 +4013,7 @@ describe("dialog overlay secret and oauth bounce rules", () => {
       {},
       new Map([["@e:tok", ["sk_live_fixturekey01"]]]),
     );
-    expect(JSON.stringify(targets.map((entry) => entry.optionLabel ?? ""))).not.toContain(
+    expect(JSON.stringify(targets.map((entry) => entry.optionLabel ?? ""))).toContain(
       "sk_live_fixturekey01",
     );
     expect(targets.some((entry) => entry.option === "sk_live_fixturekey01")).toBe(true);
@@ -4026,7 +4026,7 @@ describe("dialog overlay secret and oauth bounce rules", () => {
       },
       [select],
     );
-    expect(JSON.stringify(attached.observation)).not.toContain("sk_live_fixturekey01");
+    expect(JSON.stringify(attached.observation)).toContain("sk_live_fixturekey01");
   });
 
   it("does not treat re-entering a keys page as a cycle while Create key is untried", () => {

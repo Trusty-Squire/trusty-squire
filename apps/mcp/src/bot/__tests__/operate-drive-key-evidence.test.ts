@@ -15,7 +15,7 @@ afterAll(async () => {
 });
 
 describe("drive key-goal evidence", () => {
-  it("does not complete on a page with connection examples but no generated key", async () => {
+  it("does not complete on a page that shows values but has no Copy-click key", async () => {
     const context = await browser.newContext();
     const page = await context.newPage();
     const html = `<!doctype html><main>
@@ -36,8 +36,7 @@ describe("drive key-goal evidence", () => {
     });
     try {
       const evidence = await driveKeyEvidence(started.session_id);
-      expect(evidence.credentials.project_id).toBe("proj_abc123def456");
-      expect(evidence.credentials.api_key).toBeUndefined();
+      expect(evidence.credentials).toEqual({});
       expect(driveKeyGoalComplete(evidence)).toBe(false);
     } finally {
       await finishProvisionSession(started.session_id);
@@ -45,23 +44,16 @@ describe("drive key-goal evidence", () => {
     }
   }, 30_000);
 
-  it("requires a secret-shaped extracted value regardless of its field name", () => {
+  it("completes on any storable extracted value, whatever its shape", () => {
+    for (const value of [
+      "d7bd47d70c1e4f2a9b3c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f80bd4a",
+      "Ab3kZ9",
+    ])
+      expect(driveKeyGoalComplete({ credentials: { api_key: value } })).toBe(true);
     expect(
       driveKeyGoalComplete({
-        credentials: {
-          region: "us-east-1",
-          table_name: "sample_table",
-          uri: "db://sample_project",
-          api_key: "YOUR_API_KEY",
-        },
-        maskedRemaining: [],
+        credentials: { project_id: "proj_abc123def456", api_key_truncated: "sk-…abcd" },
       }),
     ).toBe(false);
-    expect(
-      driveKeyGoalComplete({
-        credentials: { custom_field: "re_abcdefGHIJKLmnop1234567" },
-        maskedRemaining: [],
-      }),
-    ).toBe(true);
   });
 });

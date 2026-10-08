@@ -50,9 +50,7 @@ describe("direct-import selection", () => {
     const { tests, notes } = select("src/bot/credential-shape.ts");
     expect(tests).toContain("src/bot/__tests__/credential-shape.test.ts");
     expect(tests).toContain("src/bot/__tests__/provision-session.test.ts");
-    expect(tests).toContain("src/bot/capture/__tests__/capture.test.ts");
     expect(tests).toContain("src/bot/capture/__tests__/verification.test.ts");
-    expect(notes).toContain("skipped-hub-hop:src/tools/provision-drive.ts");
     expect(tests).not.toContain("src/bot/capture/__tests__/credential-capture-browser.test.ts");
     expect(tests).not.toContain("src/bot/__tests__/oauth-login.test.ts");
   });

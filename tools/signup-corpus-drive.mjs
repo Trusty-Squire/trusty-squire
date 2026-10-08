@@ -341,7 +341,6 @@ async function main() {
       event: "extract",
       stored: extracted.parsed.stored === true || extracted.parsed.stored_credential != null,
       reference: extracted.parsed.stored_credential?.reference ?? extracted.parsed.reference,
-      candidate_count: extracted.parsed.candidate_count,
       error: extracted.parsed.error,
     });
     const reference =

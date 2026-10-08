@@ -32,6 +32,7 @@ import {
   formSelectMany,
   TargetStaleError,
   extractCredentials,
+  storableCredentials,
   captureCredentialSource,
   probeCaptureSource,
   type CaptureSourceProbe,
@@ -47,7 +48,6 @@ import {
   type ProvisionAction,
   type ExtractResult,
 } from "../bot/provision-session.js";
-import { isMaskedDisplay } from "../bot/credential-shape.js";
 import { openSessionStorage } from "../session.js";
 import { servingAccountId } from "../session-guard.js";
 import { googleSessionGateForSession, sessionForCall } from "../bot/session/lifecycle.js";
@@ -597,7 +597,6 @@ const formSelectionsSchema = z
 interface ExtractArgs {
   session_id: string;
   into_slot?: string | undefined;
-  secret_label?: string | undefined;
   store?: StoreSpec | undefined;
 }
 
@@ -609,40 +608,20 @@ async function handleExtract(args: ExtractArgs, api: ApiClient | null) {
   // having to relay it. Mutually exclusive with store (a slotted secret is
   // being shuttled, not vaulted, in this call).
   if (args.into_slot !== undefined) {
-    const values = extracted.credentials;
-    const norm = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]/g, "");
-    const candidates = Object.entries(values).filter(
-      ([k, v]) => !k.endsWith("_truncated") && typeof v === "string" && v.length >= 8,
-    );
-    // A value that still LOOKS masked is never refused — it is simply ranked
-    // last, so a fully revealed sibling wins when the page shows both.
-    const ranked = [
-      ...candidates.filter(([, v]) => !isMaskedDisplay(v)),
-      ...candidates.filter(([, v]) => isMaskedDisplay(v)),
-    ];
-    // When the page shows several credentials (Google's client ID + secret),
-    // a secret_label picks the right one by field name; otherwise take the
-    // first full value. Falling back avoids a hard fail when the label misses.
-    const wantKey = args.secret_label !== undefined ? norm(args.secret_label) : null;
-    const matched = wantKey !== null ? ranked.find(([k]) => norm(k).includes(wantKey)) : undefined;
-    const full = (matched ?? ranked[0])?.[1];
-    if (typeof full !== "string" || full.length === 0) {
+    const full = extracted.credentials.api_key;
+    if (full === undefined) {
       return {
         session_id: extracted.session_id,
         url: extracted.url,
-        candidate_count: extracted.candidate_count,
         sealed: false,
         slot: null,
-        blocked_reason:
-          "no credential value was found on this page — navigate to the keys/settings " +
-          "page, then operate_extract again",
+        blocked_reason: extracted.error,
       };
     }
     const handle = stashSecretSlot(args.session_id, args.into_slot, full);
     return {
       session_id: extracted.session_id,
       url: extracted.url,
-      candidate_count: extracted.candidate_count,
       sealed: true,
       slot: handle,
     };
@@ -668,25 +647,20 @@ const extractSchema = z.object({
   capture: captureSchema.optional(),
   session_id: z.string().min(1),
   into_slot: z.string().min(1).max(60).optional(),
-  secret_label: z.string().min(1).max(60).optional(),
   store: storeShape.optional(),
 });
 
 export const provisionExtractTool: Tool<z.infer<typeof extractSchema>> = {
   name: "operate_extract",
   description:
-    "Reveal masked keys and extract credentials from the current page: returns " +
-    "{credentials, candidate_count}. credentials may include " +
-    "`api_key` (or `api_key_truncated` if only a masked display was reachable) " +
-    "plus named fields for multi-credential services. Pass `store` to immediately " +
-    "save the extracted credential into the Trusty Squire vault with the session's " +
-    "observed hosts as allowed_hosts seed; when `store` is used, the response omits " +
-    "credential values and returns only vault metadata. " +
-    "Call when you have navigated to the keys page. " +
-    "With `into_slot`, a value that still looks masked is ranked behind a fully " +
-    "revealed sibling but never refused; pass " +
-    '`secret_label` (e.g. "client secret") to pick the right one when the page ' +
-    "shows several credentials.",
+    "Store a key by its source, never by its shape. Without capture, clicks the Copy " +
+    "button in an open key dialog and returns what it writes to the clipboard as " +
+    "{credentials: {api_key}}; page text is never scanned. When no Copy click yields a " +
+    "value, nothing is stored and `error` says to read the page with operate_observe " +
+    "and point capture at the key. Pass `store` to immediately save the value into the " +
+    "Trusty Squire vault with the session's observed hosts as allowed_hosts seed; when " +
+    "`store` is used, the response omits credential values and returns only vault " +
+    "metadata. With `into_slot`, the copied value goes into a session slot instead.",
   inputSchema: extractSchema,
   jsonInputSchema: {
     type: "object",
@@ -694,7 +668,6 @@ export const provisionExtractTool: Tool<z.infer<typeof extractSchema>> = {
     properties: {
       session_id: { type: "string" },
       into_slot: { type: "string" },
-      secret_label: { type: "string" },
       store: {
         type: "object",
         required: ["service"],
@@ -729,12 +702,9 @@ async function persistExtracted(
   api: ApiClient,
   writeId?: string,
 ): Promise<StoredCredentialMetadata | null> {
-  credentials = Object.fromEntries(
-    Object.entries(credentials).filter(([key]) => !key.endsWith("_truncated")),
-  );
-  if (!Object.keys(credentials).some((key) => key !== "id" && !key.endsWith("_id"))) {
-    return null;
-  }
+  const storable = storableCredentials(credentials);
+  if (storable === null) return null;
+  credentials = storable;
   const captureDomain = getDomain(captureUrl, { allowPrivateDomains: true });
   const observedHosts = [
     ...new Set([
@@ -784,11 +754,7 @@ export function storedExtractResult(
   return {
     session_id: extracted.session_id,
     url: extracted.url,
-    candidate_count: extracted.candidate_count,
     stored_credential: stored,
-    ...(extracted.masked_remaining !== undefined
-      ? { masked_remaining: extracted.masked_remaining }
-      : {}),
   };
 }
 
@@ -843,8 +809,8 @@ async function handleFinishOutcome(
         successfulOutcome = stored !== null;
         return {
           kind: "credentials" as const,
-          candidate_count: extracted.candidate_count,
           stored_credential: stored,
+          ...(extracted.error !== undefined ? { error: extracted.error } : {}),
         };
       }
       successfulOutcome = true;
