@@ -31,6 +31,8 @@ export interface DriveSnapshotElement {
   required?: boolean;
   offscreen?: boolean;
   picker?: boolean;
+  /** Native form submit, regardless of its accessible label. */
+  submit?: boolean;
   /** The control's own `maxlength`, when it declares one. */
   width?: number;
   placeholder?: string;
@@ -218,6 +220,7 @@ export function driveRowsFromSnapshot(snapshot: DriveSnapshot): SnapshotRow[] {
       facts.push("x=x");
     }
     if (element.picker === true) facts.push("a=picker");
+    if (element.submit === true) facts.push("a=submit");
     if (element.value !== undefined && element.value.length > 0) {
       facts.push(`n=${element.value.replace(/\|/g, " ").slice(0, 80)}`);
     }
@@ -742,6 +745,9 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
         element.getAttribute("aria-readonly") === "true" ||
         (element instanceof HTMLInputElement &&
           (element.readOnly || ["date", "datetime-local", "month"].includes(element.type))));
+    const submit =
+      (element instanceof HTMLButtonElement || element instanceof HTMLInputElement) &&
+      element.type === "submit";
     const operations: Array<"click" | "fill" | "select"> = [];
     if (element.tagName === "SELECT") operations.push("select");
     else if (editable) {
@@ -815,6 +821,7 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
       ...(required ? { required: true } : {}),
       ...(inViewport ? {} : { offscreen: true }),
       ...(picker ? { picker: true } : {}),
+      ...(submit ? { submit: true } : {}),
       ...(width === undefined ? {} : { width }),
       ...(placeholder.length > 0 ? { placeholder } : {}),
       ...(ariaLabel.length > 0 ? { ariaLabel } : {}),
@@ -868,19 +875,14 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
     const occludedBy = occluderOf(node, row.ref);
     if (occludedBy !== undefined) row.occludedBy = occludedBy;
   }
-  const fieldsFirst = (list: DriveSnapshotElement[]): DriveSnapshotElement[] => {
-    const fields = list.filter(
-      (row) => row.operations.includes("fill") || row.operations.includes("select"),
-    );
-    const rest = list.filter(
-      (row) => !row.operations.includes("fill") && !row.operations.includes("select"),
-    );
-    return [...fields, ...rest];
-  };
-  const elements = [...fieldsFirst(inView), ...fieldsFirst(offscreenControls)].slice(
-    0,
-    arg.maxElements,
-  );
+  // A bounded snapshot must retain native form submits even after long menus.
+  // Within each structural/visibility group, controls stay in DOM order.
+  const elements = [
+    ...inView.filter((row) => row.submit === true),
+    ...offscreenControls.filter((row) => row.submit === true),
+    ...inView.filter((row) => row.submit !== true),
+    ...offscreenControls.filter((row) => row.submit !== true),
+  ].slice(0, arg.maxElements);
   const headings: string[] = [];
   for (const heading of queryAll("h1,h2,h3,h4,h5,h6")) {
     if (!visible(heading)) continue;

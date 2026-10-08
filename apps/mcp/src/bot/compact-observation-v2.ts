@@ -1473,6 +1473,7 @@ export function safeBlockersV2(
   const nodes: BrowserUseNode[] = [];
   const parentFor = new Map<BrowserUseNode, BrowserUseNode>();
   const visibleFor = new Map<BrowserUseNode, boolean>();
+  const suppressedFor = new Map<BrowserUseNode, boolean>();
   const scopeFor = new Map<BrowserUseNode, BrowserUseNode>();
   const idsByScope = new Map<BrowserUseNode, Map<string, BrowserUseNode>>();
   const visit = (
@@ -1480,13 +1481,18 @@ export function safeBlockersV2(
     enclosingScope: BrowserUseNode,
     parent: BrowserUseNode | undefined,
     enclosingFrameVisible: boolean,
+    enclosingSuppressed: boolean,
   ): void => {
     const scope = [9, 11].includes(node.nodeType) ? node : enclosingScope;
+    const suppressed =
+      enclosingSuppressed || node.attributes["aria-hidden"]?.toLowerCase() === "true" ||
+      Object.hasOwn(node.attributes, "inert");
     const visible =
-      enclosingFrameVisible && ([9, 11].includes(node.nodeType) ? true : node.visible);
+      !suppressed && enclosingFrameVisible && ([9, 11].includes(node.nodeType) ? true : node.visible);
     nodes.push(node);
     if (parent !== undefined) parentFor.set(node, parent);
     visibleFor.set(node, visible);
+    suppressedFor.set(node, suppressed);
     scopeFor.set(node, scope);
     let ids = idsByScope.get(scope);
     if (ids === undefined) {
@@ -1497,11 +1503,12 @@ export function safeBlockersV2(
     if (id) ids.set(id, node);
     const descendantsVisible =
       enclosingFrameVisible && (!["iframe", "frame"].includes(nodeTagV2(node)) || visible);
-    descendantsV2(node).forEach((child) => visit(child, scope, node, descendantsVisible));
+    descendantsV2(node).forEach((child) => visit(child, scope, node, descendantsVisible, suppressed));
   };
-  visit(root, root, undefined, true);
+  visit(root, root, undefined, true, false);
 
   const challengeCandidates = nodes.filter((node) => {
+    if (suppressedFor.get(node) === true) return false;
     const tag = nodeTagV2(node);
     if (
       visibleFor.get(node) !== true &&
