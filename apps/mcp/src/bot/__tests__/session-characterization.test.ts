@@ -109,8 +109,13 @@ vi.mock("../browser.js", async (importOriginal) => {
       currentUrl(): string {
         return h.currentUrl;
       }
-      activePage(): { isClosed: () => boolean; url: () => string } {
-        return { isClosed: () => false, url: () => h.currentUrl };
+      activePage() {
+        return {
+          isClosed: () => false,
+          url: () => h.currentUrl,
+          waitForLoadState: async () => undefined,
+          evaluate: async () => ({ state: "complete", rendered: true }),
+        };
       }
       mainDocumentIdentity(): string {
         return String(h.documentEpoch);

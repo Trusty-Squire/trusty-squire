@@ -52,6 +52,7 @@ import {
 import { BrowserProcessOwner } from "./browser-process-owner.js";
 import { resizeCeremonyWindow, type CeremonyDisplayClip } from "./ceremony-window.js";
 import { PageDriver } from "./page-driver.js";
+import { waitForPageReady } from "./page-ready.js";
 import type { ActiveOAuthAttempt } from "./oauth-login.js";
 import { type ProfileCloseState } from "./profile.js";
 
@@ -1313,7 +1314,7 @@ export class BrowserController implements BrowserDriver {
       });
     // Allow Shopify's bounded Places/geocoding request to begin before the
     // caller observes the delivery-method section.
-    await this.sleep(500);
+    await waitForPageReady(page, { kind: "address-change" });
   }
 
   private async typeInner(
@@ -1475,7 +1476,8 @@ export class BrowserController implements BrowserDriver {
   // `settleMs` lets the caller reuse a wait it was already going to do.
   async captureTransientAlert(settleMs = 600): Promise<string> {
     if (!this.page) return "";
-    if (settleMs > 0) await this.sleep(settleMs);
+    if (settleMs > 0)
+      await waitForPageReady(this.page, { kind: "transient-alert", capMs: settleMs });
     try {
       return await this.page.evaluate(() => {
         const sels = [
@@ -4230,36 +4232,8 @@ export class BrowserController implements BrowserDriver {
   ): Promise<BrowserUseCapture> {
     if (page === null) throw new Error("Browser not started");
     if (settlePage) {
-      // A load event alone precedes SPA hydration. Network quiet plus bounded
-      // DOM quiet gives pending scripts/frames time to install their controls.
-      // Busy analytics/animations must never make observation wait indefinitely.
-      await page.waitForLoadState("networkidle", { timeout: 1_500 }).catch(() => undefined);
-      await page
-        .evaluate(
-          () =>
-            new Promise<void>((resolve) => {
-              let quiet: ReturnType<typeof setTimeout>;
-              const finish = () => {
-                clearTimeout(quiet);
-                clearTimeout(deadline);
-                observer.disconnect();
-                resolve();
-              };
-              const observer = new MutationObserver(() => {
-                clearTimeout(quiet);
-                quiet = setTimeout(finish, 500);
-              });
-              const deadline = setTimeout(finish, 2_000);
-              observer.observe(document, {
-                subtree: true,
-                childList: true,
-                attributes: true,
-                characterData: true,
-              });
-              quiet = setTimeout(finish, 500);
-            }),
-        )
-        .catch(() => undefined);
+      const readiness = await waitForPageReady(page, { kind: "observation" });
+      if (!readiness.ready) throw new Error(`page_not_ready:${readiness.reason}`);
     }
     const bindingDeadline = Date.now() + 1_000;
     for (;;) {
@@ -4286,15 +4260,12 @@ export class BrowserController implements BrowserDriver {
     page: Page | null = this.page,
   ): Promise<{ title: string; headings: string[] }> {
     if (page === null) throw new Error("Browser not started");
+    await waitForPageReady(page, { kind: "heading-paint" });
     return await page.evaluate(async () => {
       // Visible headings only, like every other observation path: a heading
       // inside [aria-hidden]/[inert], display:none, or visibility:hidden is
-      // page plumbing, not page state. The just-revealed case (the
-      // directory-search result h2 starts [hidden] and is revealed in the
-      // same click) is handled at THIS timing boundary: when headings with
-      // copy exist but none is visible yet, poll a few frames (bounded
-      // ~800ms; rAF may never fire in a backgrounded tab, hence the timeout
-      // race) for the reveal to land before reporting nothing.
+      // page plumbing, not page state. The readiness module's heading-paint
+      // step gives just-revealed headings a bounded window before this read.
       const visibleHeading = (element: Element): boolean => {
         if (element.closest('[aria-hidden="true"],[inert]') !== null) return false;
         if (typeof element.checkVisibility === "function") {
@@ -4310,17 +4281,6 @@ export class BrowserController implements BrowserDriver {
           .filter(visibleHeading)
           .map(headingText)
           .filter(Boolean);
-      const withCopy = (): number =>
-        Array.from(document.querySelectorAll("h1,h2")).filter(
-          (element) => headingText(element).length > 0,
-        ).length;
-      const start = performance.now();
-      while (visible().length === 0 && withCopy() > 0 && performance.now() - start < 800) {
-        await Promise.race([
-          new Promise<void>((resolve) => requestAnimationFrame(() => resolve())),
-          new Promise<void>((resolve) => setTimeout(resolve, 50)),
-        ]);
-      }
       return { title: document.title.slice(0, 160), headings: visible().slice(0, 4) };
     });
   }
@@ -4438,12 +4398,12 @@ export class BrowserController implements BrowserDriver {
         const trigger = page.locator(sel).first();
         if ((await trigger.count().catch(() => 0)) === 0) continue;
         await trigger.click({ timeout: 5000 });
-        await page.waitForTimeout(600);
+        await waitForPageReady(page, { kind: "overlay", phase: "widget_open" });
         // An autocomplete input may only render its option list after a
         // keystroke — nudge it with ArrowDown so the option locator can resolve.
         if (sel.includes("input[")) {
           await page.keyboard.press("ArrowDown").catch(() => undefined);
-          await page.waitForTimeout(400);
+          await waitForPageReady(page, { kind: "overlay", phase: "widget_arrow" });
         }
         const option = page
           .locator(
@@ -4459,11 +4419,11 @@ export class BrowserController implements BrowserDriver {
             .slice(0, 40);
           await option.click({ timeout: 5000 });
           filled.push(`${sel} → ${name}`);
-          await page.waitForTimeout(300);
+          await waitForPageReady(page, { kind: "widget-reflow", phase: "commit" });
         }
         // Close the (multi-select) popover so the next trigger isn't occluded.
         await page.keyboard.press("Escape").catch(() => undefined);
-        await page.waitForTimeout(200);
+        await waitForPageReady(page, { kind: "widget-reflow", phase: "close" });
       } catch {
         // Best-effort per combobox — a miss falls back to the planner.
       }
@@ -4554,16 +4514,7 @@ export class BrowserController implements BrowserDriver {
     // signal-when-it's-real and moves on otherwise. domcontentloaded
     // is the real "DOM is parsed" signal; networkidle here is just
     // a best-effort polish wait for the SPA to settle.
-    try {
-      await this.page.waitForLoadState("domcontentloaded", { timeout: 5_000 });
-    } catch {
-      // already past domcontentloaded → fine
-    }
-    try {
-      await this.page.waitForLoadState("networkidle", { timeout: 1_500 });
-    } catch {
-      // expected on most modern pages — fall through to the element wait.
-    }
+    await waitForPageReady(this.page, { kind: "form-start" });
     // F13 follow-up — if we landed on a full-page anti-bot interstitial
     // (Cloudflare "Just a moment..." / Turnstile pre-clear / similar),
     // wait for it to clear and the real page to render. networkidle
@@ -4579,15 +4530,7 @@ export class BrowserController implements BrowserDriver {
     // role=button divs. The old selector timed out at 15s on those
     // pages, the planner saw an empty inventory, and the post-verify
     // loop burned rounds clicking nothing.
-    try {
-      await this.page.waitForSelector(
-        'input, button, textarea, select, a[href], [role="button"], [role="menuitem"]',
-        { state: "visible", timeout: timeoutMs },
-      );
-    } catch {
-      // No interactive element appeared in time — let the planner run
-      // anyway; it fails cleanly rather than hanging.
-    }
+    await waitForPageReady(this.page, { kind: "form-controls", capMs: timeoutMs });
     // The generic wait above is satisfied by ANY interactive element —
     // on a signup page with marketing chrome (links, marketplace badges)
     // that fires while the actual auth widget is still an async spinner.
@@ -4596,106 +4539,7 @@ export class BrowserController implements BrowserDriver {
     // (zilliz /signup: right-panel spinner, marketing copy on the left).
     // So: if a loading spinner is visible AND no auth-form signal exists
     // yet, give the widget a bounded extra wait to hydrate.
-    await this.waitForAuthWidgetHydration();
-  }
-
-  // Bounded poll for an auth-form signal when the page is still showing a
-  // loading spinner. Strictly additive: returns immediately unless a
-  // spinner is visible AND no auth signal (email/password input or a
-  // provider/sign-up button) is present yet. Best-effort — never throws.
-  async waitForAuthWidgetHydration(timeoutMs = 8_000): Promise<void> {
-    if (!this.page) return;
-    const authWidgetHydrationProbe = String.raw`(() => {
-      const vis = (el) => {
-        const r = el.getBoundingClientRect();
-        return r.width > 0 && r.height > 0;
-      };
-      const anyVis = (sel) =>
-        Array.from(document.querySelectorAll(sel)).some(vis);
-      const hasAuthInput = anyVis(
-        'input[type="email"],input[type="password"],input[name="email" i],input[name="password" i]',
-      );
-      let hasAuthButton = false;
-      const re = /\b(sign\s?up|continue with|log ?in with|with google|with github|with sso|create account)\b/i;
-      for (const el of Array.from(
-        document.querySelectorAll('button,a[href],[role="button"]'),
-      )) {
-        if (!vis(el)) continue;
-        if (re.test((el.textContent ?? "").trim())) {
-          hasAuthButton = true;
-          break;
-        }
-      }
-      const spinnerVisible = anyVis(
-        '[role="progressbar"],[aria-busy="true"],[class*="spin" i],[class*="loading" i],[class*="loader" i],.ant-spin,.MuiCircularProgress-root',
-      );
-      return { hasAuth: hasAuthInput || hasAuthButton, spinnerVisible };
-    })()`;
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
-      try {
-        const state = (await Promise.race([
-          this.page.evaluate(authWidgetHydrationProbe),
-          new Promise((_, reject) =>
-            setTimeout(() => reject(new Error("auth widget probe timed out")), 1_500),
-          ),
-        ])) as {
-          hasAuth: boolean;
-          spinnerVisible: boolean;
-        };
-        // Done the moment an auth signal appears, or once nothing is
-        // spinning anymore (no point waiting on a page that simply has
-        // no auth widget — a true OAuth-less/blank page bails honestly).
-        if (state.hasAuth) return;
-        if (!state.spinnerVisible) return;
-      } catch {
-        return; // navigation / context teardown — let the caller proceed
-      }
-      await this.sleep(500);
-    }
-  }
-
-  // rc.33 — wait for the DOM to grow past a minimum interactive-
-  // element count, polling every 500ms up to timeoutMs. The
-  // single-element wait in waitForFormReady is fast-path; this is
-  // for SPAs where DOMContentLoaded fires almost immediately but the
-  // React/Vue/Svelte tree takes 5-15s more to actually render. Used
-  // after navigate() in the post-verify loop so the planner doesn't
-  // see a 0-button page that's still rendering. Best-effort —
-  // returns whenever the count is reached OR the timeout elapses.
-  async waitForInteractiveDom(
-    minElements = 5,
-    timeoutMs = 20_000,
-    page: Page | null = this.page,
-  ): Promise<void> {
-    if (!page) return;
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
-      try {
-        const count = await Promise.race([
-          page.evaluate((min: number) => {
-            const sels =
-              'input,textarea,select,button,a[href],[role="button"],[role="menuitem"],[role="option"]';
-            const nodes = Array.from(document.querySelectorAll(sels));
-            let visible = 0;
-            for (const n of nodes) {
-              const el = n as HTMLElement;
-              const r = el.getBoundingClientRect();
-              if (r.width >= 2 && r.height >= 2) visible++;
-              if (visible >= min) return visible;
-            }
-            return visible;
-          }, minElements),
-          new Promise<number>((_, reject) =>
-            setTimeout(() => reject(new Error("interactive DOM probe timed out")), 1_500),
-          ),
-        ]);
-        if (count >= minElements) return;
-      } catch {
-        // Page may be mid-navigation — try again on the next tick.
-      }
-      await this.sleep(500);
-    }
+    if (this.page) await waitForPageReady(this.page, { kind: "auth-widget", capMs: 8_000 });
   }
 
   // Find and click an "Accept"-class button to dismiss any visible
@@ -4772,8 +4616,7 @@ export class BrowserController implements BrowserDriver {
       // (e.g. lazy-rendering the previously-blocked OAuth chooser).
       // Try networkidle first for SPA re-renders, fall back to a
       // fixed dwell.
-      await this.page.waitForLoadState("networkidle", { timeout: 3000 }).catch(() => undefined);
-      await this.page.waitForTimeout(800);
+      await waitForPageReady(this.page, { kind: "post-consent" });
       return target.text;
     } catch {
       return null;
@@ -4924,7 +4767,7 @@ export class BrowserController implements BrowserDriver {
         if (detected) {
           // Give the freshly-revealed page a tick to hydrate before
           // the inventory scan.
-          await new Promise((r) => setTimeout(r, 800));
+          await waitForPageReady(this.page, { kind: "post-interstitial" });
         }
         return { detected, cleared: detected, verificationPassed };
       }

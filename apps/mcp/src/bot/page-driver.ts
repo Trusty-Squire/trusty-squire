@@ -1,5 +1,6 @@
 import type { BrowserContext, Frame, Page } from "playwright";
 import { OwnedPages } from "./owned-pages.js";
+import { waitForPageReady } from "./page-ready.js";
 
 /** One session's page lifetime; never launches or terminates a browser process. */
 export class PageDriver {
@@ -164,21 +165,11 @@ export class PageDriver {
     }
     if (candidate === null) return null;
     this.openedTabs.length = 0;
-    // A window.open target starts at about:blank and is navigated a tick later.
-    // Adopting it while blank would report an empty page to the host, so wait
-    // (bounded) for the document it was opened for.
-    const blank = (url: string): boolean =>
-      url === "" || url === "about:blank" || url === "about:srcdoc";
-    for (let i = 0; i < 40 && !candidate.isClosed() && blank(candidate.url()); i++) {
-      await this.sleep(50);
-    }
     if (!this.ownedPages.has(candidate)) return null;
     this.page = candidate;
     this.trackMainDocument(candidate);
     await candidate.bringToFront().catch(() => undefined);
-    await candidate
-      .waitForLoadState("domcontentloaded", { timeout: 15_000 })
-      .catch(() => undefined);
+    await waitForPageReady(candidate, { kind: "adopted-tab" });
     return candidate.isClosed() ? null : candidate.url();
   }
 
@@ -300,7 +291,7 @@ export class PageDriver {
         // Treat that as a successful navigation: callers immediately inspect
         // the DOM and have their own element-level waits.
         if (/Timeout \d+ms exceeded/i.test(msg)) {
-          await this.sleep(500);
+          await waitForPageReady(page, { kind: "navigation-timeout" });
           if (sameOriginPathAndSearch(page.url(), url)) break;
           if (landedAuthGateForTarget(page.url(), url)) break;
           await page

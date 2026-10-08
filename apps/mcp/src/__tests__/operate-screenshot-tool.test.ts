@@ -37,6 +37,15 @@ async function connectedClient(): Promise<Client> {
 const TINY_JPEG_BASE64 =
   "/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAMCAgICAgMCAgIDAwMDBAYEBAQEBAgGBgUGCQgKCgkICQkKDA8MCgsOCwkJDRENDg8QEBEQCgwSExIQEw8QEBD/wAALCAABAAEBAREA/8QAFQABAQAAAAAAAAAAAAAAAAAAAAn/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAA/AKgAf//Z";
 
+function loadedPage(url: string) {
+  return {
+    isClosed: () => false,
+    url: () => url,
+    waitForLoadState: async () => undefined,
+    evaluate: async () => ({ state: "complete", rendered: true }),
+  };
+}
+
 describe("operate_screenshot — real MCP protocol round trip", () => {
   it("returns an MCP image content block, not just base64 buried in JSON", async () => {
     const url = "https://operator-screenshot.test/checkout";
@@ -51,7 +60,7 @@ describe("operate_screenshot — real MCP protocol round trip", () => {
       mainDocumentIdentity: vi.fn().mockReturnValue("doc"),
       extractVisibleText: vi.fn().mockResolvedValue("Checkout page"),
       currentUrl: vi.fn().mockReturnValue(url),
-      activePage: vi.fn().mockReturnValue({ isClosed: () => false, url: () => url }),
+      activePage: vi.fn().mockReturnValue(loadedPage(url)),
       takeOAuthTerminalCompletionUrl: vi.fn().mockReturnValue(null),
       close: vi.fn().mockResolvedValue(undefined),
       captureOperatorScreenshot: vi.fn().mockResolvedValue({
@@ -118,7 +127,7 @@ describe("operate_screenshot — real MCP protocol round trip", () => {
       mainDocumentIdentity: vi.fn().mockReturnValue("doc"),
       extractVisibleText: vi.fn().mockResolvedValue("Checkout page"),
       currentUrl: vi.fn().mockReturnValue(url),
-      activePage: vi.fn().mockReturnValue({ isClosed: () => false, url: () => url }),
+      activePage: vi.fn().mockReturnValue(loadedPage(url)),
       takeOAuthTerminalCompletionUrl: vi.fn().mockReturnValue(null),
       close: vi.fn().mockResolvedValue(undefined),
       captureOperatorScreenshot: vi.fn().mockResolvedValue({
@@ -168,7 +177,7 @@ describe("operate_screenshot — real MCP protocol round trip", () => {
       mainDocumentIdentity: vi.fn().mockReturnValue("doc"),
       extractVisibleText: vi.fn().mockResolvedValue("Checkout page"),
       currentUrl: vi.fn().mockReturnValue(url),
-      activePage: vi.fn().mockReturnValue({ isClosed: () => false, url: () => url }),
+      activePage: vi.fn().mockReturnValue(loadedPage(url)),
       takeOAuthTerminalCompletionUrl: vi.fn().mockReturnValue(null),
       close: vi.fn().mockResolvedValue(undefined),
       captureOperatorScreenshot: vi.fn().mockResolvedValue({
@@ -212,7 +221,7 @@ describe("operate_screenshot — real MCP protocol round trip", () => {
       mainDocumentIdentity: vi.fn().mockReturnValue("doc"),
       extractVisibleText: vi.fn().mockResolvedValue("Checkout page"),
       currentUrl: vi.fn().mockReturnValue(url),
-      activePage: vi.fn().mockReturnValue({ isClosed: () => false, url: () => url }),
+      activePage: vi.fn().mockReturnValue(loadedPage(url)),
       takeOAuthTerminalCompletionUrl: vi.fn().mockReturnValue(null),
       close: vi.fn().mockResolvedValue(undefined),
       captureOperatorScreenshot: vi.fn().mockResolvedValue({
@@ -253,7 +262,7 @@ describe("operate_screenshot — real MCP protocol round trip", () => {
       mainDocumentIdentity: vi.fn().mockReturnValue("doc"),
       extractVisibleText: vi.fn().mockResolvedValue("Checkout page"),
       currentUrl: vi.fn().mockReturnValue(url),
-      activePage: vi.fn().mockReturnValue({ isClosed: () => false, url: () => url }),
+      activePage: vi.fn().mockReturnValue(loadedPage(url)),
       takeOAuthTerminalCompletionUrl: vi.fn().mockReturnValue(null),
       close: vi.fn().mockResolvedValue(undefined),
       captureOperatorScreenshot: vi.fn().mockResolvedValue({

@@ -97,13 +97,12 @@ import {
   type ActControlIdentity,
 } from "./identity.js";
 import { evaluateBound } from "../drive-evaluate.js";
+import { waitForPageReady } from "../page-ready.js";
 import {
   clickCrossOriginFrameTarget,
   commitDriveListOption,
   selectDriveOption,
   overlayOptionLabels,
-  waitForOpenedOverlay,
-  waitForOverlayOptionsToChange,
 } from "../drive-act.js";
 
 // `detail:"none"` already owns "return no observation". `drive` is the one
@@ -438,7 +437,7 @@ async function runSerializedOAuthBoundary(
       // Human completion returns custody to bounded machine work. Give DOM
       // readiness its own short window instead of spending the human budget.
       resetOAuthActionDeadline(deadline, oauthAutomatedActionTimeoutMs());
-      await settleAfterStateChange(browser);
+      if (browser.page) await waitForPageReady(browser.page, { kind: "manual-action" });
     },
     { deadline },
   );
@@ -918,10 +917,12 @@ async function executeAct(
     const started = Date.now();
     timing?.enter("settle");
     try {
-      await settleAfterStateChange(browser, compactV2ActionPage, {
-        drive: driveSettle,
-        combobox: driveSettle && combobox,
-      });
+      const target = compactV2ActionPage ?? browser.page;
+      if (target)
+        await waitForPageReady(
+          target,
+          driveSettle ? { kind: "drive-action", combobox } : { kind: "manual-action" },
+        );
     } finally {
       settleMs += Date.now() - started;
       timing?.enter("browser_action");
@@ -1309,11 +1310,14 @@ async function executeAct(
             // The suggestion baseline is read AFTER the overlay opens; reading
             // it before would make the refresh wait return on the stale rows.
             await actClick({ ...actTarget, method: "click" });
-            await waitForOpenedOverlay(compactV2ActionPage).catch(() => undefined);
+            await waitForPageReady(compactV2ActionPage, { kind: "overlay" }).catch(() => undefined);
             const overlayBefore = await overlayOptionLabels(compactV2ActionPage);
             await compactV2ActionPage.keyboard.press("ControlOrMeta+a");
             await compactV2ActionPage.keyboard.insertText(typedText ?? "");
-            await waitForOverlayOptionsToChange(compactV2ActionPage, overlayBefore);
+            await waitForPageReady(compactV2ActionPage, {
+              kind: "overlay-refresh",
+              before: overlayBefore,
+            });
           } else {
             await actType(actTarget, typedText!, false);
           }
@@ -1763,62 +1767,4 @@ async function adoptTabOpenedByClick(
     adopted = await adoptOpenedTab(session, browser, OPENED_TAB_GRACE_MS);
   }
   return adopted;
-}
-
-export async function settleAfterDriveAction(page?: Page, combobox = false): Promise<void> {
-  if (!page) return;
-  const capMs = combobox ? 200 : 50;
-  await page
-    .evaluate(
-      ({ cap, waitOptions }: { cap: number; waitOptions: boolean }) =>
-        new Promise<void>((resolve) => {
-          let frames = 0;
-          let stopped = false;
-          const finish = () => {
-            if (stopped) return;
-            stopped = true;
-            resolve();
-          };
-          setTimeout(finish, cap);
-          const tick = () => {
-            if (stopped) return;
-            frames += 1;
-            if (waitOptions) {
-              const visible = Array.from(document.querySelectorAll('[role="option"]')).some(
-                (node) => {
-                  const box = (node as HTMLElement).getBoundingClientRect();
-                  return box.width > 0 && box.height > 0;
-                },
-              );
-              if (visible) {
-                finish();
-                return;
-              }
-            } else if (frames >= 2) {
-              finish();
-              return;
-            }
-            requestAnimationFrame(tick);
-          };
-          requestAnimationFrame(tick);
-        }),
-      { cap: capMs, waitOptions: combobox },
-    )
-    .catch(() => undefined);
-}
-
-export async function settleAfterStateChange(
-  browser: BrowserController,
-  page?: Page,
-  options?: { drive?: boolean; combobox?: boolean },
-): Promise<void> {
-  if (options?.drive === true) {
-    await settleAfterDriveAction(page, options.combobox === true);
-    return;
-  }
-  // A fixed dwell here used to consume the OAuth action's completion window
-  // after the provider had already returned. Wait for the page's actual
-  // interactive state instead; it resolves immediately when the redirect has
-  // rendered and remains bounded for slow SPAs.
-  await browser.waitForInteractiveDom(1, 2_000, page).catch(() => undefined);
 }

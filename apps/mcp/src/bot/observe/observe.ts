@@ -44,6 +44,7 @@ import { attemptOperateCaptchaAutoSolve } from "../captcha-solve.js";
 import { widenAllowedHostsFromUrl } from "../session/registry.js";
 import { norm, provisionElementRefs } from "./refs.js";
 import type { Observation } from "../provision-session.js";
+import { waitForPageReady, type PageReadyResult } from "../page-ready.js";
 
 const compactV2SourcePages = new WeakMap<object, OAuthCompletionEvidence["page"]>();
 const oauthCompletionSourcePages = new WeakMap<object, OAuthCompletionEvidence["page"]>();
@@ -606,6 +607,8 @@ export function compactV2PublicObservation(
     observed?: ObserveDetail;
     terminal?: Observation["terminal"];
     url?: string;
+    hint?: string;
+    page_readiness?: Observation["page_readiness"];
   },
   outputFormat: "compact" | "full" = "full",
 ): Observation {
@@ -623,12 +626,45 @@ export function compactV2PublicObservation(
     ...(fields.oauth === undefined ? {} : { oauth: fields.oauth }),
     ...(fields.observed === undefined ? {} : { observed: fields.observed }),
     ...(fields.terminal === undefined ? {} : { terminal: fields.terminal }),
+    ...(fields.hint === undefined ? {} : { hint: fields.hint }),
+    ...(fields.page_readiness === undefined ? {} : { page_readiness: fields.page_readiness }),
   };
   // Fixed metadata (long OAuth-shaped URLs) degrades before observation ever
   // fails; the throw is unreachable from real pages.
   const degraded = compactV2DegradeMetadata(payload as unknown as Record<string, unknown>);
   if (degraded === null) throw new Error("compact-v2 budget metadata exceeded");
   return degraded as unknown as Observation;
+}
+
+function pendingPageObservation(
+  session: Session,
+  page: Page,
+  readiness: PageReadyResult,
+  outputFormat: "compact" | "full" = "compact",
+  hint?: string,
+): Observation {
+  invalidateCompactV2Snapshot(session);
+  retainSessionElements(session, []);
+  const rawUrl = page.url();
+  const url =
+    typeof session.browser.maskOperatorOutput === "function"
+      ? session.browser.maskOperatorOutput(rawUrl)
+      : rawUrl;
+  return compactV2PublicObservation(
+    session,
+    {
+      url,
+      stage: safeStageV2(rawUrl, []),
+      guidance: `Page is still rendering (${readiness.reason ?? "unknown"}); observe again before acting.`,
+      ...(hint === undefined ? {} : { hint }),
+      page_readiness: {
+        ready: false,
+        reason: readiness.reason ?? "no_rendered_content",
+        elapsed_ms: readiness.elapsedMs,
+      },
+    },
+    outputFormat,
+  );
 }
 
 async function compactV2Observation(
@@ -949,8 +985,13 @@ async function observeQueryOwned(
 
   // A cursorless query/role is always a fresh observation. Capture action rows
   // and semantic page hints once, together, before filtering.
+  const queryPage = sourcePage ?? session.browser.activePage();
+  if (queryPage !== null && queryPage !== undefined) {
+    const readiness = await waitForPageReady(queryPage, { kind: "observation" });
+    if (!readiness.ready) return { ...pendingPageObservation(session, queryPage, readiness) };
+  }
   session.generation += 1;
-  const capture = await session.browser.extractBrowserUseObservation(sourcePage, true);
+  const capture = await session.browser.extractBrowserUseObservation(sourcePage);
   let semanticSource: ObservationSemanticSourceV2 = { title: "", headings: [] };
   try {
     semanticSource = await session.browser.extractObservationSemantics(sourcePage);
@@ -1221,6 +1262,19 @@ export async function observeSession(
     if (sourcePage === undefined) {
       widenAllowedHostsFromUrl(session, session.browser.currentUrl());
     }
+    const observationPage = sourcePage ?? session.browser.activePage();
+    if (observationPage !== null && observationPage !== undefined) {
+      const readiness = await waitForPageReady(observationPage, { kind: "observation" });
+      if (!readiness.ready) {
+        return pendingPageObservation(
+          session,
+          observationPage,
+          readiness,
+          outputFormat,
+          startMetadata?.hintPages?.[0],
+        );
+      }
+    }
     // Best-effort captcha auto-solve on the general drive (hCaptcha gap). The
     // awaited half injects a token an earlier observation's fetch already
     // bought, so the injection (and the site callbacks it fires) happen inside
@@ -1229,14 +1283,32 @@ export async function observeSession(
     // holds the lease — so the first observation to see a challenge still
     // surfaces the blocker exactly as it does today.
     onActPhase?.("captcha_probe");
+    let captchaOutcome: string;
     try {
-      await attemptOperateCaptchaAutoSolve(session, sourcePage);
+      captchaOutcome = await attemptOperateCaptchaAutoSolve(session, sourcePage);
     } finally {
       onActPhase?.("observation");
     }
+    if (
+      captchaOutcome === "injected" &&
+      observationPage !== null &&
+      observationPage !== undefined
+    ) {
+      // Token callbacks can replace the page after the first readiness check.
+      const readiness = await waitForPageReady(observationPage, { kind: "observation" });
+      if (!readiness.ready) {
+        return pendingPageObservation(
+          session,
+          observationPage,
+          readiness,
+          outputFormat,
+          startMetadata?.hintPages?.[0],
+        );
+      }
+    }
     session.generation += 1;
     const generation = session.generation;
-    const capture = await session.browser.extractBrowserUseObservation(sourcePage, true);
+    const capture = await session.browser.extractBrowserUseObservation(sourcePage);
     retainSessionElements(session, capture.elements);
     let semanticSource: ObservationSemanticSourceV2 = { title: "", headings: [] };
     try {
