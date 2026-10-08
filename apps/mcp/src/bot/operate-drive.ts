@@ -5806,31 +5806,32 @@ async function driveLoop(input: {
         automaticDecisionRefused = true;
         return "continue";
       }
-      // A visible credential is only an observation. Completion cannot claim
-      // it was captured until the source-based extraction can obtain a value.
-      // This checks page evidence, not a guessed goal type or value shape.
-      if (pageShowsCredentialValue(rows)) {
-        const extracted = await extractCredentials(sessionId).catch(() => null);
-        if (storableCredentials(extracted?.credentials ?? {}) === null) {
-          drive.history.push("DONE refused: a visible credential has no captured source");
-          drive.consumedActionKey = null;
-          const stallKey = pageProgressKey(
-            observation.url,
-            rows,
-            drive.filledRefs,
-            observation.semantic?.headings ?? [],
-          );
-          drive.stallKeys ??= [];
-          if (drive.stallKeys.includes(stallKey)) {
-            return finish("stuck", {
-              reason:
-                "no key with a known source: read the page with operate_observe and point capture at the key",
-            });
-          }
-          drive.stallKeys.push(stallKey);
-          automaticDecisionRefused = true;
-          return "continue";
+      // Try the known Copy source on every DONE, even if the value has no
+      // recognizable shape or label in the observation. Page evidence only
+      // decides whether a failed extraction must hand back for explicit capture.
+      const extracted = await extractCredentials(sessionId).catch(() => null);
+      if (
+        storableCredentials(extracted?.credentials ?? {}) === null &&
+        pageShowsCredentialValue(rows)
+      ) {
+        drive.history.push("DONE refused: a visible credential has no captured source");
+        drive.consumedActionKey = null;
+        const stallKey = pageProgressKey(
+          observation.url,
+          rows,
+          drive.filledRefs,
+          observation.semantic?.headings ?? [],
+        );
+        drive.stallKeys ??= [];
+        if (drive.stallKeys.includes(stallKey)) {
+          return finish("stuck", {
+            reason:
+              "no key with a known source: read the page with operate_observe and point capture at the key",
+          });
         }
+        drive.stallKeys.push(stallKey);
+        automaticDecisionRefused = true;
+        return "continue";
       }
       return finish("complete");
     }

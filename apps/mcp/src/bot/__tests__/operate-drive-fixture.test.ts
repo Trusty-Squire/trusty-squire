@@ -394,9 +394,27 @@ function api(): ApiClient {
   return { useCredential: vi.fn() } as unknown as ApiClient;
 }
 
-// A key `extractApiKeyFromText` recognizes, built by concatenation so no
-// contiguous Stripe-shaped literal sits in this file.
+// Built by concatenation so no contiguous Stripe-shaped literal sits in this file.
 const DRIVE_FIXTURE_KEY = "sk" + "_live_fixtureKey" + "1234567890abcde";
+
+function revealedKeyEntryHtml(title = "payments-api"): string {
+  return `<!doctype html><meta charset="utf-8"><title>${title}</title>
+<main>
+  <h1>${title}</h1>
+  <p id="secret">••••••••••••</p>
+  <button type="button" id="reveal">Reveal</button>
+  <dialog id="key-dialog" aria-label="API key created">
+    <button type="button" id="copy" onclick="navigator.clipboard.writeText('${DRIVE_FIXTURE_KEY}')">Copy API key</button>
+  </dialog>
+</main>
+<script>
+  document.getElementById("reveal").onclick = () => {
+    document.getElementById("secret").textContent = "${DRIVE_FIXTURE_KEY}";
+    document.getElementById("key-dialog").show();
+    document.getElementById("reveal").remove();
+  };
+</script>`;
+}
 
 function peaked(ids: string[], pick: string, peak = 0.91): Record<string, number> {
   const out: Record<string, number> = {};
@@ -1632,18 +1650,7 @@ describe("operate_drive real-browser fixture", () => {
   <a id="two" href="/settings/apps/two">billing-api</a>
   <a id="new" href="/settings/apps/new">+ New app</a>
 </section>`;
-    const entryHtml = `<!doctype html><meta charset="utf-8"><title>payments-api</title>
-<main>
-  <h1>payments-api</h1>
-  <p id="secret">••••••••••••</p>
-  <button type="button" id="reveal">Reveal</button>
-</main>
-<script>
-  document.getElementById("reveal").onclick = () => {
-    document.getElementById("secret").textContent = "${DRIVE_FIXTURE_KEY}";
-    document.getElementById("reveal").remove();
-  };
-</script>`;
+    const entryHtml = revealedKeyEntryHtml();
     const context = await browser.newContext();
     const page = await context.newPage();
     await page.route("**/*", (route) => {
@@ -1662,7 +1669,9 @@ describe("operate_drive real-browser fixture", () => {
       initialObservation: "standard",
     });
     try {
-      const dependencies = deps(async (_api, _state, questions) => jevFromQuestions(questions));
+      const dependencies = deps(async (_api, _state, questions) =>
+        jevFromQuestions(questions, (await page.locator("#copy:visible").count()) > 0),
+      );
       const result = await runOperateDrive(
         { session_id: started.session_id, goal: "extract an API key", max_steps: 8 },
         api(),
@@ -1671,8 +1680,9 @@ describe("operate_drive real-browser fixture", () => {
       );
       expect(page.url()).toMatch(/\/settings\/apps\//);
       expect(await page.locator("#secret").innerText()).toBe(DRIVE_FIXTURE_KEY);
-      // Jev's DONE is trusted; source-gated capture remains separate.
+      // DONE extracts from the visible dialog's Copy source.
       expect(result.status).toBe("complete");
+      expect(await sessionForCall(started.session_id)!.browser.readClipboard(page)).toBe(DRIVE_FIXTURE_KEY);
       expect(JSON.stringify(result)).not.toContain(DRIVE_FIXTURE_KEY);
       expect(JSON.stringify(result.observation?.safe_table)).toMatch(/@key-value\|secret=1\|len=/);
     } finally {
@@ -1717,18 +1727,7 @@ describe("operate_drive real-browser fixture", () => {
     panel.innerHTML = appsHtml;
   };
 </script>`;
-    const entryHtml = `<!doctype html><meta charset="utf-8"><title>payments-api</title>
-<main>
-  <h1>payments-api</h1>
-  <p id="secret">••••••••••••</p>
-  <button type="button" id="reveal">Reveal</button>
-</main>
-<script>
-  document.getElementById("reveal").onclick = () => {
-    document.getElementById("secret").textContent = "${DRIVE_FIXTURE_KEY}";
-    document.getElementById("reveal").remove();
-  };
-</script>`;
+    const entryHtml = revealedKeyEntryHtml();
     const context = await browser.newContext();
     const page = await context.newPage();
     await page.route("**/*", (route) => {
@@ -1772,6 +1771,7 @@ describe("operate_drive real-browser fixture", () => {
       expect(page.url()).toMatch(/\/settings\/apps\//);
       expect(await page.locator("#secret").innerText()).toBe(DRIVE_FIXTURE_KEY);
       expect(result.status).toBe("complete");
+      expect(await sessionForCall(started.session_id)!.browser.readClipboard(page)).toBe(DRIVE_FIXTURE_KEY);
       expect(JSON.stringify(result)).not.toContain(DRIVE_FIXTURE_KEY);
       expect(JSON.stringify(result.observation?.safe_table)).toMatch(/@key-value\|secret=1\|len=/);
     } finally {
@@ -1808,18 +1808,7 @@ describe("operate_drive real-browser fixture", () => {
   <h1>Documentation</h1>
   <a id="enroll" href="/docs/enrollment">Enrollment</a>
 </main>`;
-    const entryHtml = `<!doctype html><meta charset="utf-8"><title>payments-api</title>
-<main>
-  <h1>payments-api</h1>
-  <p id="secret">••••••••••••</p>
-  <button type="button" id="reveal">Reveal</button>
-</main>
-<script>
-  document.getElementById("reveal").onclick = () => {
-    document.getElementById("secret").textContent = "${DRIVE_FIXTURE_KEY}";
-    document.getElementById("reveal").remove();
-  };
-</script>`;
+    const entryHtml = revealedKeyEntryHtml();
     const context = await browser.newContext();
     const page = await context.newPage();
     await page.route("**/*", (route) => {
@@ -1866,6 +1855,7 @@ describe("operate_drive real-browser fixture", () => {
       expect(page.url()).toMatch(/\/settings\/apps\//);
       expect(await page.locator("#secret").innerText()).toBe(DRIVE_FIXTURE_KEY);
       expect(result.status).toBe("complete");
+      expect(await sessionForCall(started.session_id)!.browser.readClipboard(page)).toBe(DRIVE_FIXTURE_KEY);
       expect(JSON.stringify(result)).not.toContain(DRIVE_FIXTURE_KEY);
       expect(JSON.stringify(result.observation?.safe_table)).toMatch(/@key-value\|secret=1\|len=/);
     } finally {
@@ -5498,18 +5488,7 @@ describe("capture flow key evidence", () => {
 <script>
   document.getElementById("dismiss").onclick = () => document.getElementById("modal").remove();
 </script>`;
-    const keysHtml = `<!doctype html><meta charset="utf-8"><title>API keys</title>
-<main>
-  <h1>API keys</h1>
-  <p id="secret">••••••••••••</p>
-  <button type="button" id="reveal">Reveal</button>
-</main>
-<script>
-  document.getElementById("reveal").onclick = () => {
-    document.getElementById("secret").textContent = "${DRIVE_FIXTURE_KEY}";
-    document.getElementById("reveal").remove();
-  };
-</script>`;
+    const keysHtml = revealedKeyEntryHtml("API keys");
     const context = await browser.newContext();
     const page = await context.newPage();
     await page.route("**/*", (route) => {
@@ -5528,7 +5507,9 @@ describe("capture flow key evidence", () => {
       initialObservation: "standard",
     });
     try {
-      const dependencies = deps(async (_api, _state, questions) => jevFromQuestions(questions));
+      const dependencies = deps(async (_api, _state, questions) =>
+        jevFromQuestions(questions, (await page.locator("#copy:visible").count()) > 0),
+      );
       const result = await runOperateDrive(
         { session_id: started.session_id, goal: "extract an API key", max_steps: 12 },
         api(),
@@ -5541,6 +5522,7 @@ describe("capture flow key evidence", () => {
       expect(page.url()).toMatch(/\/settings\/keys/);
       expect(await page.locator("#secret").innerText()).toBe(DRIVE_FIXTURE_KEY);
       expect(result.status).toBe("complete");
+      expect(await sessionForCall(started.session_id)!.browser.readClipboard(page)).toBe(DRIVE_FIXTURE_KEY);
     } finally {
       await finishProvisionSession(started.session_id);
       await context.close();
