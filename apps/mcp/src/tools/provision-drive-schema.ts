@@ -21,10 +21,7 @@ const proxySchema = z
       });
       return;
     }
-    if (
-      parsed.hostname.length === 0 ||
-      !["http:", "https:", "socks5:"].includes(parsed.protocol)
-    ) {
+    if (parsed.hostname.length === 0 || !["http:", "https:", "socks5:"].includes(parsed.protocol)) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         message: "proxy must be a valid HTTP, HTTPS, or SOCKS5 URL",
@@ -77,36 +74,23 @@ const startSchema = z.object({
 });
 
 const DOM_OBSERVATION_CONTRACT =
-  'With `format:"full"`, the response format is `browser-use-dom`: `session_id` continues the session, `url` is the live page URL, ' +
-  "and `stage` identifies the page stage. `dom` is a tab-indented tree with interleaved visible text: " +
-  "`[@e:...]<tag attributes />` identifies a control; attributes may include field values and state. " +
-  "`|SHADOW(open)|` / `|SHADOW(closed)|` mark shadow hosts, with Open/Closed Shadow and Shadow End boundaries. " +
-  "`not-targetable=true` marks display-only refs that cannot be acted on. `*` before a ref marks a new " +
-  "element or compound control. `more_above` / `more_below` indicate content beyond the viewport; use operate_scroll. " +
-  "`delta:true` means the same document: when `dom` is present it replaces the entire prior tree; " +
-  "when omitted retain the prior tree. `removed` lists refs that left the rendered view. " +
-  "Without delta:true, reset the prior view. Refs stay usable on the same document; on stale_ref, " +
-  "call operate_observe and choose a current ref. ";
+  'With `format:"full"`, `browser-use-dom` returns a tab-indented `dom` tree with text and `[@e:...]` controls. ' +
+  "`|SHADOW(open)|` / `|SHADOW(closed)|` mark shadow hosts; `not-targetable=true` refs are display-only. " +
+  "`*` marks a new control; `more_above` / `more_below` signal offscreen content. " +
+  "On `delta:true`, a present `dom` replaces the prior tree; otherwise keep it and remove refs in `removed`. " +
+  "Without delta, reset the view. Refs stay usable on the same document; on stale_ref, observe again. ";
 
 const CONTROL_QUERY_CONTRACT =
-  'The default `format:"compact"` response is `browser-use-control-query`. It contains every actionable control ' +
-  "(button, link, textbox, select, checkbox, radio, tab, menuitem, and file), including off-viewport controls; " +
-  "non-control markup and arbitrary page text are absent by construction, not redacted. Query or role filters this same map. " +
-  "Its `safe_table` is a paged control map: each row is `[ref,role,facts?]`; role is " +
-  "b=button, l=link, t=textbox, s=select, c=checkbox, r=radio, tb=tab, m=menuitem, or f=file; other roles are literal (e.g. slider or generic for a listener container). " +
-  "facts is a `|`-joined `@label` alias followed by present s=state (c=checked, u=unchecked, d=disabled, r=required), " +
-  "v=offscreen when outside the viewport, a=action, f=field, q=choice-position/total, and x=s same-origin or x=x cross-origin frame; absent x means main frame. " +
-  "nf=1 marks a listener container that carries a field name but is not itself fillable — its fillable field is emitted separately; fill that one. " +
-  "Query matches include m=n (exact name), m=r (exact role), m=t (local text), or m=c (explicit form/fieldset/dialog context), ranked in that order. " +
-  "semantic.blocked=true and semantic.blockers report what blocks the task independently of stage; stage=browse does not mean unblocked. " +
-  "Blocker kind is challenge (verification instructions), validation (a structurally identified field error), dialog (an open modal), or error_page (a CDN/gateway block wall named from the title/headings, so a blocked body is not read as a normal page). " +
-  "A dialog blocker also carries options — a bounded list of its rendered controls in DOM order, including the close path that keeps what was entered whenever the dialog renders one; when more controls exist than fit, that dismiss path and the controls that resolve the dialog are kept ahead of anchors, so query the control map for the rest. ref names the dialog's exit, matched on a control's whole label, or is absent with target=unavailable when the dialog renders none — act on an option rather than assuming one dismisses it. A bounded detail carries the dialog's own prose. " +
-  "Cursors page an immutable snapshot and require the same query and role; document changes invalidate them. A cursorless query captures fresh controls and semantics. " +
-  "Use overflow.next_cursor to page safe_table. A cursor from hint_overflow returns `hint` and pages with hint_overflow.next_cursor. ";
+  'The default `format:"compact"` response is `browser-use-control-query`: `safe_table` pages controls, including offscreen ones, as `[ref,role,facts?]`. ' +
+  "Arbitrary page text is absent from this control map; use full format when text matters. " +
+  "Roles b/l/t/s/c/r/tb/m/f mean button/link/textbox/select/checkbox/radio/tab/menuitem/file; other roles are literal. " +
+  "`facts` joins an `@label` alias with hints: s=c/u/d/r means checked/unchecked/disabled/required, v=offscreen, a=action, f=field, q=choice-position/total, and x=s/x for same/cross-origin frame (absent x means main frame). `nf=1` is a non-fillable listener; use its separately listed field. " +
+  "Query or role filters controls; `m=n/r/t/c` marks name/role/text/context matches. " +
+  "`semantic.blocked` and `semantic.blockers` report challenges, validation, dialogs, and error pages regardless of stage. Dialog options include actionable exits; an absent exit ref has target=unavailable. " +
+  "Use `overflow.next_cursor` to page with the same query and role; `hint_overflow.next_cursor` pages hints. Document changes invalidate cursors. ";
 
 const ACTION_FORMAT_NOTE =
-  "The action response is the compact `browser-use-control-query` control map by default: after a compact map on the same document, `delta:true` carries changed/new controls in `safe_table` and departed refs in `removed`, never the verbatim DOM. The acted control's own current row is always included, marked `w=acted`, so a write is confirmable from its own result. " +
-  'Pass `format:"full"` to receive the `browser-use-dom` tree instead. After inject_card releases a card, its PAN (complete ordinary spellings and prefixes of at least eight digits) and security code are replaced in every normal observation; all other emitted content stays verbatim. ';
+  'Returns a compact control map; `delta:true` lists changed rows in `safe_table` and departed refs in `removed`. `w=acted` marks the acted row. Use `format:"full"` for the DOM tree. ';
 
 const ACTION_FORMATS = ["compact", "full"] as const;
 
@@ -123,9 +107,7 @@ const observeSchema = z.object({
     .min(1)
     .max(64)
     .regex(/^[a-z][a-z0-9-]*$/)
-    .describe(
-      "Emitted control role, including literal roles such as slider or generic",
-    )
+    .describe("Emitted control role, including literal roles such as slider or generic")
     .optional(),
   format: z.enum(["compact", "full"]).optional(),
   subtree_ref: z.string().min(1).max(512).optional(),
@@ -167,10 +149,7 @@ const storeShape = z.object({
   auth_shape: z
     .string()
     .max(120)
-    .regex(
-      /^(bearer|header:.+|query:.+)$/,
-      "auth_shape must be bearer|header:<name>|query:<param>",
-    )
+    .regex(/^(bearer|header:.+|query:.+)$/, "auth_shape must be bearer|header:<name>|query:<param>")
     .optional(),
 });
 
@@ -186,6 +165,19 @@ const captureSchema = z
       .optional(),
   })
   .strict();
+
+const captureClickSchema = captureSchema.omit({ write_id: true });
+
+const captureActionSchema = captureClickSchema.extend({
+  source: captureSourceSchema.refine(
+    (source) => !("clipboard" in source),
+    "capture.source.clipboard is only valid on operate_click",
+  ),
+});
+
+const captureExtractSchema = captureSchema.extend({
+  source: captureActionSchema.shape.source,
+});
 
 const captureJson = {
   type: "object",
@@ -241,14 +233,39 @@ const captureJson = {
         },
       },
     },
-    write_id: {
-      type: "string",
-      minLength: 1,
-      maxLength: 128,
-      pattern: "^[a-zA-Z0-9:_-]+$",
-    },
+    write_id: { type: "string", minLength: 1, maxLength: 128, pattern: "^[a-zA-Z0-9:_-]+$" },
   },
 };
+
+const captureJsonFor = (toolName: string) => {
+  const { write_id: _writeId, ...actionProperties } = captureJson.properties;
+  if (toolName === "operate_click") return { ...captureJson, properties: actionProperties };
+  const { clipboard: _clipboard, ...sourceProperties } = captureJson.properties.source.properties;
+  return {
+    ...captureJson,
+    properties: {
+      ...(toolName === "operate_extract" ? captureJson.properties : actionProperties),
+      source: {
+        ...captureJson.properties.source,
+        oneOf: captureJson.properties.source.oneOf.slice(0, 2),
+        properties: sourceProperties,
+      },
+    },
+  };
+};
+
+const CAPTURE_NOTE =
+  " Optional capture:{store,source:{role,name?,container?}|{selector,container?}} stores one revealed value after the action and returns metadata, not the value; resolved_source names the element. " +
+  "Role and value-free CSS selector sources can cross open shadow roots; a unique secret-shaped textbox can match without an id. " +
+  "capture_unresolved returns candidate_count 0 and found roles/names; capture_ambiguous means several matches. " +
+  "An unresolved capture does not block unrelated actions. Never paste a secret into a page field to read it.";
+
+const CLICK_CAPTURE_NOTE =
+  " On operate_click, source:{clipboard:true} stores only a new clipboard value written by that click; " +
+  "an unchanged or empty clipboard stores nothing and reports capture_clipboard_unchanged or capture_clipboard_empty.";
+
+const EXTRACT_CAPTURE_NOTE =
+  " Only operate_extract accepts capture.write_id to retry storage after an unresolved capture.";
 
 const storeJsonProps = {
   service: { type: "string" },
@@ -261,29 +278,19 @@ const storeJsonProps = {
 
 const formSelectionsSchema = z
   .record(z.string().min(1).max(200), z.string().min(1).max(4096))
-  .refine(
-    (value) => Object.keys(value).length > 0,
-    "Provide at least one selection",
-  )
-  .refine(
-    (value) => Object.keys(value).length <= 12,
-    "At most 12 selections per call",
-  )
-  .describe(
-    "Map each current browser-use DOM @e: ref or @label, or V1 observed label/ref, to its visible option text.",
-  );
+  .refine((value) => Object.keys(value).length > 0, "Provide at least one selection")
+  .refine((value) => Object.keys(value).length <= 12, "At most 12 selections per call")
+  .describe("Map each current control ref or @label to its visible option text.");
 
 const extractSchema = z.object({
-  capture: captureSchema.optional(),
+  capture: captureExtractSchema.optional(),
   session_id: z.string().min(1),
   into_slot: z.string().min(1).max(60).optional(),
   secret_label: z.string().min(1).max(60).optional(),
   store: storeShape.optional(),
 });
 
-const finishDataSchema = z.record(
-  z.union([z.string().max(4000), z.number(), z.boolean()]),
-);
+const finishDataSchema = z.record(z.union([z.string().max(4000), z.number(), z.boolean()]));
 
 const prepareLoginSchema = z.object({
   session_id: z.string().min(1),
@@ -387,15 +394,12 @@ const clickSchema = z
     ...sessionShape,
     ref: refSchema.optional(),
     screenshot: screenshotPointSchema.optional(),
-    capture: captureSchema.optional(),
+    capture: captureClickSchema.optional(),
     format: actionFormatSchema.optional(),
   })
-  .refine(
-    (args) => (args.ref !== undefined) !== (args.screenshot !== undefined),
-    {
-      message: "Provide exactly one of ref or screenshot",
-    },
-  );
+  .refine((args) => (args.ref !== undefined) !== (args.screenshot !== undefined), {
+    message: "Provide exactly one of ref or screenshot",
+  });
 
 const typeSchema = z
   .object({
@@ -404,7 +408,7 @@ const typeSchema = z
     text: z.string().max(4096).optional(),
     slot: z.string().min(1).max(60).optional(),
     submit: z.boolean().optional(),
-    capture: captureSchema.optional(),
+    capture: captureActionSchema.optional(),
     format: actionFormatSchema.optional(),
   })
   .refine((args) => (args.text !== undefined) !== (args.slot !== undefined), {
@@ -417,7 +421,7 @@ const selectSchema = z
     ref: refSchema.optional(),
     values: z.array(z.string().min(1).max(4096)).length(1).optional(),
     selections: formSelectionsSchema.optional(),
-    capture: captureSchema.optional(),
+    capture: captureActionSchema.optional(),
     country: z.string().min(1).max(60).optional(),
     format: actionFormatSchema.optional(),
   })
@@ -426,10 +430,7 @@ const selectSchema = z
       Number(args.ref !== undefined || args.values !== undefined) +
       Number(args.selections !== undefined) +
       Number(args.country !== undefined);
-    if (
-      modes !== 1 ||
-      (args.ref !== undefined) !== (args.values !== undefined)
-    ) {
+    if (modes !== 1 || (args.ref !== undefined) !== (args.values !== undefined)) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         message: "Provide ref + values, selections, or country",
@@ -440,7 +441,7 @@ const selectSchema = z
 const pressSchema = z.object({
   ...sessionShape,
   key: z.string().min(1).max(40),
-  capture: captureSchema.optional(),
+  capture: captureActionSchema.optional(),
   format: actionFormatSchema.optional(),
 });
 
@@ -474,15 +475,8 @@ const publicFinishSchema = z
   })
   .superRefine((args, ctx) => {
     if (args.outcome === "credentials" && args.store === undefined)
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "credentials outcome requires store",
-      });
-    if (
-      args.outcome === "result" &&
-      args.summary === undefined &&
-      args.data === undefined
-    )
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "credentials outcome requires store" });
+    if (args.outcome === "result" && args.summary === undefined && args.data === undefined)
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         message: "result outcome requires summary or data",
@@ -518,12 +512,9 @@ export const provisionStartTool: Tool = {
     CONTROL_QUERY_CONTRACT +
     'Use `format:"full"` only when the page DOM and text are needed. A released card\'s PAN (complete ordinary spellings and prefixes of at least eight digits) and security code are masked; all other emitted content stays verbatim. ' +
     DOM_OBSERVATION_CONTRACT +
-    "For a signup, checkout, or other goal-shaped task, call operate_drive " +
-    "with the goal and facts (or pass url to operate_drive to open and drive in one call) " +
-    "instead of planning each click and type yourself; resume the same session with " +
-    "answer and/or added facts if it hands back. The primitives " +
-    "(operate_click, operate_type, operate_select, operate_navigate, operate_scroll, operate_login) " +
-    "remain for a single step the drive handed back or a task that is not a goal. " +
+    "Use operate_drive for a multi-step goal when a time-bounded handoff is useful; " +
+    "operate_click, operate_type, operate_select, operate_navigate, operate_scroll, and operate_login " +
+    "complete individual steps. Resume a drive handoff on the same session with answer or added facts. " +
     "inject_card releases a saved card into pan/cvv refs and exposes masked {{pan}}/{{cvv}} per-digit tokens for operate_type placement. " +
     "Call operate_extract when you reach the credentials. Always operate_finish when done. The " +
     "browser has unrestricted egress.",
@@ -585,19 +576,13 @@ export const provisionObserveTool: Tool = {
 export const provisionScreenshotTool: Tool = {
   name: "operate_screenshot",
   description:
-    "WARNING: EXPENSIVE — a screenshot is a full image and costs far more context than any " +
-    "observation. Reach for it ONLY when the DOM tree or control search (" +
-    "operate_observe with query/cursor) is NOT sufficient to determine the page state; " +
-    "if the observation already tells you what the page is doing, do not take one. " +
-    "Debugging tool: capture a screenshot of what the operate session's browser actually RENDERS — " +
-    "the whole page (default: viewport; full_page:true for the whole scrollable page) or ONE specific " +
-    "frame in isolation via frame_index or frame_url_contains, so a cross-origin challenge iframe (a " +
-    "3-D Secure ACS frame, a captcha) can be captured on its own even when it won't show clearly inside " +
-    "a full-page shot. Use this when the DOM tree from an explicitly " +
-    "selected full observation isn't enough to tell what state " +
-    "a stuck page is actually in — a challenge that never advances, an unexpected layout, a captcha you " +
-    "need to SEE. Read-only: never navigates, clicks, types, submits, or steals focus; it only reads " +
-    "pixels. After inject_card releases a card, pixels containing that card's PAN (complete ordinary spellings or prefixes of at least eight digits) or security code in injected controls and identified ordinary displayed copies are covered in the returned image; surrounding borders, labels, and errors remain visible. An active mask is never bypassed: if the mask cannot scan or composite the capture, the screenshot call fails rather than returning the unmasked image. When click_binding is present, its screenshot_id and original image width/height authorize one operate_click screenshot point for 60 seconds. Navigation, viewport/scroll or frame geometry changes invalidate it. An absent binding means this image is read-only; capture again for a coordinate click.",
+    "Capture rendered pixels from the viewport (or full_page:true) or one frame via frame_index or frame_url_contains. " +
+    "A screenshot costs more context than operate_observe; use it when visual state or a coordinate click matters, " +
+    "including a captcha or 3-D Secure ACS frame. During bank approval, short, non-blocking screenshots or observations " +
+    "can watch for a change. This read does not interact with the page. Released PAN and security code in injected " +
+    "controls and identified displayed copies are covered; if masking fails, capture fails. " +
+    "A click_binding authorizes one dispatched operate_click point in original image pixels for 60 seconds; " +
+    "navigation, scroll, viewport, or frame changes invalidate it. Without a binding, capture again before a coordinate click.",
   inputSchema: screenshotSchema,
   jsonInputSchema: {
     type: "object",
@@ -793,8 +778,7 @@ export const operateLoginTool: Tool = {
 
 export const operateNavigateTool: Tool = {
   name: "operate_navigate",
-  description:
-    "Navigate to a URL without session host restrictions. Squire control-plane destinations remain refused.",
+  description: "Navigate the session to a URL without session host restrictions.",
   inputSchema: navigateSchema,
   jsonInputSchema: {
     type: "object",
@@ -885,40 +869,25 @@ export const operateSelectTool: Tool = {
     oneOf: [
       {
         required: ["ref", "values"],
-        not: {
-          anyOf: [{ required: ["selections"] }, { required: ["country"] }],
-        },
+        not: { anyOf: [{ required: ["selections"] }, { required: ["country"] }] },
       },
       {
         required: ["selections"],
         not: {
-          anyOf: [
-            { required: ["ref"] },
-            { required: ["values"] },
-            { required: ["country"] },
-          ],
+          anyOf: [{ required: ["ref"] }, { required: ["values"] }, { required: ["country"] }],
         },
       },
       {
         required: ["country"],
         not: {
-          anyOf: [
-            { required: ["ref"] },
-            { required: ["values"] },
-            { required: ["selections"] },
-          ],
+          anyOf: [{ required: ["ref"] }, { required: ["values"] }, { required: ["selections"] }],
         },
       },
     ],
     properties: {
       ...sessionJson,
       ...refJson,
-      values: {
-        type: "array",
-        items: { type: "string" },
-        minItems: 1,
-        maxItems: 1,
-      },
+      values: { type: "array", items: { type: "string" }, minItems: 1, maxItems: 1 },
       selections: { type: "object", additionalProperties: { type: "string" } },
       country: { type: "string" },
       format: actionFormatJson,
@@ -964,11 +933,7 @@ export const operateScrollTool: Tool = {
     required: ["session_id"],
     properties: {
       ...sessionJson,
-      direction: {
-        type: "string",
-        enum: ["down", "up", "bottom", "top"],
-        default: "down",
-      },
+      direction: { type: "string", enum: ["down", "up", "bottom", "top"], default: "down" },
       format: actionFormatJson,
     },
   },
@@ -990,12 +955,7 @@ export const operateWaitTool: Tool = {
     required: ["session_id"],
     properties: {
       ...sessionJson,
-      milliseconds: {
-        type: "integer",
-        minimum: 0,
-        maximum: 30_000,
-        default: 1_000,
-      },
+      milliseconds: { type: "integer", minimum: 0, maximum: 30_000, default: 1_000 },
       format: actionFormatJson,
     },
   },
@@ -1009,32 +969,12 @@ export const operateWaitTool: Tool = {
 export const operateReadInboxTool: Tool = {
   name: "operate_read_inbox",
   description:
-    "Read the session's signed-in Gmail inbox for a verification email and return " +
-    "{code, link, source_from} WITHOUT touching the live page: the read runs in a " +
-    "dedicated tab that is closed when done, so a signup form or dialog waiting for " +
-    "the code stays exactly as it is. NEVER navigate the session to the mailbox for " +
-    "a code or link — navigating away and back resets the form and closes the " +
-    "waiting dialog. The read is scoped to this session: the signup recipient " +
-    "(drive fact `email`, or `recipient`) and the service host from the session " +
-    "start URL. A verification mail that matches neither is not a candidate — " +
-    "returning another service's newest mail is worse than returning nothing. " +
-    "An IP or localhost start URL is the exception: no From address can ever " +
-    "contain it, so host scoping there would drop every mail and protect " +
-    "nothing — such a read is NOT host-scoped and the newest mail after the " +
-    "session start wins, so cross-check `source_from` before using the code. " +
-    "`sender` and `recipient` override those defaults when the caller has a " +
-    "narrower hint. The newest matching mail is the one read, cross-checked " +
-    "across the search listing AND the real-time All Mail listing (Gmail's " +
-    "search index can lag fresh mail by minutes — found:false means the mail is " +
-    "not in the mailbox, not that the search was stale). A miss reports the " +
-    "query it searched. `into_slot` " +
-    "seals a found OTP into a session slot so it is typed with operate_type slot and " +
-    "never crosses the MCP boundary; `grant_inbox_consent` overrides the session's " +
-    "inbox-read consent for this call. Returns needs_user when nothing is found yet " +
-    "— retry after a few seconds or ask the user (the session stays live). A " +
-    "needs_user carrying wall:google_session is the opposite case: the operator " +
-    "cannot read the inbox until the user runs `connect`, so retrying cannot clear " +
-    "it — don't poll and don't ask the user for a code.",
+    "Read verification mail in a separate tab without changing the live form. Returns {code, link, source_from} or needs_user. " +
+    "The default search uses the session recipient and service host; sender and recipient narrow it. " +
+    "For an IP or localhost start URL, host scoping is unavailable: check source_from before using the result. " +
+    "It checks search and All Mail because Gmail search can lag. A miss reports the query; retry after a few seconds. " +
+    "into_slot keeps a found code in a session slot for operate_type; grant_inbox_consent overrides consent for this call. " +
+    "If needs_user reports wall:google_session, ask the user to run connect; polling will not clear it.",
   inputSchema: readInboxSchema,
   jsonInputSchema: {
     type: "object",
@@ -1059,34 +999,15 @@ export const operateFinishTool: Tool = {
   name: "operate_finish",
   jsonOutputSchema: {
     type: "object",
-    required: [
-      "session_id",
-      "operation_id",
-      "execution",
-      "mutation",
-      "cleanup",
-      "closed",
-    ],
+    required: ["session_id", "operation_id", "execution", "mutation", "cleanup", "closed"],
     properties: {
       session_id: { type: "string" },
       operation_id: { type: "string" },
-      execution: {
-        type: "string",
-        enum: ["completed", "cancelled", "pending", "unknown"],
-      },
-      mutation: {
-        type: "string",
-        enum: ["not_dispatched", "dispatched", "unknown"],
-      },
-      cleanup: {
-        type: "string",
-        enum: ["open", "closing", "closed", "already_closed", "unknown"],
-      },
+      execution: { type: "string", enum: ["completed", "cancelled", "pending", "unknown"] },
+      mutation: { type: "string", enum: ["not_dispatched", "dispatched", "unknown"] },
+      cleanup: { type: "string", enum: ["open", "closing", "closed", "already_closed", "unknown"] },
       closed: { type: "boolean" },
-      data: {
-        type: "object",
-        additionalProperties: { type: ["string", "number", "boolean"] },
-      },
+      data: { type: "object", additionalProperties: { type: ["string", "number", "boolean"] } },
     },
     additionalProperties: true,
   },
@@ -1098,32 +1019,18 @@ export const operateFinishTool: Tool = {
     required: ["session_id"],
     properties: {
       ...sessionJson,
-      outcome: {
-        type: "string",
-        enum: ["none", "credentials", "result"],
-        default: "none",
-      },
-      store: {
-        type: "object",
-        required: ["service"],
-        properties: storeJsonProps,
-      },
+      outcome: { type: "string", enum: ["none", "credentials", "result"], default: "none" },
+      store: { type: "object", required: ["service"], properties: storeJsonProps },
       summary: { type: "string" },
       data: { type: "object" },
     },
     allOf: [
       {
-        if: {
-          required: ["outcome"],
-          properties: { outcome: { const: "credentials" } },
-        },
+        if: { required: ["outcome"], properties: { outcome: { const: "credentials" } } },
         then: { required: ["store"] },
       },
       {
-        if: {
-          required: ["outcome"],
-          properties: { outcome: { const: "result" } },
-        },
+        if: { required: ["outcome"], properties: { outcome: { const: "result" } } },
         then: { anyOf: [{ required: ["summary"] }, { required: ["data"] }] },
       },
     ],
@@ -1138,27 +1045,17 @@ export const operateFinishTool: Tool = {
 export const operateDriveTool: Tool = {
   name: "operate_drive",
   description:
-    "Drive a signup, checkout, or other website goal to completion. This is the tool to reach for " +
-    "when the user asked to create an account, complete a purchase, or provision a service — " +
-    "prefer it over calling operate_click / operate_type / operate_observe yourself. " +
-    "Pass session_id of an open operate_start session, or url to open the page (same start path as " +
-    "operate_start, with no blanket sign-in wall) and drive in one call. goal is the task in words. " +
-    "facts is the key/value bag of values the loop may type (email, first_name, last_name, company, " +
-    "address, city, state, zip, password, card_ref, merchant, amount_cents, currency, …); it never " +
-    "invents a value. Amount_cents is in the currency's smallest unit: USD $12.34 -> 1234; JPY ¥65,800 -> 65800 (do not multiply by 100); KRW works like JPY. A search or query field may receive a phrase Jev assigns from the goal's own " +
-    "words or the facts; identity and payment fields still require a fact. Each step asks Jev for one operation (CLICK, TYPE_TEXT, SELECT, SCROLL, WAIT, DONE, BLOCKED) " +
-    "and a matching per-operation target; unused target heads cannot act. It reads verification mail " +
-    "when a verification field is chosen or the page is stuck after a click. Optional max_steps (default 60) and max_seconds (default 45) bound this call; " +
-    "a budget handoff is partial progress — call again on the same session to continue. " +
-    "Resume with answer (one option key from a previous handoff: a readable action slug, done, or stuck) and/or added " +
-    "facts; the loop continues from the current page. Returns a handoff, never a bare page: status, " +
-    "the current compact observation with the same stable refs, trajectory, done/remaining, and " +
-    "step/time counters. Status complete means the goal is done; needs_value names the missing field's label; " +
-    "stuck means no listed element advances the goal; " +
-    "low_confidence includes the question, options, probabilities, and confidence; " +
-    "invalid_answer is a malformed Jev choice (reason + confidence) after one same-observation retry; no_progress, budget, " +
-    "jev_unavailable, evaluate_timeout (an in-page evaluate was aborted so the broker stays serving), pending_approval (card approval URL), and card_incomplete (the card released but not every requested field landed; resume to retry the fill against the same approval_id) are resumable. Google sign-in, " +
-    "verification-email read, captcha, and card release run inside the loop. Always operate_finish when done.",
+    "Drive a multi-step signup, checkout, or other website goal and hand back when complete, blocked, or out of budget. " +
+    "Pass an open session_id or url to open and drive. goal states the task; facts provides values to type. " +
+    "Identity and payment values must come from facts; a search phrase may come from the goal. " +
+    "Amount_cents is in the currency's smallest unit: USD $12.34 -> 1234; JPY ¥65,800 -> 65800 (do not multiply by 100); KRW works like JPY. " +
+    "The loop can handle Google sign-in, verification mail, captcha, and card release. " +
+    "max_steps (default 60) and max_seconds (default 45) bound a call. Resume a budget or other partial handoff on the " +
+    "same session with added facts and/or answer from its options. The handoff includes status, current compact observation, " +
+    "trajectory, done/remaining, and counters. complete means done; needs_value names a missing field; stuck and low_confidence " +
+    "need a decision. invalid_answer, no_progress, budget, evaluate_timeout, pending_approval, and " +
+    "card_incomplete are resumable. After a card_incomplete handoff, retry against the same approval_id. " +
+    "Always operate_finish when done.",
   inputSchema: driveSchema,
   jsonInputSchema: {
     type: "object",
@@ -1209,9 +1106,7 @@ const captureOutputSchema = {
     write_id: { type: "string" },
     execution: { enum: ["completed", "cancelled", "pending", "unknown"] },
     mutation: { enum: ["not_dispatched", "dispatched", "unknown"] },
-    cleanup: {
-      enum: ["open", "closing", "closed", "already_closed", "unknown"],
-    },
+    cleanup: { enum: ["open", "closing", "closed", "already_closed", "unknown"] },
     closed: { type: "boolean" },
     stored: { type: "boolean" },
     storage: { enum: ["stored", "unknown", "not_attempted"] },
@@ -1222,8 +1117,7 @@ const captureOutputSchema = {
     },
     resolved_source: {
       type: "object",
-      description:
-        "Names the element the vaulted value was resolved from (role/name or selector).",
+      description: "Names the element the vaulted value was resolved from (role/name or selector).",
       additionalProperties: true,
     },
     candidate_count: { type: "integer" },
@@ -1259,9 +1153,11 @@ for (const tool of OPERATE_TOOLS) {
     continue;
   const properties = tool.jsonInputSchema.properties;
   if (properties !== null && typeof properties === "object")
-    Object.assign(properties, { capture: captureJson });
+    Object.assign(properties, { capture: captureJsonFor(tool.name) });
   tool.description +=
-    " Optional capture:{store,source:{role,name?,container?}|{selector,container?}|{clipboard:true}} vaults exactly one revealed source and returns metadata only; the source is resolved against the document AFTER the action's mutation settles, and a stored result names the resolved element in resolved_source. Use a value-free CSS selector for a plain-text copy field without a textbox/code role. Resolution pierces open shadow roots: a bare selector, a role, or a cross-shadow [container] descendant selector all reach shadow-hosted fields (e.g. Groq's id-less created-key <input> inside an open shadow root); when the role is textbox, an id-less text input whose value looks secret-shaped also matches if it is the only textbox in the container/document. A source matching nothing returns error capture_unresolved with candidate_count 0 and a found list of the roles/names that DID render (never values) — use it to pick the next source; capture_ambiguous is reserved for more than one match. If storage is unresolved, retry operate_extract with capture.write_id. An unresolved capture does not block unrelated actions. On operate_click only, source {clipboard:true} vaults the value the click newly writes to the browser clipboard (a \"Copy API key\" button whose full key never appears in the page); the clipboard is read before and after the click, and an unchanged or empty clipboard returns capture_clipboard_unchanged or capture_clipboard_empty and stores nothing. Never paste a secret into a page field to read it.";
+    CAPTURE_NOTE +
+    (tool.name === "operate_click" ? CLICK_CAPTURE_NOTE : "") +
+    (tool.name === "operate_extract" ? EXTRACT_CAPTURE_NOTE : "");
   tool.jsonOutputSchema = captureOutputSchema;
 }
 
@@ -1276,9 +1172,7 @@ operateClickTool.jsonOutputSchema = {
       properties: {
         dispatch: { enum: ["dispatched", "not_dispatched", "unknown"] },
         outcome: { const: "unknown" },
-        retry_policy: {
-          enum: ["observe_before_new_action", "capture_new_screenshot"],
-        },
+        retry_policy: { enum: ["observe_before_new_action", "capture_new_screenshot"] },
       },
     },
   },
