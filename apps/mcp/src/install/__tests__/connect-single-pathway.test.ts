@@ -29,18 +29,39 @@ const boundSession: SessionData = {
 
 describe("the login subcommand is gone", () => {
   it("refuses to run it and names connect instead", async () => {
-    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
     const exit = vi.spyOn(process, "exit").mockImplementation((code?: string | number | null) => {
       throw new Error(`exit:${code}`);
     });
     try {
       await expect(runCli(["login", "--provider=google"])).rejects.toThrow("exit:64");
-      const message = String(error.mock.calls.at(-1)?.[0] ?? "");
+      const message = String(warning.mock.calls.at(-1)?.[0] ?? "");
       expect(message).toContain("`login` has been removed");
       expect(message).toContain("connect");
     } finally {
       exit.mockRestore();
-      error.mockRestore();
+      warning.mockRestore();
+    }
+  });
+});
+
+describe("help routing", () => {
+  it.each([
+    { label: "--help", argv: ["--help"] },
+    { label: "-h", argv: ["-h"] },
+    { label: "help", argv: ["help"] },
+    { label: "connect --help", argv: ["connect", "--help"] },
+  ])("$label prints help without starting connect", async ({ argv }) => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await runCli(argv);
+      const output = warn.mock.calls.map(([line]) => String(line ?? "")).join("\n");
+      expect(output).toContain("Commands");
+      expect(output).toContain("--api-base=<url>");
+      expect(output).toContain("--account=<id>");
+      expect(output).not.toContain("Setting up this machine");
+    } finally {
+      warn.mockRestore();
     }
   });
 });
@@ -171,5 +192,9 @@ describe("connectIncompleteMessage", () => {
   it("explains why --skip-browser can't establish the session", () => {
     expect(connectIncompleteMessage("no_google_session", true)).toContain("--skip-browser");
     expect(connectIncompleteMessage("no_google_session", false)).not.toContain("--skip-browser");
+    expect(connectIncompleteMessage("no_google_session", true)).toContain(
+      "connect --force-relogin",
+    );
+    expect(connectIncompleteMessage("no_google_session", true)).toContain("fresh browser sign-in");
   });
 });

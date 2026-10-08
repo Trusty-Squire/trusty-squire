@@ -291,8 +291,9 @@ it("prints the same already-connected facts as JSON without changing the human l
 
   expect(human.join("\n")).toContain("Already connected");
   // Newline-delimited JSON: each line is a complete report, and the run's last
-  // word is the one marked terminal. This run answers in a single line.
-  expect(machine.reports()).toHaveLength(1);
+  // word is the one marked terminal. Startup speaks before broker work.
+  expect(machine.reports()).toHaveLength(2);
+  expect(machine.reports()[0]).toMatchObject({ state: "connecting", terminal: false });
   const report = machine.terminal<{
     state: string;
     sign_in_url: string | null;

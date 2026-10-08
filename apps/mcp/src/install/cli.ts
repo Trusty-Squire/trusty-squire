@@ -153,6 +153,7 @@ interface InstallConsent {
 // Default (no positional) → `connect` because the most common invocation is
 // `npx @trusty-squire/mcp` with no args, and that should kick off setup.
 function commandFromArgv(argv: readonly string[]): string {
+  if (argv.includes("--help") || argv.includes("-h")) return "help";
   return argv.filter((a) => !a.startsWith("--"))[0] ?? "connect";
 }
 
@@ -265,12 +266,12 @@ function parseArgs(argv: string[]): Argv {
 export class CliUsageError extends Error {}
 
 function rejectUsage(message: string): never {
-  console.error(message);
+  ui.fail(message);
   throw new CliUsageError(message);
 }
 
 function rejectDeprecatedCli(message: string): never {
-  rejectUsage(`[trusty-squire] ${message}`);
+  rejectUsage(message);
 }
 
 function isAgentTarget(s: string): s is AgentTarget {
@@ -352,8 +353,8 @@ function resolveCopiedNpxServerLaunch(binPath: string): { command: string; args:
     // fall back to the in-cache absolute path. Works until npx clears
     // the cache (days-to-weeks later), at which point the MCP server
     // breaks silently mid-session. Surface the warning so users know.
-    console.warn(
-      `[trusty-squire] couldn't copy node_modules to ~/.trusty-squire/lib ` +
+    ui.warn(
+      `Couldn't copy node_modules to ~/.trusty-squire/lib ` +
         `(${err instanceof Error ? err.message : String(err)}); using cache path. ` +
         `Re-run install if the MCP server stops working.`,
     );
@@ -389,7 +390,7 @@ export async function runCli(argv: string[]): Promise<void> {
         printHelp();
         return;
       default:
-        console.error(`unknown command: ${args.command}`);
+        ui.fail(`unknown command: ${args.command}`);
         printHelp();
         process.exit(64);
     }
@@ -528,7 +529,16 @@ async function connect(args: Argv, argv: readonly string[] = []): Promise<void> 
         agentIdentity: context.agentIdentity,
       },
       async () => {
-        await installBrokerService(canonicalProfileDir);
+        emitConnectStatus(args, {
+          outcome: { kind: "starting" },
+          profileDir: canonicalProfileDir,
+          browser_location: { kind: "none" },
+        });
+        await ui.withSpinner({
+          start: "Starting browser service",
+          done: "Browser service ready",
+          task: () => installBrokerService(canonicalProfileDir),
+        });
         // An install that is already connected needs no browser at all. Decide
         // that BEFORE any browser work, or a machine whose browser is busy with
         // other work fails an install it never had to perform.
@@ -806,8 +816,7 @@ async function runConnectInstall(
   wantInteractive: boolean,
   placed: BrowserPlacementSlot,
 ): Promise<void> {
-  console.warn("");
-  console.warn(
+  ui.step(
     "Opening the Trusty Squire install page in a browser. " +
       "The page walks you through signing in with Google and (optionally) GitHub.",
   );
@@ -849,9 +858,9 @@ async function runConnectInstall(
     }
     if (busy) {
       deferredReloginProviders = wanted;
-      console.error(
-        "[connect] the bot profile is busy, so the old provider sessions will be " +
-          "signed out through the sign-in browser instead.",
+      ui.warn(
+        "The bot profile is busy; old provider sessions will be signed out " +
+          "through the browser sign-in instead.",
       );
     } else if (!cleared) {
       emitConnectStatus(args, {
@@ -995,7 +1004,6 @@ async function runConnectInstall(
 
   const storage = await openSessionStorage();
   await storage.write(session);
-  ui.success(`Session saved (${storage.path})`);
   args.noRegistry = session.consent_skillify_telemetry !== true;
   args.consentOperatorInboxOtp = session.consent_operator_inbox_otp !== false;
 
@@ -1022,9 +1030,7 @@ async function runConnectInstall(
         providers = await confirmLiveGoogleProviderSnapshot(profileDir, providers);
       }
     } catch (err) {
-      console.error(
-        `[connect] provider-session probe failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
+      ui.warn(`Provider-session check failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
@@ -1051,14 +1057,14 @@ async function runConnectInstall(
     ownBrowserPid: placed.ownBrowserPid,
   });
   if (!complete.ok) {
-    ui.fail(connectIncompleteMessage(complete.reason, args.skipBrowser));
+    ui.fail(
+      `Session saved (${storage.path}), but setup is incomplete. ${connectIncompleteMessage(complete.reason, args.skipBrowser)}`,
+    );
     process.exit(1);
   }
+  ui.success(`Session saved (${storage.path})`);
 
-  // Visual consistency: when the picker was running, close with
-  // clack's `outro` so the bookends match. The flag-driven path keeps
-  // the boxen panel (its callers are typically CI / logs where
-  // clack's box would look noisier).
+  // Close the interactive picker with its matching clack outro.
   const closingLine =
     `Squire on duty. Restart ${agent.display_name} to pick up the new tools. ` +
     `Try it — ask your agent: ${ui.code(`"sign me up for Resend"`)}`;
@@ -1066,7 +1072,7 @@ async function runConnectInstall(
     showOutro(closingLine);
   } else {
     ui.divider();
-    ui.panel(closingLine, { color: "wine" });
+    ui.success(closingLine);
   }
 }
 
@@ -1229,7 +1235,7 @@ async function offerGithubReloginIfDead(args: Argv): Promise<boolean> {
   }
   const answer = await confirm({
     message:
-      "Your GitHub session looks dead (GitHub-only signups will fail). Reconnect GitHub now?",
+      "Your GitHub session looks dead (GitHub-only signups will fail). Reconnect GitHub now? This opens a browser sign-in window.",
     initialValue: true,
   });
   if (isCancel(answer) || answer !== true) {
@@ -1420,7 +1426,7 @@ async function runInstallClaim(
     forceReloginProviders?: readonly OAuthProviderId[];
   },
 ): Promise<InstallClaimResult> {
-  console.warn(`Connecting this machine to your account…`);
+  ui.step("Connecting this machine to your account…");
   const initiate = await installInitiate(apiBase, target, baseSession.machine_token ?? null);
   // Waiting past the pairing token's life would hand back a URL that is
   // already dead. Counted as a DURATION from the moment the response arrived:
@@ -1484,7 +1490,7 @@ async function runInstallClaim(
       )
     ) {
       if (claimedThisPoll) {
-        console.error(chalk.dim(`   ✓ ${claimHeartbeatMessage(true)}`));
+        ui.info(claimHeartbeatMessage(true));
       }
       return { status: "claimed", provider: null };
     }
@@ -1635,18 +1641,22 @@ async function resolveTarget(explicit: AgentTarget | undefined): Promise<AgentTa
   if (explicit !== undefined) return explicit;
   const detected = await detectInstalledAgents();
   if (detected.length === 1) {
-    console.warn(`Detected ${detected[0]!.display_name}. Configuring squire for it.`);
+    ui.info(`Detected ${detected[0]!.display_name}. Configuring squire for it.`);
     return detected[0]!.target;
   }
   if (detected.length > 1) {
-    console.error("Multiple agents detected. Please pass --target=<agent>:");
-    for (const a of detected) console.error(`  --target=${a.target}  (${a.display_name})`);
+    ui.fail(
+      `Multiple agents detected. Please pass --target=<agent>:\n` +
+        detected.map((a) => `  --target=${a.target}  (${a.display_name})`).join("\n"),
+    );
     throw new TargetUnresolvedError("multiple agents detected");
   }
-  console.error("No coding agents auto-detected. Pass --target= explicitly:");
-  for (const a of Object.values(AGENTS)) {
-    console.error(`  --target=${a.target}  (${a.display_name})`);
-  }
+  ui.fail(
+    `No coding agents auto-detected. Pass --target= explicitly:\n` +
+      Object.values(AGENTS)
+        .map((a) => `  --target=${a.target}  (${a.display_name})`)
+        .join("\n"),
+  );
   throw new TargetUnresolvedError("no coding agents auto-detected");
 }
 
@@ -1657,13 +1667,13 @@ async function logout(args: Argv): Promise<void> {
   const storage = await openSessionStorage();
   const target = args.account ?? (await storage.currentAccountId());
   if (target === null || (args.account !== undefined && (await storage.read(target)) === null)) {
-    console.warn("✓ No local session to clear.");
+    ui.success("No local session to clear.");
     return;
   }
   await storage.clear(target);
   const remaining = await storage.listAccounts();
-  console.warn(
-    `✓ Cleared local session for account ${target} (${storage.path}).` +
+  ui.success(
+    `Cleared local session for account ${target} (${storage.path}).` +
       (remaining.length > 0 ? ` Still installed: ${remaining.join(", ")}.` : ""),
   );
 }
@@ -1676,19 +1686,26 @@ function printHelp(): void {
   console.warn(`  ${ui.code("connect")}                       set up this machine (default)`);
   console.warn(`  ${ui.code("settings")}                      edit registry and OTP choices`);
   console.warn(`  ${ui.code("logout [--account=<id>]")}       clear ONE account's local session`);
+  console.warn(`  ${ui.code("help")}                          show this help`);
   console.warn("");
   console.warn(`${chalk.bold("Flags for connect")}`);
   console.warn(`  --target=<${Object.keys(AGENTS).join("|")}>`);
-  console.warn(`  --skip-browser               don't launch a browser (CI mode)`);
+  console.warn(`  --skip-browser               use a separate browser for sign-in (CI mode)`);
+  console.warn(`  --api-base=<url>             use a different Trusty Squire API`);
   console.warn(
     `  --force-relogin[=google|github] re-sign-in: switch the bound account or refresh one provider`,
   );
   console.warn(`  --no-registry                disable managed registry participation`);
   console.warn(`  --no-interactive             skip the TUI picker (use flag defaults only)`);
   console.warn(
-    `  --json                       print one machine-readable connect report on stdout ` +
+    `  --json                       stream machine-readable connect reports on stdout ` +
       `(implies --no-interactive)`,
   );
+  console.warn("");
+  console.warn(`${chalk.bold("Flags for logout")}`);
+  console.warn(`  --account=<id>               select the local session for logout`);
+  console.warn("");
+  console.warn(`  --help, -h                   show this help`);
   console.warn("");
   console.warn(`${chalk.bold("Example")}`);
   console.warn(`  ${ui.code("npx @trusty-squire/mcp connect")}`);

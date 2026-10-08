@@ -20,7 +20,13 @@ import type { OAuthProviderId } from "../bot/oauth-providers.js";
 import { profileOperationIsLocked, readLockHolder } from "../bot/profile.js";
 import type { SessionData } from "../session.js";
 
-export const CONNECT_STATES = ["connected", "needs-sign-in", "busy", "no-browser"] as const;
+export const CONNECT_STATES = [
+  "connecting",
+  "connected",
+  "needs-sign-in",
+  "busy",
+  "no-browser",
+] as const;
 export type ConnectState = (typeof CONNECT_STATES)[number];
 
 // What blocks this connect, and ONLY where the other fields cannot say it:
@@ -94,7 +100,9 @@ export type ConnectReport =
     });
 
 export type ConnectOutcome =
-  // The only non-terminal outcome: the pairing link is valid and the run is
+  // Emitted before the broker-service wait, while no browser is open yet.
+  | { kind: "starting" }
+  // The pairing link is valid and the run is
   // about to wait on a human. It goes out before the wait, and again whenever
   // the browser's placement becomes known, so a caller holds both live
   // addresses while they still reach something.
@@ -122,7 +130,7 @@ export interface ConnectReportInput {
 }
 
 function settled(
-  state: Exclude<ConnectState, "needs-sign-in">,
+  state: Exclude<ConnectState, "needs-sign-in" | "connecting">,
   reason: ConnectReasonCode | null,
   input: ConnectReportInput,
   extras: { sign_in_url?: string; account?: ConnectAccount } = {},
@@ -177,6 +185,16 @@ export function buildConnectReport(input: ConnectReportInput): ConnectReport {
   }
   const { outcome } = input;
   switch (outcome.kind) {
+    case "starting":
+      return {
+        state: "connecting",
+        terminal: false,
+        reason: null,
+        sign_in_url: null,
+        account: null,
+        holder: input.holder,
+        browser_location: input.browser_location,
+      };
     case "sign_in_open":
       return signInOutstanding(input, outcome.confirm_url, false);
     case "provisioned":
@@ -266,22 +284,18 @@ export function connectIncompleteMessage(
 ): string {
   const retry = "npx @trusty-squire/mcp connect --force-relogin";
   const skipBrowserNote = skipBrowser
-    ? " --skip-browser signs you in outside the bot's Chrome, so its profile never " +
-      "gains the session; re-run connect without it on a machine with a display " +
-      "(headless hosts get a noVNC URL)."
+    ? " --skip-browser used a separate browser, so the bot's Chrome did not gain the session."
     : "";
+  const retryStep = skipBrowser
+    ? `Run ${retry} without --skip-browser to open a fresh browser sign-in.`
+    : `Run ${retry} to open a fresh browser sign-in.`;
   switch (reason) {
     case "probe_failed":
-      return (
-        `This machine is bound to your account and its session was saved, but the Google ` +
-        `session in the bot's Chrome profile could not be verified. ` +
-        `Re-run ${retry} without --skip-browser to sign in there.`
-      );
+      return `The Google session in the bot's Chrome could not be verified. ` + retryStep;
     case "no_google_session":
       return (
-        `This machine is bound to your account, but the bot's Chrome profile has no live ` +
-        `Google session, so the operator cannot act as you.${skipBrowserNote} ` +
-        `Re-run ${retry}.`
+        `The bot's Chrome has no live Google session, so the operator cannot act as you.` +
+        `${skipBrowserNote} ${retryStep}`
       );
     case "requested_provider_missing":
       return (

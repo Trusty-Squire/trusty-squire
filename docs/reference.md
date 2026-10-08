@@ -116,7 +116,8 @@ Each report carries seven fields:
 
 - `terminal` — `false` while the run is still going, `true` on the line that ends it. Exactly one line per run is terminal, and it is the last one.
 
-- `state` — one of four:
+- `state` — one of five:
+  - `connecting` — startup is in progress. This non-terminal line is written before the browser-service wait so a caller gets an immediate answer; `sign_in_url` and `account` are `null`.
   - `connected` — the bot's Chrome profile carries a Google session bound to your account. `account` is set. `reason: null` means the in-profile Google ceremony completed or a `--skip-browser` profile check found the session; `reason: "cached_cookie_evidence"` means the no-ceremony fast path read the profile's cookie store and opened nothing, so the session is present but not proven live.
   - `needs-sign-in` — a sign-in is outstanding **and Squire holds its live URL**. `sign_in_url` is always a string here; this is the only state that promises one. Non-terminal lines in this state are how a caller gets that URL, and the browser's placement, while both still reach something.
   - `busy` — Squire could not read or use the bot profile to answer, including a ceremony refused because another session holds the browser (the profile gate's refusal, or a resident broker declining to yield). `holder` says who has it. A broker that died mid-ceremony is not this — that is the run failing, and it reports `no-browser` with `reason: "run_failed"`.

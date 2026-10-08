@@ -37,6 +37,18 @@ function classify(
 }
 
 describe("buildConnectReport", () => {
+  it("reports broker startup before the long wait as a nonterminal line", () => {
+    expect(classify({ outcome: { kind: "starting" } })).toEqual({
+      state: "connecting",
+      terminal: false,
+      reason: null,
+      sign_in_url: null,
+      account: null,
+      holder: noneHolder,
+      browser_location: noBrowser,
+    });
+  });
+
   it("does not report the shared ceremony browser as a competing holder", () => {
     const browser_location = { kind: "virtual" as const, url: "https://example.test/novnc" };
     const open = classify({
