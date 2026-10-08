@@ -1655,6 +1655,9 @@ describe("form-fill assignment helpers", () => {
     ];
     expect(isRenderedCaptchaRow(captchaGate[2]!)).toBe(true);
     expect(pageHasRenderedCaptcha(captchaGate)).toBe(true);
+    const checkboxGate: WireRow[] = [["@e:checkbox", "c", "Verify you are human|s=u|x=x"]];
+    expect(isRenderedCaptchaRow(checkboxGate[0]!)).toBe(false);
+    expect(pageHasRenderedCaptcha(checkboxGate)).toBe(false);
     expect(disabledSubmitKind(captchaGate, 0)).toBe("widget_unready");
     expect(disabledSubmitKind(captchaGate, 0, [], false)).toBe("widget_unready");
     expect(

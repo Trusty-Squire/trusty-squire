@@ -2144,6 +2144,9 @@ export type DisabledSubmitKind = "in_flight" | "needs_fill" | "widget_unready" |
 /** A rendered image/audio challenge in a cross-origin frame. */
 export function isRenderedCaptchaRow(row: WireRow): boolean {
   if (!/(?:^|\|)x=x(?:\||$)/.test(row[2] ?? "")) return false;
+  // A checkbox widget can say "Verify you are human" before it is pressed.
+  // Only the image/audio challenge path should suppress the checkbox press.
+  if (row[1] === "c") return false;
   return /\b(?:image[- ]?challenge|audio[- ]?challenge|verify|skip)\b/.test(
     readableLabel(row).toLowerCase(),
   );
