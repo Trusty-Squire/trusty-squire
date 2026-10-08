@@ -9,7 +9,7 @@
 // the rest of the tree, never from provision-session.
 
 import type { ElementHandle, Page } from "playwright";
-import type { CaptureSource } from "../credential-capture.js";
+import type { CaptureSource, ElementCaptureSource } from "../credential-capture.js";
 import { extractApiKeyFromText, isTruncatedCapture } from "../credential-text.js";
 import {
   looksLikeCodeIdentifier,
@@ -131,10 +131,11 @@ export function sanitizeExtractedCredentials(
   for (const [key, value] of Object.entries(credentials)) {
     const k = normLabelKey(key);
     if (k === "refcode" || k === "referral_code") continue;
-    if (isCredentialNoise(value)) continue;
+    const accepted = acceptedVisibleCredentials.includes(value);
+    if (!accepted && isCredentialNoise(value)) continue;
     if (
       (k === "key" || k === "api_key" || k === "secret") &&
-      !acceptedVisibleCredentials.includes(value) &&
+      !accepted &&
       !looksLikeCredentialValue(value)
     )
       continue;
@@ -188,7 +189,7 @@ export interface CaptureFoundCandidate {
 
 async function shadowPiercingCapture(
   page: Page,
-  source: CaptureSource,
+  source: ElementCaptureSource,
   handles: ElementHandle<Node>[],
   containerHandles: ElementHandle<Node>[],
 ): Promise<{ candidate_count: number; value?: string; found?: CaptureFoundCandidate[] }> {
@@ -439,7 +440,7 @@ async function shadowPiercingCapture(
     { source, nodes: handles, scopeNodes: containerHandles },
   );
 }
-function captureSourceContainer(page: Page, source: CaptureSource) {
+function captureSourceContainer(page: Page, source: ElementCaptureSource) {
   return source.container === undefined
     ? undefined
     : page.getByRole(source.container.role, {
@@ -449,7 +450,7 @@ function captureSourceContainer(page: Page, source: CaptureSource) {
       });
 }
 
-function captureSourceTargets(page: Page, source: CaptureSource) {
+function captureSourceTargets(page: Page, source: ElementCaptureSource) {
   const container = source.container === undefined ? page : captureSourceContainer(page, source)!;
   return "selector" in source
     ? container.locator(`css=${source.selector}`).filter({ visible: true })
@@ -464,6 +465,11 @@ interface CaptureSourceResolution {
   resolved_source?: { tag: string; role?: string; name?: string; selector?: string };
   resolved_from?: "post_action" | "pre_action_only";
   found?: CaptureFoundCandidate[];
+  // A clipboard source that yielded nothing new. Never carries a value.
+  clipboard_error?:
+    | "capture_clipboard_unchanged"
+    | "capture_clipboard_empty"
+    | "capture_clipboard_unreadable";
 }
 
 async function readCaptureElement(handle: ElementHandle<Node>) {
@@ -524,7 +530,7 @@ async function readCaptureElement(handle: ElementHandle<Node>) {
  * capture is in flight. */
 async function resolveCaptureSourceOnce(
   page: Page,
-  source: CaptureSource,
+  source: ElementCaptureSource,
 ): Promise<CaptureSourceResolution> {
   // A locator-engine failure is a zero-match, not a mystery: the explicit
   // shadow-piercing walk below still gets its chance to resolve the source.
@@ -574,6 +580,12 @@ export async function probeCaptureSource(
   if (session === undefined) throw new Error("unknown provision session");
   const page = operationPageForSession(session);
   if (page === undefined) throw new Error("capture page unavailable");
+  if ("clipboard" in source) {
+    // The pre-click clipboard is the baseline: only a value the click newly
+    // writes there is evidence of a copied credential.
+    await ensureCaptureClipboardPermission(page);
+    return { candidate_count: 1, value: (await session.browser.readClipboard(page)).trim() };
+  }
   const handles = await captureSourceTargets(page, source)
     .elementHandles()
     .catch(() => []);
@@ -624,7 +636,7 @@ const CAPTURE_MUTATION_RENDER_POLL_MS = 250;
 
 async function resolveChangedPostActionSource(
   page: Page,
-  source: CaptureSource,
+  source: ElementCaptureSource,
   pre: CaptureSourceProbe,
 ): Promise<CaptureSourceResolution | null> {
   const handles = await captureSourceTargets(page, source)
@@ -665,9 +677,32 @@ async function resolveChangedPostActionSource(
   }
 }
 
+/** Read the clipboard after a click until it holds a non-empty value that
+ * differs from the pre-click baseline, within the mutation render budget. */
+async function resolvePostActionClipboard(
+  page: Page,
+  browser: Session["browser"],
+  pre: CaptureSourceProbe,
+): Promise<CaptureSourceResolution> {
+  const before = pre.value ?? "";
+  const deadline = Date.now() + CAPTURE_MUTATION_RENDER_BUDGET_MS;
+  for (;;) {
+    const value = (await browser.readClipboard(page).catch(() => "")).trim();
+    if (value.length > 0 && value !== before)
+      return { candidate_count: 1, value, resolved_from: "post_action" };
+    if (Date.now() >= deadline)
+      return {
+        candidate_count: 0,
+        clipboard_error:
+          value.length === 0 ? "capture_clipboard_empty" : "capture_clipboard_unchanged",
+      };
+    await new Promise((resolve) => setTimeout(resolve, CAPTURE_MUTATION_RENDER_POLL_MS));
+  }
+}
+
 async function resolvePostActionCaptureSource(
   page: Page,
-  source: CaptureSource,
+  source: ElementCaptureSource,
   pre: CaptureSourceProbe,
 ): Promise<CaptureSourceResolution> {
   const deadline = Date.now() + CAPTURE_MUTATION_RENDER_BUDGET_MS;
@@ -694,6 +729,14 @@ export async function captureCredentialSource(
   if (session === undefined) throw new Error("unknown provision session");
   const page = operationPageForSession(session);
   if (page === undefined) throw new Error("capture page unavailable");
+  if ("clipboard" in source) {
+    // Without a pre-click baseline a clipboard value could be stale, so the
+    // clipboard source is only judged after a click that was probed first.
+    if (afterAction?.pre === undefined)
+      return { candidate_count: 0, clipboard_error: "capture_clipboard_unreadable" };
+    await settleAfterStateChange(session.browser, page);
+    return await resolvePostActionClipboard(page, session.browser, afterAction.pre);
+  }
   if (afterAction !== undefined) {
     // Same settle the click itself waits on — judge the source only after the
     // click's mutation has had its render window.
@@ -994,13 +1037,11 @@ export async function extractCredentials(sessionId: string): Promise<ExtractResu
     state = accumulateCandidate(state, { kind: "full", value: acceptedVisibleCredential });
   }
 
-  const copied = !hasFullHit(state) ? await copyCredentialFromDialog(page, browser) : null;
-  const acceptedCopy =
-    copied !== null &&
-    !isCredentialNoise(copied) &&
-    (looksLikeCredentialValue(copied) || pickRelaxedNearCopyCredential([copied]) !== null)
-      ? copied
-      : null;
+  // The Copy click itself proves provenance: copyCredentialFromDialog returns
+  // only a value that newly appeared on the clipboard after clicking a Copy
+  // control in a credential dialog. No shape gate applies (Vast.ai's key is
+  // 64-char lowercase hex, which the page-text pickers reject as a hash).
+  const acceptedCopy = !hasFullHit(state) ? await copyCredentialFromDialog(page, browser) : null;
   if (acceptedCopy !== null) {
     nearCopy.push(acceptedCopy);
     sources.push(acceptedCopy);
@@ -1066,7 +1107,7 @@ export async function extractCredentials(sessionId: string): Promise<ExtractResu
     credentials,
     page?.url() ?? browser.currentUrl(),
     haystack,
-    [acceptedVisibleCredential, acceptedNearCopyCredential].filter(
+    [acceptedVisibleCredential, acceptedNearCopyCredential, acceptedCopy].filter(
       (value): value is string => value !== null,
     ),
   );
@@ -1076,14 +1117,22 @@ export async function extractCredentials(sessionId: string): Promise<ExtractResu
   // vaulted when a sibling is still hidden; a masked value covered by a
   // readable capture under the same label is not remaining (see the helper).
   // A successful copy from this credential dialog resolves its lone masked
-  // display even if the page leaves that stale mask node in the DOM.
+  // display even if the page leaves that stale mask node in the DOM. It also
+  // resolves every masked display whose visible ends match the copied value
+  // (Vast.ai's "d7bd47d7...bd4a" stub, read under two labels).
   const maskedCandidates = labeled.filter((candidate) => candidate.isMasked);
-  const remainingCandidates =
-    acceptedCopy !== null &&
-    Object.values(sanitized).includes(acceptedCopy) &&
-    maskedCandidates.length === 1
-      ? labeled.filter((candidate) => candidate !== maskedCandidates[0])
-      : labeled;
+  const copyStored = acceptedCopy !== null && Object.values(sanitized).includes(acceptedCopy);
+  const coveredByCopy = (candidate: (typeof labeled)[number]): boolean => {
+    if (acceptedCopy === null || !copyStored || !candidate.isMasked) return false;
+    if (maskedCandidates.length === 1) return true;
+    const fragments = candidate.value.split(/[•●⬤*…]+|\.{3,}/).filter((part) => part.length > 0);
+    return (
+      fragments.length > 0 &&
+      acceptedCopy.startsWith(fragments[0]!) &&
+      acceptedCopy.endsWith(fragments[fragments.length - 1]!)
+    );
+  };
+  const remainingCandidates = labeled.filter((candidate) => !coveredByCopy(candidate));
   const maskedRemaining = maskedCredentialLabels(remainingCandidates, Object.keys(sanitized));
   audit(sessionId, "extract", { found, candidate_count: labeled.length });
   return {

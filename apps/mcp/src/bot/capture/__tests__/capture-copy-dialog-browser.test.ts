@@ -73,3 +73,30 @@ it.each([
   ).toBe("granted");
   expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(key);
 });
+
+it("vaults a Vast-shaped hex key that only the Copy button puts on the clipboard", async () => {
+  // Vast.ai's created-key dialog shows a truncated stub and writes the full
+  // 64-char lowercase hex key to the clipboard; the key never enters the DOM.
+  // An existing key's stub stays visible in the list behind the dialog.
+  const key = "d7bd47d70c1e4f2a9b3c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f80bd4a";
+  await context.clearPermissions();
+  await page.evaluate(() => navigator.clipboard.writeText("")).catch(() => undefined);
+  const html = `<!doctype html>
+  <table><tr><th>Key</th></tr><tr><td>0a1b2c3d...9f8e</td></tr></table>
+  <div role="dialog" aria-label="API key created">
+    <h2>API key created</h2>
+    <label>API key <input readonly value="${key.slice(0, 8)}...${key.slice(-4)}"></label>
+    <button type="button" aria-label="Copy API key">Copy</button>
+  </div>
+  <script>document.querySelector('[aria-label="Copy API key"]')
+    .addEventListener('click', () => navigator.clipboard.writeText(atob('${Buffer.from(key).toString("base64")}')));</script>`;
+  await page.route("**/*", (route) => route.fulfill({ contentType: "text/html", body: html }));
+  await page.goto("http://127.0.0.1/");
+  expect(await page.content()).not.toContain(key);
+
+  const result = await extractCredentials("fixture-session");
+  expect(result.credentials.api_key).toBe(key);
+  // The dialog's own stub is resolved by the copy; an older key's mask in the
+  // list behind it stays reported.
+  expect(result.masked_remaining).toEqual(["key"]);
+});
