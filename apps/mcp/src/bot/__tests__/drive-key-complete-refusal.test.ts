@@ -29,14 +29,21 @@ afterAll(async () => {
 const api = { useCredential: vi.fn() } as unknown as ApiClient;
 const key = "re_abcdefGHIJKLmnop1234567";
 
-async function withKeyPage(run: (sessionId: string) => Promise<void>): Promise<void> {
+const plainKeyPage = `<main><h1>API keys</h1><label>API key <input readonly value="${key}"></label></main>`;
+// The Copy click is the source the drive stores a key from.
+const copyKeyPage = `<main><h1>API keys</h1><div role="dialog" aria-label="API key created">
+  <label>API key <input readonly value="${key}"></label>
+  <button type="button" aria-label="Copy API key"
+    onclick="navigator.clipboard.writeText('${key}')">Copy</button></div></main>`;
+
+async function withKeyPage(body: string, run: (sessionId: string) => Promise<void>): Promise<void> {
   const context = await browser.newContext();
   const page = await context.newPage();
   const url = "https://app.example.test/keys";
   await page.route("**/*", (route) =>
     route.fulfill({
       contentType: "text/html",
-      body: `<main><h1>API keys</h1><label>API key <input readonly value="${key}"></label></main>`,
+      body,
     }),
   );
   await page.goto(url);
@@ -67,8 +74,8 @@ function dependencies(askJev: DriveDependencies["askJev"]): DriveDependencies {
   };
 }
 
-it("completes a readable key despite a binding from the previous page", async () => {
-  await withKeyPage(async (sessionId) => {
+it("completes a copied key despite a binding from the previous page", async () => {
+  await withKeyPage(copyKeyPage, async (sessionId) => {
     const session = sessionForCall(sessionId)!;
     session.drive = emptyDriveState("extract an API key", {});
     session.drive.boundFingerprint = "previous page";
@@ -109,7 +116,7 @@ it("completes a readable key despite a binding from the previous page", async ()
 }, 15_000);
 
 it("asks the model when automatic key completion is refused", async () => {
-  await withKeyPage(async (sessionId) => {
+  await withKeyPage(plainKeyPage, async (sessionId) => {
     const session = sessionForCall(sessionId)!;
     session.drive = emptyDriveState("extract an API key", {});
     const realExtract = vi.mocked(extractCredentials).getMockImplementation()!;

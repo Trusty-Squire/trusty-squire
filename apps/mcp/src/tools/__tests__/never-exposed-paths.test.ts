@@ -82,7 +82,6 @@ describe("extract { store } is unchanged: vault metadata only", () => {
         session_id: "sess_1",
         url: "https://dashboard.example.test/keys",
         credentials: { api_key: SECRET, api_secret: "another-secret" },
-        candidate_count: 2,
       },
       {
         reference: "vault://a/b/c",

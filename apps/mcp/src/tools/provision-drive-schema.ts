@@ -286,7 +286,6 @@ const extractSchema = z.object({
   capture: captureExtractSchema.optional(),
   session_id: z.string().min(1),
   into_slot: z.string().min(1).max(60).optional(),
-  secret_label: z.string().min(1).max(60).optional(),
   store: storeShape.optional(),
 });
 
@@ -642,18 +641,14 @@ export const provisionNetworkTool: Tool = {
 export const provisionExtractTool: Tool = {
   name: "operate_extract",
   description:
-    "Reveal masked keys and extract credentials from the current page: returns " +
-    "{credentials, candidate_count}. credentials may include " +
-    "`api_key` (or `api_key_truncated` if only a masked display was reachable) " +
-    "plus named fields for multi-credential services. Pass `store` to immediately " +
-    "save the extracted credential into the Trusty Squire vault with the session's " +
-    "observed hosts as allowed_hosts seed; when `store` is used, the response omits " +
-    "credential values and returns only vault metadata. " +
-    "Call when you have navigated to the keys page. " +
-    "With `into_slot`, a value that still looks masked is ranked behind a fully " +
-    "revealed sibling but never refused; pass " +
-    '`secret_label` (e.g. "client secret") to pick the right one when the page ' +
-    "shows several credentials.",
+    "Store a key by its source, never by its shape. Without capture, clicks the Copy " +
+    "button in an open key dialog and returns what it writes to the clipboard as " +
+    "{credentials: {api_key}}; page text is never scanned. When no Copy click yields a " +
+    "value, nothing is stored and `error` says to read the page with operate_observe " +
+    "and point capture at the key. Pass `store` to immediately save the value into the " +
+    "Trusty Squire vault with the session's observed hosts as allowed_hosts seed; when " +
+    "`store` is used, the response omits credential values and returns only vault " +
+    "metadata. With `into_slot`, the copied value goes into a session slot instead.",
   inputSchema: extractSchema,
   jsonInputSchema: {
     type: "object",
@@ -661,7 +656,6 @@ export const provisionExtractTool: Tool = {
     properties: {
       session_id: { type: "string" },
       into_slot: { type: "string" },
-      secret_label: { type: "string" },
       store: {
         type: "object",
         required: ["service"],

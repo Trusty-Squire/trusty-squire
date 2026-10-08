@@ -9,6 +9,24 @@
 - Make `mcp server` a stdio proxy onto the host broker's shared MCP socket.
   There is one operator stack per profile. A session belongs to the
   connection that opened it and closes when that connection dies.
+- Store keys by source, not shape. **Behavior change:** `operate_extract`
+  without `capture` no longer scans page text, labels or inputs for a key.
+  It stores only the value a Copy button in an open key dialog writes to the
+  clipboard. Otherwise it stores nothing and returns an `error` telling the
+  agent to read the page with `operate_observe` and point `capture` at the
+  key. Agents that relied on untargeted extraction of a visible key need that
+  extra `capture` step. `operate_finish` with `outcome: credentials` and
+  `into_slot` follow the same rule; `secret_label`, `candidate_count` and
+  `masked_remaining` are removed.
+- A key-goal `operate_drive` accepts DONE once extraction yields a key from a
+  Copy click, whatever the value looks like (hex, short, uppercase,
+  UUID-like). A page that shows a key only as text now ends `stuck` with that
+  same `capture` instruction.
+- The Copy click empties the clipboard first, so a key the agent already
+  copied is still stored. The clipboard is restored when the click writes
+  nothing.
+- The drive no longer pattern-masks page content sent to the model. Card
+  values stay masked, and the handback to the agent is unchanged.
 
 ## 1.1.18-rc.2 (2026-09-27)
 

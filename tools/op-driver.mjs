@@ -21,7 +21,6 @@ import {
   recipeEntryUrl,
   fillTemplate,
 } from "../apps/mcp/dist/bot/operator-recipe.js";
-import { isMaskedDisplay } from "../apps/mcp/dist/bot/credential-shape.js";
 
 const PORT = Number(process.env.OP_PORT || 8731);
 const startUrl = process.argv[2];
@@ -55,8 +54,6 @@ async function readBody(req) {
   return b ? JSON.parse(b) : {};
 }
 
-const norm = (s) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
-
 const server = http.createServer(async (req, res) => {
   const send = (code, obj) => {
     res.writeHead(code, { "content-type": "application/json" });
@@ -69,35 +66,11 @@ const server = http.createServer(async (req, res) => {
     if (req.url === "/extract") {
       const ex = await extractCredentials(sid);
       if (body.into_slot) {
-        const vals = ex.credentials || {};
-        const cands = Object.entries(vals).filter(
-          ([k, v]) =>
-            !k.endsWith("_truncated") &&
-            typeof v === "string" &&
-            v.length >= 8 &&
-            !isMaskedDisplay(v),
-        );
-        const want = body.secret_label ? norm(body.secret_label) : null;
-        // Prefer a candidate whose VALUE matches a caller-supplied shape (e.g.
-        // "^GOCSPX-" for a Google client secret) — lets the planner target the
-        // right credential without the secret value ever crossing the wire.
-        let chosen;
-        if (body.value_pattern) {
-          const re = new RegExp(body.value_pattern);
-          chosen = cands.find(([, v]) => re.test(v));
-        }
-        if (!chosen && want) chosen = cands.find(([k]) => norm(k).includes(want));
-        const full = (chosen ?? cands[0])?.[1];
-        if (!full)
-          return send(200, {
-            sealed: false,
-            slot: null,
-            candidate_count: ex.candidate_count,
-            blocked_reason: ex.blocked_reason || "no full unmasked value to seal",
-            keys: Object.keys(vals),
-          });
+        // Extraction keeps only a Copy-click value; nothing is picked by shape.
+        const full = ex.credentials?.api_key;
+        if (!full) return send(200, { sealed: false, slot: null, blocked_reason: ex.error });
         const handle = stashSecretSlot(sid, body.into_slot, full);
-        return send(200, { sealed: true, slot: handle, candidate_count: ex.candidate_count });
+        return send(200, { sealed: true, slot: handle });
       }
       return send(200, ex);
     }

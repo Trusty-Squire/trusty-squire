@@ -54,7 +54,11 @@ it("creates a named key when existing keys are masked, then captures its one-tim
             document.querySelector('main').innerHTML =
               '<h1>New API key</h1><p>Name: ' + name + '</p>' +
               '<label>Old API Key <input readonly value="sk_old_***"></label>' +
-              '<label>API key <input readonly value="${key}"></label>';
+              '<div role="dialog" aria-label="API key created">' +
+              '<label>API key <input readonly value="${key}"></label>' +
+              '<button type="button" aria-label="Copy API key">Copy</button></div>';
+            document.querySelector('[aria-label="Copy API key"]').addEventListener('click', () =>
+              navigator.clipboard.writeText('${key}'));
           });
         });
       </script>`,
@@ -126,8 +130,7 @@ it("creates a named key when existing keys are masked, then captures its one-tim
     expect(await page.locator("main").innerText()).toContain("Name: Corpus Key");
     expect(await page.locator('[name="key_name"]').count()).toBe(0);
     const extracted = await extractCredentials(started.session_id);
-    expect(Object.values(extracted.credentials)).toContain(key);
-    expect(extracted.masked_remaining?.length).toBeGreaterThan(0);
+    expect(extracted.credentials).toEqual({ api_key: key });
   } finally {
     await finishProvisionSession(started.session_id);
     await context.close();

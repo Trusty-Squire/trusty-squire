@@ -95,8 +95,5 @@ it("vaults a Vast-shaped hex key that only the Copy button puts on the clipboard
   expect(await page.content()).not.toContain(key);
 
   const result = await extractCredentials("fixture-session");
-  expect(result.credentials.api_key).toBe(key);
-  // The dialog's own stub is resolved by the copy; an older key's mask in the
-  // list behind it stays reported.
-  expect(result.masked_remaining).toEqual(["key"]);
+  expect(result.credentials).toEqual({ api_key: key });
 });

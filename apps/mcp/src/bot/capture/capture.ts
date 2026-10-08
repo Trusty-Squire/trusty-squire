@@ -10,24 +10,7 @@
 
 import type { ElementHandle, Page } from "playwright";
 import type { CaptureSource, ElementCaptureSource } from "../credential-capture.js";
-import { extractApiKeyFromText, isTruncatedCapture } from "../credential-text.js";
-import {
-  looksLikeCodeIdentifier,
-  looksLikeCredentialValue,
-  isCredentialNoise,
-  findCredentialTokens,
-  keyFamilyPrefix,
-  pickRelaxedNearCopyCredential,
-} from "../credential-shape.js";
-import {
-  initialExtractionState,
-  accumulateCandidate,
-  hasFullHit,
-  resolveExtraction,
-  type CandidateClass,
-} from "../extraction.js";
 import type { Session } from "../session/model.js";
-import { registrableHost } from "../session/hosts.js";
 import { audit, sessionForCall } from "../session/lifecycle.js";
 import { invalidateCompactV2Snapshot, operationPageForSession } from "../observe/observe.js";
 import { settleAfterStateChange } from "../act/act.js";
@@ -38,148 +21,32 @@ import { captureFrameSnapshot } from "../drive-snapshot.js";
 export interface ExtractResult {
   session_id: string;
   url: string;
-  // The deliverable: a primary `api_key` (or `api_key_truncated` when only a
-  // masked display was reachable) plus any labeled/named credentials a
-  // multi-cred service presents (e.g. cloud_name, api_secret).
+  // Only a value with a known source: what this extraction's own Copy click
+  // in a credential dialog wrote to the clipboard. Page text is never scanned.
   credentials: Record<string, string>;
-  // How many labeled credential candidates the page presented — diagnostic so
-  // the host can tell "found nothing" from "found masked values it couldn't read".
-  candidate_count: number;
-  // Labels of credential-shaped values that are STILL masked after the reveal
-  // pass. Non-empty means the capture is incomplete: a sibling key was not
-  // read, so a caller must not treat this as a successful extraction.
-  masked_remaining?: string[];
+  // Set when no key had a known source; nothing is stored.
+  error?: string;
 }
 
-const normLabelKey = (label: string): string =>
-  label
-    .replace(/\s+/g, "_")
-    .replace(/[^a-z0-9_]/gi, "")
-    .toLowerCase()
-    .slice(0, 40);
+export const EXTRACT_NO_SOURCE_ERROR =
+  "no_key_source: nothing stored. operate_extract without capture stores only the value " +
+  "a Copy button in a key dialog writes to the clipboard, and none did. Read the page " +
+  "with operate_observe, then point capture at the key: operate_extract with " +
+  "capture:{source:{selector}|{role,name?},store}, or operate_click on its Copy button " +
+  "with capture:{source:{clipboard:true},store}.";
 
-/** Labels of masked credential candidates that no readable value covers. A
- * masked display is only "remaining" when nothing readable was captured under
- * the same label: a page can show the created key in clear while still carrying
- * a masked copy — or a mask-shaped decoration — beside the same field name, and
- * the readable value is what decides completion. A genuinely unread sibling has
- * its own label (or none), so it stays. */
-export function maskedCredentialLabels(
-  candidates: readonly { label: string | null; isMasked: boolean; value?: string }[],
-  readableKeys: readonly string[] = [],
-): string[] {
-  const readable = new Set<string>(readableKeys.map((key) => normLabelKey(key)));
-  return [
-    ...new Set(
-      candidates
-        .filter((candidate) => candidate.isMasked)
-        .filter((candidate) => {
-          if (candidate.label === null) return true;
-          const sameLabel = candidates.filter(
-            (other) =>
-              !other.isMasked &&
-              other.label !== null &&
-              normLabelKey(other.label) === normLabelKey(candidate.label!),
-          );
-          if (candidate.value === undefined) {
-            return sameLabel.length === 0 && !readable.has(normLabelKey(candidate.label));
-          }
-          if (sameLabel.length === 0) return true;
-          const prefix = candidate.value?.split(/[•●⬤*…]/, 1)[0]?.replace(/\.+$/, "");
-          if (prefix === undefined || prefix.length === 0) return false;
-          return !sameLabel.some((other) => other.value?.startsWith(prefix));
-        })
-        .map((candidate) => candidate.label ?? "masked credential"),
-    ),
-  ];
-}
-
-function firstTokenMatching(haystack: string, re: RegExp): string | null {
-  const match = haystack.match(re);
-  return match?.[0] ?? null;
-}
-
-export function sanitizeExtractedCredentials(
+/** The credential fields a store keeps: truncated displays are dropped, and a
+ * result holding only id fields is not a credential. Null when nothing is
+ * storable. Decided by field name, never by the value's shape. */
+export function storableCredentials(
   credentials: Record<string, string>,
-  url: string,
-  haystack = Object.values(credentials).join("\n"),
-  acceptedVisibleCredentials: readonly string[] = [],
-): Record<string, string> {
-  const host = registrableHost(url) ?? "";
-  const normalized: Record<string, string> = {};
-
-  if (host === "cloud.langfuse.com") {
-    const secret = firstTokenMatching(haystack, /\bsk-lf-[0-9a-f-]{20,}\b/i);
-    const pub = firstTokenMatching(haystack, /\bpk-lf-[0-9a-f-]{20,}\b/i);
-    if (secret !== null) {
-      normalized.langfuse_secret_key = secret;
-      normalized.api_key = secret;
-    }
-    if (pub !== null) normalized.langfuse_public_key = pub;
-    return normalized;
-  }
-
-  if (host.endsWith(".neon.tech")) {
-    const token = firstTokenMatching(haystack, /\bnapi_[A-Za-z0-9_-]{24,}\b/);
-    if (token !== null) {
-      normalized.api_token = token;
-      normalized.api_key = token;
-    }
-    return normalized;
-  }
-
-  for (const [key, value] of Object.entries(credentials)) {
-    const k = normLabelKey(key);
-    if (k === "refcode" || k === "referral_code") continue;
-    const accepted = acceptedVisibleCredentials.includes(value);
-    if (!accepted && isCredentialNoise(value)) continue;
-    if (
-      (k === "key" || k === "api_key" || k === "secret") &&
-      !accepted &&
-      !looksLikeCredentialValue(value)
-    )
-      continue;
-    if (host === "api.together.ai" && /^key_[A-Za-z0-9]{16,}$/i.test(value.trim())) continue;
-    normalized[key] = value;
-  }
-  return normalized;
-}
-
-function isFullVisibleCredential(value: string): boolean {
-  const token = value.trim();
-  if (isCredentialNoise(token) || looksLikeCodeIdentifier(token)) return false;
-  if (looksLikeCredentialValue(token)) return true;
-  // A long alphanumeric key with no separator is ambiguous in raw page text.
-  // A distinct, visible DOM candidate is the extra evidence used below.
-  return (
-    token.length >= 40 &&
-    token.length <= 128 &&
-    /^[A-Za-z0-9]+$/.test(token) &&
-    /[A-Za-z]/.test(token) &&
-    /[0-9]/.test(token)
+): Record<string, string> | null {
+  const kept = Object.fromEntries(
+    Object.entries(credentials).filter(([key]) => !key.endsWith("_truncated")),
   );
+  return Object.keys(kept).some((key) => key !== "id" && !key.endsWith("_id")) ? kept : null;
 }
 
-export function classifyVouchflowCredentials(text: string): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const tok of findCredentialTokens(text)) {
-    if (/^vsk_sandbox_read_/i.test(tok) && out.sandbox_read_key === undefined) {
-      out.sandbox_read_key = tok;
-    } else if (/^vsk_sandbox_/i.test(tok) && out.sandbox_write_key === undefined) {
-      out.sandbox_write_key = tok;
-    } else if (/^vsk_live_read_/i.test(tok) && out.live_read_key === undefined) {
-      out.live_read_key = tok;
-    } else if (/^vsk_live_/i.test(tok) && out.live_write_key === undefined) {
-      out.live_write_key = tok;
-    }
-  }
-  return out;
-}
-
-// Reveal masked keys, then classify every on-page string source through the
-// SAME exported regex policy the bot uses (extractApiKeyFromText +
-// isTruncatedCapture + extraction.ts accumulation). Reuses the substrate —
-// no new credential regexes.
 /** What a zero-match capture DID find, so the caller can pick a better source
  * on the next try: computed roles and accessible names only — never values. */
 export interface CaptureFoundCandidate {
@@ -964,15 +831,34 @@ async function copyCredentialFromDialog(
     if (selector === null) return null;
     copyButton = page.locator(selector);
   }
+  // Empty the clipboard first: a value present after the click was written by
+  // this click, even when it equals what an earlier Copy click left there.
   const before = await browser.readClipboard(page).catch(() => "");
+  const writeClipboard = async (text: string): Promise<boolean> =>
+    await page
+      .evaluate(async (value) => {
+        try {
+          await navigator.clipboard.writeText(value);
+          return true;
+        } catch {
+          return false;
+        }
+      }, text)
+      .catch(() => false);
+  const cleared = await writeClipboard("");
+  let copied = "";
   try {
     await copyButton.click({ timeout: 1500 });
+    copied = (await browser.readClipboard(page).catch(() => "")).trim();
   } catch {
+    // Fall through: nothing was copied.
+  }
+  if (copied.length === 0 || (!cleared && copied === before.trim())) {
+    // Leave the clipboard as the page found it when this control wrote nothing.
+    if (cleared && before.length > 0) await writeClipboard(before);
     return null;
   }
-  const copied = (await browser.readClipboard(page).catch(() => "")).trim();
-  // A stale clipboard is not evidence that this control yielded a credential.
-  return copied.length > 0 && copied !== before.trim() ? copied : null;
+  return copied;
 }
 
 export async function extractCredentials(sessionId: string): Promise<ExtractResult> {
@@ -982,164 +868,15 @@ export async function extractCredentials(sessionId: string): Promise<ExtractResu
   const page = operationPageForSession(session);
   invalidateCompactV2Snapshot(session);
 
-  // The masked-display trap: click reveal/show toggles before reading.
-  await browser.revealMaskedCredentials(page);
-
-  const labeled = await browser.extractLabeledCredentialCandidates(page);
-  const inputs = await browser.extractAllInputValues(page);
-  const nearCopy = await browser.extractCredentialsNearCopyButtons(page);
-  const text = await browser.extractVisibleText(page);
-
-  // Copy-only key surfaces (e.g. LangWatch's /settings/api-keys) never render
-  // the value into the DOM — it goes to the clipboard on a "Copy" click. Read
-  // it after checking the live origin's permission.
+  // Storage is decided by source, never by shape: the Copy click itself proves
+  // provenance, whatever the value looks like (Vast.ai's key is 64-char hex).
   await ensureCaptureClipboardPermission(page);
-  const clip = await browser.readClipboard(page).catch(() => "");
-
-  // Primary api_key: first FULL hit wins; a truncated/masked hit is the fallback.
-  let state = initialExtractionState();
-  const sources: string[] = [...labeled.map((c) => c.value), ...inputs, ...nearCopy, clip, text];
-  for (const src of sources) {
-    if (hasFullHit(state)) break;
-    const key = extractApiKeyFromText(src);
-    if (key === null) continue;
-    // Reject an env-var NAME mistaken for a key — a "LANGWATCH_API_KEY="
-    // display (the SDK snippet shows `LANGWATCH_API_KEY=sk-lw-…`) would
-    // otherwise win first-full and mask the real token. Skip it so scanning
-    // reaches the actual secret further down the source list.
-    if (/^[A-Z][A-Z0-9_]{2,}=?$/.test(key.trim())) continue;
-    if (isCredentialNoise(key)) continue;
-    // Reject too-short non-secrets (UI noise like "Ctrl+K"). Real API keys are
-    // long; a sub-12-char "key" is a false positive, never a credential.
-    if (key.trim().length < 12) continue;
-    // Reject a code identifier scraped off a page (the X-tombstone false-green).
-    if (looksLikeCodeIdentifier(key)) continue;
-    const cls: CandidateClass = isTruncatedCapture(src, key)
-      ? { kind: "truncated", value: key }
-      : { kind: "full", value: key };
-    state = accumulateCandidate(state, cls);
-  }
-
-  // A full key can appear as bare text in a table cell or a text input
-  // without a known prefix or a nearby label. Require one distinct visible
-  // credential-shaped value; masked and truncated displays never qualify.
-  const readable = [
-    ...new Set(
-      labeled
-        .filter((candidate) => !candidate.isMasked)
-        .map((candidate) => candidate.value)
-        .filter(isFullVisibleCredential),
-    ),
-  ];
-  const acceptedVisibleCredential =
-    !hasFullHit(state) && readable.length === 1 ? (readable[0] ?? null) : null;
-  if (acceptedVisibleCredential !== null) {
-    state = accumulateCandidate(state, { kind: "full", value: acceptedVisibleCredential });
-  }
-
-  // The Copy click itself proves provenance: copyCredentialFromDialog returns
-  // only a value that newly appeared on the clipboard after clicking a Copy
-  // control in a credential dialog. No shape gate applies (Vast.ai's key is
-  // 64-char lowercase hex, which the page-text pickers reject as a hash).
-  const acceptedCopy = !hasFullHit(state) ? await copyCredentialFromDialog(page, browser) : null;
-  if (acceptedCopy !== null) {
-    nearCopy.push(acceptedCopy);
-    sources.push(acceptedCopy);
-    state = accumulateCandidate(state, { kind: "full", value: acceptedCopy });
-  }
-  const haystack = sources.join("\n");
-
-  // Named credentials for multi-cred services (skip still-masked values and
-  // env-var NAME displays — "LANGWATCH_API_KEY=" is the SDK-snippet prefix, not
-  // a credential).
-  const named: Record<string, string> = {};
-  for (const c of labeled) {
-    if (c.label === null || c.isMasked) continue;
-    if (isCredentialNoise(c.value)) continue;
-    if (looksLikeCodeIdentifier(c.value)) continue;
-    const k = normLabelKey(c.label);
-    if (k.length > 0 && !(k in named)) named[k] = c.value;
-  }
-
-  // resolveExtraction (the regex-found primary key) wins over a same-named
-  // labeled candidate, so a "API Key" label carrying the env-var snippet can
-  // never clobber the real `api_key`.
-  const credentials: Record<string, string> = {
-    ...named,
-    ...classifyVouchflowCredentials(haystack),
-    ...resolveExtraction(state),
-  };
-
-  const relaxed = pickRelaxedNearCopyCredential(nearCopy);
-  const acceptedNearCopyCredential =
-    relaxed !== null &&
-    !Object.entries(credentials).some(([key, value]) => key !== "api_key" && value === relaxed)
-      ? relaxed
-      : null;
-  if (!("api_key" in credentials) && acceptedNearCopyCredential !== null) {
-    credentials.api_key = acceptedNearCopyCredential;
-  }
-
-  // Multi-credential: a service may present several keys of the SAME family
-  // (VouchFlow shows a vsk_ write AND a vsk_ read). Surface only tokens that
-  // repeat a family already captured for THIS service — a cross-family token that
-  // merely shares the page (a Resend dashboard's mcp-… widget beside the real re_
-  // key) is page noise, not a second credential, and surfacing it pollutes the
-  // credential + allow-lists an unrelated token to the service host (capture bug
-  // 2026-07-09). A prefixless primary (deepinfra) yields no family, so no extras.
-  const families = new Set(
-    Object.values(credentials)
-      .map((v) => (typeof v === "string" ? keyFamilyPrefix(v) : null))
-      .filter((f): f is string => f !== null),
-  );
-  const have = new Set(Object.values(credentials));
-  let n = 1;
-  for (const tok of findCredentialTokens(haystack)) {
-    if (have.has(tok)) continue;
-    if (n >= 8) break; // cap extras so page noise can't flood the result
-    const fam = keyFamilyPrefix(tok);
-    if (fam === null || !families.has(fam)) continue;
-    have.add(tok);
-    n += 1;
-    credentials[`api_key_${n}`] = tok;
-  }
-  const sanitized = sanitizeExtractedCredentials(
-    credentials,
-    page?.url() ?? browser.currentUrl(),
-    haystack,
-    [acceptedVisibleCredential, acceptedNearCopyCredential, acceptedCopy].filter(
-      (value): value is string => value !== null,
-    ),
-  );
-  const found = Object.keys(sanitized).length > 0;
-  // A masked credential-shaped value that survived the reveal pass is an
-  // UNREAD key, not success. Name it so a caller never believes every key is
-  // vaulted when a sibling is still hidden; a masked value covered by a
-  // readable capture under the same label is not remaining (see the helper).
-  // A successful copy from this credential dialog resolves its lone masked
-  // display even if the page leaves that stale mask node in the DOM. It also
-  // resolves every masked display whose visible ends match the copied value
-  // (Vast.ai's "d7bd47d7...bd4a" stub, read under two labels).
-  const maskedCandidates = labeled.filter((candidate) => candidate.isMasked);
-  const copyStored = acceptedCopy !== null && Object.values(sanitized).includes(acceptedCopy);
-  const coveredByCopy = (candidate: (typeof labeled)[number]): boolean => {
-    if (acceptedCopy === null || !copyStored || !candidate.isMasked) return false;
-    if (maskedCandidates.length === 1) return true;
-    const fragments = candidate.value.split(/[•●⬤*…]+|\.{3,}/).filter((part) => part.length > 0);
-    return (
-      fragments.length > 0 &&
-      acceptedCopy.startsWith(fragments[0]!) &&
-      acceptedCopy.endsWith(fragments[fragments.length - 1]!)
-    );
-  };
-  const remainingCandidates = labeled.filter((candidate) => !coveredByCopy(candidate));
-  const maskedRemaining = maskedCredentialLabels(remainingCandidates, Object.keys(sanitized));
-  audit(sessionId, "extract", { found, candidate_count: labeled.length });
+  const copied = await copyCredentialFromDialog(page, browser);
+  audit(sessionId, "extract", { found: copied !== null });
   return {
     session_id: sessionId,
     url: page?.url() ?? browser.currentUrl(),
-    credentials: sanitized,
-    candidate_count: labeled.length,
-    ...(maskedRemaining.length > 0 ? { masked_remaining: maskedRemaining } : {}),
+    credentials: copied === null ? {} : { api_key: copied },
+    ...(copied === null ? { error: EXTRACT_NO_SOURCE_ERROR } : {}),
   };
 }
