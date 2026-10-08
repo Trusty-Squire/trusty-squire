@@ -1,21 +1,12 @@
 // drive-feedback.ts — the deterministic half of the drive loop's feedback
-// loop: what an action actually did, the goal phase the decider should reason
-// in, and the one dry extraction the loop trusts for a "key" goal.
+// loop: what an action actually did and the page context the decider reasons in.
 //
-// The decider (Jev) answers narrow questions about a state. Everything that is
-// control flow, memory, or verification belongs in code (TypeSafe's own
-// guidance). This module owns:
+// The decider (Jev) answers narrow questions about a state. Code owns control
+// flow and memory; Jev interprets the goal. This module owns:
 //   • outcome classification — after every executed action, name the
 //     consequence in one deterministic token (navigated/changed/no_change/
 //     not_executed/bounced_back/text_appeared) instead of leaving the model to
 //     infer it from prose.
-//   • goal phase + done_when — stated as concrete conditions over the page,
-//     never "advance the goal".
-//
-// The key-goal evidence and DONE condition are not a drive-local check: the
-// drive calls the capture flow operate_extract runs (`driveKeyCredentials` in
-// operate-drive.ts, which calls capture.ts's `extractCredentials`). No second
-// credential policy lives here.
 //
 // Browser-free.
 
@@ -57,54 +48,13 @@ export function feedbackPagePath(url: string): string {
   }
 }
 
-export type DriveGoalPhase = "sign_in" | "verify" | "find_keys" | "create_or_reveal";
-
-const VERIFY_GOAL_RE =
-  /\bverif(?:y|ication)|confirm(?:ation)?(?:\s+your)?\s+e-?mail|check your e-?mail|otp|one[- ]time code|verification code|email code/;
-const FIND_KEYS_GOAL_RE =
-  /\bapi\s*key|access\s*token|api\s*token|credential|secret key|personal access token|bearer token/;
-const SIGN_IN_GOAL_RE =
-  /\bsign[\s-]*in|log[\s-]*in|login|signin|oauth|continue with (?:google|github|microsoft|apple)|single sign-on|\bsso\b/;
-const CREATE_OR_REVEAL_GOAL_RE =
-  /\bsign[\s-]*up|signup|create\s+(?:an?\s+)?account|register|create\s+(?:an?\s+)?(?:api\s+)?key|generate\s+(?:an?\s+)?(?:api\s+)?key|reveal|new key|add key/;
-
-/** The phase the goal's own words put the drive in. Deterministic. */
-export function goalPhase(goal: string): DriveGoalPhase | undefined {
-  const text = goal.toLowerCase();
-  if (VERIFY_GOAL_RE.test(text)) return "verify";
-  if (FIND_KEYS_GOAL_RE.test(text)) return "find_keys";
-  if (SIGN_IN_GOAL_RE.test(text)) return "sign_in";
-  if (CREATE_OR_REVEAL_GOAL_RE.test(text)) return "create_or_reveal";
-  return undefined;
+/** The goal stays intact for the model; code does not guess its type. */
+export function goalDoneWhen(_goal: string): string {
+  return "the page shows the requested result and every stated requirement is satisfied";
 }
 
-/** The exact page condition that satisfies the goal, in literal terms. */
-export function goalDoneWhen(goal: string): string {
-  switch (goalPhase(goal)) {
-    case "find_keys":
-      return "a full value for the requested credential is readable and every key requirement in the goal is satisfied";
-    case "create_or_reveal":
-      return "the page confirms the account or resource was created";
-    case "verify":
-      return "the page confirms the email address or verification code was accepted";
-    case "sign_in":
-      return "the page shows an authenticated session for the provided account";
-    default:
-      return "the page shows the requested result";
-  }
-}
-
-export function goalPhaseAndDoneWhen(goal: string): {
-  phase?: DriveGoalPhase;
-  done_when: string;
-} {
-  const phase = goalPhase(goal);
-  return { ...(phase === undefined ? {} : { phase }), done_when: goalDoneWhen(goal) };
-}
-
-/** True when the goal's finish line is a secret-shaped value on the page. */
-export function isKeyGoal(goal: string): boolean {
-  return goalPhase(goal) === "find_keys";
+export function goalPhaseAndDoneWhen(goal: string): { done_when: string } {
+  return { done_when: goalDoneWhen(goal) };
 }
 
 export function truncateDriveTrailText(text: string, cap = DRIVE_TRAIL_TEXT_MAX): string {
