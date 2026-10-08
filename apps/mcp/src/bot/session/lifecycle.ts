@@ -561,6 +561,21 @@ export async function googleSessionGateForSession(
   return gate;
 }
 
+async function dismissStartConsentBanner(
+  browser: BrowserController,
+  sessionId: string,
+): Promise<void> {
+  // The widget may render just after navigation, so make one bounded retry.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const cta = await browser.dismissConsentBanner().catch(() => null);
+    if (cta !== null) {
+      audit(sessionId, "consent_dismissed", { cta });
+      break;
+    }
+    if (attempt === 0) await waitForCaptchaChallengeToSettle(browser, 800, 0).catch(() => false);
+  }
+}
+
 export async function startProvisionSession(
   opts: StartOptions,
   ports: SessionStartPorts,
@@ -608,19 +623,7 @@ export async function startProvisionSession(
     // dismissConsentBanner() existed but had NO call sites (dead code); it only
     // clicks banner-specific CTAs (accept/reject all), so a false click is unlikely.
     // Best-effort + one retry, since the widget lazy-loads a beat after the goto.
-    // A drive-owned start snapshots the overlay as an ordinary actionable state
-    // instead of spending this general-observation settling budget up front.
-    if (opts.initialObservation !== "drive") {
-      for (let attempt = 0; attempt < 2; attempt++) {
-        const cta = await browser.dismissConsentBanner().catch(() => null);
-        if (cta !== null) {
-          audit(id, "consent_dismissed", { cta });
-          break;
-        }
-        if (attempt === 0)
-          await waitForCaptchaChallengeToSettle(browser, 800, 0).catch(() => false);
-      }
-    }
+    await dismissStartConsentBanner(browser, id);
     // Provider detection is intentionally lazy: ordinary starts pay no Google
     // identity probe and receive provider-neutral login guidance.
     const loginHint = loginSessionGuidance();
@@ -689,6 +692,7 @@ export async function startHarnessProvisionSession(
     });
     await opts.browser.goto(opts.serviceUrl, undefined, "document-ready");
     if (opts.initialObservation === "drive") {
+      await dismissStartConsentBanner(opts.browser, id);
       session.initializing = false;
       session.lastActivityAt = Date.now();
       return { session_id: session.id, url: session.browser.currentUrl(), hint: "" };

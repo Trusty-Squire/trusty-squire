@@ -187,6 +187,7 @@ export type ProvisionAction =
       kind: "type";
       target: string;
       text: string;
+      submit?: boolean;
     }
   // Choose an option in a native <select> OR a custom listbox/combobox by its
   // visible text (fuzzy, case-insensitive substring). `type` cannot drive these
@@ -224,7 +225,7 @@ export type ProvisionAction =
   // Sealed credential transfer — type a secret held in a session-local slot
   // into a field, WITHOUT the value ever crossing the MCP boundary to the
   // host. The host orchestrates by slot name; the bot types the real value.
-  | { kind: "type_secret"; slot: string; target: string }
+  | { kind: "type_secret"; slot: string; target: string; submit?: boolean }
   // Reveal below-the-fold controls on a long SPA form, then re-observe to pick
   // up the newly-visible elements (heavy consoles render fields off-viewport).
   | { kind: "scroll"; direction?: "down" | "up" | "bottom" | "top" }

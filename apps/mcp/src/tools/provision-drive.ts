@@ -1325,28 +1325,17 @@ export const operateTypeTool: Tool<z.infer<typeof typeSchema>> = {
     },
   },
   async handler(args) {
-    const result = await runAction(
+    return await runAction(
       args.session_id,
       {
         target: args.ref,
         ...(args.slot !== undefined
           ? { kind: "type_secret" as const, slot: args.slot }
           : { kind: "type" as const, text: args.text! }),
+        ...(args.submit === true ? { submit: true } : {}),
       },
       args.format ?? "compact",
       args.submit !== true,
-    );
-    if (
-      args.submit !== true ||
-      (typeof result === "object" &&
-        result !== null &&
-        ("status" in result || "needs_user" in result))
-    )
-      return result;
-    return await runAction(
-      args.session_id,
-      { kind: "press", key: "Enter" },
-      args.format ?? "compact",
     );
   },
 };
