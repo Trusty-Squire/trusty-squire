@@ -113,7 +113,7 @@ describe("credential mutation approval page", () => {
     render(<CredentialMutationApprovalPage />);
 
     await waitFor(() =>
-      expect(screen.getByText("Failed to load approval.")).toBeTruthy(),
+      expect(screen.getByText("This approval link is invalid or was already used.")).toBeTruthy(),
     );
     expect(router.replace).not.toHaveBeenCalled();
     expect(api.apiPost).not.toHaveBeenCalled();

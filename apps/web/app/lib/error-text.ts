@@ -3,7 +3,14 @@
 export function errorText(error: unknown, fallback: string): string {
   if (!(error instanceof Error)) return fallback;
   const message = error.message.trim();
-  return message !== "" && !/^[a-z][a-z0-9]*(?:_[a-z0-9]+)+$/.test(message) ? message : fallback;
+  if (!/^[a-z][a-z0-9]*(?:_[a-z0-9]+)+$/.test(message)) return message || fallback;
+  if (message.endsWith("_expired")) {
+    return "This approval has expired. Ask the agent to request a new one.";
+  }
+  if (message.endsWith("_not_found")) {
+    return "This approval link is invalid or was already used.";
+  }
+  return fallback;
 }
 
 export const CARD_UNLOCK_FAILED =
