@@ -196,7 +196,6 @@ export function inboxPollMissReason(search: {
   if (search.sender !== undefined) bits.push(`host=${search.sender}`);
   return `inbox poll found nothing (${bits.join(" ")})`;
 }
-export const DRIVE_PAY_SUBMIT_WAITS = 3;
 export const DRIVE_STALE_LIMIT = 3;
 export const DRIVE_EXHAUSTED_ACTION_LIMIT = 5;
 /** How many times the same control may be re-offered after a press refused
@@ -1183,6 +1182,9 @@ export function candidateAimScore(
   const occluder = rowOccluder(row);
   const failed = new Set(input.failedKeys ?? []);
   let score = 0;
+  // Native form submits must survive the decision's bounded choice list,
+  // independent of the merchant's button wording.
+  if (/(?:^|\|)a=submit(?:\||$)/.test(row[2] ?? "")) score += 200;
   if (formId !== undefined && filledIds.has(formId)) {
     score += isSubmitLikeRow(row) ? 100 : 30;
   } else if (filledIds.size > 0 && isSubmitLikeRow(row)) {
@@ -1237,54 +1239,9 @@ export function isSubmitLikeRow(row: WireRow): boolean {
   );
 }
 
-const PAYMENT_SUBMIT_LABEL =
-  /pay[- ]?now|place[- ]?order|complete[- ]?(?:order|purchase|payment)|submit[- ]?payment|buy[- ]?now/;
-
-/** A row that can carry a checkout's submit control.
- *
- * `<input type="submit">` already reports role button. A radio or checkbox is
- * a payment-METHOD option: clicking one after release switches method and
- * remounts the card frames.
- */
-const BUTTON_LIKE_ROLES = new Set(["b", "button"]);
-
-export function isButtonLikeRow(row: WireRow): boolean {
-  return BUTTON_LIKE_ROLES.has(row[1]);
-}
-
 /** The act path scrolls an offscreen target into view before acting. */
 export function offscreenRowStaysOffered(_row: WireRow, _pageUrl: string): boolean {
   return true;
-}
-
-/** Whether the drive already asked to pay since the card went in.
- *
- * The pay control is replaced by the processor's own screen, so "no pay row"
- * after a dispatched pay click means submitted, not stuck. The line must name
- * a button: a click on a radio spelled "Buy now, pay later" chose a method.
- * Without a recorded release the drive cannot place a click relative to one,
- * so an earlier storefront "Buy now" never counts.
- */
-export function paymentSubmitDispatched(history: readonly string[]): boolean {
-  const released = history.lastIndexOf(DRIVE_INJECT_CARD_HISTORY);
-  if (released === -1) return false;
-  return history
-    .slice(released + 1)
-    .some(
-      (line) =>
-        /^click the button labeled /i.test(line) && PAYMENT_SUBMIT_LABEL.test(line.toLowerCase()),
-    );
-}
-
-/** Whether the checkout has moved off its payment form.
- *
- * The drive's own history only knows the clicks the drive made; a host that
- * submits with operate_click and resumes the drive on the processor step
- * leaves no trace in it. The page itself is the stronger signal.
- */
-export function checkoutPastPaymentForm(url: string): boolean {
-  if (safeStageV2(url, []) === "complete") return true;
-  return /(?:^|\/)processing(?:\/|$)/.test(urlPathname(url));
 }
 
 /** Fill, select, an enabled non-OAuth submit, or an enabled choice is still listed — WAIT and BLOCKED are not honest. */
@@ -1300,46 +1257,6 @@ export function pageHasListedWork(
   });
 }
 
-/** A visible control the planner could take for the checkout's submit.
- *
- * A picker textbox reports clickable but is a FILL dressed as a click, so a
- * payment stage carrying only fields offers nothing to mistake for Pay —
- * refusing there would abort a drive whose remaining work is a fill or a DONE
- * call (a card-fill goal never submits at all).
- */
-function isPaymentSubstituteRow(row: WireRow): boolean {
-  return isClickableRow(row) && !isFillableRow(row);
-}
-
-export function paymentSubmitControlMissing(input: {
-  rows: readonly WireRow[];
-  includePayment: boolean;
-  alreadyCard: boolean;
-  cardRetry: boolean;
-  pageUrl: string;
-  remainingFills: number;
-  history: readonly string[];
-}): string | undefined {
-  if (
-    !input.includePayment ||
-    !input.alreadyCard ||
-    input.cardRetry ||
-    !isCheckoutUrl(input.pageUrl) ||
-    input.remainingFills > 0 ||
-    checkoutPastPaymentForm(input.pageUrl) ||
-    paymentSubmitDispatched(input.history) ||
-    input.rows.some((row) => isButtonLikeRow(row))
-  ) {
-    return undefined;
-  }
-  const seen = input.rows
-    .filter((row) => isPaymentSubstituteRow(row))
-    .map((row) => readableLabel(row))
-    .filter((label, index, all) => label.length > 0 && all.indexOf(label) === index)
-    .slice(0, 8);
-  if (seen.length === 0) return undefined;
-  return `the control for this operation is not present (CLICK pay/place-order). visible: ${seen.join(", ")}`;
-}
 
 function urlPathname(url: string): string {
   try {
@@ -3020,10 +2937,7 @@ export function scrollDescription(row: WireRow, rows: readonly WireRow[]): strin
 }
 
 /** The recent-actions line for a dispatched action.
- *
- * A scroll reveals a control; it does not operate it. Describing one as a click
- * both misinforms the model and makes a scroll onto Pay look like a dispatched
- * payment to `paymentSubmitDispatched`.
+ * A scroll reveals a control; it does not operate it.
  */
 export function actionHistoryLine(
   action: ProvisionAction,
@@ -3171,6 +3085,15 @@ export function requiredFactTypeAction(
   pageUrl: string = "",
   _goal?: string,
 ): { target: string; text: string } | undefined {
+  // A supplied fact can match a secondary form such as a footer newsletter.
+  // When multiple forms offer actions, leave the choice of form to the model.
+  const actionableForms = new Set(
+    rows
+      .filter((row) => !isDisabledRow(row) && (isFillableRow(row) || isClickableRow(row)))
+      .map(rowFormId)
+      .filter((id): id is string => id !== undefined),
+  );
+  if (actionableForms.size > 1) return undefined;
   const includePayment = facts.card_ref !== undefined;
   for (const candidate of fillableCandidates(rows, facts, includePayment, filledRefs, pageUrl)) {
     if (isSelectRow(candidate.row)) continue;
@@ -4898,7 +4821,9 @@ async function captureDriveSession(
   }
   ensureFrameCacheInvalidation(session);
   const omit = maskedRefsOf(drive);
-  const keepOffscreenButtons = isCheckoutUrl(page.url());
+  // The act path scrolls a chosen control into view. Storefront product
+  // submits need the same visibility rule as checkout submits.
+  const keepOffscreenButtons = true;
   const main = await captureFrameSnapshot(page, omit, 0, keepOffscreenButtons);
   if (main === null) {
     const observation = await deps.observe(sessionId, "compact");
@@ -5461,7 +5386,6 @@ async function driveLoop(input: {
   let settleWaits = 0;
   let widgetWaits = 0;
   let inboxSilent = false;
-  let paySubmitWaits = 0;
   let captchaAfterSubmit = false;
   let lastCaptchaOutcome: string | undefined;
   let captchaSolveStartedAt = 0;
@@ -7364,32 +7288,6 @@ async function driveLoop(input: {
         if (automaticDecisionRefused) break automaticDecisions;
         spendStep("card");
         continue;
-      }
-
-      const missingPay = paymentSubmitControlMissing({
-        rows,
-        includePayment,
-        alreadyCard,
-        cardRetry,
-        pageUrl,
-        remainingFills: remainingFills.length,
-        history: drive.history,
-      });
-      if (missingPay === undefined) {
-        paySubmitWaits = 0;
-      } else if (paySubmitWaits < DRIVE_PAY_SUBMIT_WAITS) {
-        // A checkout that is still hydrating already carries its header and
-        // footer buttons, so the snapshot is non-empty while the pay control has
-        // not mounted. Spend a bounded re-observation budget before calling a
-        // paid-for order stuck.
-        paySubmitWaits += 1;
-        const applied = await applyDecision({ kind: "wait", confidence: 1 });
-        if (applied !== "continue") return applied;
-        if (automaticDecisionRefused) break automaticDecisions;
-        spendStep("pay_submit_wait");
-        continue;
-      } else {
-        return finish("stuck", { reason: missingPay });
       }
 
       drive.awaitingDecideAfterExplore = false;

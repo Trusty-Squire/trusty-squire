@@ -59,6 +59,28 @@ const SIGNUP_HTML = `<!doctype html><meta charset="utf-8"><title>Signup fixture<
   </form>
 </main>`;
 
+const PRODUCT_WITH_NEWSLETTER_HTML = `<!doctype html><meta charset="utf-8"><title>The Glow Serum</title>
+<style>body { margin: 0; } main { padding-top: 900px; } footer { margin-top: 800px; }</style>
+<nav><a href="/">Home</a><a href="/collections">Shop</a><a href="/contact">Contact</a></nav>
+<main>
+  <h1>The Glow Serum</h1>
+  <form id="product-form">
+    <button id="product-add-to-cart" type="submit">Add to cart</button>
+  </form>
+  <span id="cart-count">0</span>
+</main>
+<footer>
+  <h2>Join our email list</h2>
+  <form id="newsletter"><label>Email <input name="email" type="email"></label><button>Sign up</button></form>
+</footer>
+<div aria-hidden="true"><iframe title="Verification challenge" style="width:1px;height:1px;border:0"></iframe></div>
+<script>
+  document.getElementById('product-form').addEventListener('submit', (event) => {
+    event.preventDefault();
+    document.getElementById('cart-count').textContent = '1';
+  });
+</script>`;
+
 const CREATE_PASSWORD_NEXT_HTML = `<!doctype html><meta charset="utf-8"><title>Signup fixture</title>
 <main>
   <h1>Create account</h1>
@@ -560,6 +582,171 @@ function refFor(started: { safe_table?: unknown }, label: string): string {
 }
 
 describe("operate_drive real-browser fixture", () => {
+  it("adds a product to cart before touching the footer newsletter field", async () => {
+    const { context, page, started } = await openFixture(
+      PRODUCT_WITH_NEWSLETTER_HTML,
+      "whitejade-fixture.test",
+      "standard",
+      "/products/the-glow-serum",
+    );
+    try {
+      await page.setViewportSize({ width: 800, height: 600 });
+      const dependencies = deps(async (_api, _state, questions) => {
+        if ((await page.locator("#cart-count").textContent()) === "1") {
+          return jevChoose(questions, "DONE");
+        }
+        return jevChoose(questions, "CLICK", /^Add to cart$/i);
+      });
+      const result = await runOperateDrive(
+        {
+          session_id: started.session_id,
+          goal: "Add The Glow Serum to the cart; done when cart count is 1",
+          facts: { email: "buyer@example.test" },
+          max_steps: 4,
+        },
+        api(),
+        undefined,
+        dependencies,
+      );
+      expect(await page.locator("#cart-count").textContent()).toBe("1");
+      expect(await page.locator("#newsletter input").inputValue()).toBe("");
+      expect(result.status).toBe("complete");
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
+  it("offers the product submit on a low-confidence handback", async () => {
+    const { context, page, started } = await openFixture(
+      PRODUCT_WITH_NEWSLETTER_HTML,
+      "whitejade-handoff.test",
+      "standard",
+      "/products/the-glow-serum",
+    );
+    try {
+      await page.setViewportSize({ width: 800, height: 600 });
+      const dependencies = deps(async (_api, _state, questions) => {
+        const answer = jevChoose(questions, "CLICK", /^Add to cart$/i);
+        answer.result.answers.operation!.confidence = 0.41;
+        return answer;
+      });
+      const result = await runOperateDrive(
+        {
+          session_id: started.session_id,
+          goal: "Add The Glow Serum to the cart",
+          facts: { email: "buyer@example.test" },
+          max_steps: 4,
+        },
+        api(),
+        undefined,
+        dependencies,
+      );
+      expect(result.status).toBe("low_confidence");
+      expect(Object.values(result.options ?? {})).toContain("Add to cart");
+      expect(await page.locator("#cart-count").textContent()).toBe("0");
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
+  it("does not report the hidden verification frame as a blocker after add to cart", async () => {
+    const { context, page, started } = await openFixture(
+      PRODUCT_WITH_NEWSLETTER_HTML,
+      "whitejade-blocker.test",
+      "standard",
+      "/products/the-glow-serum",
+    );
+    try {
+      await page.locator("#product-add-to-cart").click();
+      const observation = await observe(started.session_id, "compact");
+      expect(await page.locator("#cart-count").textContent()).toBe("1");
+      expect((observation.semantic?.blockers ?? []).filter((blocker) => blocker.kind === "challenge"))
+        .toEqual([]);
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
+  it("keeps a product form submit when navigation exceeds the snapshot cap", async () => {
+    const links = Array.from({ length: 260 }, (_, index) =>
+      `<a href="/collection/${index}">Collection ${index}</a>`,
+    ).join("");
+    const html = PRODUCT_WITH_NEWSLETTER_HTML.replace("<nav>", `<nav>${links}`);
+    const { context, page, started } = await openFixture(html, "whitejade-many-links.test");
+    try {
+      await page.setViewportSize({ width: 800, height: 600 });
+      const snapshot = await captureFrameSnapshot(page, [], 0, true);
+      expect(snapshot?.elements.map((element) => element.label)).toContain("Add to cart");
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
+  it("offers checkout links to the model after card release", async () => {
+    const html = `<!doctype html><meta charset="utf-8"><title>Checkout</title>
+      <main><h1>Checkout</h1><a id="review" href="#review">Review order</a>
+      <p id="stage">Payment details entered</p></main>
+      <script>document.getElementById('review').onclick = (event) => {
+        event.preventDefault();
+        document.getElementById('stage').textContent = 'Review order';
+      };</script>`;
+    const { context, page, started } = await openFixture(
+      html,
+      "checkout-link-fixture.test",
+      "standard",
+      "/checkout",
+    );
+    try {
+      const session = sessionForCall(started.session_id)!;
+      session.releasedPaymentCard = {
+        approvalId: "approved",
+        approvalUrl: "https://approval.test",
+        checkout: {
+          merchant: "checkout-link-fixture.test",
+          checkout_origin: "https://checkout-link-fixture.test",
+          amount_cents: 100,
+          currency: "USD",
+        },
+        cardRef: "card-1",
+        last4: "1111",
+        deadline: Date.now() + 60_000,
+        card: {
+          pan: "4111111111111111",
+          cvv: "739",
+          exp_month: "12",
+          exp_year: "2030",
+          name: "Ada",
+          billing: { line1: "1 Main St", city: "Boston", postal_code: "02110", country: "US" },
+        },
+      };
+      const dependencies = deps(async (_api, _state, questions) =>
+        (await page.locator("#stage").textContent()) === "Review order"
+          ? jevChoose(questions, "DONE")
+          : jevChoose(questions, "CLICK", /^Review order$/i),
+      );
+      const result = await runOperateDrive(
+        {
+          session_id: started.session_id,
+          goal: "Open the review order step",
+          facts: { card_ref: "card-1" },
+          max_steps: 6,
+        },
+        api(),
+        undefined,
+        dependencies,
+      );
+      expect(await page.locator("#stage").textContent()).toBe("Review order");
+      expect(result.status).toBe("complete");
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
   it.skipIf(process.env.DRIVE_WHITEJADE_STARTUP_AB !== "1")(
     "measures Whitejade drive startup with the general bypass kept versus deleted",
     async () => {

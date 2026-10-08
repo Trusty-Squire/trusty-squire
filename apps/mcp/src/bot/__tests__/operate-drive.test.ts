@@ -19,7 +19,6 @@ import {
   DRIVE_VALUE_QUESTION,
   goalValueCriteria,
   DRIVE_IDENTICAL_RESNAP_MS,
-  DRIVE_INJECT_CARD_HISTORY,
   DRIVE_STALE_LIMIT,
   DRIVE_EXHAUSTED_ACTION_LIMIT,
   pageProgressKey,
@@ -42,9 +41,6 @@ import {
   decideAfterJev,
   driveCandidates,
   isCandidateRow,
-  paymentSubmitControlMissing,
-  paymentSubmitDispatched,
-  checkoutPastPaymentForm,
   actionHistoryLine,
   scrollDescription,
   fillActionForCandidate,
@@ -356,157 +352,6 @@ describe("request building", () => {
         (c) => c.ref,
       ),
     ).toEqual(["@e:buy"]);
-  });
-
-  it("does not report a localized submit button as a missing pay control", () => {
-    const checkout = "https://shop.example/checkouts/cn/hWNH38PujD9hoKo3tgk00iw6/fr";
-    const gate = {
-      includePayment: true,
-      alreadyCard: true,
-      cardRetry: false,
-      pageUrl: checkout,
-      remainingFills: 0,
-      history: [],
-    };
-    for (const label of ["Payer maintenant", "Subscribe now", "Confirm and pay", "Pay $68.00"]) {
-      expect(
-        paymentSubmitControlMissing({ ...gate, rows: [["@e:submit", "b", label]] }),
-      ).toBeUndefined();
-    }
-    expect(
-      paymentSubmitControlMissing({
-        ...gate,
-        rows: [
-          ["@e:method", "r", "Pay now"],
-          ["@e:email", "t", "Email"],
-        ],
-      }),
-    ).toMatch(/the control for this operation is not present \(CLICK pay\/place-order\)/);
-  });
-
-  it("reports a missing Pay control when the checkout shows no button at all", () => {
-    const link: WireRow = ["@e:back", "l", "Back to finalize order"];
-    const pay: WireRow = ["@e:pay", "b", "Pay now$68.00|v=offscreen"];
-    const gate = {
-      includePayment: true,
-      alreadyCard: true,
-      cardRetry: false,
-      pageUrl: "https://whitejade.xyz/checkouts/cn/hWNH38PujD9hoKo3tgk00iw6/en-us",
-      remainingFills: 0,
-      history: [],
-    };
-    expect(paymentSubmitControlMissing({ ...gate, rows: [link] })).toMatch(
-      /the control for this operation is not present \(CLICK pay\/place-order\)\. visible: Back to finalize order/,
-    );
-    expect(paymentSubmitControlMissing({ ...gate, rows: [link, pay] })).toBeUndefined();
-  });
-
-  it("keeps driving a payment stage that offers no substitute to click", () => {
-    // Fields only: a picker textbox reports clickable but is a fill, so there
-    // is nothing to mistake for Pay and nothing to refuse — a card-fill goal
-    // on a bare checkout must still reach its own ending.
-    const expiry: WireRow = ["@e:exp", "t", "Expiration date (MM / YY)|f=date"];
-    const pan: WireRow = ["@e:pan", "t", "Card number|f=cc-number"];
-    expect(
-      paymentSubmitControlMissing({
-        rows: [pan, expiry],
-        includePayment: true,
-        alreadyCard: true,
-        cardRetry: false,
-        pageUrl: "https://checkout.test/checkout",
-        remainingFills: 0,
-        history: [],
-      }),
-    ).toBeUndefined();
-  });
-
-  it("does not call a dispatched or completed payment stuck", () => {
-    const processing: WireRow = ["@e:back", "l", "Back to finalize order"];
-    const gate = {
-      rows: [processing],
-      includePayment: true,
-      alreadyCard: true,
-      cardRetry: false,
-      pageUrl: "https://whitejade.xyz/checkouts/cn/hWNH38PujD9hoKo3tgk00iw6/en-us",
-      remainingFills: 0,
-      history: [],
-    };
-    expect(paymentSubmitControlMissing(gate)).toBeDefined();
-    expect(
-      paymentSubmitControlMissing({
-        ...gate,
-        history: [DRIVE_INJECT_CARD_HISTORY, 'click the button labeled "Pay now$68.00"'],
-      }),
-    ).toBeUndefined();
-    expect(
-      paymentSubmitControlMissing({
-        ...gate,
-        pageUrl: "https://whitejade.xyz/checkouts/cn/hWNH38PujD9hoKo3tgk00iw6/thank-you",
-      }),
-    ).toBeUndefined();
-  });
-
-  it("does not call a host-submitted payment stuck on the processor step", () => {
-    const processing = "https://whitejade.xyz/checkouts/cn/hWNH38PujD9hoKo3tgk00iw6/processing";
-    expect(checkoutPastPaymentForm(processing)).toBe(true);
-    expect(
-      checkoutPastPaymentForm("https://whitejade.xyz/checkouts/cn/hWNH38PujD9hoKo3tgk00iw6/en-us"),
-    ).toBe(false);
-    expect(
-      paymentSubmitControlMissing({
-        rows: [["@e:back", "l", "Back to finalize order"]],
-        includePayment: true,
-        alreadyCard: true,
-        cardRetry: false,
-        pageUrl: processing,
-        remainingFills: 0,
-        history: [],
-      }),
-    ).toBeUndefined();
-  });
-
-  it("ignores a pay click that predates the card release", () => {
-    expect(
-      paymentSubmitDispatched([
-        'click the button labeled "Buy now"',
-        DRIVE_INJECT_CARD_HISTORY,
-        "type into the Name on card field",
-      ]),
-    ).toBe(false);
-    expect(paymentSubmitDispatched(['click the button labeled "Buy now"'])).toBe(false);
-    expect(
-      paymentSubmitDispatched([
-        DRIVE_INJECT_CARD_HISTORY,
-        'click the button labeled "Place order"',
-      ]),
-    ).toBe(true);
-  });
-
-  it("does not latch a payment-method radio click as a dispatched payment", () => {
-    const radio: WireRow = ["@e:method", "r", "Buy now, pay later"];
-    const line = actionHistoryLine({ kind: "click", target: "@e:method" }, radio, [radio]);
-    expect(line).toBe('click the radio labeled "Buy now, pay later"');
-    expect(paymentSubmitDispatched([DRIVE_INJECT_CARD_HISTORY, line])).toBe(false);
-  });
-
-  it("does not treat a scroll onto Pay now as a dispatched payment", () => {
-    const pay: WireRow = ["@e:pay", "b", "Pay now$68.00|v=offscreen"];
-    const scrolled = actionHistoryLine({ kind: "scroll", direction: "down" }, pay, [pay]);
-    const clicked = actionHistoryLine({ kind: "click", target: "@e:pay" }, pay, [pay]);
-    expect(scrolled).toBe(scrollDescription(pay, [pay]));
-    expect(paymentSubmitDispatched([DRIVE_INJECT_CARD_HISTORY, scrolled])).toBe(false);
-    expect(paymentSubmitDispatched([DRIVE_INJECT_CARD_HISTORY, clicked])).toBe(true);
-    expect(
-      paymentSubmitControlMissing({
-        rows: [["@e:back", "l", "Back to finalize order"]],
-        includePayment: true,
-        alreadyCard: true,
-        cardRetry: false,
-        pageUrl: "https://whitejade.xyz/checkouts/cn/hWNH38PujD9hoKo3tgk00iw6/en-us",
-        remainingFills: 0,
-        history: [DRIVE_INJECT_CARD_HISTORY, scrolled],
-      }),
-    ).toBeDefined();
   });
 
   it("puts SELECT option keys on the SELECT_target head", () => {
@@ -2898,6 +2743,24 @@ describe("select option key collisions", () => {
 });
 
 describe("drive outbound choice budgets", () => {
+  it("keeps a native form submit in model choices and handback after a long menu", () => {
+    const rows: WireRow[] = [
+      ...Array.from({ length: 125 }, (_, index): WireRow => [
+        `@e:collection-${index}`,
+        "l",
+        `Collection ${index}|u=/collections/${index}`,
+      ]),
+      ["@e:add", "b", "Add to cart|a=submit|fm=1"],
+    ];
+    const questions = buildDriveQuestions(rows, {}, "Add the serum to the cart");
+    const click = questions.CLICK_target;
+    expect(click?.type).toBe("choice");
+    if (click?.type !== "choice") return;
+    expect(Object.values(click.criteria)).toContain("Add to cart");
+    expect(Object.values(resumeAnswerOptions(rows, {}, "Add the serum to the cart", false, "/")))
+      .toContain("Add to cart");
+  });
+
   it("reserves a usable search value when earlier click targets consume the budget", () => {
     const search: WireRow = ["@e:search", "t", "@search|f=query"];
     const rows: WireRow[] = [
