@@ -176,7 +176,7 @@ export const provisionStartTool: Tool<z.infer<typeof startSchema>> = {
     'Use `format:"full"` only when the page DOM and text are needed. A released card\'s PAN (complete ordinary spellings and prefixes of at least eight digits) and security code are masked; all other emitted content stays verbatim. ' +
     DOM_OBSERVATION_CONTRACT +
     "Use operate_start when you want to inspect the first page before choosing steps. For a known multi-step goal, call operate_drive with url, goal, and facts directly. " +
-    "operate_click, operate_type, operate_select, operate_navigate, operate_scroll, and operate_login " +
+    "operate_click, operate_type, operate_select, operate_upload, operate_navigate, operate_scroll, and operate_login " +
     "complete individual steps. Resume a drive handoff on the same session with answer or added facts. " +
     "inject_card releases a saved card into pan/cvv refs and exposes masked {{pan}}/{{cvv}} per-digit tokens for operate_type placement. " +
     "Call operate_extract when you reach the credentials. Always operate_finish when done. The " +
@@ -1324,6 +1324,36 @@ export const operateSelectTool: Tool<z.infer<typeof selectSchema>> = {
   },
 };
 
+const uploadSchema = z.object({
+  ...sessionShape,
+  target: refSchema,
+  path: z.string().startsWith("/"),
+  format: actionFormatSchema.optional(),
+});
+export const operateUploadTool: Tool<z.infer<typeof uploadSchema>> = {
+  name: "operate_upload",
+  description:
+    "Attach a local file through the browser file chooser. The file must exist on the machine running the browser. Target a current ref or @label for the upload button or file input; path must be absolute.",
+  inputSchema: uploadSchema,
+  jsonInputSchema: {
+    type: "object",
+    required: ["session_id", "target", "path"],
+    properties: {
+      ...sessionJson,
+      target: { type: "string" },
+      path: { type: "string", pattern: "^/" },
+      format: actionFormatJson,
+    },
+  },
+  async handler(args) {
+    return await runAction(
+      args.session_id,
+      { kind: "upload", target: args.target, path: args.path },
+      args.format ?? "compact",
+    );
+  },
+};
+
 const pressSchema = z.object({
   ...sessionShape,
   key: z.string().min(1).max(40),
@@ -1617,6 +1647,7 @@ export const OPERATE_TOOLS: Tool[] = [
   operateClickTool,
   operateTypeTool,
   operateSelectTool,
+  operateUploadTool,
   operatePressTool,
   operateScrollTool,
   operateWaitTool,

@@ -17,11 +17,16 @@ still require another observation or an explicit wait.
 | Goal-shaped drive | `operate_drive` |
 | Start and finish | `operate_start`, `operate_finish` |
 | Read the page | `operate_observe`, `operate_screenshot`, `operate_network` |
-| Drive ordinary UI | `operate_navigate`, `operate_click`, `operate_type`, `operate_select`, `operate_press`, `operate_scroll`, `operate_wait` |
+| Drive ordinary UI | `operate_navigate`, `operate_click`, `operate_type`, `operate_select`, `operate_upload`, `operate_press`, `operate_scroll`, `operate_wait` |
 | Email verification read | `operate_read_inbox` |
 | Login | `operate_login` |
 | Vault-aware browser work | `operate_login({action:"load_saved"})`, `operate_extract` |
 | Payments and vault lists | `inject_card`, `list_credentials`, `list_payment_cards`, `edit_payment_card` |
+
+`operate_upload` takes `session_id`, a current `target` ref or `@label` for an
+upload button or file input, and an absolute local `path`. The file must exist
+on the machine running the browser; the operator sets it through the browser
+file chooser without using an OS dialog.
 
 For a signup, checkout, or other goal-shaped website task, call `operate_drive`
 with the goal and a `facts` bag (email, name, address, `card_ref`, …). Pass
