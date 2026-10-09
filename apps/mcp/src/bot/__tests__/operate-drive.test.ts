@@ -835,6 +835,19 @@ describe("decideAfterJev stop reasons", () => {
     });
   });
 
+  it("moves to a second fact-backed form after the first form is filled", () => {
+    const rows: WireRow[] = [
+      ["@e:email", "t", "Email|f=email|fm=1|n=buyer@example.test"],
+      ["@e:phone", "t", "Phone|f=phone|fm=2"],
+    ];
+    expect(
+      requiredFactTypeAction(rows, {
+        email: "buyer@example.test",
+        phone: "2125551234",
+      }),
+    ).toEqual({ target: "@e:phone", text: "2125551234" });
+  });
+
   it("holds the card for an optional offscreen phone until the fact is typed", () => {
     const email: WireRow = ["@e:email", "t", "Email|f=email|s=r|n=a@b.test"];
     const state: WireRow = ["@e:state", "s", "State|f=state|s=r|a=picker|n=NY"];
@@ -1307,6 +1320,26 @@ describe("decideAfterJev stop reasons", () => {
     expect(currentKey).not.toBe(oldKey);
     expect(resumeAction(currentKey, current, {}, "Proceed to checkout", undefined, url))
       .toMatchObject({ kind: "act", action: { kind: "click", target: original[0] } });
+  });
+
+  it("accepts an offered expiry key after the goal changes and defers its value until card release", () => {
+    const url = "https://whitejade.xyz/checkouts/cn/test/en-us";
+    const rows: WireRow[] = [
+      ["@e:expiry", "t", "Expiration date (MM / YY)|f=date|s=r|fm=1"],
+      ["@e:pay", "b", "Pay now|a=submit|fm=1"],
+      ["@e:pan", "t", "Card number|f=payment|fm=1"],
+      ["@e:cvv", "t", "Security code|f=cvv|fm=1"],
+    ];
+    const offered = resumeAnswerOptions(rows, {}, "Finish checkout", false, url);
+    const key = Object.keys(offered).find((choice) => choice.startsWith("kexpiration_date"));
+    expect(key).toBeDefined();
+    const newGoal = "Pay for this order and fill the expiry after card approval";
+    expect(
+      resumeAction(key!, rows, { card_ref: "saved-card" }, newGoal, "saved-card", url),
+    ).toEqual({ kind: "defer" });
+    expect(resumeAction(key!, rows, {}, newGoal, undefined, url)).toMatchObject({
+      kind: "needs_value",
+    });
   });
 
   it("offers White Jade navigation when only product links have local overlays", () => {

@@ -14,6 +14,7 @@ import {
 import {
   driveTargetSets,
   isWalletSignInPrompt,
+  peakedProbabilities,
   resumeAction,
   resumeAnswerOptions,
   runOperateDrive,
@@ -52,6 +53,81 @@ async function openFixture(url: string, html: string) {
 }
 
 describe("drive commerce fixtures", () => {
+  it("chains supplied delivery facts on a long multi-form checkout", async () => {
+    const url = "https://whitejade.xyz/checkouts/fixture";
+    const f = await openFixture(url, fixture("shopify-long-checkout.html"));
+    let sessionId: string | undefined;
+    try {
+      const started = await startHarnessProvisionSession({
+        browser: BrowserController.fromHarnessPage(f.page),
+        serviceUrl: url,
+        format: "compact",
+        initialObservation: "drive",
+      });
+      sessionId = started.session_id;
+      const deps: DriveDependencies = {
+        askJev: async (_api, _state, questions) => {
+          const operation = questions.operation;
+          const ids = operation?.type === "choice" ? Object.keys(operation.criteria) : [];
+          const choice = ids[0]!;
+          return {
+            result: {
+              answers: {
+                operation: {
+                  choice,
+                  confidence: 0.2,
+                  probabilities: peakedProbabilities(ids, choice, 0.51),
+                },
+              },
+            },
+            attempts: 1,
+            elapsedMs: 1,
+          };
+        },
+        act,
+        observe,
+        awaitVerification,
+        startSession: async () => {
+          throw new Error("existing session required");
+        },
+        injectCard: async () => ({ status: "unused" }),
+      };
+      const handback = await runOperateDrive(
+        {
+          session_id: sessionId,
+          goal: "Fill the delivery address and continue to payment",
+          facts: {
+            email: "buyer@example.test",
+            first_name: "Test",
+            last_name: "Squire",
+            address: "350 5th Ave",
+            city: "New York",
+            state: "NY",
+            zip: "10001",
+          },
+          max_steps: 12,
+        },
+        {} as ApiClient,
+        undefined,
+        deps,
+      );
+      expect(handback.steps).toBe(7);
+      expect(await f.page.locator('#delivery [name="email"]').inputValue()).toBe(
+        "buyer@example.test",
+      );
+      expect(await f.page.locator('#delivery [name="firstName"]').inputValue()).toBe("Test");
+      expect(await f.page.locator('#delivery [name="lastName"]').inputValue()).toBe("Squire");
+      expect(await f.page.locator('#delivery [name="address1"]').inputValue()).toBe("350 5th Ave");
+      expect(await f.page.locator('#delivery [name="city"]').inputValue()).toBe("New York");
+      expect(await f.page.locator('#delivery [name="province"]').inputValue()).toBe("NY");
+      expect(await f.page.locator('#delivery [name="zip"]').inputValue()).toBe("10001");
+      expect(await f.page.locator('#newsletter [name="email"]').inputValue()).toBe("");
+    } finally {
+      if (sessionId !== undefined) await finishProvisionSession(sessionId);
+      await f.context.close();
+    }
+  }, 30_000);
+
   it("dismisses a Shop code prompt and drops its hidden cross-origin frame", async () => {
     const context = await browser.newContext();
     const page = await context.newPage();
@@ -236,12 +312,13 @@ describe("drive commerce fixtures", () => {
         document.querySelector("main")!.prepend(decoy);
       });
       const resumed = await runOperateDrive(
-        { session_id: sessionId, goal: GOAL, answer: key!, max_steps: 1 },
+        { session_id: sessionId, goal: `${GOAL} with exactly one item`, answer: key!, max_steps: 1 },
         api,
         undefined,
         deps,
       );
       expect(resumed.status).not.toBe("invalid_answer");
+      expect(resumed.status).not.toBe("stuck");
       expect(f.page.url()).toBe("https://ouraring.com/ja/checkout");
     } finally {
       if (sessionId !== undefined) await finishProvisionSession(sessionId);

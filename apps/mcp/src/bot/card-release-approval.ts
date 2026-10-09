@@ -85,6 +85,9 @@ interface CardReleaseDependencies {
   // Resume only while the requested purchase terms still match. Changed terms
   // start a new approval; an old approval can never authorize the new terms.
   resumeFrom?: PendingApprovalWait;
+  // An explicit approval_id is a request to use exactly that approval. It
+  // must never silently fall through to a new ceremony.
+  requiredApprovalId?: string;
   // [P0] A defined budget makes a newly minted approval return immediately
   // with its URL. On a resumed call, this bounds the active wait by the
   // overall approval deadline. Undefined preserves the full approval/JIT
@@ -501,6 +504,9 @@ export async function executeCardReleaseApproval(
       resume.checkout.currency !== args.currency.toUpperCase() ||
       (resume.cardRef ?? resume.boundCardRef) !== args.card_ref)
   ) {
+    if (deps.requiredApprovalId !== undefined) {
+      throw new Error("approval_id purchase terms do not match this session's approval");
+    }
     // The API has no agent-side cancellation endpoint. Retire the local
     // capability and keypair; any later signature on the old URL cannot open
     // a card in this session.
@@ -558,6 +564,9 @@ export async function executeCardReleaseApproval(
         }
       }
       if (!reusable) {
+        if (deps.requiredApprovalId !== undefined) {
+          throw new Error("approval_id is not reusable in this session");
+        }
         // Never re-surface a stale capability URL or retain the private half
         // of a terminal approval's keypair. The fresh ceremony below mints a
         // new approval and surfaces its URL instead.
@@ -721,20 +730,16 @@ export async function executeCardReleaseApproval(
       iteration++;
       const remainingPollMs = Math.max(Math.min(callDeadline, deadline) - deps.now(), 0);
       const candidateRead = remainingPollMs > 0 ? true : "immediate";
-      const heldWaitMs = candidateRead === true
-        ? Math.min(Math.max(remainingPollMs - PAYMENT_APPROVAL_RESPONSE_RESERVE_MS, 0), 15_000)
-        : 0;
+      const heldWaitMs =
+        candidateRead === true
+          ? Math.min(Math.max(remainingPollMs - PAYMENT_APPROVAL_RESPONSE_RESERVE_MS, 0), 15_000)
+          : 0;
       const readStartedAt = deps.now();
       let approval: PaymentApproval;
       try {
         approval =
           candidateRead === true
-            ? await api.getPaymentApproval(
-                approvalId,
-                true,
-                heldWaitMs,
-                remainingPollMs,
-              )
+            ? await api.getPaymentApproval(approvalId, true, heldWaitMs, remainingPollMs)
             : await api.getPaymentApproval(approvalId, "immediate");
       } catch (error) {
         if (!isPaymentApprovalTransportTimeout(error)) throw error;
@@ -923,7 +928,9 @@ export async function executeCardReleaseApproval(
       if (!shouldKeepPolling()) break;
       // A full server-held pending read already paced the loop. Back off only
       // when it returned early (or an already-rejected candidate reappeared).
-      const fullHeldRead = candidateRead === true && heldWaitMs > 0 &&
+      const fullHeldRead =
+        candidateRead === true &&
+        heldWaitMs > 0 &&
         deps.now() - readStartedAt >= Math.max(heldWaitMs - 500, heldWaitMs * 0.9);
       if (!fullHeldRead || hasCandidate) await deps.sleep(deps.pollIntervalMs);
     }

@@ -760,7 +760,10 @@ async function compactV2Observation(
         .filter(([element, ref]) => element.frameUrl && targetableRefs.has(ref))
         .map(([element, ref]) => [ref, element.frameUrl!] as const),
     ),
-    expiresAt: Date.now() + 5 * 60_000,
+    expiresAt: Math.max(
+      Date.now() + 5 * 60_000,
+      (session.activePayment?.state.deadline ?? 0) + 10_000,
+    ),
   };
   const canCompactActionDelta =
     outputFormat === "compact" &&

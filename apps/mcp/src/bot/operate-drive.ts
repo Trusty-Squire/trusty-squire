@@ -3129,18 +3129,52 @@ export function requiredFactTypeAction(
   pageUrl: string = "",
   _goal?: string,
 ): { target: string; text: string } | undefined {
-  // A supplied fact can match a secondary form such as a footer newsletter.
-  // When multiple forms offer actions, leave the choice of form to the model.
-  const actionableForms = new Set(
-    rows
-      .filter((row) => !isDisabledRow(row) && (isFillableRow(row) || isClickableRow(row)))
-      .map(rowFormId)
-      .filter((id): id is string => id !== undefined),
-  );
-  if (actionableForms.size > 1) return undefined;
   const includePayment = facts.card_ref !== undefined;
-  for (const candidate of fillableCandidates(rows, facts, includePayment, filledRefs, pageUrl)) {
+  const checkoutForms = new Map<string, Set<string>>();
+  if (isCheckoutUrl(pageUrl)) {
+    for (const row of rows) {
+      const form = rowFormId(row);
+      if (form === undefined || !isFillableRow(row) || isOffscreenRow(row)) continue;
+      const keys = checkoutForms.get(form) ?? new Set<string>();
+      for (const key of matchingFactKeys(facts, row)) keys.add(key);
+      checkoutForms.set(form, keys);
+    }
+  }
+  const primaryForm = [...checkoutForms].sort(
+    (left, right) => right[1].size - left[1].size,
+  )[0]?.[0];
+  const primaryStart = rows.findIndex((row) => rowFormId(row) === primaryForm);
+  const candidates = fillableCandidates(rows, facts, includePayment, filledRefs, pageUrl).filter(
+    (candidate) => {
+      const form = rowFormId(candidate.row);
+      if (primaryForm === undefined || form === undefined || form === primaryForm) return true;
+      if (isExpiryRow(candidate.row) || isCardholderNameRow(candidate.row)) return true;
+      // A contact form before delivery may still need its email. A footer
+      // newsletter or phantom name form after delivery is not checkout work.
+      return rows.findIndex((row) => rowFormId(row) === form) < primaryStart;
+    },
+  );
+  // Checkout pages often contain discount, wallet, and payment forms beside
+  // delivery. Count only forms with fields backed by supplied facts. Prefer a
+  // unique form with the broadest fact coverage; a duplicated newsletter
+  // email alone cannot compete with a full delivery address. Equal coverage
+  // remains a real ambiguity for Jev and the operator handback.
+  const coverage = new Map<string, Set<string>>();
+  const pendingForms = new Set(candidates.map((candidate) => rowFormId(candidate.row)));
+  for (const row of rows) {
+    const form = rowFormId(row);
+    if (form === undefined || !pendingForms.has(form) || !isFillableRow(row) || isOffscreenRow(row))
+      continue;
+    const fields = coverage.get(form) ?? new Set<string>();
+    for (const key of matchingFactKeys(facts, row)) fields.add(key);
+    coverage.set(form, fields);
+  }
+  const ranked = [...coverage].sort((left, right) => right[1].size - left[1].size);
+  if (ranked.length > 1 && ranked[0]![1].size === ranked[1]![1].size) return undefined;
+  const selectedForm = ranked[0]?.[0];
+  for (const candidate of candidates) {
     if (isSelectRow(candidate.row)) continue;
+    if (selectedForm !== undefined && rowFormId(candidate.row) !== selectedForm) continue;
     const fact = firstFactValue(facts, matchingFactKeys(facts, candidate.row));
     if (fact === undefined) continue;
     return { target: candidate.ref, text: fact };
@@ -3904,6 +3938,7 @@ export type DriveDecision =
   | { kind: "operator_handoff"; confidence: number }
   | { kind: "wait"; confidence: number }
   | { kind: "no_progress" }
+  | { kind: "defer" }
   | { kind: "none_of_these"; confidence: number; reason: string }
   | { kind: "go_back"; confidence: number }
   | { kind: "replan"; confidence: number; reason: string }
@@ -4620,7 +4655,10 @@ function installDriveActionIndex(
     semantics,
     rows: indexed,
     byRef: new Map(),
-    expiresAt: Date.now() + 5 * 60_000,
+    expiresAt: Math.max(
+      Date.now() + 5 * 60_000,
+      (session.activePayment?.state.deadline ?? 0) + 10_000,
+    ),
   };
   session.compactV2Previous = null;
   session.compactV2Active = true;
@@ -5339,6 +5377,16 @@ export function resumeAction(
     operation === "SELECT" ? sets.SELECT : operation === "TYPE_TEXT" ? sets.TYPE_TEXT : sets.CLICK;
   const candidate = pool.find((entry) => entry.ref === row[0] || entry.slug === answer);
   const targetChoice = candidate?.slug ?? row[0];
+  if (operation === "TYPE_TEXT" && matchingFactKeys(facts, row).length === 0) {
+    // An offered expiry target can precede card release. Accept the selected
+    // key and let the loop release the card before filling its public expiry;
+    // a changed goal must not turn the missing value subquestion into an
+    // invalid_answer for the operator's already-offered target key.
+    if (cardRef !== undefined && isExpiryRow(row)) return { kind: "defer" };
+    if (isFormValueField(row, rows, goal)) {
+      return { kind: "needs_value", field: fieldLabelForRow(row) };
+    }
+  }
   const operationCriteriaMap =
     questions.operation?.type === "choice" ? questions.operation.criteria : {};
   const targetQuestion = questions[targetQuestionName(operation)];
@@ -5463,7 +5511,9 @@ export async function runOperateDrive(
   if (!Array.isArray(drive.triedHereLabels)) drive.triedHereLabels = [];
   if (drive.triedHereKey === undefined) drive.triedHereKey = null;
   if (!Array.isArray(drive.stallKeys)) drive.stallKeys = [];
+  const offeredQuestion = args.answer === undefined ? null : drive.lastQuestion;
   if (drive.goal !== args.goal) resetDriveGoalMemory(drive);
+  if (offeredQuestion !== null) drive.lastQuestion = offeredQuestion;
   drive.running = true;
   drive.goal = args.goal;
   drive.facts = facts;
@@ -5935,6 +5985,7 @@ async function driveLoop(input: {
     jevMs?: number,
     modelChosen = false,
   ): Promise<DriveHandoff | "continue"> => {
+    if (decision.kind === "defer") return "continue";
     if (decision.kind === "operator_handoff") {
       drive.lastQuestion = null;
       return finish("stuck", {
@@ -7065,6 +7116,11 @@ async function driveLoop(input: {
       drive.facts.card_ref !== undefined,
       drive.lastQuestion?.options,
     );
+    // The offered key has been interpreted against the fresh page. Its
+    // question is consumed even when the caller also changed the goal; a new
+    // handback must describe the current decision, not reject this answer as
+    // a repeat of the old question.
+    drive.lastQuestion = null;
     // Resume binds to the fresh snapshot: the pending operation (e.g. an
     // approval that completed on the phone) must pass the consume-once gate
     // on its first post-resume attempt instead of bouncing off a

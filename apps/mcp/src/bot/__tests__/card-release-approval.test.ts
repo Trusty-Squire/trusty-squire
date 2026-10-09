@@ -126,11 +126,66 @@ it("returns a new approval link before polling, then waits on the resumed call",
   const second = await executeCardReleaseApproval(requested, api, browser, {
     ...shared,
     resumeFrom: pending[0]!,
+    requiredApprovalId: "new-approval",
   });
   expect(second).toMatchObject({ status: "approval_pending", approval_id: "new-approval" });
   expect(api.createPaymentApproval).toHaveBeenCalledTimes(1);
   expect(getPaymentApproval).toHaveBeenCalled();
   expect(sleep).toHaveBeenCalled();
+});
+
+it("never creates a replacement when an explicit approval_id cannot be reused", async () => {
+  const pending: PendingApprovalWait = {
+    approval_id: "held",
+    approval_url: "https://example.test/held",
+    nonce: "nonce",
+    agent: "agent",
+    account_binding: "account",
+    checkout: CHECKOUT,
+    boundCardRef: "saved-card",
+    cardRef: "saved-card",
+    deadline: Date.now() + 60_000,
+    rejectedCandidates: [],
+    keypair: await generateOperatorKeypair(),
+    item: "item",
+    reason: "reason",
+  };
+  const create = vi.fn();
+  const api = {
+    createPaymentApproval: create,
+    getPaymentApproval: async () => ({
+      id: "held",
+      status: "approved",
+      expires_at: new Date(Date.now() + 60_000).toISOString(),
+      jws: null,
+      sealed_card: null,
+    }),
+  } as unknown as ApiClient;
+  await expect(
+    executeCardReleaseApproval(
+      {
+        merchant: CHECKOUT.merchant,
+        amount_cents: CHECKOUT.amount_cents,
+        currency: CHECKOUT.currency,
+        card_ref: "saved-card",
+        item: "item",
+        reason: "reason",
+      },
+      api,
+      {
+        currentUrl: () => `${CHECKOUT.checkout_origin}/checkout`,
+        injectCardFields: async () => {
+          throw new Error("card must not release");
+        },
+      },
+      {
+        resumeFrom: pending,
+        requiredApprovalId: "held",
+        vouchflowExpectedAudience: "customer_test",
+      },
+    ),
+  ).rejects.toThrow("approval_id is not reusable");
+  expect(create).not.toHaveBeenCalled();
 });
 
 it("makes a final API read when the local approval deadline expires", async () => {
