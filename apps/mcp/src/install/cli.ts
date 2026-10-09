@@ -22,13 +22,8 @@
 //
 //   npx @trusty-squire/mcp logout
 //
-// Flags:
-//   --target=<agent>     skip auto-detection
-//   --api-base=<url>     override the API base URL
-//   --skip-browser       don't launch the bot's Chrome; just print the
-//                        confirm URL and expect the user to open it in
-//                        their own browser (CI / scripted installs)
-//   --no-registry        disable managed registry participation
+// Flags are parsed for each command below. The API base for development is
+// configured through TRUSTY_SQUIRE_API_BASE, not a user-facing CLI option.
 //
 // Pure module — `runCli()` is invoked by bin.ts. No shebang, no
 // entrypoint guard, no top-level execution.
@@ -116,7 +111,6 @@ type Argv = {
   // whether this install participates; registry ON is also the user's consent
   // to contribute successful non-personal signup recipes back to the registry.
   noRegistry: boolean;
-  registryConfigured?: boolean;
   // --skip-browser:
   // don't launch the bot's Chrome at the confirm URL. Print the URL
   // for the user to open in their own browser, then poll for claim.
@@ -132,9 +126,7 @@ type Argv = {
   // Optional scoped form: --force-relogin=google|github. Bare
   // --force-relogin remains the full-profile account-switch escape hatch.
   forceReloginProvider?: ProviderArg;
-  // --no-interactive: skip the clack picker even in a TTY. Useful for
-  // scripted runs that still want a normal Chrome confirm (i.e. don't
-  // imply --skip-browser).
+  // The machine report and external-browser paths skip the clack picker.
   noInteractive: boolean;
   // --json: print the typed connect report on stdout. Human copy stays
   // on stderr. Additive — an interactive run without this flag is unchanged.
@@ -153,8 +145,18 @@ interface InstallConsent {
 // Default (no positional) → `connect` because the most common invocation is
 // `npx @trusty-squire/mcp` with no args, and that should kick off setup.
 function commandFromArgv(argv: readonly string[]): string {
-  if (argv.includes("--help") || argv.includes("-h")) return "help";
-  return argv.filter((a) => !a.startsWith("--"))[0] ?? "connect";
+  return argv[0] !== undefined && !argv[0].startsWith("-") ? argv[0] : "connect";
+}
+
+const VALID_FLAGS = {
+  connect: ["--target", "--force-relogin", "--skip-browser", "--json", "--help", "-h"],
+  settings: ["--target", "--help", "-h"],
+  logout: ["--account", "--help", "-h"],
+  help: ["--help", "-h"],
+} as const;
+
+function validFlagsFor(command: keyof typeof VALID_FLAGS): string {
+  return VALID_FLAGS[command].join(", ");
 }
 
 function parseArgs(argv: string[]): Argv {
@@ -171,93 +173,127 @@ function parseArgs(argv: string[]): Argv {
         "add `--force-relogin=google` or `--force-relogin=github` to refresh one provider session.",
     );
   }
+  if (!Object.hasOwn(VALID_FLAGS, command)) {
+    rejectUsage(`unknown command '${command}'. Valid commands: connect, settings, logout, help`);
+  }
+  const parsedCommand = command as keyof typeof VALID_FLAGS;
+  const tokens = command === argv[0] ? argv.slice(1) : argv;
   let target: AgentTarget | undefined;
-  let apiBase = DEFAULT_API_BASE;
-  let noRegistry = false;
-  let registryConfigured = false;
   let skipBrowser = false;
   let forceRelogin = false;
   let forceReloginProvider: ProviderArg | undefined;
-  let noInteractive = false;
   let json = false;
   let account: string | undefined;
-  for (const arg of argv) {
-    if (arg.startsWith("--target=")) {
-      const t = arg.slice("--target=".length);
-      if (!isAgentTarget(t)) {
-        // Silent-drop is the footgun behind the pre-0.4.2 Goose mishap
-        // (--target=goose-typo → auto-detect → wrong agent configured).
-        // Fail loud with the valid list so the user sees the mismatch.
-        rejectUsage(`unknown --target '${t}'. Valid targets: ${Object.keys(AGENTS).join(", ")}`);
-      }
-      target = t;
-    } else if (arg.startsWith("--api-base=")) {
-      apiBase = arg.slice("--api-base=".length);
-    } else if (arg.startsWith("--registry-url=")) {
+  let showHelp = false;
+  const seen = new Set<string>();
+  for (let i = 0; i < tokens.length; i++) {
+    const arg = tokens[i]!;
+    const equals = arg.indexOf("=");
+    const flag = equals === -1 ? arg : arg.slice(0, equals);
+    const attached = equals === -1 ? undefined : arg.slice(equals + 1);
+    if (flag === "--registry-url") {
       rejectDeprecatedCli(
         "`--registry-url` has been removed. Trusty Squire uses the managed skill registry.",
       );
-    } else if (arg === "--no-registry") {
-      noRegistry = true;
-      registryConfigured = true;
-    } else if (arg === "--registry") {
+    } else if (flag === "--registry") {
       rejectDeprecatedCli(
         "`--registry` has been removed because the managed registry is enabled by default.",
       );
-    } else if (arg.startsWith("--provider=")) {
+    } else if (flag === "--provider") {
       rejectDeprecatedCli(
         "`--provider` has been removed with `login`. Use `connect --force-relogin=google|github`.",
       );
-    } else if (arg.startsWith("--account=")) {
-      // An empty value must not fall through to "the most recent account":
-      // silently clearing a different account than the one named is the
-      // silent-destruction class this whole change removes.
-      const value = arg.slice("--account=".length).trim();
-      if (value.length === 0) {
-        rejectUsage("--account requires an account id (e.g. --account=01ABC...)");
-      }
-      account = value;
-    } else if (arg.startsWith("--profile-dir=")) {
+    } else if (flag === "--profile-dir") {
       rejectDeprecatedCli(
         "`--profile-dir` has been removed with `login`. `connect` always uses the bot's Chrome profile.",
       );
-    } else if (arg === "--skip-browser") {
-      skipBrowser = true;
-    } else if (arg === "--skip-login") {
+    } else if (flag === "--skip-login") {
       rejectDeprecatedCli("`--skip-login` has been removed. Use `--skip-browser`.");
-    } else if (arg === "--force-relogin") {
-      forceRelogin = true;
-    } else if (arg.startsWith("--force-relogin=")) {
-      forceRelogin = true;
-      const p = arg.slice("--force-relogin=".length);
-      if (p === "google" || p === "github") forceReloginProvider = p;
-    } else if (arg === "--skip-secondary") {
+    } else if (flag === "--skip-secondary") {
       rejectDeprecatedCli("`--skip-secondary` has been removed; connect is single-stage.");
-    } else if (arg === "--no-interactive") {
-      noInteractive = true;
-    } else if (arg === "--json") {
-      json = true;
+    } else if (flag === "--api-base") {
+      rejectDeprecatedCli("`--api-base` has been removed. Set TRUSTY_SQUIRE_API_BASE instead.");
+    } else if (flag === "--no-registry") {
+      rejectDeprecatedCli(
+        "`--no-registry` has been removed. Run `settings` to disable registry participation.",
+      );
+    } else if (flag === "--no-interactive") {
+      rejectDeprecatedCli(
+        "`--no-interactive` has been removed. Use `--json` for scripted connect runs.",
+      );
+    }
+
+    if (!(VALID_FLAGS[parsedCommand] as readonly string[]).includes(flag)) {
+      rejectUsage(
+        `unknown flag '${flag}' for ${parsedCommand}. Valid flags: ${validFlagsFor(parsedCommand)}`,
+      );
+    }
+    if (seen.has(flag))
+      rejectUsage(`duplicate ${flag}. Valid flags: ${validFlagsFor(parsedCommand)}`);
+    seen.add(flag);
+    const requiredValue = (): string => {
+      const value = attached ?? tokens[++i];
+      if (value === undefined || value.length === 0 || value.startsWith("-")) {
+        rejectUsage(
+          `${flag} requires a value. Valid values: ${flag === "--target" ? Object.keys(AGENTS).join(", ") : "a non-empty account id"}`,
+        );
+      }
+      return value;
+    };
+    switch (flag) {
+      case "--target": {
+        const value = requiredValue();
+        if (!isAgentTarget(value)) {
+          rejectUsage(
+            `invalid --target '${value}'. Valid values: ${Object.keys(AGENTS).join(", ")}`,
+          );
+        }
+        target = value;
+        break;
+      }
+      case "--account":
+        account = requiredValue().trim();
+        if (account.length === 0)
+          rejectUsage("--account requires a value. Valid values: a non-empty account id");
+        break;
+      case "--force-relogin": {
+        forceRelogin = true;
+        const next = tokens[i + 1];
+        const value =
+          attached ?? (next !== undefined && !next.startsWith("-") ? tokens[++i] : undefined);
+        if (value !== undefined && value !== "google" && value !== "github") {
+          rejectUsage(
+            `invalid --force-relogin '${value}'. Valid values: google, github (or omit for full relogin)`,
+          );
+        }
+        forceReloginProvider = value;
+        break;
+      }
+      case "--skip-browser":
+      case "--json":
+      case "--help":
+      case "-h":
+        if (attached !== undefined)
+          rejectUsage(`${flag} does not take a value. Valid form: ${flag}`);
+        if (flag === "--skip-browser") skipBrowser = true;
+        if (flag === "--json") json = true;
+        if (flag === "--help" || flag === "-h") showHelp = true;
+        break;
     }
   }
   const args: Argv = {
-    command,
-    apiBase,
+    command: showHelp ? "help" : parsedCommand,
+    apiBase: DEFAULT_API_BASE,
     skipBrowser,
     forceRelogin,
     ...(forceReloginProvider !== undefined ? { forceReloginProvider } : {}),
-    noRegistry,
-    ...(registryConfigured ? { registryConfigured } : {}),
+    noRegistry: false,
     // The picker draws on stdout, which is the machine channel under --json.
-    noInteractive: noInteractive || json,
+    noInteractive: json,
     ...(json ? { json } : {}),
   };
   if (target !== undefined) args.target = target;
-  if (account !== undefined) {
-    if (account.length === 0) {
-      rejectDeprecatedCli("`--account` requires a non-empty account ID.");
-    }
-    args.account = account;
-  }
+  if (account !== undefined) args.account = account;
   return args;
 }
 
@@ -278,7 +314,7 @@ function isAgentTarget(s: string): s is AgentTarget {
   // Source of truth is AGENTS — adding/removing a target there auto-
   // propagates here, so a new agent (or a removed one) can't drift the
   // accept-list out of sync.
-  return s in AGENTS;
+  return Object.hasOwn(AGENTS, s);
 }
 
 /**
@@ -482,9 +518,7 @@ async function settings(args: Argv): Promise<void> {
       );
       process.exit(64);
     }
-    if (args.registryConfigured !== true) {
-      args.noRegistry = session.consent_skillify_telemetry !== true;
-    }
+    args.noRegistry = session.consent_skillify_telemetry !== true;
     if (args.consentOperatorInboxOtp === undefined) {
       args.consentOperatorInboxOtp = session.consent_operator_inbox_otp !== false;
     }
@@ -1691,15 +1725,16 @@ function printHelp(): void {
   console.warn(`${chalk.bold("Flags for connect")}`);
   console.warn(`  --target=<${Object.keys(AGENTS).join("|")}>`);
   console.warn(`  --skip-browser               use a separate browser for sign-in (CI mode)`);
-  console.warn(`  --api-base=<url>             use a different Trusty Squire API`);
   console.warn(
     `  --force-relogin[=google|github] re-sign-in: switch the bound account or refresh one provider`,
   );
-  console.warn(`  --no-registry                disable managed registry participation`);
-  console.warn(`  --no-interactive             skip the TUI picker (use flag defaults only)`);
   console.warn(
     `  --json                       stream machine-readable connect reports on stdout ` +
-      `(implies --no-interactive)`,
+      `(skips setup prompts)`,
+  );
+  console.warn(`  Values accept --flag=value or --flag value.`);
+  console.warn(
+    `  Use settings to change registry participation; TRUSTY_SQUIRE_API_BASE selects a development API.`,
   );
   console.warn("");
   console.warn(`${chalk.bold("Flags for logout")}`);

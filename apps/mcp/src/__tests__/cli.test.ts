@@ -81,13 +81,8 @@ describe("parseArgs registry", () => {
     expect(parseArgs(["connect"]).noRegistry).toBe(false);
   });
 
-  it("keeps the legacy --no-registry flag as an explicit off switch", () => {
-    const args = parseArgs(["connect", "--no-registry"]);
-    expect(args.noRegistry).toBe(true);
-    expect(args.registryConfigured).toBe(true);
-  });
-
-  it("rejects deprecated registry flags", async () => {
+  it("rejects removed registry flags and points to settings", async () => {
+    expect(await expectDeprecatedExit(["connect", "--no-registry"])).toContain("settings");
     await expectDeprecatedExit(["connect", "--registry"]);
     await expectDeprecatedExit(["connect", "--registry-url=https://staging.registry.test"]);
   });
@@ -101,6 +96,10 @@ describe("parseArgs deprecated flags", () => {
   it("rejects removed compatibility flags", async () => {
     await expectDeprecatedExit(["connect", "--skip-login"]);
     await expectDeprecatedExit(["connect", "--skip-secondary"]);
+    expect(await expectDeprecatedExit(["connect", "--api-base=https://example.test"])).toContain(
+      "TRUSTY_SQUIRE_API_BASE",
+    );
+    expect(await expectDeprecatedExit(["connect", "--no-interactive"])).toContain("--json");
   });
 
   // ONE pathway: `login` and the two flags that existed only to serve it are
@@ -145,6 +144,25 @@ describe("the machine channel on a usage failure", () => {
       machine.restore();
     }
   });
+
+  it("reports an invalid relogin provider without a connection state", async () => {
+    const machine = captureMachineChannel();
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const exit = vi.spyOn(process, "exit").mockImplementation((code?: string | number | null) => {
+      throw new Error(`exit:${code}`);
+    });
+    try {
+      await expect(runCli(["connect", "--json", "--force-relogin=gogle"])).rejects.toThrow(
+        "exit:64",
+      );
+      expect(machine.terminal()).toMatchObject({ error: "usage" });
+      expect(machine.terminal().state).toBeUndefined();
+    } finally {
+      exit.mockRestore();
+      warning.mockRestore();
+      machine.restore();
+    }
+  });
 });
 
 describe("parseArgs --force-relogin", () => {
@@ -155,9 +173,82 @@ describe("parseArgs --force-relogin", () => {
   });
 
   it("supports provider-scoped relogin", () => {
-    const args = parseArgs(["connect", "--force-relogin=github"]);
-    expect(args.forceRelogin).toBe(true);
-    expect(args.forceReloginProvider).toBe("github");
+    for (const argv of [
+      ["connect", "--force-relogin=github"],
+      ["connect", "--force-relogin", "github"],
+    ]) {
+      const args = parseArgs(argv);
+      expect(args.forceRelogin).toBe(true);
+      expect(args.forceReloginProvider).toBe("github");
+    }
+  });
+});
+
+describe("strict command flags", () => {
+  it("accepts both value forms for connect, settings, and logout", () => {
+    for (const argv of [
+      ["connect", "--target=claude-code"],
+      ["connect", "--target", "claude-code"],
+    ]) {
+      expect(parseArgs(argv).target).toBe("claude-code");
+    }
+    for (const argv of [
+      ["settings", "--target=codex"],
+      ["settings", "--target", "codex"],
+    ]) {
+      expect(parseArgs(argv)).toMatchObject({ command: "settings", target: "codex" });
+    }
+    for (const argv of [
+      ["logout", "--account=account"],
+      ["logout", "--account", "account"],
+    ]) {
+      expect(parseArgs(argv)).toMatchObject({ command: "logout", account: "account" });
+    }
+  });
+
+  it.each([
+    { argv: ["connect", "--targte=codex"], message: "Valid flags" },
+    { argv: ["settings", "--json"], message: "Valid flags" },
+    { argv: ["logout", "--target=codex"], message: "Valid flags" },
+    { argv: ["help", "--target=codex"], message: "Valid flags" },
+    { argv: ["connect", "--target"], message: "Valid values" },
+    { argv: ["settings", "--target="], message: "Valid values" },
+    { argv: ["logout", "--account"], message: "non-empty account id" },
+    { argv: ["connect", "--target=not-an-agent"], message: "Valid values" },
+    { argv: ["connect", "--target=constructor"], message: "Valid values" },
+    { argv: ["constructor"], message: "Valid commands" },
+    { argv: ["connect", "--force-relogin=gogle"], message: "google, github" },
+    { argv: ["connect", "--force-relogin", "gogle"], message: "google, github" },
+    { argv: ["connect", "--force-relogin="], message: "google, github" },
+    { argv: ["connect", "--json=true"], message: "Valid form: --json" },
+    {
+      argv: ["connect", "--force-relogin=google", "--force-relogin"],
+      message: "duplicate --force-relogin",
+    },
+  ])("rejects $argv with a one-line usage error", ({ argv, message }) => {
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(() => parseArgs(argv)).toThrow(message);
+      expect(warning).toHaveBeenCalledOnce();
+      expect(String(warning.mock.calls[0]?.[0])).not.toContain("\n");
+    } finally {
+      warning.mockRestore();
+    }
+  });
+
+  it("never widens an invalid scoped relogin into a full-profile relogin", () => {
+    expect(() => parseArgs(["connect", "--force-relogin=gogle"])).toThrow("--force-relogin");
+  });
+
+  it.each([
+    ["connect", "--targte=codex"],
+    ["connect", "--force-relogin=gogle"],
+    ["settings", "--json"],
+    ["logout", "--target=codex"],
+    ["help", "--target=codex"],
+  ])("exits 64 for an invalid %s option", async (command, flag) => {
+    const message = await expectDeprecatedExit([command, flag]);
+    expect(message).toContain(flag.split("=")[0]);
   });
 });
 
