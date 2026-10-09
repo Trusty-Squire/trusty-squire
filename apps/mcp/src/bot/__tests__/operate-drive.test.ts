@@ -13,6 +13,7 @@ import {
   driveTargetSets,
   resumeAnswerOptions,
   resumeAction,
+  resolveResumeAnswer,
   elementState,
   DRIVE_MAX_JEV_CALLS,
   DRIVE_RULES,
@@ -1291,6 +1292,22 @@ describe("decideAfterJev stop reasons", () => {
       kind: "act",
       action: { kind: "select", target: "@e:country", text: "US" },
     });
+  });
+
+  it("binds an offered handback key to its still-mounted control after key order changes", () => {
+    const url = "https://ouraring.com/ja/cart";
+    const original: WireRow = ["@e:checkout", "b", "チェックアウトに進む"];
+    const prior = [original];
+    const current: WireRow[] = [["@e:other", "b", "チェックアウトに進む"], original];
+    const offered = resumeAnswerOptions(prior, {}, "Proceed to checkout", false, url);
+    const oldKey = Object.keys(offered).find((key) => offered[key] === "チェックアウトに進む");
+    expect(oldKey).toBeDefined();
+    const currentKey = resolveResumeAnswer(
+      oldKey!, current, prior, url, {}, "Proceed to checkout", false, offered,
+    );
+    expect(currentKey).not.toBe(oldKey);
+    expect(resumeAction(currentKey, current, {}, "Proceed to checkout", undefined, url))
+      .toMatchObject({ kind: "act", action: { kind: "click", target: original[0] } });
   });
 
   it("offers White Jade navigation when only product links have local overlays", () => {

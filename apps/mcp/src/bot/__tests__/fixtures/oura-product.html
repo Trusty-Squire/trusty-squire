@@ -1,0 +1,31 @@
+<!doctype html><html lang="ja"><meta charset="utf-8"><title>Oura Ring 4のご購入：Silver</title>
+<style>
+  body { margin: 0; font: 16px sans-serif; }
+  header { padding: 20px; }
+  main { padding: 24px; }
+  .choice { display: inline-block; padding: 18px; border: 1px solid #777; margin: 8px; }
+  .peer { position: absolute; width: 0; height: 0; appearance: none; }
+  #add { display: block; margin-top: 850px; padding: 16px; }
+</style>
+<header><a href="/ja/cart" data-cy="nav-cart-button">カート内に商品がありません</a></header>
+<main>
+  <h1>Oura Ring 4</h1><h2>Silver</h2>
+  <fieldset><legend>カラー</legend>
+    <label class="choice" for="silver"><input class="peer" type="radio" id="silver" name="finish" aria-label="Silver" checked>Silver</label>
+    <label class="choice" for="gold"><input class="peer" type="radio" id="gold" name="finish" aria-label="Gold">Gold</label>
+  </fieldset>
+  <fieldset><legend>サイズ</legend>
+    <label class="choice" for="kit"><input class="peer" type="radio" id="kit" name="sizing" value="sizing-kit" checked>無料サイジングキット</label>
+    <label class="choice" for="choose-size"><input class="peer" type="radio" id="choose-size" name="sizing" value="choose-size">サイズを選択</label>
+  </fieldset>
+  <div id="sizes" hidden><label>サイズ <select id="ring-size"><option value="">選択してください</option><option value="8">8</option><option value="9">9</option></select></label></div>
+  <button type="button" id="add" data-cy="add-to-cart-button" aria-haspopup="dialog">カートに追加</button>
+</main>
+<script>
+  document.querySelector('#choose-size').addEventListener('change', () => {
+    document.querySelector('#sizes').hidden = false;
+  });
+  document.querySelector('#add').addEventListener('click', () => {
+    document.querySelector('[data-cy=nav-cart-button]').textContent = 'カート内に商品が1個あります';
+  });
+</script></html>

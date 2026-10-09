@@ -5006,12 +5006,41 @@ async function snapshotDriveSession(
   return snap;
 }
 
-function resolveResumeAnswer(
+export function resolveResumeAnswer(
   answer: string,
   snapshotRows: readonly WireRow[],
   compactRows: readonly WireRow[],
   pageUrl: string,
+  facts: Record<string, string> = {},
+  goal: string = "",
+  includePayment = false,
+  offeredOptions?: Readonly<Record<string, string>>,
 ): string {
+  // Criteria slugs are rebuilt from the current page. A new sibling can take
+  // an old slug even while the control offered at handback remains mounted.
+  // Bind an offered slug to its old row, then find that row in the fresh set.
+  if (offeredOptions !== undefined && Object.hasOwn(offeredOptions, answer)) {
+    const candidates = (rows: readonly WireRow[]) => {
+      const sets = resumeTargetSets(rows, facts, goal, includePayment, pageUrl);
+      buildDriveQuestions(rows, facts, goal, includePayment, [], pageUrl, new Map(), sets);
+      return [...sets.CLICK, ...sets.TYPE_TEXT, ...sets.SELECT];
+    };
+    const prior = candidates(compactRows).find((candidate) => candidate.slug === answer);
+    if (prior !== undefined) {
+      const current = candidates(snapshotRows);
+      const sameControl = (candidate: DriveCandidate) =>
+        candidate.row[1] === prior.row[1] &&
+        readableLabel(candidate.row) === readableLabel(prior.row) &&
+        candidate.option === prior.option;
+      const byRef = current.find(
+        (candidate) => candidate.ref === prior.ref && sameControl(candidate),
+      );
+      if (byRef !== undefined) return byRef.slug;
+      const byLabel = current.filter(sameControl);
+      if (byLabel.length === 1) return byLabel[0]!.slug;
+      return "";
+    }
+  }
   if (findRow(snapshotRows, answer, pageUrl) !== undefined) return answer;
   const compact = findRow(compactRows, answer, pageUrl);
   if (compact === undefined) return answer;
@@ -6066,6 +6095,7 @@ async function driveLoop(input: {
       };
       const repeated = rememberQuestion(question);
       if (repeated !== undefined) return repeated;
+      drive.resumeCompactRows = rows.map((row) => [...row]);
       return finish("low_confidence", {
         question,
         confidence: decision.confidence,
@@ -6073,10 +6103,24 @@ async function driveLoop(input: {
       });
     }
     if (decision.kind === "invalid_answer") {
-      const repeated = rememberQuestion(decision.question);
+      // Jev's rejected answer may belong to an operation or value question.
+      // Those criteria (for example CLICK) are not valid resume targets.
+      const question = {
+        question: "Choose one current target key, or DONE, BLOCKED, NONE_OF_THESE, or WAIT.",
+        options: resumeAnswerOptions(
+          rows,
+          drive.facts,
+          drive.goal,
+          drive.facts.card_ref !== undefined,
+          observation.url,
+          liveProviders,
+        ),
+      };
+      const repeated = rememberQuestion(question);
       if (repeated !== undefined) return repeated;
+      drive.resumeCompactRows = rows.map((row) => [...row]);
       return finish("invalid_answer", {
-        question: decision.question,
+        question,
         confidence: decision.confidence,
         reason: decision.reason,
       });
@@ -6949,7 +6993,16 @@ async function driveLoop(input: {
   if (args.answer !== undefined) {
     await detectOfferedProviderSessions();
     const compactRows = drive.resumeCompactRows ?? mergeCompactTable([], priorCompact ?? {});
-    const answer = resolveResumeAnswer(args.answer, rows, compactRows, observation.url);
+    const answer = resolveResumeAnswer(
+      args.answer,
+      rows,
+      compactRows,
+      observation.url,
+      drive.facts,
+      drive.goal,
+      drive.facts.card_ref !== undefined,
+      drive.lastQuestion?.options,
+    );
     // Resume binds to the fresh snapshot: the pending operation (e.g. an
     // approval that completed on the phone) must pass the consume-once gate
     // on its first post-resume attempt instead of bouncing off a
