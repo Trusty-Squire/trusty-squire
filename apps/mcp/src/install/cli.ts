@@ -594,7 +594,6 @@ async function connect(args: Argv, argv: readonly string[] = []): Promise<void> 
           target,
           agent,
           canonicalProfileDir,
-          context.accountId,
           context.agentIdentity,
           wantInteractive,
           placed,
@@ -845,7 +844,6 @@ async function runConnectInstall(
   target: AgentTarget,
   agent: AgentDefinition,
   profileDir: string,
-  accountId: string | undefined,
   agentIdentity: string,
   wantInteractive: boolean,
   placed: BrowserPlacementSlot,
@@ -1017,29 +1015,11 @@ async function runConnectInstall(
     process.exit(1);
   }
   const session = claim.session;
-  if (
-    args.forceReloginProvider !== undefined &&
-    accountId !== undefined &&
-    session.account_id !== accountId
-  ) {
-    emitConnectStatus(args, {
-      outcome: { kind: "account_switch_refused" },
-      profileDir,
-      browser_location: claim.browser_location,
-      ownBrowserPid: placed.ownBrowserPid,
-    });
-    ui.fail(
-      `The scoped ${args.forceReloginProvider} refresh returned a different Trusty Squire account. ` +
-        `Refusing to replace ${agent.display_name}'s account binding; use bare --force-relogin ` +
-        `only when you intend to switch accounts.`,
-    );
-    process.exit(1);
-  }
 
-  // Only the completed claim identifies the account for an unscoped connect.
+  // Only the completed claim identifies the account for a connect.
   // On a busy broker, provider logout ran in its existing browser and the old
   // profile binding survived; replace that binding before new agent calls.
-  if (!args.skipBrowser && args.forceReloginProvider === undefined && session.account_id) {
+  if (!args.skipBrowser && session.account_id) {
     await rebindBrokerProfileAccount(profileDir, session.account_id);
   }
 

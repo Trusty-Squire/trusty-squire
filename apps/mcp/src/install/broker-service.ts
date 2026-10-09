@@ -32,7 +32,7 @@ import {
 import { readBrokerUnitMarkerSync, writeBrokerUnitMarker } from "../bot/broker/managed-marker.js";
 import { sharedMcpSocketPath } from "../bot/broker/mcp-socket-path.js";
 
-/** A completed unscoped connect makes its claimed account the profile owner.
+/** A completed in-profile connect makes its claimed account the profile owner.
  * Publish the marker first so old agent clients stop joining before the
  * runtime starts accepting calls for the new account. */
 export async function rebindBrokerProfileAccount(
