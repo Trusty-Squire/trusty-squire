@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { chromium, type Browser } from "playwright";
 import { BrowserController } from "../browser.js";
+import type { ApiClient } from "../../api-client.js";
 import { dispatchDriveAct } from "../act/act.js";
 import { runOperateDrive } from "../operate-drive.js";
 import {
@@ -13,6 +14,7 @@ import {
   startHarnessProvisionSession,
 } from "../provision-session.js";
 import { sessionForCall } from "../session/lifecycle.js";
+import { injectCardOnSession } from "../../tools/inject-card.js";
 
 const URL = "https://drive-handback.test/form";
 const HTML = `<!doctype html><meta charset="utf-8"><title>Handback</title>
@@ -182,6 +184,77 @@ describe("drive public action handback", () => {
       expect(refs.has(f.refs.pan!)).toBe(true);
       expect(refs.has(f.refs.cvv!)).toBe(true);
       expect(f.refs.pan).not.toBe(f.refs.cvv);
+    } finally {
+      await f.close();
+    }
+  }, 30_000);
+
+  it("keeps drive card refs live across an approval wait and reuses the explicit approval with refreshed refs", async () => {
+    const f = await cardFixture();
+    try {
+      const session = sessionForCall(f.started.session_id)!;
+      // The original observation's ordinary lease would have expired while
+      // the human was signing. The approval keeps the same physical binding.
+      session.compactV2Index!.expiresAt = Date.now() - 1;
+      const deadline = Date.now() + 10 * 60_000;
+      const create = vi.fn(async () => ({
+        id: "approval_long_wait",
+        nonce: "nonce",
+        agent: "agent",
+        account_binding: "account",
+        expires_at: new Date(deadline).toISOString(),
+      }));
+      const api = {
+        getPaymentConfig: async () => ({ vouchflow_audience: "customer_test" }),
+        createPaymentApproval: create,
+        getPaymentApproval: async (id: string) => ({
+          id,
+          status: "pending",
+          expires_at: new Date(deadline).toISOString(),
+          jws: null,
+          sealed_card: null,
+        }),
+      } as unknown as ApiClient;
+      const input = {
+        session_id: f.started.session_id,
+        merchant: "Synthetic Merchant",
+        amount_cents: 123,
+        currency: "JPY",
+        item: "Synthetic item",
+        reason: "Synthetic purchase",
+        card_ref: "card_synthetic",
+        fields: { pan: { ref: f.refs.pan! }, cvv: { ref: f.refs.cvv! } },
+      };
+      const first = await injectCardOnSession(session, input, api, { pollBudgetMs: 0 });
+      expect(first).toMatchObject({
+        status: "approval_pending",
+        approval_id: "approval_long_wait",
+      });
+      expect(session.compactV2Index!.expiresAt).toBeGreaterThan(deadline);
+      const observed = await observe(f.started.session_id, "compact");
+      const refs = new Set(
+        (observed.safe_table as unknown as Array<[string]>).map((row) => row[0]),
+      );
+      expect(refs.has(f.refs.pan!)).toBe(true);
+      expect(refs.has(f.refs.cvv!)).toBe(true);
+      expect(session.compactV2Index!.expiresAt).toBeGreaterThan(deadline);
+      const retry = await injectCardOnSession(
+        session,
+        {
+          ...input,
+          approval_id: "approval_long_wait",
+          fields: { pan: { ref: f.refs.pan! }, cvv: { ref: f.refs.cvv! } },
+        },
+        api,
+        { pollBudgetMs: 0 },
+      );
+      expect(retry).toMatchObject({
+        status: "approval_pending",
+        approval_id: "approval_long_wait",
+      });
+      expect(create).toHaveBeenCalledTimes(1);
+      const filled = await injectCardIntoSessionTargets(f.started.session_id, CARD, input.fields);
+      expect(filled).toEqual({ pan: { status: "filled" }, cvv: { status: "filled" } });
     } finally {
       await f.close();
     }

@@ -213,6 +213,7 @@ export async function injectCardOnSession(
     releaseBrowser,
     {
       ...(resumeFrom === undefined ? {} : { resumeFrom }),
+      ...(args.approval_id === undefined ? {} : { requiredApprovalId: args.approval_id }),
       ...(options.signal === undefined ? {} : { signal: options.signal }),
       pollBudgetMs: options.pollBudgetMs ?? APPROVAL_WAIT_MS,
       surfaceApprovalUrl: async (url) => {
@@ -222,6 +223,15 @@ export async function injectCardOnSession(
       },
       onApprovalPending: (state) => {
         session.activePayment = { status: "awaiting_approval", state };
+        // The approval can wait longer than the ordinary five-minute ref
+        // lease. Keep its observed card-field handles usable until this
+        // approval ends; each write still resolves the original live node.
+        if (session.compactV2Index !== null) {
+          session.compactV2Index.expiresAt = Math.max(
+            session.compactV2Index.expiresAt,
+            state.deadline + 10_000,
+          );
+        }
       },
       onApprovalTerminal: () => {
         session.activePayment = null;

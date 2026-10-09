@@ -1,0 +1,23 @@
+<!doctype html><meta charset="utf-8"><title>Checkout</title>
+<main>
+  <h1>Checkout</h1>
+  <form id="delivery">
+    <h2>Contact and delivery</h2>
+    <label>Email <input name="email" type="email" required></label>
+    <label>First name <input name="firstName" required></label>
+    <label>Last name <input name="lastName" required></label>
+    <label>Address <input name="address1" required></label>
+    <div id="suggestions" role="listbox" hidden><button type="button">350 5th Ave, Miami, FL</button></div>
+    <label>City <input name="city" required></label>
+    <label>State <select name="province" required><option value="FL">Florida</option><option value="NY">New York</option></select></label>
+    <label>ZIP code <input name="zip" required></label>
+    <button type="button" id="continue">Continue to payment</button>
+  </form>
+  <form id="discount"><label>Discount code <input name="discount"></label><button type="button">Apply</button></form>
+  <form id="wallet"><button type="button">Shop Pay</button></form>
+  <form id="payment"><label>Card number <input name="number"></label><label>Security code <input name="cvv"></label></form>
+</main>
+<footer style="position:absolute;top:4000px">
+  <form id="newsletter"><label>Email <input name="email" type="email"></label><button type="button">Subscribe</button></form>
+  <form id="phantom"><label>First name <input name="firstName"></label><label>Last name <input name="lastName"></label></form>
+</footer>
