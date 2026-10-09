@@ -61,7 +61,7 @@ const fs = require("node:fs");
 const net = require("node:net");
 const os = require("node:os");
 const path = require("node:path");
-const [marker, socketPath, lockPath, connectMode, openNeedsUser, profileDir] = process.argv.slice(2);
+const [marker, socketPath, lockPath, connectMode, openNeedsUser, profileDir, finishAfterObserves] = process.argv.slice(2);
 const CONFIRM_URL = ${JSON.stringify(CONFIRM_URL)};
 if (marker !== "broker") process.exit(78);
 // The ceremony's exposure helper discovers the shared display from the
@@ -81,6 +81,7 @@ const lockDb = new (require(process.env.TS_SQLITE))(lockPath, { timeout: 0 });
 lockDb.exec("BEGIN EXCLUSIVE");
 process.on("exit", () => lockDb.close());
 const seen = { openUrl: null, openCeremony: false, closedSession: null, commands: [] };
+let observeCalls = 0;
 const server = net.createServer((socket) => {
   let buffered = "";
   socket.on("data", (chunk) => {
@@ -148,6 +149,7 @@ const server = net.createServer((socket) => {
           name: request.params?.name ?? null,
           args,
         });
+        if (request.params?.name === "operate_observe") observeCalls += 1;
         // GitHub's logout page renders its confirm control; the observe-then-
         // click drive must find a Sign out row in the returned action map.
         // Rows travel the REAL wire shape — positional tuples [ref, role,
@@ -162,6 +164,10 @@ const server = net.createServer((socket) => {
             result:
               request.params?.name === "operate_observe"
                 ? {
+                    url:
+                      Number(finishAfterObserves) > 0 && observeCalls >= Number(finishAfterObserves)
+                        ? "https://trustysquire.ai/install/done"
+                        : CONFIRM_URL,
                     safe_table: [
                       [${JSON.stringify(SIGN_OUT_LABEL)}, "b", ${JSON.stringify(SIGN_OUT_LABEL)}],
                     ],
@@ -240,7 +246,8 @@ async function connectFixture(
      * on a credential this release no longer sends. */
     legacyConnect?: boolean;
     openNeedsUser?: boolean;
-    pollUntilDone?: () => Promise<boolean>;
+    finishAfterObserves?: number;
+    pollUntilDone?: (tabFinished: boolean) => Promise<boolean>;
   } = {},
 ): Promise<{
   result: unknown;
@@ -299,6 +306,7 @@ async function connectFixture(
       opts.legacyConnect === true ? "legacy" : "current",
       opts.openNeedsUser === true ? "needs-user" : "",
       targetProfile,
+      String(opts.finishAfterObserves ?? 0),
     ],
     {
       stdio: ["ignore", "ignore", "pipe"],
@@ -364,6 +372,16 @@ async function connectFixture(
 
 describe("connect attaches to the live broker for the profile it is connecting", () => {
   it(
+    "uses an arrived Finish callback without waiting for a broker tab observation",
+    { timeout: 30_000 },
+    async () => {
+      const outcome = await connectFixture({ pollUntilDone: async () => true });
+      expect(outcome.result).toEqual({ status: "satisfied", closeState: "closed" });
+      expect(outcome.commands.filter((command) => command.name === "operate_observe")).toEqual([]);
+    },
+  );
+
+  it(
     "opens the confirm tab through the broker that owns the TARGET profile, not the process default",
     { timeout: 30_000 },
     async () => {
@@ -417,9 +435,30 @@ describe("connect attaches to the live broker for the profile it is connecting",
           args: { ref: SIGN_OUT_LABEL, session_id: "tab-1" },
         },
         { name: "operate_navigate", args: { url: CONFIRM_URL, session_id: "tab-1" } },
-        // The Finish check reads the ceremony tab's URL while polling.
-        { name: "operate_observe", args: { session_id: "tab-1" } },
       ]);
+      expect(outcome.lockNeverReleased).toBe(true);
+    },
+  );
+
+  it(
+    "completes a delivered claim after Finish in a busy broker tab without a loopback callback",
+    { timeout: 30_000 },
+    async () => {
+      let claimDelivered = false;
+      const outcome = await connectFixture({
+        forceReloginProviders: ["google", "github"],
+        // First observe is GitHub's logout control; the first ceremony poll
+        // sees the wizard, then the human's Finish changes this owned tab to
+        // /install/done. No loopback callback is delivered in this fixture.
+        finishAfterObserves: 3,
+        pollUntilDone: async (tabFinished) => {
+          claimDelivered = true; // installPoll returned the delivered token
+          return claimDelivered && tabFinished;
+        },
+      });
+      expect(outcome.result).toEqual({ status: "satisfied", closeState: "closed" });
+      expect(outcome.commands.filter((command) => command.name === "operate_observe")).toHaveLength(3);
+      expect(outcome.closedSession).toBe("tab-1");
       expect(outcome.lockNeverReleased).toBe(true);
     },
   );

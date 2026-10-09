@@ -260,9 +260,10 @@ cookie snapshot can still be empty while the broker holds Chrome and must not
 turn that claim into a negative. No provider list is persisted in the account
 session file. A scoped GitHub refresh waits for its provider session during
 the ceremony and reports a missing requested session. The ceremony closes its
-tab and noVNC exposure after the claim completes; the browser's nonce-scoped
-Finish callback is a courtesy that closes the page early, never a completion
-gate. With `--skip-browser`, the claim happens in a different browser, so
+tab and noVNC exposure after the claim and the person's Finish action. Finish
+reaches the CLI through the nonce-scoped callback or the broker observing
+`/install/done`; the wizard navigates there even if callback delivery fails.
+With `--skip-browser`, the claim happens in a different browser, so
 `probeProviderSessionsAfterCeremony` still checks the bot profile afterward.
 It may poll committed-cookie snapshots for up to 45 seconds, awaiting Google
 and any explicitly requested provider. An unreadable snapshot is unknown,

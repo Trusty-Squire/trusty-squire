@@ -3,6 +3,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   clearInstallCompletionUrl,
+  finishInstallCeremony,
   installCompletionAcknowledgementUrl,
   installCompletionProviderUrl,
   normalizeInstallCompletionUrl,
@@ -31,6 +32,22 @@ describe("install completion callback validation", () => {
 
     expect(url.searchParams.getAll("provider")).toEqual(["google", "github"]);
     expect(url.pathname).toBe(new URL(callback).pathname);
+  });
+
+  it("lands on the done page even when the loopback Finish callback cannot be delivered", async () => {
+    const callback =
+      "http://127.0.0.1:49152/.well-known/trusty-squire/install-complete/" + "e".repeat(48);
+    const send = vi.fn().mockRejectedValue(new TypeError("Failed to fetch"));
+    const navigateDone = vi.fn();
+
+    finishInstallCeremony(callback, ["google", "github"], navigateDone, send);
+
+    expect(send).toHaveBeenCalledWith(
+      `${callback}?provider=google&provider=github`,
+      expect.objectContaining({ mode: "no-cors", keepalive: true }),
+    );
+    expect(navigateDone).toHaveBeenCalledOnce();
+    await Promise.resolve();
   });
 
   it.each([

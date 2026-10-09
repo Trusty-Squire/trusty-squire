@@ -11,8 +11,8 @@
 //
 // State is derived from /v1/auth/whoami + /v1/mcp/install/<token>/state,
 // polled every 3s after each redirect-return. The bot's Chrome stays
-// on this page until the user clicks Finish, which calls the per-run
-// loopback completion URL and then navigates to /install/done.
+// on this page until the user clicks Finish, which navigates to
+// /install/done and sends the per-run loopback callback in the background.
 
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
@@ -21,8 +21,8 @@ import { useQueryParam } from "../lib/use-query-param";
 import { Shield } from "../components/Shield";
 import {
   clearInstallCompletionUrl,
+  finishInstallCeremony,
   installCompletionAcknowledgementUrl,
-  installCompletionProviderUrl,
   readInstallCompletionProviders,
   readInstallCompletionUrl,
   recordInstallCompletionProvider,
@@ -298,17 +298,14 @@ export default function InstallPage() {
 
   const finish = useCallback(() => {
     const persistedProviders = token === null ? [] : readInstallCompletionProviders(token);
-    const callback =
-      completionUrl === null
-        ? null
-        : installCompletionProviderUrl(completionUrl, [
-            ...(googleSessionFresh || persistedProviders.includes("google")
-              ? (["google"] as const)
-              : []),
-            ...(githubSessionFresh || persistedProviders.includes("github")
-              ? (["github"] as const)
-              : []),
-          ]);
+    const completedProviders: Provider[] = [
+      ...(googleSessionFresh || persistedProviders.includes("google")
+        ? (["google"] as const)
+        : []),
+      ...(githubSessionFresh || persistedProviders.includes("github")
+        ? (["github"] as const)
+        : []),
+    ];
     if (token !== null) {
       try {
         window.localStorage.removeItem(`ts-install-prefs:${token}`);
@@ -317,11 +314,7 @@ export default function InstallPage() {
       }
       clearInstallCompletionUrl(token);
     }
-    if (callback !== null) {
-      window.location.assign(callback);
-      return;
-    }
-    router.push("/install/done");
+    finishInstallCeremony(completionUrl, completedProviders, () => router.push("/install/done"));
   }, [completionUrl, githubSessionFresh, googleSessionFresh, router, token]);
 
   // ---- Render branches -----------------------------------------------
