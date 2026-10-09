@@ -1064,6 +1064,34 @@ export async function observedOAuthChallenge(
   };
 }
 
+const confirmedPaymentAudits = new WeakMap<Session, Promise<void>>();
+
+/** One ledger event for this session's confirmed released payment, including
+ * orders submitted by operate_click. A failed audit may retry on the next observe. */
+async function auditConfirmedPayment(session: Session): Promise<void> {
+  const released = session.releasedPaymentCard;
+  if (released === null || session.api === undefined) return;
+  let audit = confirmedPaymentAudits.get(session);
+  if (audit === undefined) {
+    audit = session.api
+      .auditPayment({
+        merchant: released.checkout.merchant,
+        amount_cents: released.checkout.amount_cents,
+        currency: released.checkout.currency,
+        last4: released.last4,
+        status: "merchant_order_confirmed",
+        card_ref: released.cardRef,
+        approval_id: released.approvalId,
+      })
+      .then(() => undefined);
+    confirmedPaymentAudits.set(session, audit);
+    audit.catch(() => {
+      if (confirmedPaymentAudits.get(session) === audit) confirmedPaymentAudits.delete(session);
+    });
+  }
+  await audit;
+}
+
 export async function observedThreeDsChallenge(
   sessionId: string,
 ): Promise<Observation["three_ds"] | undefined> {
@@ -1072,12 +1100,14 @@ export async function observedThreeDsChallenge(
   const released = session.releasedPaymentCard;
   if (released === null) return undefined;
   const outcome = await session.browser.readThreeDsOutcome().catch(() => null);
-  if (outcome === "merchant_order_confirmed")
+  if (outcome === "merchant_order_confirmed") {
+    await auditConfirmedPayment(session).catch(() => undefined);
     return {
       state: outcome,
       evidence: { source: "page_text", observed_at: Date.now() },
       next_action: "operate_observe",
     };
+  }
   const challenge = await session.browser.detectThreeDsChallenge().catch(() => null);
   if (challenge?.phase === "loading")
     return { state: "challenge_loading", url: challenge.url, next_action: "operate_observe" };

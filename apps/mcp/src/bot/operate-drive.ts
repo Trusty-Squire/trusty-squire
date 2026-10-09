@@ -2054,10 +2054,13 @@ function rowValueMissing(row: WireRow): boolean {
   return match === null || match[1] === undefined || match[1].length === 0;
 }
 
-/** An empty or invalid field the submit is waiting on. Fill it; disable is not a gate. */
+/** An empty or invalid field the submit is waiting on. `missingOnly` is for
+ * submit dispatch: Shopify can retain aria-invalid on a populated cardholder
+ * field even while its Pay now button is enabled and the form is complete. */
 export function outstandingEmptyFill(
   rows: readonly WireRow[],
   filledRefs: readonly string[] = [],
+  missingOnly = false,
 ): WireRow | undefined {
   const filled = new Set(filledRefs);
   return rows.find((row) => {
@@ -2073,8 +2076,7 @@ export function outstandingEmptyFill(
     ) {
       return false;
     }
-    if (isInvalidRow(row)) return true;
-    if (isPasswordRow(row)) return true;
+    if (!missingOnly && (isInvalidRow(row) || isPasswordRow(row))) return true;
     return rowValueMissing(row);
   });
 }
@@ -3011,6 +3013,15 @@ export function typedValueEquals(
   if (rowField(row) === "phone" || /\b(?:phone|telephone|mobile|tel)\b/i.test(readableLabel(row))) {
     const digits = (value: string) => value.replace(/\D/g, "");
     return digits(actual).length > 0 && digits(actual) === digits(intended);
+  }
+  if (
+    isExpiryRow(row) ||
+    isPaymentRow(row) ||
+    /\bdate\b/i.test(readableLabel(row)) ||
+    /(?:^|\|)it=(?:date|month)(?:\||$)/.test(row[2] ?? "")
+  ) {
+    const compact = (value: string) => value.replace(/[\s/-]/g, "");
+    return compact(actual).length > 0 && compact(actual) === compact(intended);
   }
   if (/(?:^|\|)it=number(?:\||$)/.test(row[2] ?? "")) {
     return (
@@ -4635,8 +4646,11 @@ export async function driveApprovalPageTexts(
   >,
   observedDom: string,
 ): Promise<string[]> {
-  const read =
-    resumedApprovalId(session) === null ? await readPageCheckoutTexts(session.browser.page) : [];
+  const fresh = resumedApprovalId(session) === null;
+  if (fresh && session.browser.page !== null) {
+    await waitForPageReady(session.browser.page, { kind: "checkout-total" });
+  }
+  const read = fresh ? await readPageCheckoutTexts(session.browser.page) : [];
   return [...read, observedDom];
 }
 
@@ -4648,7 +4662,13 @@ export function paymentArgs(
   rows: readonly WireRow[],
   pageTexts: readonly string[] = [],
 ): Parameters<InjectCardFn>[1] | undefined {
-  const cardRef = facts.card_ref;
+  const pending =
+    session.activePayment?.status === "awaiting_approval" ? session.activePayment.state : null;
+  const cardRef =
+    pending?.cardRef ??
+    pending?.boundCardRef ??
+    session.releasedPaymentCard?.cardRef ??
+    facts.card_ref;
   if (cardRef === undefined) return undefined;
   const approvalId = resumedApprovalId(session);
   const fields = paymentFields(rows);
@@ -4659,13 +4679,20 @@ export function paymentArgs(
   } catch {
     hostname = "checkout";
   }
-  const amount = resolveDriveApprovalAmount(pageTexts, facts);
+  const amount =
+    pending?.checkout ??
+    session.releasedPaymentCard?.checkout ??
+    resolveDriveApprovalAmount(pageTexts, facts);
   return {
     session_id: session.id,
-    merchant: facts.merchant ?? hostname,
+    merchant:
+      pending?.checkout.merchant ??
+      session.releasedPaymentCard?.checkout.merchant ??
+      facts.merchant ??
+      hostname,
     amount_cents: amount.amount_cents,
     currency: amount.currency,
-    item: approvalItemWithNote(facts.item ?? goal, amount.note),
+    item: approvalItemWithNote(facts.item ?? goal, "note" in amount ? amount.note : null),
     reason: facts.reason ?? goal,
     card_ref: cardRef,
     ...(approvalId === null ? {} : { approval_id: approvalId }),
@@ -6264,6 +6291,7 @@ async function driveLoop(input: {
       outstandingEmptyFill(
         rows.filter((row) => rowFormId(row) === rowFormId(liveRow)),
         drive.filledRefs,
+        true,
       ) !== undefined
     ) {
       traceUndispatchedOauth("required_field_empty");

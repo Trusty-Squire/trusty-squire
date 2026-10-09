@@ -21,6 +21,8 @@ import {
   DRIVE_EMPTY_SNAPSHOT_WAITS,
   DRIVE_FIXED_NONE,
   applyReleasedCardFacts,
+  driveApprovalPageTexts,
+  paymentArgs,
   matchingFactKeys,
   emptyDriveState,
   runOperateDrive,
@@ -581,6 +583,34 @@ function refFor(started: { safe_table?: unknown }, label: string): string {
 }
 
 describe("operate_drive real-browser fixture", () => {
+  it("reads Shopify's total after its shipping rate finishes loading", async () => {
+    const html = `<!doctype html><meta charset="utf-8"><title>Checkout</title>
+      <main><h1>Checkout</h1><p>Subtotal $68.00</p>
+      <label>Shipping <input type="radio" name="shipping_rate" id="loading" disabled>Loading</label>
+      <p id="total">Total $68.00 USD</p></main>
+      <script>setTimeout(() => {
+        document.querySelector('#loading').disabled = false;
+        document.querySelector('#total').textContent = 'Total $76.00 USD';
+      }, 250);</script>`;
+    const { context, page, started } = await openFixture(html, "whitejade-shipping.test");
+    try {
+      const texts = await driveApprovalPageTexts(
+        { browser: { page }, activePayment: null, releasedPaymentCard: null },
+        "Subtotal $68.00\nTotal $68.00 USD",
+      );
+      expect(texts[0]).toContain("Total $76.00 USD");
+      const args = paymentArgs(
+        { id: started.session_id, activePayment: null, releasedPaymentCard: null },
+        { card_ref: "card-1" }, "buy serum", page.url(),
+        [["@e:pan", "t", "Card number|f=payment"], ["@e:cvv", "t", "Security code"]], texts,
+      );
+      expect(args?.amount_cents).toBe(7600);
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  });
+
   it("adds a product to cart before touching the footer newsletter field", async () => {
     const { context, page, started } = await openFixture(
       PRODUCT_WITH_NEWSLETTER_HTML,
