@@ -1,0 +1,23 @@
+<!doctype html>
+<html><body>
+  <main>
+    <h1>Checkout</h1>
+    <label>Email <input name="email" type="email"></label>
+    <label>First name <input name="firstName" required></label>
+    <button>Continue to shipping</button>
+  </main>
+  <div id="shop-modal" role="dialog" aria-label="Shop sign in" style="display:none;position:fixed;inset:0;background:white;z-index:10">
+    <h2>Confirm it's you</h2>
+    <p>Enter code sent to your email to securely use your saved information.</p>
+    <button id="close-shop" aria-label="Close">Close</button>
+    <iframe title="Shop confirmation" src="https://shop.app/confirm-it-s-you"></iframe>
+  </div>
+  <script>
+    document.querySelector('[name=email]').addEventListener('change', () => {
+      document.querySelector('#shop-modal').style.display = 'block';
+    });
+    document.querySelector('#close-shop').addEventListener('click', () => {
+      document.querySelector('#shop-modal').style.display = 'none';
+    });
+  </script>
+</body></html>

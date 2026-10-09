@@ -1086,6 +1086,41 @@ export async function captureFrameSnapshot(
   }
 }
 
+/** A child document can retain live controls after its containing dialog closes. */
+export async function isFrameRendered(frame: Frame): Promise<boolean> {
+  try {
+    for (
+      let current: Frame | null = frame;
+      current !== null && current.parentFrame() !== null;
+      current = current.parentFrame()
+    ) {
+      const owner = await current.frameElement();
+      const rendered = await owner.evaluate((element) => {
+        if (!(element instanceof Element)) return false;
+        for (
+          let ancestor: Element | null = element;
+          ancestor !== null;
+          ancestor = ancestor.parentElement
+        ) {
+          if (ancestor.matches('[aria-hidden="true"],[inert],dialog:not([open])')) return false;
+        }
+        const box = element.getBoundingClientRect();
+        return (
+          box.width > 0 &&
+          box.height > 0 &&
+          element.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })
+        );
+      });
+      if (!rendered) return false;
+    }
+    return true;
+  } catch {
+    // A failed cross-process owner probe does not prove the frame is hidden.
+    // Let captureFrameSnapshot attempt its ordinary read.
+    return true;
+  }
+}
+
 export function mergeSnapshots(parts: readonly DriveSnapshot[]): DriveSnapshot {
   if (parts.length === 0) {
     return {
