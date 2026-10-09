@@ -835,7 +835,7 @@ describe("decideAfterJev stop reasons", () => {
     });
   });
 
-  it("moves to a second fact-backed form after the first form is filled", () => {
+  it("leaves a second form to the model after the first form is filled", () => {
     const rows: WireRow[] = [
       ["@e:email", "t", "Email|f=email|fm=1|n=buyer@example.test"],
       ["@e:phone", "t", "Phone|f=phone|fm=2"],
@@ -845,7 +845,46 @@ describe("decideAfterJev stop reasons", () => {
         email: "buyer@example.test",
         phone: "2125551234",
       }),
-    ).toEqual({ target: "@e:phone", text: "2125551234" });
+    ).toBeUndefined();
+  });
+
+  it("does not spill into other checkout forms after delivery is filled", () => {
+    const checkout = "https://shop.example/checkouts/order";
+    const facts = { email: "buyer@example.test", first_name: "Ada", last_name: "Lovelace", state: "NY" };
+    const rows: WireRow[] = [
+      ["@e:email", "t", "Email|f=email|fm=delivery|n=buyer@example.test"],
+      ["@e:first", "t", "First name|f=first_name|fm=delivery|n=Ada"],
+      ["@e:last", "t", "Last name|f=last_name|fm=delivery|n=Lovelace"],
+      ["@e:state", "s", "State|f=state|fm=delivery|n=NY"],
+      ["@e:newsletter", "t", "Email|f=email|fm=newsletter"],
+      ["@e:other-state", "s", "State|f=state|fm=other"],
+    ];
+    expect(requiredFactTypeAction(rows, facts, [], checkout)).toBeUndefined();
+    expect(requiredFactSelectAction(rows, facts, [], checkout)).toBeUndefined();
+  });
+
+  it("does not treat a remaining checkout footer as the next form", () => {
+    const rows: WireRow[] = [
+      ["@e:newsletter", "t", "Email|f=email|fm=newsletter|v=offscreen"],
+      ["@e:subscribe", "b", "Subscribe|fm=newsletter"],
+      ["@e:discount", "t", "Discount code|f=discount_code|fm=discount"],
+      ["@e:apply", "b", "Apply|fm=discount"],
+    ];
+    const facts = { email: "buyer@example.test", discount_code: "WELCOME" };
+    expect(requiredFactTypeAction(rows, facts, [], "https://shop.example/checkout")).toBeUndefined();
+  });
+
+  it("waits for the product action before filling a lone newsletter form", () => {
+    const rows: WireRow[] = [
+      ["@e:add", "b", "Add to cart"],
+      ["@e:newsletter", "t", "Email|f=email|fm=newsletter"],
+    ];
+    expect(requiredFactTypeAction(
+      rows,
+      { email: "buyer@example.test" },
+      [],
+      "https://shop.example/products/serum",
+    )).toBeUndefined();
   });
 
   it("holds the card for an optional offscreen phone until the fact is typed", () => {
