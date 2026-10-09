@@ -6,8 +6,8 @@
 //
 // Connect ceremony custody, display exposure, and provider-probe contracts are
 // owned by docs/browser-broker.md. The CLI polls the install claim out of
-// band; the nonce-scoped Finish callback says when the user is done with the
-// visible browser window.
+// band; Finish is reported through a nonce-scoped callback or the ceremony
+// tab reaching /install/done.
 
 import { createRequire } from "node:module";
 import { readFileSync, readdirSync } from "node:fs";
@@ -563,8 +563,8 @@ export type CeremonyBrowserPlacement =
 // and hands tabs out from it, so the ceremony and every operator session share
 // the same Chrome, the same profile, and the same cookies. Nothing in this
 // product launches a browser of its own. Nothing drives the user's sign-in:
-// completion is the account claim `connect` polls out of band; the
-// nonce-scoped Finish callback only lets the page close itself early.
+// completion requires the account claim `connect` polls out of band and the
+// person's Finish action, observed through the callback or /install/done.
 export interface RunInBotChromeOpts {
   profileDir: string;
   url: string;
@@ -1076,16 +1076,19 @@ export async function runCeremonyInSharedBroker(opts: RunInBotChromeOpts): Promi
       if (warning !== null) console.error(`${warning}\n`);
     }
     stopExposure = exposure.kind === "exposed" ? exposure.stop : null;
-    // Finish reaches connect through its loopback callback when the page still
-    // holds it; either way the wizard ends on /install/done, so the tab's own
-    // URL is the reliable Finish signal.
+    // Check the polled claim and loopback Finish callback before asking the
+    // broker for a DOM observation. A slow or unavailable observation must not
+    // hold up a Finish callback already received by this process. If the
+    // callback is absent, the tab reaching /install/done remains the fallback.
     let tabFinished = false;
     const ok = await pollUntil(
       opts.deadline,
       async () => {
-        if (!tabFinished && sessionId !== undefined)
+        if (await opts.pollUntilDone(tabFinished)) return true;
+        if (!tabFinished && sessionId !== undefined) {
           tabFinished = await ceremonyTabFinished(client, sessionId);
-        return opts.pollUntilDone(tabFinished);
+        }
+        return tabFinished && (await opts.pollUntilDone(true));
       },
       opts.heartbeatMessage,
       () => {
@@ -1221,9 +1224,8 @@ export function checkLoginStatusWithin(
 export async function openInstallConfirmInBotChrome(
   opts: {
     confirmUrl: string;
-    // `wizardCompleted` carries the browser's Finish callback, a courtesy that
-    // closes the page early. The caller's completion gate is the polled install
-    // claim, not this signal, so it still completes when Finish never arrives.
+    // `wizardCompleted` carries the browser's Finish callback or the ceremony
+    // tab reaching /install/done. The caller requires it alongside the claim.
     pollUntilClaimed: (wizardCompleted: boolean) => Promise<InstallClaimPollResult>;
     profileDir?: string;
     // Absolute local deadline (ms). The caller owns it because only the

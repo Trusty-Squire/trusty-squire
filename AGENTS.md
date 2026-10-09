@@ -758,18 +758,17 @@ The agent chooses the relevant message. `into_slot` requires its `pick` index;
 The session consent and live Google identity gates still apply. A worktree
 change is invisible to a running broker until that broker is rebuilt.
 
-### 23. A claimed enrollment completes on the claim alone, and the shared-display warning prints only where it is true
+### 23. A claimed enrollment waits for Finish, and the shared-display warning prints only where it is true
 
-`connect` completes on the **account claim alone**. The claim is the
-authoritative fact — the CLI polls the same `/state` the wizard posts — and the
-wizard's Finish button is a courtesy that closes the page early, never a
-second completion gate. On a headless machine the wizard page exists only
-behind the single-use pairing link, so gating completion on a control inside
-it can strand an enrollment the server already established (a completed Google
-sign-in whose `session.json` held only the API base and a machine token).
-`shouldCompleteInstallClaim` in `apps/mcp/src/install/cli.ts` is the gate; do
-not re-add a second signal, and do not "fix" an expiry by extending the
-deadline — a longer window is still a window.
+`connect` requires both the account claim and the person's Finish action, so
+the browser stays open for optional GitHub sign-in. `shouldCompleteInstallClaim`
+in `apps/mcp/src/install/cli.ts` owns that gate. Finish has two independent
+signals: the CLI's nonce-scoped loopback callback and the broker's observation
+of the ceremony tab at `/install/done`. The wizard must navigate to that page
+even if callback delivery fails; navigating to an unreachable callback URL
+first can strand a delivered claim. The CLI checks an arrived callback before
+asking the broker for another observation. Do not "fix" a missed Finish by
+extending the pairing deadline — a longer window is still a window.
 
 The shared-browser disclosure prints only where it is a real disclosure: a
 real human-facing display, with the login tab in the browser the person is

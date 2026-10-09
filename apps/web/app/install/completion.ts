@@ -134,3 +134,25 @@ export function installCompletionProviderUrl(
   for (const provider of providers) callback.searchParams.append("provider", provider);
   return callback.toString();
 }
+
+// Finish is visible to the broker as /install/done even if its loopback
+// callback is unreachable. A callback failure must not strand the wizard on
+// a browser error page before the CLI can observe the person's Finish click.
+export function finishInstallCeremony(
+  callbackUrl: string | null,
+  providers: readonly InstallCompletionProvider[],
+  navigateDone: () => void,
+  send: typeof fetch = fetch,
+): void {
+  const callback =
+    callbackUrl === null ? null : installCompletionProviderUrl(callbackUrl, providers);
+  try {
+    if (callback !== null) {
+      void send(callback, { mode: "no-cors", keepalive: true }).catch(() => undefined);
+    }
+  } catch {
+    // Navigation remains the independent Finish signal.
+  } finally {
+    navigateDone();
+  }
+}

@@ -1141,8 +1141,8 @@ function printProviderState(providers: OAuthProviderId[] | null, githubChecked =
 // URL in the bot's OWN persistent Chrome profile. The user signs in
 // once — that single sign-in claims the install and establishes the bot's
 // profile with a provider session for future OAuth signups. The
-// pollUntilClaimed callback closes the Chrome window as soon as the
-// API flips the install to claimed.
+// pollUntilClaimed closes the ceremony tab after the API claims the install
+// and the person presses Finish.
 //
 // Fallback (`skipBrowser=true`): prints the URL, attempts a best-
 // effort `open()` to the user's default browser, polls the API for
@@ -1390,8 +1390,7 @@ export function shouldCompleteInstallClaim(
   );
 }
 
-// Once the required session is observed the ceremony returns; Finish remains
-// a courtesy rather than a requirement.
+// The ceremony reports progress until both the claim and Finish arrive.
 export function claimHeartbeatMessage(claimed: boolean, waitingForGithub = false): string {
   return claimed
     ? waitingForGithub
@@ -1478,11 +1477,9 @@ async function runInstallClaim(
   // check at the call site — bare closure-captured `let` doesn't.
   const state: { value: ClaimResult | null } = { value: null };
   let requestedProviderObserved = false;
-  // The wizard's Finish button invokes the nonce-scoped loopback callback,
-  // which closes the page early. It is a courtesy, not the completion gate:
-  // the claim polled from the API is authoritative, so an install completes as
-  // soon as the server claims it (and any requested provider session is
-  // observed) even when that callback never arrives.
+  // Finish arrives through the nonce-scoped loopback callback or by observing
+  // the ceremony tab at /install/done. The account claim and Finish are both
+  // required; only an explicit GitHub refresh adds a provider-session wait.
   const pollOnce = async (wizardCompleted: boolean): Promise<InstallClaimPollResult> => {
     let claimedThisPoll = false;
     // Keep state.value warm — the install moves to "claimed" the instant the
