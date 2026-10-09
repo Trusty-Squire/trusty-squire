@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { VAULT_AUDIT_TYPES, type VaultAuditStore } from "@trusty-squire/vault";
 
 /** Idempotent across status reads and the retention sweep. */
@@ -12,7 +13,10 @@ export async function recordPaymentApprovalExpiry(
   },
 ): Promise<void> {
   await audit.record({
-    idempotency_key: `payment_approval_expired:${approval.id}`,
+    idempotency_key: createHash("sha256")
+      .update(`payment_approval_expired:${approval.id}`)
+      .digest("base64url")
+      .slice(0, 26),
     account_id: approval.accountId,
     type: VAULT_AUDIT_TYPES.paymentApprovalExpired,
     payload: {

@@ -260,13 +260,20 @@ export class RetentionCron {
         for (const row of lapsed) {
           if (row.status === "pending") {
             if (this.deps.vaultAuditStore === undefined) continue;
-            await recordPaymentApprovalExpiry(this.deps.vaultAuditStore, {
-              id: row.id,
-              accountId: row.account_id,
-              merchant: row.merchant,
-              amountCents: row.amount_cents,
-              currency: row.currency,
-            });
+            try {
+              await recordPaymentApprovalExpiry(this.deps.vaultAuditStore, {
+                id: row.id,
+                accountId: row.account_id,
+                merchant: row.merchant,
+                amountCents: row.amount_cents,
+                currency: row.currency,
+              });
+            } catch (err) {
+              stats.errors.push(
+                `payment approval ${row.id} audit: ${err instanceof Error ? err.message : String(err)}`,
+              );
+              continue;
+            }
           }
           deletable.push(row.id);
         }
