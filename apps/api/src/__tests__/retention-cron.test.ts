@@ -5,6 +5,7 @@
 
 import { describe, expect, it } from "vitest";
 import { InMemoryVaultAuditStore } from "@trusty-squire/vault";
+import { recordPaymentApprovalExpiry } from "../services/payment-approval-expiry-audit.js";
 import { RetentionCron } from "../services/retention-cron.js";
 
 interface RecordedCall {
@@ -178,6 +179,34 @@ function makeFakes(
 }
 
 describe("RetentionCron", () => {
+  it("uses a stable expiry audit key that fits the database id column", async () => {
+    const keys: string[] = [];
+    class WidthCheckedAuditStore extends InMemoryVaultAuditStore {
+      override async record(event: Parameters<InMemoryVaultAuditStore["record"]>[0]): Promise<void> {
+        const key = event.idempotency_key;
+        if (key === undefined || key.length > 26) throw new Error("audit id exceeds VarChar(26)");
+        keys.push(key);
+        await super.record(event);
+      }
+    }
+    const auditStore = new WidthCheckedAuditStore();
+    const approval = {
+      id: "01K73YJ0SWRYJXGFYX82PXBE97",
+      accountId: "acct_owner",
+      merchant: "Whitejade",
+      amountCents: 7600,
+      currency: "USD",
+    };
+
+    await recordPaymentApprovalExpiry(auditStore, approval);
+    await recordPaymentApprovalExpiry(auditStore, approval);
+
+    expect(keys).toHaveLength(2);
+    expect(keys[0]).toHaveLength(26);
+    expect(keys[1]).toBe(keys[0]);
+    expect(auditStore.events).toHaveLength(1);
+  });
+
   it("records one expiry for an unread payment approval before deleting it", async () => {
     const now = new Date("2026-01-15T12:00:00Z");
     const auditStore = new InMemoryVaultAuditStore(() => now);
@@ -218,7 +247,7 @@ describe("RetentionCron", () => {
     });
   });
 
-  it("retains an expired payment approval until its audit write succeeds", async () => {
+  it("continues past a failed payment audit and retries that row next sweep", async () => {
     const now = new Date("2026-01-15T12:00:00Z");
     const auditStore = new FlakyAuditStore(1, () => now);
     const payments = [
@@ -231,16 +260,28 @@ describe("RetentionCron", () => {
         status: "pending",
         expires_at: new Date("2026-01-15T11:10:00Z"),
       },
+      {
+        id: "payment_later",
+        account_id: "acct_owner",
+        merchant: "Whitejade",
+        amount_cents: 7600,
+        currency: "USD",
+        status: "pending",
+        expires_at: new Date("2026-01-15T11:10:00Z"),
+      },
     ];
     const { authPrisma } = makeFakes([], undefined, payments);
     const cron = new RetentionCron({ authPrisma, vaultAuditStore: auditStore, now: () => now });
 
     const failed = await cron.runOnce();
-    expect(failed.payment_approvals_deleted).toBe(0);
+    expect(failed.payment_approvals_deleted).toBe(1);
     expect(failed.errors).toEqual([expect.stringContaining("payment approval")]);
     expect(payments).toHaveLength(1);
-    expect((await cron.runOnce()).payment_approvals_deleted).toBe(1);
+    expect(payments[0]?.["id"]).toBe("payment_pending");
     expect(auditStore.events).toHaveLength(1);
+    expect(auditStore.events[0]?.payload.approval_id).toBe("payment_later");
+    expect((await cron.runOnce()).payment_approvals_deleted).toBe(1);
+    expect(auditStore.events).toHaveLength(2);
   });
 
   it("computes correct cutoffs for each retention window", async () => {
