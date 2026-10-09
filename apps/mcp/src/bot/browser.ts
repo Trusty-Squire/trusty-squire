@@ -1,7 +1,11 @@
 import type { CheckoutCard } from "./checkout.js";
 import type { DriveRefAnchor } from "./drive-ref-bridge.js";
 import { captchaWidgetKindForFrameUrl, isCaptchaFrameUrl } from "./captcha.js";
-import { captureBoundScreenshot, type ScreenshotBinding } from "./screenshot-click.js";
+import {
+  captureBoundScreenshot,
+  clearScreenshotBinding,
+  type ScreenshotBinding,
+} from "./screenshot-click.js";
 import {
   captureBrowserUseDOM,
   frameOriginOf,
@@ -4037,6 +4041,7 @@ export class BrowserController implements BrowserDriver {
       fullPage?: boolean;
     } = {},
     page: Page | null = this.page,
+    timeoutMs = 25_000,
   ): Promise<{
     base64: string;
     mimeType: "image/jpeg" | "image/png";
@@ -4044,7 +4049,20 @@ export class BrowserController implements BrowserDriver {
     frameCount: number;
     clickBinding?: ScreenshotBinding;
   }> {
-    return await this.screenshotForOperator(opts, page);
+    const abort = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        abort.abort();
+        if (page !== null) clearScreenshotBinding(page);
+        reject(new Error("screenshot_capture_timeout"));
+      }, timeoutMs);
+    });
+    try {
+      return await Promise.race([this.screenshotForOperator(opts, page, abort.signal), deadline]);
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   async screenshotForOperator(
@@ -4054,6 +4072,7 @@ export class BrowserController implements BrowserDriver {
       fullPage?: boolean;
     } = {},
     page: Page | null = this.page,
+    signal?: AbortSignal,
   ): Promise<{
     base64: string;
     mimeType: "image/jpeg" | "image/png";
@@ -4069,7 +4088,7 @@ export class BrowserController implements BrowserDriver {
       // caret:"initial" is not needed here — the CDP capture never runs
       // Playwright's caret-hiding pass, so element styles stay untouched.
       const frameOrigin = (frame: Frame) => this.frameOrigin(frame);
-      const captured = await captureBoundScreenshot(page, frameOrigin, async () => {
+      const capturePixels = async () => {
         let base64: string;
         const metrics = await cdp.send("Page.getLayoutMetrics");
         const viewport = metrics.cssVisualViewport;
@@ -4131,7 +4150,8 @@ export class BrowserController implements BrowserDriver {
           base64 = result.data;
         }
         return { base64, rect };
-      });
+      };
+      const captured = await captureBoundScreenshot(page, frameOrigin, capturePixels, signal);
       const maskRectsAfter = await this.cardMaskPixelRects(page);
       let output = captured.base64;
       if (this.cardValueOutputMask.active) {
@@ -4165,6 +4185,7 @@ export class BrowserController implements BrowserDriver {
         }));
         output = await compositePngCardMasks(output, translated);
       }
+      signal?.throwIfAborted();
       this.operatorEvidence.recordScreenshot({
         url: page.url(),
         frame_url: targetFrame?.url() ?? null,
