@@ -1290,8 +1290,8 @@ export const operateDriveTool: Tool<z.infer<typeof driveSchema>> = {
     "max_steps (default 60) and max_seconds (default 45) bound a call. Resume a budget or other partial handoff on the " +
     "same session with added facts and/or answer from its options. The handoff includes status, current compact observation, " +
     "trajectory, done/remaining, and counters. complete means done; needs_value names a missing field; stuck and low_confidence " +
-    "need a decision. invalid_answer, no_progress, budget, evaluate_timeout, pending_approval, and " +
-    "card_incomplete are resumable. After a card_incomplete handoff, retry against the same approval_id. " +
+    "need a decision. invalid_answer, no_progress, budget, evaluate_timeout, pending_approval, approval_expired, and " +
+    "card_incomplete are resumable. After approval_expired, resume to request a fresh approval link. After card_incomplete, retry against the same approval_id. " +
     "Always operate_finish when done.",
   inputSchema: driveSchema,
   async handler(args, api, context) {

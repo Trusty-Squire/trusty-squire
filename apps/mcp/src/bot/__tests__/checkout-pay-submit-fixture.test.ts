@@ -89,9 +89,11 @@ function jevPreferring(prefer: string, seen: unknown[], whenMissing: "DONE" | "W
           ? wanted === undefined
             ? whenMissing
             : "CLICK"
-          : name === "CLICK_target" && wanted !== undefined
-            ? wanted
-            : (keys[0] ?? "none");
+          : name === "email_code_field" && keys.includes("none")
+            ? "none"
+            : name === "CLICK_target" && wanted !== undefined
+              ? wanted
+              : (keys[0] ?? "none");
       answers[name] = { choice, confidence: 0.95, probabilities: peaked(keys, choice) };
     }
     return { attempts: 1, elapsedMs: 5, result: { answers } };
@@ -166,6 +168,75 @@ async function openCheckout(html: string, path: string) {
 }
 
 describe("checkout pay-submit reachability (real browser)", () => {
+  it("returns approval_expired when card approval times out", async () => {
+    const { context, started } = await openCheckout(
+      checkoutHtml(`<p>Total $68.00 USD</p>
+        <label>Card number <input name="card_number" autocomplete="cc-number"></label>
+        ${payButton("Pay now")}`),
+      CHECKOUT_PATH,
+    );
+    try {
+      const session = sessionForCall(started.session_id)!;
+      session.releasedPaymentCard = null;
+      const injectCard = vi.fn(async () => ({
+        status: "payment_approval_timeout",
+        approval_url: "https://approval.test/expired",
+      }));
+      const result = await runOperateDrive(
+        {
+          session_id: started.session_id,
+          goal: "pay for the order with the saved card",
+          facts: { card_ref: "card-1", merchant: "whitejade.xyz" },
+          max_steps: 3,
+        },
+        api(),
+        undefined,
+        { ...deps(jevPreferring("Card number", [])), injectCard },
+      );
+      expect(injectCard, JSON.stringify(result)).toHaveBeenCalledOnce();
+      expect(result).toMatchObject({
+        status: "approval_expired",
+        reason: expect.stringContaining("fresh approval link"),
+        payment: { status: "payment_approval_timeout" },
+      });
+      expect(result.approval_url).toBeUndefined();
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 60_000);
+
+  it("clicks Pay now with empty optional phone and apartment fields", async () => {
+    const { context, page, started } = await openCheckout(
+      checkoutHtml(`<form id="checkout">
+        <label>Phone (optional) <input name="phone" type="tel"></label>
+        <label>Apartment, suite, etc. (optional) <input name="apartment"></label>
+        ${payButton("Pay now")}
+      </form>`),
+      CHECKOUT_PATH,
+    );
+    try {
+      const asked: unknown[] = [];
+      const result = await runOperateDrive(
+        {
+          session_id: started.session_id,
+          goal: "pay for the order with the saved card",
+          facts: { card_ref: "card-1", merchant: "whitejade.xyz" },
+          max_steps: 6,
+        },
+        api(),
+        undefined,
+        deps(jevPreferring("Pay now", asked)),
+      );
+      expect(JSON.stringify(asked), JSON.stringify(result)).toContain("Pay now");
+      expect(page.url(), JSON.stringify(result)).toContain(PROCESSING_PATH);
+      expect(result.status).not.toBe("stuck");
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 60_000);
+
   it("offers and clicks an offscreen Pay now on a checkout", async () => {
     const { context, page, started } = await openCheckout(
       checkoutHtml(payButton("Pay now")),

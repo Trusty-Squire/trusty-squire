@@ -266,6 +266,7 @@ export const VAULT_AUDIT_TYPES = {
   paymentExecuted: "vault.payment_executed",
   // An approval request was persisted; no card release or charge has occurred.
   paymentApprovalCreated: "vault.payment_approval_created",
+  paymentApprovalExpired: "vault.payment_approval_expired",
   paymentApprovalDeliveryFailed: "vault.payment_approval_delivery_failed",
   // Egress-grant lifecycle — a standing token that lets a deployed app
   // spend the referenced credential through the injecting proxy.
