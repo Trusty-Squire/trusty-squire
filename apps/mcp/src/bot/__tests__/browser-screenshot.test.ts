@@ -6,7 +6,7 @@
 // something a mocked page can meaningfully stand in for.
 import { existsSync } from "node:fs";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { BrowserController, type CheckoutCard } from "../browser.js";
 
 // Contract C click/type verbs take a DriverTarget now.
@@ -136,6 +136,56 @@ async function centerOf(page: Page, selector: string): Promise<readonly [number,
 }
 
 describe("operate_screenshot before card release (real browser)", () => {
+  it.skipIf(!chromiumAvailable)("bounds a stalled CDP capture on a rendered page", async () => {
+    const browser = await launchIsolatedTestBrowser();
+    try {
+      const page = await browser.newPage();
+      await page.setContent('<main style="height:3000px">capture fixture</main>');
+      const context = page.context();
+      const newCDPSession = context.newCDPSession.bind(context);
+      let releaseCapture!: () => void;
+      const stalledCapture = new Promise<void>((resolve) => {
+        releaseCapture = resolve;
+      });
+      let captureStarted!: () => void;
+      const started = new Promise<void>((resolve) => {
+        captureStarted = resolve;
+      });
+      const sessionSpy = vi.spyOn(context, "newCDPSession").mockImplementation(async (target) => {
+        const session = await newCDPSession(target);
+        const send = session.send.bind(session);
+        vi.spyOn(session, "send").mockImplementation(async (method, params) => {
+          if (method === "Page.captureScreenshot") {
+            captureStarted();
+            await stalledCapture;
+          }
+          return await send(method, params);
+        });
+        return session;
+      });
+      const controller = BrowserController.fromHarnessPage(page);
+      const capture = controller.captureOperatorScreenshot({ fullPage: true }, page, 750);
+      try {
+        await started;
+        const outcome = await Promise.race([
+          capture.then(
+            () => "captured",
+            (error: unknown) => (error as Error).message,
+          ),
+          new Promise<string>((resolve) => setTimeout(() => resolve("still waiting"), 2_000)),
+        ]);
+        expect(outcome).toBe("screenshot_capture_timeout");
+      } finally {
+        releaseCapture();
+        sessionSpy.mockRestore();
+        await capture.catch(() => undefined);
+      }
+      expect(isValidJpegBase64((await controller.captureOperatorScreenshot()).base64)).toBe(true);
+    } finally {
+      await browser.close();
+    }
+  });
+
   it.skipIf(!chromiumAvailable)(
     "captures a filled card PAN/expiry/CVV/name without masking, and without mutating the DOM",
     async () => {
@@ -342,11 +392,15 @@ describe("operate_screenshot card-value output mask (real browser)", () => {
       const browser = await launchIsolatedTestBrowser();
       try {
         const page = await browser.newPage();
-        await page.setContent(`<iframe style="display:none" srcdoc='<input data-ts-card-mask="pan" value="${SYNTHETIC_CARD.pan}">'></iframe><main>Thank you</main>`);
+        await page.setContent(
+          `<iframe style="display:none" srcdoc='<input data-ts-card-mask="pan" value="${SYNTHETIC_CARD.pan}">'></iframe><main>Thank you</main>`,
+        );
         const controller = BrowserController.fromHarnessPage(page);
         controller.registerCardValueOutputMask(SYNTHETIC_CARD);
         expect(isValidPngBase64((await controller.screenshotForOperator()).base64)).toBe(true);
-        expect(isValidPngBase64((await controller.screenshotForOperator({ fullPage: true })).base64)).toBe(true);
+        expect(
+          isValidPngBase64((await controller.screenshotForOperator({ fullPage: true })).base64),
+        ).toBe(true);
         await page.setContent("<main>Order complete</main>");
         expect(isValidPngBase64((await controller.screenshotForOperator()).base64)).toBe(true);
       } finally {
@@ -449,9 +503,7 @@ describe("operate_screenshot card-value output mask (real browser)", () => {
         const result = await controller.screenshotForOperator();
 
         const points = await Promise.all(
-          ["#agent-typed", "#total"].map(
-            async (selector) => await centerOf(page, selector),
-          ),
+          ["#agent-typed", "#total"].map(async (selector) => await centerOf(page, selector)),
         );
         const [agentTyped, total] = await samplePixels(page, result.base64, points);
         expect(isCompositeGray(agentTyped ?? [])).toBe(true);

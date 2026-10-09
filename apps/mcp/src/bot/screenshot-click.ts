@@ -62,6 +62,10 @@ type Binding = {
 };
 const bindings = new WeakMap<Page, Binding>();
 
+export function clearScreenshotBinding(page: Page): void {
+  bindings.delete(page);
+}
+
 export class ScreenshotClickError extends Error {
   constructor(
     readonly code: "stale_screenshot" | "invalid_screenshot_point" | "screenshot_click_uncertain",
@@ -228,6 +232,7 @@ export async function captureBoundScreenshot(
   page: Page,
   frameOrigin: FrameOrigin,
   capture: () => Promise<{ base64: string; rect: Rect }>,
+  signal?: AbortSignal,
 ): Promise<{ base64: string; clickBinding?: ScreenshotBinding }> {
   bindings.delete(page);
   const cdp = await page.context().newCDPSession(page);
@@ -235,7 +240,7 @@ export async function captureBoundScreenshot(
     const before = await geometry(page, cdp).catch(() => null);
     const result = await capture();
     const after = await geometry(page, cdp).catch(() => null);
-    if (before === null || after === null || before.state !== after.state)
+    if (signal?.aborted || before === null || after === null || before.state !== after.state)
       return { base64: result.base64 };
     const publicBinding: ScreenshotBinding = {
       screenshot_id: randomUUID(),
