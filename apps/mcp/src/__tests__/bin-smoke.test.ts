@@ -344,12 +344,11 @@ describe("launched through a bin symlink", () => {
 
   it("`mcp connect` reaches the setup flow", async () => {
     const link = await linkTo("mcp-connect-link.js");
-    // Bogus api-base + sandbox HOME: it fails at the API call, but only
+    // Bogus API base + sandbox HOME: it fails at the API call, but only
     // after the entrypoint fired and dispatched into connect.
     const out = runSubcommand(link, [
       "connect",
       "--target=claude-code",
-      "--api-base=http://127.0.0.1:1",
     ]);
     // rc.6 voice pass — heading is "Trusty Squire" with a separate
     // dim subline "Setting up this machine."
@@ -361,7 +360,6 @@ describe("launched through a bin symlink", () => {
     const out = runSubcommand(link, [
       "install",
       "--target=claude-code",
-      "--api-base=http://127.0.0.1:1",
     ]);
     expect(out).toMatch(/`install` has been removed/);
   }, 30_000);
@@ -625,7 +623,7 @@ function mcpHandshake(scriptPath: string): Promise<{ response: InitResponse; std
 
 function runSubcommand(scriptPath: string, args: string[]): string {
   const r = spawnSync(process.execPath, [scriptPath, ...args], {
-    env: { ...process.env, HOME: tmpDir },
+    env: { ...process.env, HOME: tmpDir, TRUSTY_SQUIRE_API_BASE: "http://127.0.0.1:1" },
     encoding: "utf8",
     timeout: 25_000,
   });

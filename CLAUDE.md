@@ -531,8 +531,8 @@ package would defeat the whole 0.7.0 thesis).
 
 - `TRUSTY_SQUIRE_REGISTRY_URL` — base URL. **Auto-wired by `connect`
   as of rc.10**; defaults to `https://registry.trustysquire.ai`.
-  The URL is not user-configurable; disable registry participation with
-  `connect --no-registry`.
+  The URL is not user-configurable; disable registry participation in
+  interactive `settings`.
 - `SKILL_SIGNING_PRIVATE_KEY` — required for `mcp skill promote`
   (operator-explicit signing). Auto-promote (rc.13+) falls back to
   an ephemeral Ed25519 keypair when this is unset, so the closed

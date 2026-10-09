@@ -44,13 +44,10 @@ Works with Claude Code, Codex, Cursor, OpenCode, Goose, Cline, Continue, and Her
 | `settings` | Edit registry and email verification choices. |
 | `logout [--account=<id>]` | Clear one local account session. |
 | `help`, `--help`, `-h` | Show CLI help. |
-| `--target=<agent>` | Choose a coding agent instead of detecting one. |
-| `--api-base=<url>` | Use a different Trusty Squire API. |
-| `--account=<id>` | Select the local account session to clear with `logout`. |
+| `--target <agent>` | Choose a coding agent for `connect` or `settings` instead of detecting one. |
+| `--account <id>` | Select the local account session to clear with `logout`. |
 | `--force-relogin[=google\|github]` | Reopen sign-in for the account or one provider. |
 | `--skip-browser` | Hand off the sign-in URL to a separate browser for scripted setup. |
-| `--no-registry` | Disable managed skill registry participation. |
-| `--no-interactive` | Skip terminal setup prompts. |
-| `--json` | Stream machine-readable connect reports; implies `--no-interactive`. |
+| `--json` | Stream machine-readable connect reports and skip setup prompts. |
 
-Run `npx -y @trusty-squire/mcp@latest --help` for the full command reference. The interactive setup also offers an optional 2Captcha key, stored in your vault.
+Value options accept both `--flag value` and `--flag=value`. Unknown options, missing values, and invalid values exit with a usage error. Set `TRUSTY_SQUIRE_API_BASE` to use a development API; use `settings` to change managed registry participation. Run `npx -y @trusty-squire/mcp@latest --help` for the full command reference. The interactive setup also offers an optional 2Captcha key, stored in your vault.

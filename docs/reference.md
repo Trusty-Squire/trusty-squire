@@ -104,7 +104,15 @@ To choose a target explicitly:
 npx @trusty-squire/mcp connect --target=codex
 ```
 
-Callers that must not parse English can pass `--json`. Connect then writes **newline-delimited JSON** to stdout: one complete, self-sufficient report per line, written whenever the run's answer changes, and the last line carries `"terminal": true`. Read lines, not prose — connect blocks for minutes waiting on a human, and the line that names the live sign-in URL goes out *before* that wait begins rather than after it. Human output stays on stderr, and `--json` implies `--no-interactive` so the picker never draws on the machine channel. A first-time install has no MCP session yet, so this flag is the machine contract — not a server tool.
+`connect` accepts `--target <agent>`, `--force-relogin` (optionally with
+`google` or `github`), `--skip-browser`, and `--json`. `settings` accepts
+`--target <agent>`; `logout` accepts `--account <id>`. Value options accept
+both `--flag value` and `--flag=value`. Unknown flags, missing values, and
+invalid choices stop with a usage error (exit 64) before setup or logout
+starts. Set `TRUSTY_SQUIRE_API_BASE` in the process environment to use a
+development API. Change registry participation in interactive `settings`.
+
+Callers that must not parse English can pass `--json`. Connect then writes **newline-delimited JSON** to stdout: one complete, self-sufficient report per line, written whenever the run's answer changes, and the last line carries `"terminal": true`. Read lines, not prose — connect blocks for minutes waiting on a human, and the line that names the live sign-in URL goes out *before* that wait begins rather than after it. Human output stays on stderr, and `--json` skips setup prompts so the picker never draws on the machine channel. A first-time install has no MCP session yet, so this flag is the machine contract — not a server tool.
 
 ```bash
 npx @trusty-squire/mcp connect --json --target=codex

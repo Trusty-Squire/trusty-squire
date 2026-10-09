@@ -57,7 +57,8 @@ describe("help routing", () => {
       await runCli(argv);
       const output = warn.mock.calls.map(([line]) => String(line ?? "")).join("\n");
       expect(output).toContain("Commands");
-      expect(output).toContain("--api-base=<url>");
+      expect(output).not.toContain("--api-base=<url>");
+      expect(output).toContain("TRUSTY_SQUIRE_API_BASE");
       expect(output).toContain("--account=<id>");
       expect(output).not.toContain("Setting up this machine");
     } finally {
