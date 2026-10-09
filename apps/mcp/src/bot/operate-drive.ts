@@ -324,6 +324,7 @@ export type DriveStatus =
   | "jev_unavailable"
   | "evaluate_timeout"
   | "pending_approval"
+  | "approval_expired"
   | "card_incomplete"
   | "busy";
 
@@ -2077,7 +2078,7 @@ export function outstandingEmptyFill(
       return false;
     }
     if (!missingOnly && (isInvalidRow(row) || isPasswordRow(row))) return true;
-    return rowValueMissing(row);
+    return (!missingOnly || isRequiredRow(row)) && rowValueMissing(row);
   });
 }
 
@@ -6283,24 +6284,25 @@ async function driveLoop(input: {
         reason: `operator decision required before ${readableLabel(liveRow)} on ${observation.url}; no action was dispatched`,
       });
     }
-    if (
+    const blockedSubmitField =
       (decision.action.kind === "click" || decision.action.kind === "oauth_login") &&
       liveRow !== undefined &&
       isSubmitLikeRow(liveRow) &&
-      rowFormId(liveRow) !== undefined &&
-      outstandingEmptyFill(
-        rows.filter((row) => rowFormId(row) === rowFormId(liveRow)),
-        drive.filledRefs,
-        true,
-      ) !== undefined
-    ) {
+      rowFormId(liveRow) !== undefined
+        ? outstandingEmptyFill(
+            rows.filter((row) => rowFormId(row) === rowFormId(liveRow)),
+            drive.filledRefs,
+            true,
+          )
+        : undefined;
+    if (blockedSubmitField !== undefined) {
       traceUndispatchedOauth("required_field_empty");
       recordUndeliveredDecision(
         drive,
         rows,
         decision,
         observation.url,
-        "decided submit was not executed because a required field is still empty",
+        `decided submit was not executed because required field ${fieldLabelForRow(blockedSubmitField)} is still empty`,
       );
       automaticDecisionRefused = true;
       return "continue";
@@ -6347,6 +6349,12 @@ async function driveLoop(input: {
         drive.history.push(DRIVE_INJECT_CARD_HISTORY);
         const approvalUrl =
           typeof payment.approval_url === "string" ? payment.approval_url : undefined;
+        if (payment.status === "payment_approval_timeout") {
+          return finish("approval_expired", {
+            reason: "Approval expired. Resume the drive to request a fresh approval link.",
+            payment,
+          });
+        }
         return finish("pending_approval", {
           ...(approvalUrl === undefined ? {} : { approvalUrl }),
           payment,

@@ -1660,6 +1660,15 @@ describe("form-fill assignment helpers", () => {
       ["@e:pay", "b", "Pay now|fo=checkout"],
     ];
     expect(outstandingEmptyFill(shopifyComplete, [], true)).toBeUndefined();
+    const shopifyOptionalEmpty: WireRow[] = [
+      ["@e:email", "t", "Email|fo=checkout|s=r|n=buyer@example.test"],
+      ["@e:phone", "t", "Phone (optional)|fo=checkout"],
+      ["@e:apartment", "t", "Apartment, suite, etc. (optional)|fo=checkout"],
+      ["@e:pay", "b", "Pay now|fo=checkout"],
+    ];
+    expect(outstandingEmptyFill(shopifyOptionalEmpty, [], true)).toBeUndefined();
+    shopifyOptionalEmpty[0] = ["@e:email", "t", "Email|fo=checkout|s=r"];
+    expect(outstandingEmptyFill(shopifyOptionalEmpty, [], true)?.[0]).toBe("@e:email");
     expect(
       fillableCandidates(invalid, { email: "a@b.test" }, false, ["@e:email"]).map((c) => c.ref),
     ).toEqual(["@e:email"]);

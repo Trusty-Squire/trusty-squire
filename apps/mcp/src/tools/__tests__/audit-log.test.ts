@@ -407,6 +407,20 @@ describe("audit_log backward compatibility", () => {
 });
 
 describe("audit_log classification helpers", () => {
+  it("treats pending approvals and confirmed merchant orders as routine", () => {
+    const payment = {
+      id: "payment",
+      type: "vault.payment_executed",
+      emitted_at: at(0),
+      payment_status: "merchant_order_confirmed",
+    };
+    expect(anomalyReason(payment)).toBeNull();
+    expect(anomalyReason({ ...payment, payment_status: "approval_pending" })).toBeNull();
+    expect(anomalyReason({ ...payment, payment_status: "approval_expired" })).toBe(
+      "payment_approval_expired",
+    );
+  });
+
   it("treats only verifiably-2xx egress as routine", () => {
     expect(anomalyReason(egressBurst(1)[0]!)).toBeNull();
     expect(anomalyReason(egressBurst(1, { status: 500 })[0]!)).toBe("http_500");

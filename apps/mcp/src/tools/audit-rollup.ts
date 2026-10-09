@@ -102,7 +102,12 @@ export function anomalyReason(event: AuditEvent): string | null {
     if (status < 200 || status >= 300) return `http_${status}`;
   }
   const paymentStatus = str(event.payment_status);
-  if (paymentStatus !== null && !/^(approved|succeeded|success|captured)$/i.test(paymentStatus)) {
+  if (
+    paymentStatus !== null &&
+    !/^(approval_pending|approved|succeeded|success|captured|merchant_order_confirmed)$/i.test(
+      paymentStatus,
+    )
+  ) {
     return `payment_${paymentStatus.toLowerCase()}`;
   }
   return null;

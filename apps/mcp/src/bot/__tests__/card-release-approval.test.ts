@@ -78,7 +78,7 @@ it("returns a new approval link before polling, then waits on the resumed call",
   };
   let now = 0;
   const sleep = vi.fn(async (ms: number) => { now += ms; });
-  const getPaymentApproval = vi.fn(async (id: string) => ({
+  const getPaymentApproval = vi.fn(async (id: string, _wait?: boolean | "immediate") => ({
     id,
     status: "pending" as const,
     card_ref: requested.card_ref,
@@ -131,6 +131,60 @@ it("returns a new approval link before polling, then waits on the resumed call",
   expect(api.createPaymentApproval).toHaveBeenCalledTimes(1);
   expect(getPaymentApproval).toHaveBeenCalled();
   expect(sleep).toHaveBeenCalled();
+});
+
+it("makes a final API read when the local approval deadline expires", async () => {
+  let now = 0;
+  const request = {
+    merchant: CHECKOUT.merchant,
+    amount_cents: CHECKOUT.amount_cents,
+    currency: CHECKOUT.currency,
+    card_ref: "saved-card",
+    item: "item",
+    reason: "reason",
+  };
+  const getPaymentApproval = vi.fn(async (id: string, _wait?: boolean | "immediate") => ({
+    id,
+    status: "pending" as const,
+    card_ref: request.card_ref,
+    expires_at: new Date(1_000).toISOString(),
+    jws: null,
+    sealed_card: null,
+  }));
+  const api = {
+    createPaymentApproval: async () => ({
+      id: "expiring-approval",
+      nonce: "nonce",
+      agent: "agent",
+      account_binding: "account",
+      expires_at: new Date(1_000).toISOString(),
+    }),
+    getPaymentApproval,
+  } as unknown as ApiClient;
+  const pending: PendingApprovalWait[] = [];
+  const onApprovalTerminal = vi.fn();
+  const shared = {
+    now: () => now,
+    sleep: async (ms: number) => { now += ms; },
+    pollIntervalMs: 1_000,
+    pollBudgetMs: 2_000,
+    vouchflowExpectedAudience: "customer_test",
+    surfaceApprovalUrl: vi.fn(),
+    onApprovalPending: (state: PendingApprovalWait) => pending.push(state),
+    onApprovalTerminal,
+  };
+  const browser: CardReleaseBrowser = {
+    currentUrl: () => `${CHECKOUT.checkout_origin}/checkout`,
+    injectCardFields: async () => { throw new Error("card must not release"); },
+  };
+  await executeCardReleaseApproval(request, api, browser, shared);
+  const result = await executeCardReleaseApproval(request, api, browser, {
+    ...shared,
+    resumeFrom: pending[0]!,
+  });
+  expect(result.status).toBe("payment_approval_timeout");
+  expect(getPaymentApproval.mock.calls.at(-1)?.[1]).toBe("immediate");
+  expect(onApprovalTerminal).toHaveBeenCalledOnce();
 });
 
 it("starts the next held read immediately after a full pending long poll", async () => {

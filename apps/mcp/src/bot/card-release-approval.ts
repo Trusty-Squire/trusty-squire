@@ -704,7 +704,13 @@ export async function executeCardReleaseApproval(
         ? approvalDeniedResult(approvalId, approvalUrl, checkout)
         : approvalExpiredResult(approvalUrl, checkout);
     };
-    const expiredApprovalResult = (): Record<string, unknown> => terminalApprovalResult("expired");
+    const expiredApprovalResult = async (): Promise<Record<string, unknown>> => {
+      // The API records the terminal audit row when it observes an expired
+      // pending approval. A local deadline can end between held reads, so
+      // make one final immediate read before dropping the resumable state.
+      await api.getPaymentApproval(approvalId, "immediate").catch(() => undefined);
+      return terminalApprovalResult("expired");
+    };
 
     let approved: { jws: string; sealed_card: string; card_ref: string | null } | undefined;
     let claims: JWTPayload | undefined;

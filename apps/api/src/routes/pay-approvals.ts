@@ -196,6 +196,24 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
   requireAny: (req: FastifyRequest, reply: FastifyReply) => Promise<void>;
   vouchVerifier?: VouchMandateVerifier;
 }> = async (fastify, opts) => {
+  const recordExpiredApproval = async (record: ApprovalRecord, now: Date): Promise<void> => {
+    if (record.status !== "pending" || record.expiresAt > now) return;
+    await opts.deps.vaultAuditStore.record({
+      idempotency_key: `payment_approval_expired:${record.id}`,
+      account_id: record.accountId,
+      type: VAULT_AUDIT_TYPES.paymentApprovalExpired,
+      payload: {
+        reference: `pay://${record.id}`,
+        requester: "agent",
+        purpose: "payment.approval.expire",
+        approval_id: record.id,
+        merchant: record.merchant,
+        amount_cents: record.amountCents,
+        currency: record.currency,
+        payment_status: "approval_expired",
+      },
+    });
+  };
   type Submission = z.infer<typeof approveBody>;
   const submissionWaitMs = 15_000;
   const relayPollIntervalMs = 1_000;
@@ -499,6 +517,7 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
       }
     }
     const now = opts.deps.now?.() ?? new Date();
+    await recordExpiredApproval(record, now);
     const status =
       record.status === "pending" && record.expiresAt <= now ? "expired" : record.status;
     if (submission !== null && !peekSubmission)
@@ -536,6 +555,7 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
         return;
       }
       const now = opts.deps.now?.() ?? new Date();
+      await recordExpiredApproval(record, now);
       const status =
         record.status === "pending" && record.expiresAt <= now ? "expired" : record.status;
       const card =

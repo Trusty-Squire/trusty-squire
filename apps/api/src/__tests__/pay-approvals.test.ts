@@ -1175,6 +1175,34 @@ describe("payment approval relay", () => {
     });
     expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject({ id: created.id, status: "expired" });
+    const secondRead = await server.inject({
+      method: "GET",
+      url: `/v1/pay/approvals/${created.id}`,
+      headers: { authorization: `Bearer ${agentToken}` },
+    });
+    expect(secondRead.json()).toMatchObject({ id: created.id, status: "expired" });
+    const ceremony = await server.inject({
+      method: "GET",
+      url: `/v1/pay/approvals/${created.id}/ceremony`,
+    });
+    expect(ceremony.json()).toMatchObject({ id: created.id, status: "expired" });
+    const audit = await server.inject({
+      method: "GET",
+      url: "/v1/vault/audit?type=vault.payment_approval_expired",
+      headers: { authorization: `Bearer ${agentToken}` },
+    });
+    expect(audit.statusCode).toBe(200);
+    expect(audit.json().events).toEqual([
+      expect.objectContaining({
+        type: "vault.payment_approval_expired",
+        reference: `pay://${created.id}`,
+        approval_id: created.id,
+        payment_status: "approval_expired",
+        merchant: "Synthetic Books",
+        amount_cents: 2599,
+        currency: "USD",
+      }),
+    ]);
 
     const approve = await server.inject({
       method: "POST",
