@@ -116,56 +116,6 @@ export const editCredentialTool: Tool<z.infer<typeof editInput>> = {
   name: "edit_credential",
   description: EDIT_DESCRIPTION,
   inputSchema: editInput,
-  jsonInputSchema: {
-    type: "object",
-    oneOf: [
-      {
-        type: "object",
-        required: ["changes"],
-        properties: {
-          reference: { type: "string" },
-          service: { type: "string" },
-          name: { type: "string" },
-          changes: {
-            type: "object",
-            properties: {
-              label: { type: "string" },
-              allowed_hosts: { $ref: "#/$defs/allowedHostEdit" },
-              login_hosts: { $ref: "#/$defs/loginHostEdit" },
-            },
-            additionalProperties: false,
-          },
-        },
-        additionalProperties: false,
-      },
-      {
-        type: "object",
-        required: ["approval_id"],
-        properties: { approval_id: { type: "string" } },
-        additionalProperties: false,
-      },
-    ],
-    $defs: {
-      allowedHostEdit: {
-        type: "object",
-        required: ["mode", "hosts"],
-        properties: {
-          mode: { type: "string", enum: ["add", "remove", "replace"] },
-          hosts: { type: "array", maxItems: 50, items: { type: "string", maxLength: 256 } },
-        },
-        additionalProperties: false,
-      },
-      loginHostEdit: {
-        type: "object",
-        required: ["mode", "hosts"],
-        properties: {
-          mode: { type: "string", enum: ["add", "remove", "replace"] },
-          hosts: { type: "array", maxItems: 20, items: { type: "string", maxLength: 253 } },
-        },
-        additionalProperties: false,
-      },
-    },
-  },
   annotations: { destructiveHint: true, idempotentHint: true },
   meta: ALWAYS_LOAD_META,
   async handler(args, api) {
@@ -204,26 +154,6 @@ export const deleteCredentialTool: Tool<z.infer<typeof deleteInput>> = {
   name: "delete_credential",
   description: DELETE_DESCRIPTION,
   inputSchema: deleteInput,
-  jsonInputSchema: {
-    type: "object",
-    oneOf: [
-      {
-        type: "object",
-        properties: {
-          reference: { type: "string" },
-          service: { type: "string" },
-          name: { type: "string" },
-        },
-        additionalProperties: false,
-      },
-      {
-        type: "object",
-        required: ["approval_id"],
-        properties: { approval_id: { type: "string" } },
-        additionalProperties: false,
-      },
-    ],
-  },
   annotations: { destructiveHint: true, idempotentHint: true },
   meta: ALWAYS_LOAD_META,
   async handler(args, api) {

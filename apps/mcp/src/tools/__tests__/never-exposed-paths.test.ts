@@ -1,3 +1,4 @@
+import { inputJsonSchema } from "../input-json-schema.js";
 // The two credential paths that must stay never-exposed after fetch_credential
 // landed. fetch_credential is an ADDITION — one narrow, human-approved door —
 // not a relaxation of the vault's posture. If either of these ever starts
@@ -69,9 +70,9 @@ describe("use_credential is unchanged: the agent still never sees the value", ()
     expect(
       useCredentialTool.inputSchema.safeParse({ service: "X", approval_id: "a" }).success,
     ).toBe(false);
-    expect(Object.keys(useCredentialTool.jsonInputSchema.properties as object)).not.toContain(
-      "approval_id",
-    );
+    expect(
+      Object.keys(inputJsonSchema(useCredentialTool.inputSchema).properties as object),
+    ).not.toContain("approval_id");
   });
 });
 

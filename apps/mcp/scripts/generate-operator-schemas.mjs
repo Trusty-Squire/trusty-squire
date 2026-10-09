@@ -24,10 +24,8 @@ for (const base of ["provision-drive", "inject-card"]) {
   const referenced = new Set();
   if (base === "provision-drive") {
     for (const name of [
-      "captureJson",
       "captureClickSchema",
       "captureExtractSchema",
-      "captureJsonFor",
       "CAPTURE_NOTE",
       "CLICK_CAPTURE_NOTE",
       "EXTRACT_CAPTURE_NOTE",
@@ -79,7 +77,7 @@ for (const base of ["provision-drive", "inject-card"]) {
         source.indexOf("\n\nconst captureOutputSchema ="),
       ),
     );
-    // The source applies shared capture metadata after declaring its tools.
+    // The source applies shared capture descriptions and output metadata after declaring its tools.
     pieces.push(
       source.slice(
         source.indexOf("const captureOutputSchema = "),

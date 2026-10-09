@@ -1,3 +1,4 @@
+import { inputJsonSchema } from "../../tools/input-json-schema.js";
 import { readFileSync } from "node:fs";
 import ts from "typescript";
 import { describe, expect, it, vi } from "vitest";
@@ -43,7 +44,7 @@ describe("operate CAPTCHA entry point", () => {
     expect(operateSolveCaptchaTool.inputSchema.parse({ session_id: "s1" })).toEqual({
       session_id: "s1",
     });
-    expect(operateSolveCaptchaTool.jsonInputSchema.required).toEqual(["session_id"]);
+    expect(inputJsonSchema(operateSolveCaptchaTool.inputSchema).required).toEqual(["session_id"]);
   });
 
   it("is called by both the drive and the direct tool", () => {

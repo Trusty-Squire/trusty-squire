@@ -7,16 +7,16 @@ const inputSchema = z.object({
   service: z
     .union([z.string(), z.array(z.string()).min(1)])
     .optional()
-    .describe(
-      'Filter by service (case-insensitive exact match), e.g. "exa" or ["groq", "cartesia"]',
-    ),
+    .describe("Filter by service (case-insensitive exact match); string or array of strings"),
   // Compact projection for provisioning checks: enough to decide reuse
   // (reference, service, label, field names, hosts, age, staleness)
   // without the full metadata payload.
   fields: z
     .literal("summary")
     .optional()
-    .describe('"summary" returns a compact projection per credential'),
+    .describe(
+      '"summary" returns a compact projection: reference, service, label, field_names, allowed_hosts, created_at, stale',
+    ),
 });
 
 const DESCRIPTION = `List the credentials already stored in the user's vault for this account.
@@ -50,21 +50,6 @@ export const listCredentialsTool: Tool<z.infer<typeof inputSchema>> = {
   name: "list_credentials",
   description: DESCRIPTION,
   inputSchema,
-  jsonInputSchema: {
-    type: "object",
-    properties: {
-      service: {
-        description: "Filter by service (case-insensitive exact match); string or array of strings",
-        oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, minItems: 1 }],
-      },
-      fields: {
-        type: "string",
-        enum: ["summary"],
-        description:
-          '"summary" returns a compact projection: reference, service, label, field_names, allowed_hosts, created_at, stale',
-      },
-    },
-  },
   async handler(args, api) {
     assertApi(api);
     const res = await api.listCredentials();

@@ -29,14 +29,6 @@ export const operateFetchTextTool: Tool<z.infer<typeof fetchTextSchema>> = {
     "through the owned browser context's shared cookie jar and proxy, and return " +
     "the status, final URL, and body text. Not agent-facing.",
   inputSchema: fetchTextSchema,
-  jsonInputSchema: {
-    type: "object",
-    required: ["session_id", "url"],
-    properties: {
-      session_id: { type: "string" },
-      url: { type: "string" },
-    },
-  },
   annotations: { readOnlyHint: true },
   async handler(args) {
     const session = sessionForCall(args.session_id);

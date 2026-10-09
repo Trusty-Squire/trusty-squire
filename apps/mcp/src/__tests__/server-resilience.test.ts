@@ -9,7 +9,6 @@ import { mockBrowserUseCapture } from "../bot/__tests__/browser-use-test-capture
 // backstop is covered in bin-smoke.test.ts against the built artifact.
 
 import { ForwardedResultError, type OperatorForwarder } from "../bot/broker/forwarder.js";
-import { createServerCallAdmission } from "../server.js";
 import { describe, expect, it, vi } from "vitest";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -369,7 +368,7 @@ it("roundtrips flat finish schemas and typed receipts through the MCP SDK", asyn
     const finish = listed.tools.find((tool) => tool.name === "operate_finish");
     expect(finish?.inputSchema.properties?.outcome).toMatchObject({
       type: "string",
-      enum: ["none", "result", "credentials"],
+      enum: ["none", "credentials", "result"],
     });
     expect(finish?.outputSchema).toMatchObject({
       type: "object",
@@ -393,7 +392,6 @@ it("roundtrips flat finish schemas and typed receipts through the MCP SDK", asyn
     for (const name of ["operate_type", "operate_select", "operate_press"]) {
       const tool = listed.tools.find((candidate) => candidate.name === name);
       expect(tool?.inputSchema.properties?.capture).toMatchObject({
-        type: "object",
         deprecated: true,
       });
       expect(tool?.outputSchema).toBeUndefined();
@@ -525,12 +523,10 @@ it("publishes action format and capture migration schemas matching the runtime v
       const published = listed.tools.find((candidate) => candidate.name === runtimeTool.name)!;
       const capture = published.inputSchema.properties?.capture as
         | {
-            properties?: {
-              source?: { properties?: { role?: unknown } };
-            };
+            properties?: { source?: { anyOf?: { properties?: { role?: unknown } }[] } };
           }
         | undefined;
-      expect(capture?.properties?.source?.properties?.role).toEqual({
+      expect(capture?.properties?.source?.anyOf?.[0]?.properties?.role).toEqual({
         type: "string",
         enum: ["textbox", "code"],
       });

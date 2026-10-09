@@ -1,3 +1,4 @@
+import { inputJsonSchema } from "../../tools/input-json-schema.js";
 import {
   markOperatorMutationDispatchAttempted,
   withOperatorRequestContext,
@@ -7401,7 +7402,7 @@ it("documents the saved-login fields default and both supported naming conventio
     "fields",
     ["login", "password"],
   );
-  const schema = JSON.stringify(operateLoginTool.jsonInputSchema);
+  const schema = JSON.stringify(inputJsonSchema(operateLoginTool.inputSchema));
   expect(schema).toContain("field_names from list_credentials");
   expect(schema).toContain('"default":["login","password"]');
   expect(schema).toContain("username");

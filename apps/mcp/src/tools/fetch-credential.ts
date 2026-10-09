@@ -111,28 +111,6 @@ export const fetchCredentialTool: Tool<z.infer<typeof inputSchema>> = {
   name: "fetch_credential",
   description: DESCRIPTION,
   inputSchema,
-  jsonInputSchema: {
-    type: "object",
-    oneOf: [
-      {
-        type: "object",
-        properties: {
-          reference: { type: "string" },
-          service: { type: "string" },
-          name: { type: "string" },
-          field: { type: "string" },
-          reason: { type: "string" },
-        },
-        additionalProperties: false,
-      },
-      {
-        type: "object",
-        required: ["approval_id"],
-        properties: { approval_id: { type: "string" } },
-        additionalProperties: false,
-      },
-    ],
-  },
   // Not read-only: a fetch discloses a secret and burns a single-use approval.
   annotations: { destructiveHint: true, idempotentHint: false },
   meta: ALWAYS_LOAD_META,

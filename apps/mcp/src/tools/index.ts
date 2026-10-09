@@ -1,5 +1,5 @@
 // Tool registry for the MCP server. Each tool exports its name, the
-// JSON-schema input shape, the verbatim description that the coding
+// Zod input schema, the verbatim description that the coding
 // agent reads to decide when to call, and a `handler(args, api)` that
 // returns a plain JSON response.
 //
@@ -30,7 +30,6 @@ export interface Tool<TArgs extends Record<string, unknown> = Record<string, unk
   name: string;
   description: string;
   inputSchema: ZodTypeAny;
-  jsonInputSchema: Record<string, unknown>;
   jsonOutputSchema?: Record<string, unknown>;
   // Standard MCP tool annotations (readOnlyHint / destructiveHint /
   // idempotentHint). Client-only — they don't reach the model.

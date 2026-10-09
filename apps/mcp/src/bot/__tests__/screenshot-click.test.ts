@@ -1,3 +1,4 @@
+import { inputJsonSchema } from "../../tools/input-json-schema.js";
 import { chromium, type Browser } from "playwright";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -517,9 +518,9 @@ describe("screenshot-bound native pointer dispatch", () => {
       );
       // A point that resolves no node did not dispatch and did not consume the
       // binding: a corrected point retries the SAME image without a fresh capture.
-      await expect(
-        clickScreenshot(f.page, point(third, 174, 244), () => {}),
-      ).resolves.toBe("dispatched");
+      await expect(clickScreenshot(f.page, point(third, 174, 244), () => {})).resolves.toBe(
+        "dispatched",
+      );
       expect(await f.frame.evaluate("window.events")).toHaveLength(2);
     } finally {
       await f.close();
@@ -698,7 +699,7 @@ describe("native screenshot/click tool contract on an isolated session", () => {
       { session_id: "s", screenshot: { ...screenshot, x: Infinity } },
     ])
       expect(operateClickTool.inputSchema.safeParse(args).success).toBe(false);
-    expect(operateClickTool.jsonInputSchema.oneOf).toHaveLength(2);
+    expect(inputJsonSchema(operateClickTool.inputSchema).properties).toHaveProperty("screenshot");
   });
 
   it.each(["success", "transport", "observation"] as const)(
