@@ -323,6 +323,9 @@ async function assertJoinAccount(
   options: BrokerConnectOptions,
   what: string,
 ): Promise<void> {
+  // Enrollment creates the account. Its ceremony must reach the profile's
+  // browser even when a previous connect left a different binding behind.
+  if (options.ceremony === true) return;
   if (declared === null) return;
   const clientBinding =
     options.accountId ?? (await readBrokerAccountBinding(profilePathIdentity(profileDir)));
@@ -392,6 +395,7 @@ export async function brokerConnectionTarget(
 
 export interface BrokerConnectOptions {
   accountId?: string | undefined;
+  ceremony?: boolean;
 }
 
 export async function connectBroker(

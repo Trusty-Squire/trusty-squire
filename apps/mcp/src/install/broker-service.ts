@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   cpSync,
   existsSync,
@@ -9,7 +9,7 @@ import {
   renameSync,
   rmSync,
 } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -19,7 +19,10 @@ import {
   profileDeviceIdentity,
   profilePathIdentity,
 } from "../bot/profile-path.js";
-import { readBrokerAccountBinding } from "../bot/broker/account-binding.js";
+import {
+  brokerAccountBindingPath,
+  readBrokerAccountBinding,
+} from "../bot/broker/account-binding.js";
 import {
   defaultBrokerSocket,
   liveUnixSocket,
@@ -28,6 +31,31 @@ import {
 } from "../bot/broker/discovery.js";
 import { readBrokerUnitMarkerSync, writeBrokerUnitMarker } from "../bot/broker/managed-marker.js";
 import { sharedMcpSocketPath } from "../bot/broker/mcp-socket-path.js";
+
+/** A completed unscoped connect makes its claimed account the profile owner.
+ * Publish the marker first so old agent clients stop joining before the
+ * runtime starts accepting calls for the new account. */
+export async function rebindBrokerProfileAccount(
+  profileDir: string,
+  accountId: string,
+): Promise<void> {
+  const marker = readBrokerUnitMarkerSync(profileDir);
+  if (marker.kind === "valid") {
+    await writeBrokerUnitMarker(profileDir, { ...marker.marker, accountBinding: accountId });
+  }
+  await mkdir(profileDir, { recursive: true, mode: 0o700 });
+  const bindingPath = brokerAccountBindingPath(profileDir);
+  const pendingPath = `${bindingPath}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(pendingPath, JSON.stringify({ version: 1, accountId }), {
+      flag: "wx",
+      mode: 0o600,
+    });
+    await rename(pendingPath, bindingPath);
+  } finally {
+    await rm(pendingPath, { force: true });
+  }
+}
 
 function run(command: string, args: string[], emptyInventory = false): string {
   try {

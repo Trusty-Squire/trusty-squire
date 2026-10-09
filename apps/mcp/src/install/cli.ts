@@ -86,7 +86,7 @@ import {
   type ConnectBrowserLocation,
   type ConnectOutcome,
 } from "./connect-report.js";
-import { installBrokerService } from "./broker-service.js";
+import { installBrokerService, rebindBrokerProfileAccount } from "./broker-service.js";
 import { PAIRING_TOKEN_TTL_MS } from "../pairing-ttl.js";
 
 const DEFAULT_API_BASE = process.env.TRUSTY_SQUIRE_API_BASE ?? "https://trusty-squire-api.fly.dev";
@@ -1034,6 +1034,13 @@ async function runConnectInstall(
         `only when you intend to switch accounts.`,
     );
     process.exit(1);
+  }
+
+  // Only the completed claim identifies the account for an unscoped connect.
+  // On a busy broker, provider logout ran in its existing browser and the old
+  // profile binding survived; replace that binding before new agent calls.
+  if (!args.skipBrowser && args.forceReloginProvider === undefined && session.account_id) {
+    await rebindBrokerProfileAccount(profileDir, session.account_id);
   }
 
   const storage = await openSessionStorage();
