@@ -7,10 +7,13 @@ import { BrowserController } from "../browser.js";
 import {
   captureFrameSnapshot,
   driveRowsFromSnapshot,
+  isFrameRendered,
+  mergeSnapshots,
   snapshotSelectOptions,
 } from "../drive-snapshot.js";
 import {
   driveTargetSets,
+  isWalletSignInPrompt,
   resumeAction,
   resumeAnswerOptions,
   runOperateDrive,
@@ -49,6 +52,87 @@ async function openFixture(url: string, html: string) {
 }
 
 describe("drive commerce fixtures", () => {
+  it("dismisses a Shop code prompt and drops its hidden cross-origin frame", async () => {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    let sessionId: string | undefined;
+    let inboxCalls = 0;
+    try {
+      await page.route("**/*", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: fixture(
+            route.request().url().startsWith("https://shop.app/")
+              ? "shop-code-frame.html"
+              : "shop-guest-checkout.html",
+          ),
+        }),
+      );
+      await page.goto("https://whitejade.xyz/checkouts/test?skip_shop_pay=true");
+      const started = await startHarnessProvisionSession({
+        browser: BrowserController.fromHarnessPage(page),
+        serviceUrl: page.url(),
+        format: "compact",
+        initialObservation: "drive",
+      });
+      sessionId = started.session_id;
+      await page.locator('[name="email"]').fill("lunchbox@trustysquire.ai");
+      await page.locator('[name="email"]').dispatchEvent("change");
+      const shopFrame = page.frames().find((frame) => frame.url().startsWith("https://shop.app/"));
+      expect(shopFrame).toBeDefined();
+      expect(await isFrameRendered(shopFrame!)).toBe(true);
+      const openMain = await captureFrameSnapshot(page, [], 0, true);
+      const openChild = await captureFrameSnapshot(shopFrame!, [], 1, true);
+      expect(openMain).not.toBeNull();
+      expect(openChild).not.toBeNull();
+      expect(
+        mergeSnapshots([openMain!, openChild!]).elements.some(
+          (element) => element.inputMode === "numeric",
+        ),
+      ).toBe(true);
+      expect(isWalletSignInPrompt(openMain!.text)).toBe(true);
+
+      const deps: DriveDependencies = {
+        askJev: async () => {
+          throw new Error("wallet dismissal should run before Jev");
+        },
+        act,
+        observe,
+        awaitVerification: async () => {
+          inboxCalls += 1;
+          throw new Error("wallet code polled");
+        },
+        startSession: async () => {
+          throw new Error("existing session required");
+        },
+        injectCard: async () => ({ status: "unused" }),
+      };
+      const handback = await runOperateDrive(
+        {
+          session_id: sessionId,
+          goal: "Check out as a guest without a Shop code",
+          max_steps: 1,
+        },
+        {} as ApiClient,
+        undefined,
+        deps,
+      );
+      expect(handback.status).not.toBe("needs_value");
+      expect(inboxCalls).toBe(0);
+      expect(JSON.stringify(handback.observation)).not.toContain("confirm-it-s-you");
+      expect(handback.observation?.semantic?.headings).not.toContain("Confirm it's you");
+      expect(await page.locator("#shop-modal").isVisible()).toBe(false);
+      expect(await isFrameRendered(shopFrame!)).toBe(false);
+      const closedMain = await captureFrameSnapshot(page, [], 0, true);
+      expect(closedMain).not.toBeNull();
+      expect(closedMain!.text).not.toContain("Confirm it's you");
+      expect(closedMain!.headings).not.toContain("Confirm it's you");
+    } finally {
+      if (sessionId !== undefined) await finishProvisionSession(sessionId);
+      await context.close();
+    }
+  }, 30_000);
+
   it("offers the Oura size radio and below-fold Add to Cart with readable labels", async () => {
     const f = await openFixture(PRODUCT_URL, fixture("oura-product.html"));
     try {

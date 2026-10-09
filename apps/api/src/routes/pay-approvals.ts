@@ -19,6 +19,7 @@ import {
 import { authenticatedRequester } from "../services/requesting-agent.js";
 import { VAULT_AUDIT_TYPES } from "@trusty-squire/vault";
 import { waitForApprovalStatus } from "./approval-status-wait.js";
+import { recordPaymentApprovalExpiry } from "../services/payment-approval-expiry-audit.js";
 
 // Web base for the approval link sent to Telegram. Reuses PWA_BASE_URL
 // (the same override server.ts's defaultPwaBaseUrl() reads) if set, else
@@ -198,21 +199,7 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
 }> = async (fastify, opts) => {
   const recordExpiredApproval = async (record: ApprovalRecord, now: Date): Promise<void> => {
     if (record.status !== "pending" || record.expiresAt > now) return;
-    await opts.deps.vaultAuditStore.record({
-      idempotency_key: `payment_approval_expired:${record.id}`,
-      account_id: record.accountId,
-      type: VAULT_AUDIT_TYPES.paymentApprovalExpired,
-      payload: {
-        reference: `pay://${record.id}`,
-        requester: "agent",
-        purpose: "payment.approval.expire",
-        approval_id: record.id,
-        merchant: record.merchant,
-        amount_cents: record.amountCents,
-        currency: record.currency,
-        payment_status: "approval_expired",
-      },
-    });
+    await recordPaymentApprovalExpiry(opts.deps.vaultAuditStore, record);
   };
   type Submission = z.infer<typeof approveBody>;
   const submissionWaitMs = 15_000;

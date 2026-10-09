@@ -67,6 +67,7 @@ import {
   captureFrameSnapshot,
   driveRowsFromSnapshot,
   frameDynamicsSignature,
+  isFrameRendered,
   mergeSnapshots,
   snapshotSelectOptions,
   snapshotToObservation,
@@ -814,6 +815,30 @@ export function isConsentRow(row: WireRow): boolean {
 
 const LAYER_CONTROL_LABEL =
   /^(?:close|dismiss|skip(?:\s+for\s+now)?|not now|maybe later|no thanks|accept(?:\s+(?:all|cookies?))?|allow(?:\s+(?:all|cookies?))?|got it|ok|copy|done|reject(?:\s+all)?|decline|necessary only)(?:[.…])?$/;
+
+/** Wallet sign-in may open when checkout email is filled, without a wallet choice. */
+export function isWalletSignInPrompt(pageText: string): boolean {
+  const shopConfirmation =
+    /confirm it.s you/i.test(pageText) && /securely use your saved information/i.test(pageText);
+  const brandedSignIn =
+    /\b(?:shop(?:\s+pay)?|link)\b/i.test(pageText) &&
+    /\b(?:confirm it.s you|enter (?:the )?code|verification code|sign in to (?:shop|link))\b/i.test(
+      pageText,
+    );
+  return shopConfirmation || brandedSignIn;
+}
+
+export function walletSignInDismissRef(rows: readonly WireRow[]): string | null {
+  return (
+    rows.find(
+      (row) =>
+        isClickableRow(row) &&
+        /^(?:close|dismiss|continue as guest|check out as guest|skip(?: for now)?)(?:[.…])?$/i.test(
+          readableLabel(row).trim(),
+        ),
+    )?.[0] ?? null
+  );
+}
 
 export function pageOcclusionLayer(rows: readonly WireRow[]): "dialog" | "overlay" | undefined {
   if (rows.some((row) => rowOccluder(row) === "dialog")) return "dialog";
@@ -4940,6 +4965,7 @@ async function captureDriveSession(
     const cache = driveFrameCache.get(session) ?? new Map();
     for (let index = 1; index < frames.length; index += 1) {
       const frame = frames[index]!;
+      if (!(await isFrameRendered(frame))) continue;
       const captchaFrame = isCaptchaFrameUrl(frame.url());
       if (!needFrames && !coveredByLayer && !captchaFrame) continue;
       const signature = captchaFrame ? "" : await frameDynamicsSignature(frame);
@@ -7100,6 +7126,30 @@ async function driveLoop(input: {
       if (next.timedOut)
         return finish("evaluate_timeout", { reason: "in-page evaluate exceeded budget" });
       spendStep(`page_not_ready:${pageReadiness.reason ?? "unknown"}`);
+      continue;
+    }
+    // Shop and Link can open their own sign-in prompt after the merchant's
+    // email field is filled. The guest checkout never needs that wallet code.
+    // Dismiss the prompt before asking Jev about any of its code controls.
+    if (isWalletSignInPrompt(observation.dom ?? "")) {
+      const dismissRef = walletSignInDismissRef(rows);
+      const action: ProvisionAction =
+        dismissRef === null
+          ? { kind: "press", key: "Escape" }
+          : { kind: "click", target: dismissRef };
+      drive.boundFingerprint = driveProgressFingerprint(observation, rows, drive, session);
+      drive.consumedActionKey = null;
+      const applied = await applyDecision({
+        kind: "act",
+        action,
+        actionKey: dismissRef ?? "wallet:escape",
+        confidence: 1,
+      });
+      if (applied !== "continue") return applied;
+      spendStep("dismiss_wallet_sign_in");
+      if (isWalletSignInPrompt(observation.dom ?? "")) {
+        return finish("stuck", { reason: "wallet sign-in prompt could not be dismissed" });
+      }
       continue;
     }
     const includePayment = drive.facts.card_ref !== undefined;

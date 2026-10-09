@@ -443,6 +443,10 @@ export interface ApiPrismaClient {
   };
   pendingPaymentApproval: {
     create(args: { data: Record<string, unknown>; select: { id: true } }): Promise<{ id: string }>;
+    findMany(args: {
+      where: Record<string, unknown>;
+      take?: number;
+    }): Promise<PendingPaymentApprovalRow[]>;
     findFirst(args: {
       where: Record<string, unknown>;
       select?: Record<string, boolean>;

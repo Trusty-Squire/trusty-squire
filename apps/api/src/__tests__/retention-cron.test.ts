@@ -75,6 +75,15 @@ function makeFakes(
   // Fires after the sweep has snapshotted the lapsed rows and before it tries
   // to settle them — the window in which approve/deny/claim can win the race.
   onScan?: () => void,
+  paymentRows: Array<Record<string, unknown>> = Array.from({ length: 4 }, (_, i) => ({
+    id: `payment_${i}`,
+    account_id: "acct_owner",
+    merchant: "Whitejade",
+    amount_cents: 7600,
+    currency: "USD",
+    status: "denied",
+    expires_at: new Date("2026-01-15T11:10:00Z"),
+  })),
 ): {
   authPrisma: NonNullable<ConstructorParameters<typeof RetentionCron>[0]["authPrisma"]>;
   calls: RecordedCall[];
@@ -103,9 +112,16 @@ function makeFakes(
         },
       } as unknown as never,
       pendingPaymentApproval: {
+        findMany: async (args: { where: Record<string, unknown> }) => {
+          calls.push({ table: "PendingPaymentApproval", op: "findMany", where: args.where });
+          return paymentRows.map((row) => ({ ...row }));
+        },
         deleteMany: async (args: { where: Record<string, unknown> }) => {
           calls.push({ table: "PendingPaymentApproval", op: "deleteMany", where: args.where });
-          return { count: 4 };
+          const ids = (args.where["id"] as { in: string[] }).in;
+          const removed = paymentRows.filter((row) => ids.includes(row["id"] as string));
+          for (const row of removed) paymentRows.splice(paymentRows.indexOf(row), 1);
+          return { count: removed.length };
         },
       } as unknown as never,
       credentialFetchApproval: {
@@ -162,6 +178,71 @@ function makeFakes(
 }
 
 describe("RetentionCron", () => {
+  it("records one expiry for an unread payment approval before deleting it", async () => {
+    const now = new Date("2026-01-15T12:00:00Z");
+    const auditStore = new InMemoryVaultAuditStore(() => now);
+    const payments = [
+      {
+        id: "payment_pending",
+        account_id: "acct_owner",
+        merchant: "Whitejade",
+        amount_cents: 7600,
+        currency: "USD",
+        status: "pending",
+        expires_at: new Date("2026-01-15T11:10:00Z"),
+      },
+      {
+        id: "payment_denied",
+        account_id: "acct_owner",
+        merchant: "Whitejade",
+        amount_cents: 7600,
+        currency: "USD",
+        status: "denied",
+        expires_at: new Date("2026-01-15T11:10:00Z"),
+      },
+    ];
+    const { authPrisma } = makeFakes([], undefined, payments);
+    const cron = new RetentionCron({ authPrisma, vaultAuditStore: auditStore, now: () => now });
+
+    expect((await cron.runOnce()).payment_approvals_deleted).toBe(2);
+    expect((await cron.runOnce()).payment_approvals_deleted).toBe(0);
+    expect(auditStore.events).toHaveLength(1);
+    expect(auditStore.events[0]).toMatchObject({
+      type: "vault.payment_approval_expired",
+      payload: {
+        reference: "pay://payment_pending",
+        approval_id: "payment_pending",
+        amount_cents: 7600,
+        payment_status: "approval_expired",
+      },
+    });
+  });
+
+  it("retains an expired payment approval until its audit write succeeds", async () => {
+    const now = new Date("2026-01-15T12:00:00Z");
+    const auditStore = new FlakyAuditStore(1, () => now);
+    const payments = [
+      {
+        id: "payment_pending",
+        account_id: "acct_owner",
+        merchant: "Whitejade",
+        amount_cents: 7600,
+        currency: "USD",
+        status: "pending",
+        expires_at: new Date("2026-01-15T11:10:00Z"),
+      },
+    ];
+    const { authPrisma } = makeFakes([], undefined, payments);
+    const cron = new RetentionCron({ authPrisma, vaultAuditStore: auditStore, now: () => now });
+
+    const failed = await cron.runOnce();
+    expect(failed.payment_approvals_deleted).toBe(0);
+    expect(failed.errors).toEqual([expect.stringContaining("payment approval")]);
+    expect(payments).toHaveLength(1);
+    expect((await cron.runOnce()).payment_approvals_deleted).toBe(1);
+    expect(auditStore.events).toHaveLength(1);
+  });
+
   it("computes correct cutoffs for each retention window", async () => {
     const now = new Date("2026-01-15T12:00:00Z");
     const { authPrisma, calls } = makeFakes();
@@ -195,7 +276,9 @@ describe("RetentionCron", () => {
     const paymentWhere = paymentAuditDelete!.where["created_at"] as { lt: Date };
     expect(paymentWhere.lt).toEqual(new Date("2025-01-15T12:00:00Z"));
 
-    const paymentApprovalDelete = calls.find((c) => c.table === "PendingPaymentApproval");
+    const paymentApprovalDelete = calls.find(
+      (c) => c.table === "PendingPaymentApproval" && c.op === "deleteMany",
+    );
     expect(paymentApprovalDelete).toBeDefined();
     const paymentApprovalWhere = paymentApprovalDelete!.where["expires_at"] as { lt: Date };
     expect(paymentApprovalWhere.lt).toEqual(now);

@@ -5,7 +5,7 @@
 //     - Delete PairingToken older than 1h
 //     - Delete VaultAuditEvent older than 365d
 //     - Delete PaymentAuditEvent older than 365d
-//     - Delete PendingPaymentApproval rows past expires_at
+//     - Audit pending, then delete PendingPaymentApproval rows past expires_at
 //     - Delete CredentialMutationApproval rows past expires_at
 //     - Settle + audit, then delete, CredentialFetchApproval rows past
 //       expires_at (an abandoned reveal is a terminal outcome, not a row that
@@ -19,10 +19,11 @@
 import type { VaultAuditStore } from "@trusty-squire/vault";
 import type { ApiPrismaClient } from "./api-prisma-client.js";
 import { recordCredentialFetchOutcome } from "./credential-fetch-audit.js";
+import { recordPaymentApprovalExpiry } from "./payment-approval-expiry-audit.js";
 
 const HOUR_MS = 60 * 60 * 1000;
-// Rows settled per fetch-approval sweep. Bounded because settling writes an
-// audit row each; the hourly cadence drains any realistic backlog.
+// Rows handled per approval sweep. Bounded because pending rows write an
+// audit event each; the hourly cadence drains any realistic backlog.
 const RETENTION_BATCH = 500;
 const DAY_MS = 24 * HOUR_MS;
 // Settlement marker written BEFORE the terminal audit and cleared to `expired`
@@ -251,10 +252,30 @@ export class RetentionCron {
       }
 
       try {
-        const r = await this.deps.authPrisma.pendingPaymentApproval.deleteMany({
+        const lapsed = await this.deps.authPrisma.pendingPaymentApproval.findMany({
           where: { expires_at: { lt: startedAt } },
+          take: RETENTION_BATCH,
         });
-        stats.payment_approvals_deleted = r.count;
+        const deletable: string[] = [];
+        for (const row of lapsed) {
+          if (row.status === "pending") {
+            if (this.deps.vaultAuditStore === undefined) continue;
+            await recordPaymentApprovalExpiry(this.deps.vaultAuditStore, {
+              id: row.id,
+              accountId: row.account_id,
+              merchant: row.merchant,
+              amountCents: row.amount_cents,
+              currency: row.currency,
+            });
+          }
+          deletable.push(row.id);
+        }
+        if (deletable.length > 0) {
+          const r = await this.deps.authPrisma.pendingPaymentApproval.deleteMany({
+            where: { id: { in: deletable }, expires_at: { lt: startedAt } },
+          });
+          stats.payment_approvals_deleted = r.count;
+        }
       } catch (err) {
         stats.errors.push(
           `payment approval delete: ${err instanceof Error ? err.message : String(err)}`,
