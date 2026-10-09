@@ -26,7 +26,6 @@ import {
   withProfileOperationGuard,
 } from "./profile.js";
 import { closeBrowserContextWithin, registerLocalBrowserLaunch } from "./browser.js";
-import { createSessionGuard } from "../session-guard.js";
 import { connectBroker, resolveBrokerSocket } from "./broker/discovery.js";
 import { BrokerRefusal } from "./broker/refusal.js";
 import type { BrokerClient } from "./broker/transport.js";
@@ -964,14 +963,10 @@ async function logoutProvidersThroughSession(
  * verbatim, naming the process that holds it.
  */
 export async function runCeremonyInSharedBroker(opts: RunInBotChromeOpts): Promise<LoginRunResult> {
-  const session = await createSessionGuard().bind();
   const socket = resolveBrokerSocket(opts.profileDir);
-  const connectOptions = {
-    ...(session?.account_id === undefined ? {} : { accountId: session.account_id }),
-  };
   let client: BrokerClient;
   try {
-    client = await connectBroker(socket, connectOptions);
+    client = await connectBroker(socket, { ceremony: true });
   } catch (err) {
     // Nothing left to fall back to: the broker is the only path that owns a
     // browser. An identified resident's refusal (a broker still serving

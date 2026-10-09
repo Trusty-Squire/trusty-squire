@@ -176,11 +176,15 @@ profile. The JSON shape is:
 }
 ```
 
-Joining verifies the profile anchor and any declared account binding, refusing
-`profile_mismatch` / `account_mismatch` on disagreement. Invalid markers cannot
-permit startup. `systemctl` failure remains unknown; neither unknown nor an absent
-marker permits a client to start a broker. Removing a marker or uninstalling a
-service leaves clients connection-only.
+Joining verifies the profile anchor. Ordinary agent broker clients also verify
+the declared account binding and refuse `account_mismatch` on disagreement.
+Connect's sign-in ceremony skips that account comparison because the completed
+claim determines the account; an in-profile completed connect replaces the
+profile binding and the marker's declared account. A different profile still
+refuses `profile_mismatch`. Invalid markers cannot permit startup. `systemctl`
+failure remains unknown; neither unknown nor an absent marker permits a client
+to start a broker. Removing a marker or uninstalling a service leaves clients
+connection-only.
 
 A marked daemon requires systemd's `INVOCATION_ID` or the explicit
 `TRUSTY_SQUIRE_BROKER_UNIT=1` environment before touching the profile lock, sockets,

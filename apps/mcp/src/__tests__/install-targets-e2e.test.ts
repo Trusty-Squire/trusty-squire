@@ -1,4 +1,5 @@
-vi.mock("../install/broker-service.js", () => ({
+vi.mock("../install/broker-service.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof BrokerServiceModule>()),
   installBrokerService: vi.fn(async () => undefined),
 }));
 // E2E #3 — the install CLI works against the five host agents users
@@ -29,6 +30,7 @@ import type * as BotModule from "../bot/index.js";
 import type * as GoogleLoginModule from "../bot/google-login.js";
 import type * as LoginStateModule from "../bot/login-state.js";
 import type * as ProfileModule from "../bot/profile.js";
+import type * as BrokerServiceModule from "../install/broker-service.js";
 
 // Module-level mocks for the install pipeline's external collaborators.
 // Hoisted by vitest before the install/cli.js import below, so the
@@ -85,6 +87,7 @@ vi.mock("../bot/google-login.js", async (importOriginal) => {
     // probe, which resolves its default against the real module binding and
     // never sees a mocked export.
     detectActiveProviderSessions: vi.fn(async () => ["google"] as const),
+    detectProviderSessionsFromProfile: vi.fn(actual.detectProviderSessionsFromProfile),
     probeProviderSessionsAfterCeremony: vi.fn(async () => ["google"] as const),
     confirmLiveGoogleProviderSnapshot: vi.fn(async (_profile, providers) => providers),
     openInstallConfirmInBotChrome: vi.fn(async (options) => {
@@ -118,11 +121,19 @@ vi.mock("../bot/profile.js", async (importOriginal) => {
 // install/cli.ts module pulls in api-client + bot at top level, so
 // this ordering is load-bearing.
 import {
+  detectProviderSessionsFromProfile,
   openInstallConfirmInBotChrome,
   probeProviderSessionsAfterCeremony,
 } from "../bot/google-login.js";
 import { clearBrowserProfile, clearProviderCookies } from "../bot/login-state.js";
 import { ProfileBusyError } from "../bot/profile.js";
+import { profileDeviceAnchor } from "../bot/profile.js";
+import {
+  brokerAccountBindingPath,
+  readBrokerAccountBinding,
+} from "../bot/broker/account-binding.js";
+import { readBrokerUnitMarkerSync, writeBrokerUnitMarker } from "../bot/broker/managed-marker.js";
+import { brokerConnectionTarget } from "../bot/broker/discovery.js";
 import { BrokerRefusal } from "../bot/broker/refusal.js";
 import { installInitiate, installPoll } from "../api-client.js";
 import { captureMachineChannel } from "./machine-channel.js";
@@ -599,6 +610,19 @@ describe("connect --target=<agent> writes a valid config", () => {
 
   it("keeps bare force-relogin as an intentional account-switch path", async () => {
     const hermesProfile = path.join(tmpHome, "profiles", "hermes-switch");
+    await fs.mkdir(hermesProfile, { recursive: true });
+    const anchor = profileDeviceAnchor(hermesProfile);
+    if (anchor === null) throw new Error("profile has no device anchor");
+    await writeBrokerUnitMarker(hermesProfile, {
+      version: 1,
+      socket: path.join(tmpHome, "broker.sock"),
+      profile: anchor,
+      accountBinding: "acct_old",
+    });
+    await fs.writeFile(
+      brokerAccountBindingPath(hermesProfile),
+      JSON.stringify({ version: 1, accountId: "acct_old" }),
+    );
     await AGENTS.hermes.writeConfig({
       command: "node",
       args: ["old", "server"],
@@ -618,6 +642,9 @@ describe("connect --target=<agent> writes a valid config", () => {
     delete process.env.TRUSTY_SQUIRE_PROFILE_DIR;
     delete process.env.TRUSTY_SQUIRE_ACCOUNT_ID;
     try {
+      // A live broker holds the profile, so the old binding survives the
+      // deferred logout and must be replaced after the claimed sign-in.
+      vi.mocked(clearProviderCookies).mockRejectedValueOnce(new ProfileBusyError("profile busy"));
       await connect({
         command: "connect",
         target: "hermes",
@@ -627,7 +654,21 @@ describe("connect --target=<agent> writes a valid config", () => {
         noRegistry: false,
         noInteractive: true,
       });
-      expect(clearBrowserProfile).toHaveBeenCalledWith(hermesProfile);
+      expect(clearBrowserProfile).not.toHaveBeenCalledWith(hermesProfile);
+      expect(await readBrokerAccountBinding(hermesProfile)).toBe("acct_new");
+      const marker = readBrokerUnitMarkerSync(hermesProfile);
+      expect(marker.kind).toBe("valid");
+      if (marker.kind === "valid") expect(marker.marker.accountBinding).toBe("acct_new");
+      await expect(
+        brokerConnectionTarget(hermesProfile, path.join(tmpHome, "broker.sock"), {
+          accountId: "acct_new",
+        }),
+      ).resolves.toEqual({ socket: path.join(tmpHome, "broker.sock") });
+      await expect(
+        brokerConnectionTarget(hermesProfile, path.join(tmpHome, "broker.sock"), {
+          accountId: "acct_old",
+        }),
+      ).rejects.toThrow(/bound to account/);
       expectSquireConfig(
         await readSquireConfig("hermes"),
         "hermes",
@@ -1136,56 +1177,71 @@ describe("connect --target=<agent> writes a valid config", () => {
     }
   });
 
-  it("refuses a scoped provider refresh that returns a different account", async () => {
-    const hermesProfile = path.join(tmpHome, "profiles", "hermes-scoped");
-    await AGENTS.hermes.writeConfig({
-      command: "node",
-      args: ["old", "server"],
-      env: {
-        TRUSTY_SQUIRE_AGENT_IDENTITY: "hermes",
-        TRUSTY_SQUIRE_ACCOUNT_ID: "acct_scoped_original",
-        TRUSTY_SQUIRE_PROFILE_DIR: hermesProfile,
-      },
-    });
-    vi.mocked(installPoll).mockResolvedValueOnce({
-      status: "claimed",
-      agent_session_token: "ts_agent_unexpected",
-      account_id: "acct_scoped_unexpected",
-    });
-    const previousProfile = process.env.TRUSTY_SQUIRE_PROFILE_DIR;
-    const previousAccount = process.env.TRUSTY_SQUIRE_ACCOUNT_ID;
-    delete process.env.TRUSTY_SQUIRE_PROFILE_DIR;
-    delete process.env.TRUSTY_SQUIRE_ACCOUNT_ID;
-    const error = vi.spyOn(console, "error").mockImplementation(() => {});
-    const exit = vi.spyOn(process, "exit").mockImplementation((code) => {
-      throw new Error(`exit:${code}`);
-    });
-    try {
-      await expect(
-        connect({
+  it.each(["google", "github"] as const)(
+    "rebinds after a scoped %s refresh claims a different account",
+    async (provider) => {
+      const hermesProfile = path.join(tmpHome, "profiles", `hermes-scoped-${provider}`);
+      await fs.mkdir(hermesProfile, { recursive: true });
+      const anchor = profileDeviceAnchor(hermesProfile);
+      if (anchor === null) throw new Error("profile has no device anchor");
+      await writeBrokerUnitMarker(hermesProfile, {
+        version: 1,
+        socket: path.join(tmpHome, "broker.sock"),
+        profile: anchor,
+        accountBinding: "acct_scoped_original",
+      });
+      await fs.writeFile(
+        brokerAccountBindingPath(hermesProfile),
+        JSON.stringify({ version: 1, accountId: "acct_scoped_original" }),
+      );
+      await AGENTS.hermes.writeConfig({
+        command: "node",
+        args: ["old", "server"],
+        env: {
+          TRUSTY_SQUIRE_AGENT_IDENTITY: "hermes",
+          TRUSTY_SQUIRE_ACCOUNT_ID: "acct_scoped_original",
+          TRUSTY_SQUIRE_PROFILE_DIR: hermesProfile,
+        },
+      });
+      vi.mocked(installPoll).mockResolvedValueOnce({
+        status: "claimed",
+        agent_session_token: "ts_agent_new",
+        account_id: "acct_scoped_new",
+      });
+      const previousProfile = process.env.TRUSTY_SQUIRE_PROFILE_DIR;
+      const previousAccount = process.env.TRUSTY_SQUIRE_ACCOUNT_ID;
+      delete process.env.TRUSTY_SQUIRE_PROFILE_DIR;
+      delete process.env.TRUSTY_SQUIRE_ACCOUNT_ID;
+      try {
+        vi.mocked(clearProviderCookies).mockRejectedValueOnce(new ProfileBusyError("profile busy"));
+        if (provider === "github") {
+          vi.mocked(detectProviderSessionsFromProfile).mockResolvedValueOnce(["google", "github"]);
+        }
+        await connect({
           command: "connect",
           target: "hermes",
           apiBase: "https://test.invalid",
           skipBrowser: false,
           forceRelogin: true,
-          forceReloginProvider: "google",
+          forceReloginProvider: provider,
           noRegistry: false,
           noInteractive: true,
-        }),
-      ).rejects.toThrow("exit:1");
-      const config = await readSquireConfig("hermes");
-      expect(config.env).toMatchObject({
-        TRUSTY_SQUIRE_ACCOUNT_ID: "acct_scoped_original",
-        TRUSTY_SQUIRE_PROFILE_DIR: hermesProfile,
-      });
-      expect(String(error.mock.calls.flat())).not.toContain("acct_scoped_unexpected");
-    } finally {
-      exit.mockRestore();
-      error.mockRestore();
-      if (previousProfile === undefined) delete process.env.TRUSTY_SQUIRE_PROFILE_DIR;
-      else process.env.TRUSTY_SQUIRE_PROFILE_DIR = previousProfile;
-      if (previousAccount === undefined) delete process.env.TRUSTY_SQUIRE_ACCOUNT_ID;
-      else process.env.TRUSTY_SQUIRE_ACCOUNT_ID = previousAccount;
-    }
-  });
+        });
+        const config = await readSquireConfig("hermes");
+        expect(config.env).toMatchObject({
+          TRUSTY_SQUIRE_ACCOUNT_ID: "acct_scoped_new",
+          TRUSTY_SQUIRE_PROFILE_DIR: hermesProfile,
+        });
+        expect(await readBrokerAccountBinding(hermesProfile)).toBe("acct_scoped_new");
+        const marker = readBrokerUnitMarkerSync(hermesProfile);
+        expect(marker.kind).toBe("valid");
+        if (marker.kind === "valid") expect(marker.marker.accountBinding).toBe("acct_scoped_new");
+      } finally {
+        if (previousProfile === undefined) delete process.env.TRUSTY_SQUIRE_PROFILE_DIR;
+        else process.env.TRUSTY_SQUIRE_PROFILE_DIR = previousProfile;
+        if (previousAccount === undefined) delete process.env.TRUSTY_SQUIRE_ACCOUNT_ID;
+        else process.env.TRUSTY_SQUIRE_ACCOUNT_ID = previousAccount;
+      }
+    },
+  );
 });

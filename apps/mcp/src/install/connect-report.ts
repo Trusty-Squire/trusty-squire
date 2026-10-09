@@ -35,7 +35,6 @@ export type ConnectState = (typeof CONNECT_STATES)[number];
 export type ConnectReasonCode =
   | "provider_session_missing"
   | "requested_provider_missing"
-  | "account_mismatch"
   | "profile_unverifiable"
   | "install_expired"
   | "cached_cookie_evidence"
@@ -119,7 +118,6 @@ export type ConnectOutcome =
   | { kind: "profile_busy" }
   | { kind: "install_unclaimed"; confirm_url: string }
   | { kind: "install_expired" }
-  | { kind: "account_switch_refused" }
   | { kind: "cookie_clear_failed" }
   | { kind: "run_failed" };
 
@@ -257,8 +255,6 @@ export function buildConnectReport(input: ConnectReportInput): ConnectReport {
         : signInOutstanding(input, outcome.confirm_url, true);
     case "install_expired":
       return settled("no-browser", "install_expired", input);
-    case "account_switch_refused":
-      return settled("no-browser", "account_mismatch", input);
     case "cookie_clear_failed":
       return settled("busy", "profile_unverifiable", input);
     case "run_failed":

@@ -86,7 +86,7 @@ import {
   type ConnectBrowserLocation,
   type ConnectOutcome,
 } from "./connect-report.js";
-import { installBrokerService } from "./broker-service.js";
+import { installBrokerService, rebindBrokerProfileAccount } from "./broker-service.js";
 import { PAIRING_TOKEN_TTL_MS } from "../pairing-ttl.js";
 
 const DEFAULT_API_BASE = process.env.TRUSTY_SQUIRE_API_BASE ?? "https://trusty-squire-api.fly.dev";
@@ -594,7 +594,6 @@ async function connect(args: Argv, argv: readonly string[] = []): Promise<void> 
           target,
           agent,
           canonicalProfileDir,
-          context.accountId,
           context.agentIdentity,
           wantInteractive,
           placed,
@@ -845,7 +844,6 @@ async function runConnectInstall(
   target: AgentTarget,
   agent: AgentDefinition,
   profileDir: string,
-  accountId: string | undefined,
   agentIdentity: string,
   wantInteractive: boolean,
   placed: BrowserPlacementSlot,
@@ -1017,23 +1015,12 @@ async function runConnectInstall(
     process.exit(1);
   }
   const session = claim.session;
-  if (
-    args.forceReloginProvider !== undefined &&
-    accountId !== undefined &&
-    session.account_id !== accountId
-  ) {
-    emitConnectStatus(args, {
-      outcome: { kind: "account_switch_refused" },
-      profileDir,
-      browser_location: claim.browser_location,
-      ownBrowserPid: placed.ownBrowserPid,
-    });
-    ui.fail(
-      `The scoped ${args.forceReloginProvider} refresh returned a different Trusty Squire account. ` +
-        `Refusing to replace ${agent.display_name}'s account binding; use bare --force-relogin ` +
-        `only when you intend to switch accounts.`,
-    );
-    process.exit(1);
+
+  // Only the completed claim identifies the account for a connect.
+  // On a busy broker, provider logout ran in its existing browser and the old
+  // profile binding survived; replace that binding before new agent calls.
+  if (!args.skipBrowser && session.account_id) {
+    await rebindBrokerProfileAccount(profileDir, session.account_id);
   }
 
   const storage = await openSessionStorage();

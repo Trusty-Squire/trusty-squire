@@ -31,6 +31,8 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { controlLabelV2 } from "../compact-observation-v2.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { brokerAccountBindingPath } from "../broker/account-binding.js";
+import { writeBrokerUnitMarker } from "../broker/managed-marker.js";
 
 vi.mock("../../session-guard.js", () => ({
   createSessionGuard: () => ({
@@ -248,6 +250,7 @@ async function connectFixture(
     openNeedsUser?: boolean;
     finishAfterObserves?: number;
     pollUntilDone?: (tabFinished: boolean) => Promise<boolean>;
+    boundAccount?: string;
   } = {},
 ): Promise<{
   result: unknown;
@@ -292,6 +295,20 @@ async function connectFixture(
   const { runCeremonyInSharedBroker } = await import("../google-login.js");
 
   const socketPath = discovery.defaultBrokerSocket(targetProfile);
+  if (opts.boundAccount !== undefined) {
+    const anchor = profileModule.profileDeviceAnchor(targetProfile);
+    if (anchor === null) throw new Error("fixture profile has no device anchor");
+    await writeBrokerUnitMarker(targetProfile, {
+      version: 1,
+      socket: socketPath,
+      profile: anchor,
+      accountBinding: opts.boundAccount,
+    });
+    await writeFile(
+      brokerAccountBindingPath(targetProfile),
+      JSON.stringify({ version: 1, accountId: opts.boundAccount }),
+    );
+  }
   await mkdir(dirname(socketPath), { recursive: true, mode: 0o700 });
   const lockPath = profileModule.profileOperationLockPath(targetProfile);
   const scriptPath = join(root, "broker-fixture.cjs");
@@ -313,7 +330,12 @@ async function connectFixture(
       // The exposure helper reads the holder's exec-time environment: a
       // foreign XAUTHORITY names the machine's own display, so the real
       // helper resolves already_visible without spawning any helpers.
-      env: { ...process.env, DISPLAY: ":0", XAUTHORITY: "/tmp/fixture-foreign-Xauthority", TS_SQLITE: require.resolve("better-sqlite3") },
+      env: {
+        ...process.env,
+        DISPLAY: ":0",
+        XAUTHORITY: "/tmp/fixture-foreign-Xauthority",
+        TS_SQLITE: require.resolve("better-sqlite3"),
+      },
     },
   );
   child.stderr?.on("data", (chunk) => process.stderr.write(`[broker fixture] ${String(chunk)}`));
@@ -371,6 +393,22 @@ async function connectFixture(
 }
 
 describe("connect attaches to the live broker for the profile it is connecting", () => {
+  it.each([
+    ["plain connect", undefined],
+    ["force re-login", ["google", "github"]],
+  ])(
+    "%s reaches the sign-in tab even when the profile is bound to another account",
+    async (_name, forceReloginProviders) => {
+      const outcome = await connectFixture({
+        boundAccount: "previous-account",
+        ...(forceReloginProviders ? { forceReloginProviders } : {}),
+      });
+      expect(outcome.result).toEqual({ status: "satisfied", closeState: "closed" });
+      expect(outcome.openUrl).toBe(CONFIRM_URL);
+      expect(outcome.lockNeverReleased).toBe(true);
+    },
+    30_000,
+  );
   it(
     "uses an arrived Finish callback without waiting for a broker tab observation",
     { timeout: 30_000 },
@@ -457,7 +495,9 @@ describe("connect attaches to the live broker for the profile it is connecting",
         },
       });
       expect(outcome.result).toEqual({ status: "satisfied", closeState: "closed" });
-      expect(outcome.commands.filter((command) => command.name === "operate_observe")).toHaveLength(3);
+      expect(outcome.commands.filter((command) => command.name === "operate_observe")).toHaveLength(
+        3,
+      );
       expect(outcome.closedSession).toBe("tab-1");
       expect(outcome.lockNeverReleased).toBe(true);
     },

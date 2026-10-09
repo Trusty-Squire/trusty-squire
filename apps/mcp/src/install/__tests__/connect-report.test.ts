@@ -202,7 +202,6 @@ describe("buildConnectReport", () => {
       { kind: "profile_busy" },
       { kind: "install_unclaimed", confirm_url: "https://example.test/in" },
       { kind: "install_expired" },
-      { kind: "account_switch_refused" },
       { kind: "cookie_clear_failed" },
       { kind: "run_failed" },
     ];
@@ -323,16 +322,6 @@ describe("buildConnectReport", () => {
     // The ceremony landed Google and the session was written: this run knows
     // exactly which account the machine is bound to, so it says so.
     expect(report.account).toEqual({ id: "acc_1", providers: ["google"] });
-  });
-
-  it("names a refused account switch as its own reason", () => {
-    const report = classify({
-      outcome: { kind: "account_switch_refused" },
-      browser_location: { kind: "host_screen", display: ":0" },
-    });
-    expect(report.state).toBe("no-browser");
-    expect(report.reason).toBe("account_mismatch");
-    expect(report.sign_in_url).toBeNull();
   });
 
   it("always emits the same seven fields", () => {
@@ -503,7 +492,6 @@ describe("the non-terminal sign-in line", () => {
       { kind: "profile_busy" },
       { kind: "install_unclaimed", confirm_url: "https://example.test/in" },
       { kind: "install_expired" },
-      { kind: "account_switch_refused" },
       { kind: "cookie_clear_failed" },
       { kind: "run_failed" },
     ];
