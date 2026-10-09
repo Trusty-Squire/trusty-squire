@@ -53,6 +53,25 @@ describe("page readiness", () => {
     expect(readiness.elapsedMs).toBeGreaterThanOrEqual(96);
   });
 
+  it("waits for Shopify shipping-rate radios before the approval total read", async () => {
+    let loading = true;
+    document.querySelectorAll = () =>
+      [{ name: "shipping_rate", id: "loading", disabled: loading }] as never[];
+    const waiting = waitForPageReady(page, { kind: "checkout-total" });
+    await vi.advanceTimersByTimeAsync(96);
+    loading = false;
+    await vi.advanceTimersByTimeAsync(16);
+    expect(await waiting).toMatchObject({ ready: true });
+  });
+
+  it("returns after a bounded shipping-rate wait so an approval read can proceed", async () => {
+    document.querySelectorAll = () =>
+      [{ name: "shipping_rate", id: "loading", disabled: true }] as never[];
+    const waiting = waitForPageReady(page, { kind: "checkout-total" });
+    await vi.advanceTimersByTimeAsync(PAGE_READY_CAPS.checkoutShippingRates + 16);
+    expect(await waiting).toMatchObject({ ready: true });
+  });
+
   it("reports an unrendered document after the original 1.5 s cap", async () => {
     const waiting = waitForPageReady(page, { kind: "drive-read" });
     await vi.advanceTimersByTimeAsync(PAGE_READY_CAPS.driveEmpty + 16);

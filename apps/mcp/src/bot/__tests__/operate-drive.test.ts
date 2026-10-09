@@ -41,8 +41,6 @@ import {
   decideAfterJev,
   driveCandidates,
   isCandidateRow,
-  actionHistoryLine,
-  scrollDescription,
   fillActionForCandidate,
   fillableCandidates,
   isOtpRow,
@@ -65,6 +63,7 @@ import {
   solverOutcomeBlocksSubmit,
   DRIVE_IN_FLIGHT_MS,
   outstandingRequiredFill,
+  outstandingEmptyFill,
   checkoutWorkBeforeCard,
   paymentArgs,
   driveApprovalPageTexts,
@@ -1638,6 +1637,12 @@ describe("form-fill assignment helpers", () => {
       ["@e:go", "b", "Continue|s=d"],
     ];
     expect(disabledSubmitKind(invalid, 0)).toBe("needs_fill");
+    const shopifyComplete: WireRow[] = [
+      ["@e:name", "t", "Name on card|f=name_on_card|s=ri|n=Lunchbox Test"],
+      ["@e:shadow", "t", "Name on card|nf=1|s=r"],
+      ["@e:pay", "b", "Pay now|fo=checkout"],
+    ];
+    expect(outstandingEmptyFill(shopifyComplete, [], true)).toBeUndefined();
     expect(
       fillableCandidates(invalid, { email: "a@b.test" }, false, ["@e:email"]).map((c) => c.ref),
     ).toEqual(["@e:email"]);
@@ -1746,6 +1751,11 @@ describe("form-fill assignment helpers", () => {
       typedValueEquals("(212) 555-0124", "2125550123", ["@e:phone", "t", "Phone|f=phone"]),
     ).toBe(false);
     expect(typedValueEquals("01", "1", ["@e:qty", "t", "Quantity|it=number"])).toBe(true);
+    expect(typedValueEquals("11 / 29", "11/29", ["@e:exp", "t", "Expiration date (MM / YY)|f=card_expiry"])).toBe(true);
+    expect(typedValueEquals("11-29", "11 / 29", ["@e:exp", "t", "Expiration date (MM / YY)"])).toBe(true);
+    expect(typedValueEquals("12 / 29", "11/29", ["@e:exp", "t", "Expiration date (MM / YY)"])).toBe(false);
+    expect(typedValueEquals("2029-11-03", "2029/11/03", ["@e:date", "t", "Delivery date"])).toBe(true);
+    expect(typedValueEquals("4242-4242", "42424242", ["@e:pan", "t", "Card number|f=payment"])).toBe(true);
     expect(typedValueEquals("(212) 555-0123", "2125550123", ["@e:name", "t", "Name"])).toBe(false);
     expect(typedFieldMismatchReason("First name", "Squire", "Squir")).toBe(
       'typed First name as "Squire" but the field shows "Squir"',
@@ -3559,6 +3569,23 @@ describe("drive approval amount", () => {
     expect(args?.reason).toBe("pay for the order");
   });
 
+  it("keeps the first approval's terms when Shopify updates its total before resume", () => {
+    const pending = {
+      ...session,
+      activePayment: {
+        status: "awaiting_approval" as const,
+        state: {
+          approval_id: "approval_68",
+          cardRef: "card-original",
+          checkout: { merchant: "whitejade.xyz", amount_cents: 6800, currency: "USD" },
+        },
+      } as unknown as Session["activePayment"],
+    };
+    const args = paymentArgs(pending, { card_ref: "card-new", merchant: "changed.test" }, "pay for the order", checkout,
+      [PAYMENT, cvv], ["Shipping $8.00\\nTotal $76.00 USD"]);
+    expect(args).toMatchObject({ approval_id: "approval_68", merchant: "whitejade.xyz", amount_cents: 6800, currency: "USD", card_ref: "card-original" });
+  });
+
   it("does not let a facts amount replace the page total, and says they disagreed", () => {
     const args = paymentArgs(
       session,
@@ -3596,6 +3623,7 @@ describe("drive approval page texts", () => {
         reads += 1;
         return text;
       },
+      waitForFunction: async () => undefined,
     } as unknown as Page;
     return { page, reads: () => reads };
   }

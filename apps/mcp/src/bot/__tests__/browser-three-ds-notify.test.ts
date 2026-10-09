@@ -42,9 +42,18 @@ async function page(): Promise<{ context: BrowserContext; page: Page }> {
   return { context, page: await context.newPage() };
 }
 
-function stubApi(): { api: ApiClient; notifyThreeDs: ReturnType<typeof vi.fn> } {
+function stubApi(): {
+  api: ApiClient;
+  notifyThreeDs: ReturnType<typeof vi.fn>;
+  auditPayment: ReturnType<typeof vi.fn>;
+} {
   const notifyThreeDs = vi.fn(async () => ({ sent: true }));
-  return { api: { notifyThreeDs } as unknown as ApiClient, notifyThreeDs };
+  const auditPayment = vi.fn(async () => ({ id: "audit_1" }));
+  return {
+    api: { notifyThreeDs, auditPayment } as unknown as ApiClient,
+    notifyThreeDs,
+    auditPayment,
+  };
 }
 
 // A released card is the only state in which a 3-D Secure challenge is ours to
@@ -53,7 +62,11 @@ function stubApi(): { api: ApiClient; notifyThreeDs: ReturnType<typeof vi.fn> } 
 async function releasedCardSession(
   isolated: { context: BrowserContext; page: Page },
   body: string,
-): Promise<{ sessionId: string; notifyThreeDs: ReturnType<typeof vi.fn> }> {
+): Promise<{
+  sessionId: string;
+  notifyThreeDs: ReturnType<typeof vi.fn>;
+  auditPayment: ReturnType<typeof vi.fn>;
+}> {
   const topUrl = "https://merchant.test/checkout";
   await isolated.page.route("**/*", (route) =>
     route.request().url() === topUrl
@@ -61,7 +74,7 @@ async function releasedCardSession(
       : route.fulfill({ status: 404, body: "not found" }),
   );
   const controller = BrowserController.fromHarnessPage(isolated.page);
-  const { api, notifyThreeDs } = stubApi();
+  const { api, notifyThreeDs, auditPayment } = stubApi();
   const started = await startHarnessProvisionSession({
     browser: controller,
     serviceUrl: topUrl,
@@ -81,10 +94,42 @@ async function releasedCardSession(
     deadline: Date.now() + 60_000,
     card: CARD,
   };
-  return { sessionId: started.session_id, notifyThreeDs };
+  return { sessionId: started.session_id, notifyThreeDs, auditPayment };
 }
 
 describe("3-D Secure detection and notification", () => {
+  it.skipIf(!available)("records a confirmed order once after a flat checkout click", async () => {
+    const isolated = await page();
+    let sessionId: string | undefined;
+    try {
+      const released = await releasedCardSession(
+        isolated,
+        '<button id="pay" onclick="document.body.innerHTML = \'<h1>Your order is confirmed</h1>\'">Pay now</button>',
+      );
+      sessionId = released.sessionId;
+      await isolated.page.locator("#pay").click();
+      expect((await observe(sessionId)).three_ds).toMatchObject({
+        state: "merchant_order_confirmed",
+      });
+      expect((await observe(sessionId)).three_ds).toMatchObject({
+        state: "merchant_order_confirmed",
+      });
+      expect(released.auditPayment).toHaveBeenCalledTimes(1);
+      expect(released.auditPayment).toHaveBeenCalledWith({
+        merchant: "Synthetic Merchant",
+        amount_cents: 123,
+        currency: "JPY",
+        last4: "1111",
+        status: "merchant_order_confirmed",
+        card_ref: "card_synthetic",
+        approval_id: "approval_3ds",
+      });
+    } finally {
+      if (sessionId !== undefined) await finishProvisionSession(sessionId).catch(() => undefined);
+      await isolated.context.close();
+    }
+  });
+
   it.skipIf(!available)(
     "reports a rendered challenge and notifies the cardholder exactly once",
     async () => {

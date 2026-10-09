@@ -33,6 +33,7 @@ export type PageReadyRequest =
   | { kind: "navigation-timeout" }
   | { kind: "form-start" }
   | { kind: "form-controls"; capMs: number }
+  | { kind: "checkout-total" }
   | { kind: "auth-widget"; capMs: number };
 
 // Historical ceilings. A timeout never makes an unrendered page safe to read.
@@ -65,6 +66,7 @@ export const PAGE_READY_CAPS = {
   formDocument: 5_000,
   formNetwork: 1_500,
   formAuthWidget: 8_000,
+  checkoutShippingRates: 3_000,
   modelWait: 1_500,
 } as const;
 const INTERACTIVE =
@@ -218,6 +220,20 @@ export async function waitForPageReady(
     documentLoaded = true;
 
   switch (request.kind) {
+    case "checkout-total":
+      // Shopify can paint the subtotal before it finishes shipping-rate
+      // calculation. This only delays the read; timing out never refuses it.
+      add(
+        "checkout_shipping_rates",
+        C.checkoutShippingRates,
+        until(() => {
+          const rates = Array.from(
+            document.querySelectorAll<HTMLInputElement>('input[type="radio"]'),
+          ).filter((input) => /shipping|delivery/i.test(`${input.name} ${input.id}`));
+          return rates.length === 0 || !rates.some((input) => input.disabled);
+        }, undefined),
+      );
+      break;
     case "model-wait": // Model WAIT remains a deliberate 1.5 s re-observation.
       add("model_wait", C.modelWait, (cap) => pause(cap, request.signal));
       break;
@@ -480,6 +496,7 @@ export async function waitForPageReady(
     elapsedMs: Date.now() - started,
   });
   const eventOnly = [
+    "checkout-total",
     "overlay",
     "overlay-refresh",
     "identical-resnap",
