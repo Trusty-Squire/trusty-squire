@@ -3108,13 +3108,74 @@ export function requiredFactSelectAction(
   _goal?: string,
 ): { target: string; text: string } | undefined {
   const includePayment = facts.card_ref !== undefined;
+  const formScope = autoFillFormScope(rows, facts, pageUrl);
+  if (formScope === null) return undefined;
   for (const candidate of fillableCandidates(rows, facts, includePayment, filledRefs, pageUrl)) {
     if (!isSelectRow(candidate.row)) continue;
+    if (formScope !== undefined && rowFormId(candidate.row) !== formScope) continue;
     const fact = firstFactValue(facts, matchingFactKeys(facts, candidate.row));
     if (fact === undefined) continue;
     return { target: candidate.ref, text: fact };
   }
   return undefined;
+}
+
+/** Keep automatic fact fills in the checkout form chosen from the whole page.
+ * Pending fields alone would switch to a footer form after delivery is filled.
+ * On other pages, distinct actionable forms need the model to choose the step.
+ */
+function autoFillFormScope(
+  rows: readonly WireRow[],
+  facts: Record<string, string>,
+  pageUrl: string,
+): string | null | undefined {
+  if (!isCheckoutUrl(pageUrl)) {
+    if (
+      /(?:^|\/)products?(?:\/|$)/.test(urlPathname(pageUrl)) &&
+      rows.some(
+        (row) => isClickableRow(row) && /\b(?:add to cart|buy now)\b/i.test(readableLabel(row)),
+      )
+    )
+      return null;
+    const actionableForms = new Set(
+      rows
+        .filter((row) => !isDisabledRow(row) && (isFillableRow(row) || isClickableRow(row)))
+        .map(rowFormId)
+        .filter((id): id is string => id !== undefined),
+    );
+    return actionableForms.size > 1 ? null : undefined;
+  }
+  const coverage = new Map<string, Set<string>>();
+  const checkoutForms = new Set<string>();
+  for (const row of rows) {
+    const form = rowFormId(row);
+    if (form === undefined) continue;
+    checkoutForms.add(form);
+    // A newsletter, discount, or name-only footer form can outlive delivery.
+    // Its fact overlap does not make it the next checkout step.
+    const label = readableLabel(row);
+    const checkoutField =
+      /(?:address|street|city|state|province|zip|postal|country|shipping|delivery|card number|security code|cvv|expir)/i.test(
+        label,
+      );
+    const checkoutAction =
+      isClickableRow(row) &&
+      /\b(?:continue|pay now|place order|complete purchase|checkout)\b/i.test(label);
+    if (checkoutField || checkoutAction)
+      coverage.set(form, coverage.get(form) ?? new Set<string>());
+  }
+  for (const row of rows) {
+    const form = rowFormId(row);
+    if (form === undefined || !coverage.has(form) || !isFillableRow(row)) continue;
+    const keys = coverage.get(form)!;
+    for (const key of matchingFactKeys(facts, row)) keys.add(key);
+    coverage.set(form, keys);
+  }
+  const ranked = [...coverage].sort((left, right) => right[1].size - left[1].size);
+  if (ranked.length === 0) return checkoutForms.size > 0 ? null : undefined;
+  if (ranked[0]![1].size === 0) return null;
+  if (ranked.length > 1 && ranked[0]![1].size === ranked[1]![1].size) return null;
+  return ranked[0]![0];
 }
 
 /** The typeable fact the drive must write itself before asking the model.
@@ -3130,51 +3191,11 @@ export function requiredFactTypeAction(
   _goal?: string,
 ): { target: string; text: string } | undefined {
   const includePayment = facts.card_ref !== undefined;
-  const checkoutForms = new Map<string, Set<string>>();
-  if (isCheckoutUrl(pageUrl)) {
-    for (const row of rows) {
-      const form = rowFormId(row);
-      if (form === undefined || !isFillableRow(row) || isOffscreenRow(row)) continue;
-      const keys = checkoutForms.get(form) ?? new Set<string>();
-      for (const key of matchingFactKeys(facts, row)) keys.add(key);
-      checkoutForms.set(form, keys);
-    }
-  }
-  const primaryForm = [...checkoutForms].sort(
-    (left, right) => right[1].size - left[1].size,
-  )[0]?.[0];
-  const primaryStart = rows.findIndex((row) => rowFormId(row) === primaryForm);
-  const candidates = fillableCandidates(rows, facts, includePayment, filledRefs, pageUrl).filter(
-    (candidate) => {
-      const form = rowFormId(candidate.row);
-      if (primaryForm === undefined || form === undefined || form === primaryForm) return true;
-      if (isExpiryRow(candidate.row) || isCardholderNameRow(candidate.row)) return true;
-      // A contact form before delivery may still need its email. A footer
-      // newsletter or phantom name form after delivery is not checkout work.
-      return rows.findIndex((row) => rowFormId(row) === form) < primaryStart;
-    },
-  );
-  // Checkout pages often contain discount, wallet, and payment forms beside
-  // delivery. Count only forms with fields backed by supplied facts. Prefer a
-  // unique form with the broadest fact coverage; a duplicated newsletter
-  // email alone cannot compete with a full delivery address. Equal coverage
-  // remains a real ambiguity for Jev and the operator handback.
-  const coverage = new Map<string, Set<string>>();
-  const pendingForms = new Set(candidates.map((candidate) => rowFormId(candidate.row)));
-  for (const row of rows) {
-    const form = rowFormId(row);
-    if (form === undefined || !pendingForms.has(form) || !isFillableRow(row) || isOffscreenRow(row))
-      continue;
-    const fields = coverage.get(form) ?? new Set<string>();
-    for (const key of matchingFactKeys(facts, row)) fields.add(key);
-    coverage.set(form, fields);
-  }
-  const ranked = [...coverage].sort((left, right) => right[1].size - left[1].size);
-  if (ranked.length > 1 && ranked[0]![1].size === ranked[1]![1].size) return undefined;
-  const selectedForm = ranked[0]?.[0];
-  for (const candidate of candidates) {
+  const formScope = autoFillFormScope(rows, facts, pageUrl);
+  if (formScope === null) return undefined;
+  for (const candidate of fillableCandidates(rows, facts, includePayment, filledRefs, pageUrl)) {
     if (isSelectRow(candidate.row)) continue;
-    if (selectedForm !== undefined && rowFormId(candidate.row) !== selectedForm) continue;
+    if (formScope !== undefined && rowFormId(candidate.row) !== formScope) continue;
     const fact = firstFactValue(facts, matchingFactKeys(facts, candidate.row));
     if (fact === undefined) continue;
     return { target: candidate.ref, text: fact };
