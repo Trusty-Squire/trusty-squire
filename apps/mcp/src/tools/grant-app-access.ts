@@ -43,15 +43,6 @@ export const grantAppAccessTool: Tool<z.infer<typeof inputSchema>> = {
   name: "grant_app_access",
   description: DESCRIPTION,
   inputSchema,
-  jsonInputSchema: {
-    type: "object",
-    properties: {
-      reference: { type: "string" },
-      service: { type: "string" },
-      rate_limit_per_hour: { type: "number" },
-      spend_cap_usd: { type: "number" },
-    },
-  },
   meta: ALWAYS_LOAD_META,
   async handler(args, api) {
     assertApi(api);

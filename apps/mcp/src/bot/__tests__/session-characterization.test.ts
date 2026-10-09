@@ -1,3 +1,4 @@
+import { inputJsonSchema } from "../../tools/input-json-schema.js";
 import { mockBrowserUseCapture } from "./browser-use-test-capture.js";
 // Phase 0 of the operator session-management restructure: a characterization
 // ORACLE, not new behavior. It pins what the driving agent and the internal
@@ -302,26 +303,26 @@ describe("characterization: registered operator tool surface", () => {
   });
 
   it("merges query and cursor into the observation schema", () => {
-    expect(provisionObserveTool.jsonInputSchema).toEqual({
+    expect(inputJsonSchema(provisionObserveTool.inputSchema)).toMatchObject({
       type: "object",
       required: ["session_id"],
       properties: {
-        session_id: { type: "string" },
+        session_id: { type: "string", minLength: 1 },
         format: { type: "string", enum: ["compact", "full"] },
-        query: { type: "string" },
-        cursor: { type: "string" },
+        query: { type: "string", maxLength: 160 },
+        cursor: { type: "string", maxLength: 1024 },
         role: {
           type: "string",
           minLength: 1,
           maxLength: 64,
           pattern: "^[a-z][a-z0-9-]*$",
         },
-        subtree_ref: { type: "string" },
+        subtree_ref: { type: "string", minLength: 1, maxLength: 512 },
         raw_attributes: { type: "boolean" },
       },
     });
     expect(provisionStartTool.name).toBe("operate_start");
-    const startProperties = provisionStartTool.jsonInputSchema.properties as Record<
+    const startProperties = inputJsonSchema(provisionStartTool.inputSchema).properties as Record<
       string,
       unknown
     >;

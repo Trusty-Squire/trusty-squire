@@ -133,7 +133,10 @@ const proxySchema = z
         message: "proxy credentials contain invalid percent encoding",
       });
     }
-  });
+  })
+  .describe(
+    "Optional per-session HTTP/HTTPS proxy URL with or without credentials, or unauthenticated SOCKS5 URL. HTTP/HTTPS passwords require a non-empty username; authenticated SOCKS5 is unsupported by the browser engine. Sensitive and launch-only; never returned or saved.",
+  );
 
 const startSchema = z.object({
   service_url: z.string().url(),
@@ -167,7 +170,6 @@ const ACTION_FORMAT_NOTE =
 
 const ACTION_FORMATS = ["compact", "full"] as const;
 const actionFormatSchema = z.enum(ACTION_FORMATS);
-const actionFormatJson = { type: "string", enum: [...ACTION_FORMATS] };
 
 export const provisionStartTool: Tool<z.infer<typeof startSchema>> = {
   name: "operate_start",
@@ -184,19 +186,6 @@ export const provisionStartTool: Tool<z.infer<typeof startSchema>> = {
     "Call operate_extract when you reach the credentials. Always operate_finish when done. The " +
     "browser has unrestricted egress.",
   inputSchema: startSchema,
-  jsonInputSchema: {
-    type: "object",
-    required: ["service_url"],
-    properties: {
-      service_url: { type: "string" },
-      format: { type: "string", enum: ["compact", "full"] },
-      proxy: {
-        type: "string",
-        description:
-          "Optional per-session HTTP/HTTPS proxy URL with or without credentials, or unauthenticated SOCKS5 URL. HTTP/HTTPS passwords require a non-empty username; authenticated SOCKS5 is unsupported by the browser engine. Sensitive and launch-only; never returned or saved.",
-      },
-    },
-  },
   async handler(args, api, context) {
     const consentInboxRead = await readInboxConsent();
     return await startProvisionSession({
@@ -239,24 +228,6 @@ export const provisionObserveTool: Tool<z.infer<typeof observeSchema>> = {
     DOM_OBSERVATION_CONTRACT +
     "Supplying query, role, or cursor always selects the compact control-map path, regardless of format.",
   inputSchema: observeSchema,
-  jsonInputSchema: {
-    type: "object",
-    required: ["session_id"],
-    properties: {
-      session_id: { type: "string" },
-      query: { type: "string" },
-      cursor: { type: "string" },
-      role: {
-        type: "string",
-        minLength: 1,
-        maxLength: 64,
-        pattern: "^[a-z][a-z0-9-]*$",
-      },
-      format: { type: "string", enum: ["compact", "full"] },
-      subtree_ref: { type: "string" },
-      raw_attributes: { type: "boolean" },
-    },
-  },
   async handler(args) {
     if (args.subtree_ref !== undefined) {
       return await observeSubtree(args.session_id, args.subtree_ref, args.raw_attributes === true);
@@ -295,16 +266,6 @@ export const provisionScreenshotTool: Tool<z.infer<typeof screenshotSchema>> = {
     "A click_binding authorizes one dispatched operate_click point in original image pixels for 60 seconds; " +
     "navigation, scroll, viewport, or frame changes invalidate it. Without a binding, capture again before a coordinate click.",
   inputSchema: screenshotSchema,
-  jsonInputSchema: {
-    type: "object",
-    required: ["session_id"],
-    properties: {
-      session_id: { type: "string" },
-      frame_index: { type: "number" },
-      frame_url_contains: { type: "string" },
-      full_page: { type: "boolean" },
-    },
-  },
   jsonOutputSchema: {
     type: "object",
     properties: {
@@ -343,15 +304,6 @@ export const provisionNetworkTool: Tool<z.infer<typeof networkSchema>> = {
   description:
     "Read raw browser evidence collected since session start: requests, responses, pending/completed/failed state, HTTP status, loading failures, CORS/blocked reasons, console messages, exceptions, and screenshot events. Pass the returned cursor as since for an incremental read, or request_id for one request. This surface does not diagnose payment stages. Released card PAN/CVV copies are masked; status bodies and all unrelated values remain visible.",
   inputSchema: networkSchema,
-  jsonInputSchema: {
-    type: "object",
-    required: ["session_id"],
-    properties: {
-      session_id: { type: "string" },
-      since: { type: "integer", minimum: 0 },
-      request_id: { type: "string" },
-    },
-  },
   annotations: { readOnlyHint: true },
   async handler(args) {
     return readOperatorEvidence(args.session_id, args.since ?? 0, args.request_id);
@@ -369,7 +321,11 @@ const storeShape = z.object({
   // read, not a guess. Unioned with the service-default + start/auto_widen
   // scope (never mid_session task scope). Omit for a single-service key.
   api_hosts: z.array(z.string().min(1).max(253)).max(10).optional(),
-  egress_hosts: z.array(z.string().min(1).max(253)).max(10).optional(),
+  egress_hosts: z
+    .array(z.string().min(1).max(253))
+    .max(10)
+    .optional()
+    .describe("Deprecated alias for api_hosts; removed next minor"),
   auth_shape: z
     .string()
     .max(120)
@@ -392,92 +348,18 @@ const captureSchema = z
   .strict();
 const captureClickSchema = captureSchema.omit({ write_id: true });
 const captureExtractSchema = captureSchema.extend({
-  source: captureSourceSchema.refine(
-    (source) => !("clipboard" in source),
-    "capture.source.clipboard is only valid on operate_click",
-  ),
+  source: z.union([captureSourceSchema.options[0], captureSourceSchema.options[1]], {
+    errorMap: (issue, ctx) => ({
+      message:
+        issue.code === z.ZodIssueCode.invalid_union &&
+        typeof ctx.data === "object" &&
+        ctx.data !== null &&
+        "clipboard" in ctx.data
+          ? "capture.source.clipboard is only valid on operate_click"
+          : ctx.defaultError,
+    }),
+  }),
 });
-const captureJson = {
-  type: "object",
-  additionalProperties: false,
-  required: ["store", "source"],
-  properties: {
-    store: {
-      type: "object",
-      required: ["service"],
-      properties: {
-        service: { type: "string" },
-        label: { type: "string" },
-        env_var_suggestion: { type: "string" },
-        type: { type: "string" },
-        api_hosts: { type: "array", items: { type: "string" } },
-        egress_hosts: {
-          type: "array",
-          items: { type: "string" },
-          deprecated: true,
-          description: "Deprecated alias for api_hosts; removed next minor",
-        },
-        auth_shape: { type: "string" },
-      },
-    },
-    source: {
-      type: "object",
-      additionalProperties: false,
-      oneOf: [
-        { required: ["role"], not: { required: ["selector"] } },
-        {
-          required: ["selector"],
-          not: { anyOf: [{ required: ["role"] }, { required: ["name"] }] },
-        },
-        {
-          required: ["clipboard"],
-          not: {
-            anyOf: [
-              { required: ["role"] },
-              { required: ["name"] },
-              { required: ["selector"] },
-              { required: ["container"] },
-            ],
-          },
-        },
-      ],
-      properties: {
-        clipboard: { type: "boolean", const: true },
-        selector: { type: "string", minLength: 1, maxLength: 2000 },
-        role: { type: "string", enum: ["textbox", "code"] },
-        name: { type: "string", maxLength: 200 },
-        container: {
-          type: "object",
-          additionalProperties: false,
-          required: ["role"],
-          properties: {
-            role: { type: "string", enum: ["dialog", "region"] },
-            name: { type: "string", maxLength: 200 },
-          },
-        },
-      },
-    },
-    write_id: { type: "string", minLength: 1, maxLength: 128, pattern: "^[a-zA-Z0-9:_-]+$" },
-  },
-};
-
-const captureJsonFor = (toolName: string) => {
-  const { write_id: _writeId, ...actionProperties } = captureJson.properties;
-  if (toolName === "operate_click") return { ...captureJson, properties: actionProperties };
-  const { clipboard: _clipboard, ...sourceProperties } = captureJson.properties.source.properties;
-  return {
-    ...captureJson,
-    properties: {
-      ...(toolName === "operate_extract" ? captureJson.properties : actionProperties),
-      source: {
-        ...captureJson.properties.source,
-        oneOf: captureJson.properties.source.oneOf.slice(0, 2),
-        properties: sourceProperties,
-      },
-    },
-  };
-};
-
 const CAPTURE_NOTE =
   " Optional capture:{store,source:{role,name?,container?}|{selector,container?}} stores one revealed value after the action and returns metadata, not the value; resolved_source names the element. " +
   "Use store.api_hosts for API hosts this credential may be sent to; store.egress_hosts is a deprecated alias removed next minor. " +
@@ -599,21 +481,6 @@ async function captureIntoVault(
   }
 }
 
-const storeJsonProps = {
-  service: { type: "string" },
-  label: { type: "string" },
-  env_var_suggestion: { type: "string" },
-  type: { type: "string" },
-  api_hosts: { type: "array", items: { type: "string" } },
-  egress_hosts: {
-    type: "array",
-    items: { type: "string" },
-    deprecated: true,
-    description: "Deprecated alias for api_hosts; removed next minor",
-  },
-  auth_shape: { type: "string" },
-} as const;
-
 const formSelectionsSchema = z
   .record(z.string().min(1).max(200), z.string().min(1).max(4096))
   .refine((value) => Object.keys(value).length > 0, "Provide at least one selection")
@@ -688,19 +555,6 @@ export const provisionExtractTool: Tool<z.infer<typeof extractSchema>> = {
     "`store` is used, the response omits credential values and returns only vault " +
     "metadata. With `into_slot`, the copied value goes into a session slot instead.",
   inputSchema: extractSchema,
-  jsonInputSchema: {
-    type: "object",
-    required: ["session_id"],
-    properties: {
-      session_id: { type: "string" },
-      into_slot: { type: "string" },
-      store: {
-        type: "object",
-        required: ["service"],
-        properties: storeJsonProps,
-      },
-    },
-  },
   handler: handleExtract,
 };
 
@@ -897,15 +751,6 @@ const vaultCredentialFieldsDescription =
   'Exact field_names from list_credentials for the selected reference. Defaults to ["login","password"] ' +
   'for logins saved by operate_login; use ["username","password"] when those are the stored names. ' +
   "Use operate_type with each returned slot to fill its matching form control.";
-const vaultCredentialFieldsJson = {
-  type: "array",
-  items: { type: "string" },
-  minItems: 1,
-  maxItems: 20,
-  default: ["login", "password"],
-  description: vaultCredentialFieldsDescription,
-};
-
 const sealVaultCredentialBaseSchema = z.object({
   session_id: z.string().min(1),
   reference: z.string().min(1).max(400).optional(),
@@ -992,55 +837,6 @@ export const operateLoginTool: Tool<z.infer<typeof loginSchema>> = {
     "'load_saved' fetches an allowed saved login through encrypted browser-fill and seals " +
     "its fields into session slots. Use operate_type with slot to fill returned slots.",
   inputSchema: loginSchema,
-  jsonInputSchema: {
-    type: "object",
-    oneOf: [
-      {
-        required: ["session_id", "provider", "ref"],
-        properties: {
-          session_id: { type: "string" },
-          action: { const: "oauth" },
-          provider: { type: "string", enum: ["google", "github"] },
-          ref: { type: "string" },
-        },
-      },
-      {
-        required: ["action", "session_id"],
-        properties: {
-          action: { const: "prepare_signup" },
-          session_id: { type: "string" },
-          login_slot: { type: "string" },
-          password_slot: { type: "string" },
-          password_length: { type: "number" },
-        },
-      },
-      {
-        required: ["action", "session_id", "service", "login_hosts"],
-        properties: {
-          action: { const: "store_signup" },
-          session_id: { type: "string" },
-          service: { type: "string" },
-          login_slot: { type: "string" },
-          password_slot: { type: "string" },
-          label: { type: "string" },
-          signin_url: { type: "string" },
-          login_hosts: { type: "array", items: { type: "string" } },
-        },
-      },
-      {
-        required: ["action", "session_id"],
-        anyOf: [{ required: ["reference"] }, { required: ["service"] }],
-        properties: {
-          action: { const: "load_saved" },
-          session_id: { type: "string" },
-          reference: { type: "string" },
-          service: { type: "string" },
-          fields: vaultCredentialFieldsJson,
-          slot_prefix: { type: "string" },
-        },
-      },
-    ],
-  },
   async handler(args, api) {
     if ("provider" in args) {
       return await runAction(args.session_id, {
@@ -1078,19 +874,12 @@ async function runAction(
 
 const sessionShape = { session_id: z.string().min(1) };
 const refSchema = z.string().min(1).max(200);
-const sessionJson = { session_id: { type: "string" } };
-const refJson = { ref: { type: "string" } };
 
 const navigateSchema = z.object({ ...sessionShape, url: z.string().url() });
 export const operateNavigateTool: Tool<z.infer<typeof navigateSchema>> = {
   name: "operate_navigate",
   description: "Navigate the session to a URL without session host restrictions.",
   inputSchema: navigateSchema,
-  jsonInputSchema: {
-    type: "object",
-    required: ["session_id", "url"],
-    properties: { ...sessionJson, url: { type: "string", format: "uri" } },
-  },
   handler: async (args) => await runAction(args.session_id, { kind: "goto", url: args.url }),
 };
 
@@ -1111,36 +900,14 @@ const clickSchema = z
   })
   .refine((args) => (args.ref !== undefined) !== (args.screenshot !== undefined), {
     message: "Provide exactly one of ref or screenshot",
-  });
+  })
+  .describe("Provide exactly one of ref or screenshot.");
 export const operateClickTool: Tool<z.infer<typeof clickSchema>> = {
   name: "operate_click",
   description:
     ACTION_FORMAT_NOTE +
     "Prefer a current observation ref or unique @label. If a screenshot-visible control has no usable ref, pass screenshot:{screenshot_id,x,y} from operate_screenshot.click_binding, in original image pixels. Provide exactly one of ref or screenshot. target_unresolved means the label was never issued in this document; stale_ref means its reference or alias expired. stale_screenshot requires a new image. Each image binding permits one DISPATCHED attempt; invalid_screenshot_point (a point outside the image or one that resolves no node) does not consume the binding, so a corrected point may retry the same image. After an uncertain click, observe before deciding any new action. If 3-D Secure bank approval is in progress, do not click, type, navigate, reload, resubmit, or trigger another verification. Only watch with operate_screenshot or operate_observe (short, non-blocking checks) until checkout resolves. Use inject_card for saved-card field entry. A pointer-interception failure may use guarded DOM dispatch internally only when the executor proves no click was dispatched.",
   inputSchema: clickSchema,
-  jsonInputSchema: {
-    type: "object",
-    required: ["session_id"],
-    oneOf: [
-      { required: ["ref"], not: { required: ["screenshot"] } },
-      { required: ["screenshot"], not: { required: ["ref"] } },
-    ],
-    properties: {
-      ...sessionJson,
-      ...refJson,
-      format: actionFormatJson,
-      screenshot: {
-        type: "object",
-        additionalProperties: false,
-        required: ["screenshot_id", "x", "y"],
-        properties: {
-          screenshot_id: { type: "string", format: "uuid" },
-          x: { type: "number", minimum: 0 },
-          y: { type: "number", minimum: 0 },
-        },
-      },
-    },
-  },
   async handler(args) {
     const action = {
       kind: "click" as const,
@@ -1202,34 +969,24 @@ const typeSchema = z
     text: z.string().max(4096).optional(),
     slot: z.string().min(1).max(60).optional(),
     submit: z.boolean().optional(),
-    capture: z.unknown().optional(),
+    capture: z
+      .unknown()
+      .optional()
+      .describe(
+        "Deprecated and rejected; perform the action, then call operate_extract({capture}). Removed next minor.",
+      ),
     format: actionFormatSchema.optional(),
   })
   .refine((args) => (args.text !== undefined) !== (args.slot !== undefined), {
     message: "Provide exactly one of text or slot",
-  });
+  })
+  .describe("Provide exactly one of text or slot.");
 export const operateTypeTool: Tool<z.infer<typeof typeSchema>> = {
   name: "operate_type",
   description:
     ACTION_FORMAT_NOTE +
     "Fill a control with text, or a session slot returned by operate_login or operate_extract. Provide exactly one of text or slot. submit presses Enter after a successful fill.",
   inputSchema: typeSchema,
-  jsonInputSchema: {
-    type: "object",
-    required: ["session_id", "ref"],
-    oneOf: [
-      { required: ["text"], not: { required: ["slot"] } },
-      { required: ["slot"], not: { required: ["text"] } },
-    ],
-    properties: {
-      ...sessionJson,
-      ...refJson,
-      text: { type: "string" },
-      slot: { type: "string" },
-      submit: { type: "boolean" },
-      format: actionFormatJson,
-    },
-  },
   async handler(args) {
     return await runAction(
       args.session_id,
@@ -1252,7 +1009,12 @@ const selectSchema = z
     ref: refSchema.optional(),
     values: z.array(z.string().min(1).max(4096)).length(1).optional(),
     selections: formSelectionsSchema.optional(),
-    capture: z.unknown().optional(),
+    capture: z
+      .unknown()
+      .optional()
+      .describe(
+        "Deprecated and rejected; perform the action, then call operate_extract({capture}). Removed next minor.",
+      ),
     country: z.string().min(1).max(60).optional(),
     format: actionFormatSchema.optional(),
   })
@@ -1267,43 +1029,14 @@ const selectSchema = z
         message: "Provide ref + values, selections, or country",
       });
     }
-  });
+  })
+  .describe("Provide ref with one value, a selections map, or a country.");
 export const operateSelectTool: Tool<z.infer<typeof selectSchema>> = {
   name: "operate_select",
   description:
     ACTION_FORMAT_NOTE +
     "Choose an option by visible text with ref + values (one value per control). For several controls, supply an ordered selections map of ref to option; partial results are retained. country selects the phone field's native country dropdown.",
   inputSchema: selectSchema,
-  jsonInputSchema: {
-    type: "object",
-    required: ["session_id"],
-    oneOf: [
-      {
-        required: ["ref", "values"],
-        not: { anyOf: [{ required: ["selections"] }, { required: ["country"] }] },
-      },
-      {
-        required: ["selections"],
-        not: {
-          anyOf: [{ required: ["ref"] }, { required: ["values"] }, { required: ["country"] }],
-        },
-      },
-      {
-        required: ["country"],
-        not: {
-          anyOf: [{ required: ["ref"] }, { required: ["values"] }, { required: ["selections"] }],
-        },
-      },
-    ],
-    properties: {
-      ...sessionJson,
-      ...refJson,
-      values: { type: "array", items: { type: "string" }, minItems: 1, maxItems: 1 },
-      selections: { type: "object", additionalProperties: { type: "string" } },
-      country: { type: "string" },
-      format: actionFormatJson,
-    },
-  },
   async handler(args) {
     if (args.selections !== undefined) {
       return await formSelectMany(args.session_id, args.selections, args.format ?? "compact");
@@ -1337,16 +1070,6 @@ export const operateUploadTool: Tool<z.infer<typeof uploadSchema>> = {
   description:
     "Attach a local file through the browser file chooser. The file must exist on the machine running the browser. Target a current ref or @label for the upload button or file input; path must be absolute.",
   inputSchema: uploadSchema,
-  jsonInputSchema: {
-    type: "object",
-    required: ["session_id", "target", "path"],
-    properties: {
-      ...sessionJson,
-      target: { type: "string" },
-      path: { type: "string", pattern: "^/" },
-      format: actionFormatJson,
-    },
-  },
   async handler(args) {
     return await runAction(
       args.session_id,
@@ -1359,7 +1082,12 @@ export const operateUploadTool: Tool<z.infer<typeof uploadSchema>> = {
 const pressSchema = z.object({
   ...sessionShape,
   key: z.string().min(1).max(40),
-  capture: z.unknown().optional(),
+  capture: z
+    .unknown()
+    .optional()
+    .describe(
+      "Deprecated and rejected; perform the action, then call operate_extract({capture}). Removed next minor.",
+    ),
   format: actionFormatSchema.optional(),
 });
 export const operatePressTool: Tool<z.infer<typeof pressSchema>> = {
@@ -1368,15 +1096,6 @@ export const operatePressTool: Tool<z.infer<typeof pressSchema>> = {
     ACTION_FORMAT_NOTE +
     "Press a keyboard key in the current session, such as Enter, Tab, or Escape.",
   inputSchema: pressSchema,
-  jsonInputSchema: {
-    type: "object",
-    required: ["session_id", "key"],
-    properties: {
-      ...sessionJson,
-      key: { type: "string" },
-      format: actionFormatJson,
-    },
-  },
   handler: async (args) =>
     await runAction(args.session_id, { kind: "press", key: args.key }, args.format ?? "compact"),
 };
@@ -1387,11 +1106,6 @@ export const operateSolveCaptchaTool: Tool<z.infer<typeof solveCaptchaSchema>> =
   description:
     "Press a visible CAPTCHA checkbox and try the configured 2Captcha solver. Returns the outcome and a fresh page observation; check a pending solve with operate_observe.",
   inputSchema: solveCaptchaSchema,
-  jsonInputSchema: {
-    type: "object",
-    required: ["session_id"],
-    properties: { ...sessionJson },
-  },
   async handler(args) {
     const session = sessionForCall(args.session_id);
     if (session === undefined) throw new Error(`unknown provision session ${args.session_id}`);
@@ -1416,15 +1130,6 @@ export const operateScrollTool: Tool<z.infer<typeof scrollSchema>> = {
     ACTION_FORMAT_NOTE +
     "Scroll the page viewport down, up, to the bottom, or to the top. Observe again to discover newly visible controls.",
   inputSchema: scrollSchema,
-  jsonInputSchema: {
-    type: "object",
-    required: ["session_id"],
-    properties: {
-      ...sessionJson,
-      direction: { type: "string", enum: ["down", "up", "bottom", "top"], default: "down" },
-      format: actionFormatJson,
-    },
-  },
   handler: async (args) =>
     await runAction(
       args.session_id,
@@ -1444,15 +1149,6 @@ export const operateWaitTool: Tool<z.infer<typeof waitSchema>> = {
     ACTION_FORMAT_NOTE +
     "Wait briefly for the live page to change, then return a fresh observation. Use this for spinners, late-mounted fields, and pending requests without assigning them a payment stage.",
   inputSchema: waitSchema,
-  jsonInputSchema: {
-    type: "object",
-    required: ["session_id"],
-    properties: {
-      ...sessionJson,
-      milliseconds: { type: "integer", minimum: 0, maximum: 30_000, default: 1_000 },
-      format: actionFormatJson,
-    },
-  },
   async handler(args, _api, context) {
     await new Promise<void>((resolve, reject) => {
       if (context?.signal?.aborted === true) {
@@ -1494,19 +1190,6 @@ export const operateReadInboxTool: Tool<z.infer<typeof readInboxSchema>> = {
     "To seal a code, pass into_slot and the message's pick index, then use the slot with operate_type. grant_inbox_consent overrides consent for this session. " +
     "If needs_user reports wall:google_session, ask the user to run connect; polling will not clear it.",
   inputSchema: readInboxSchema,
-  jsonInputSchema: {
-    type: "object",
-    required: ["session_id"],
-    properties: {
-      session_id: { type: "string" },
-      query: { type: "string" },
-      sender: { type: "string" },
-      recipient: { type: "string" },
-      into_slot: { type: "string" },
-      pick: { type: "integer" },
-      grant_inbox_consent: { type: "boolean" },
-    },
-  },
   annotations: { readOnlyHint: true },
   async handler(args) {
     return await awaitVerification(args.session_id, {
@@ -1524,8 +1207,16 @@ export const operateReadInboxTool: Tool<z.infer<typeof readInboxSchema>> = {
 const publicFinishSchema = z
   .object({
     ...sessionShape,
-    outcome: z.enum(["none", "credentials", "result"]).default("none"),
-    store: z.unknown().optional(),
+    outcome: z
+      .enum(["none", "credentials", "result"])
+      .default("none")
+      .describe(
+        "credentials is deprecated and rejected; use operate_extract({store}) then operate_finish. result requires summary or data.",
+      ),
+    store: z
+      .unknown()
+      .optional()
+      .describe("Deprecated with outcome=credentials; removed next minor"),
     summary: z.string().max(4000).optional(),
     data: finishDataSchema.optional(),
   })
@@ -1535,7 +1226,8 @@ const publicFinishSchema = z
         code: z.ZodIssueCode.custom,
         message: "result outcome requires summary or data",
       });
-  });
+  })
+  .describe("For outcome=result, include summary or data.");
 export const operateFinishTool: Tool<z.infer<typeof publicFinishSchema>> = {
   name: "operate_finish",
   jsonOutputSchema: {
@@ -1555,33 +1247,6 @@ export const operateFinishTool: Tool<z.infer<typeof publicFinishSchema>> = {
   description:
     "Finish the task and close its session. outcome='none' closes without a reported outcome; 'result' reports summary or data — the reported outcome is recorded as-is. Extract and store credentials with operate_extract({store}) before calling operate_finish. Deprecated outcome='credentials' returns an error and will be removed next minor. Successful completion saves eligible login state through the existing teardown.",
   inputSchema: publicFinishSchema,
-  jsonInputSchema: {
-    type: "object",
-    required: ["session_id"],
-    properties: {
-      ...sessionJson,
-      outcome: {
-        type: "string",
-        enum: ["none", "result", "credentials"],
-        default: "none",
-        description:
-          "credentials is deprecated and rejected; use operate_extract({store}) then operate_finish",
-      },
-      store: {
-        type: "object",
-        deprecated: true,
-        description: "Deprecated with outcome=credentials; removed next minor",
-      },
-      summary: { type: "string" },
-      data: { type: "object" },
-    },
-    allOf: [
-      {
-        if: { required: ["outcome"], properties: { outcome: { const: "result" } } },
-        then: { anyOf: [{ required: ["summary"] }, { required: ["data"] }] },
-      },
-    ],
-  },
   async handler(args) {
     if (args.outcome === "credentials")
       throw new Error(
@@ -1611,7 +1276,8 @@ const driveSchema = z
         message: "Provide exactly one of session_id or url",
       });
     }
-  });
+  })
+  .describe("Provide exactly one of session_id or url.");
 
 export const operateDriveTool: Tool<z.infer<typeof driveSchema>> = {
   name: "operate_drive",
@@ -1628,20 +1294,6 @@ export const operateDriveTool: Tool<z.infer<typeof driveSchema>> = {
     "card_incomplete are resumable. After a card_incomplete handoff, retry against the same approval_id. " +
     "Always operate_finish when done.",
   inputSchema: driveSchema,
-  jsonInputSchema: {
-    type: "object",
-    required: ["goal"],
-    oneOf: [{ required: ["session_id"] }, { required: ["url"] }],
-    properties: {
-      session_id: { type: "string" },
-      url: { type: "string", format: "uri" },
-      goal: { type: "string" },
-      facts: { type: "object", additionalProperties: { type: "string" } },
-      max_steps: { type: "integer", minimum: 1, maximum: 60 },
-      max_seconds: { type: "integer", minimum: 1, maximum: 120 },
-      answer: { type: "string" },
-    },
-  },
   async handler(args, api, context) {
     const consentInboxRead = args.url === undefined ? undefined : await readInboxConsent();
     return await runOperateDrive(
@@ -1740,19 +1392,7 @@ for (const tool of OPERATE_TOOLS) {
     ].includes(tool.name)
   )
     continue;
-  const properties = tool.jsonInputSchema.properties;
   const supportsCapture = tool.name === "operate_click" || tool.name === "operate_extract";
-  if (properties !== null && typeof properties === "object")
-    Object.assign(properties, {
-      capture: supportsCapture
-        ? captureJsonFor(tool.name)
-        : {
-            type: "object",
-            deprecated: true,
-            description:
-              "Deprecated and rejected; perform the action, then call operate_extract({capture}). Removed next minor.",
-          },
-    });
   tool.description += supportsCapture
     ? CAPTURE_NOTE +
       (tool.name === "operate_click" ? CLICK_CAPTURE_NOTE : "") +

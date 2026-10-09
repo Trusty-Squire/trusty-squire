@@ -77,19 +77,6 @@ export const auditLogTool: Tool<AuditLogArgs> = {
   name: "audit_log",
   description: DESCRIPTION,
   inputSchema,
-  jsonInputSchema: {
-    type: "object",
-    properties: {
-      limit: { type: "number" },
-      before: { type: "string" },
-      type: { type: "string" },
-      reference: { type: "string" },
-      view: { type: "string", enum: ["ledger", "raw"] },
-      scan: { type: "number" },
-      window_minutes: { type: "number" },
-      expand: { type: "string" },
-    },
-  },
   annotations: { readOnlyHint: true },
   meta: ALWAYS_LOAD_META,
   async handler(args, api) {

@@ -15,7 +15,11 @@ const inputSchema = z
     signin_url: z.string().url().optional(),
     login_hosts: z.array(z.string().min(1).max(253)).max(20).optional(),
     api_hosts: z.array(z.string().min(1).max(256)).max(10).optional(),
-    observed_hosts: z.array(z.string().min(1).max(256)).max(10).optional(),
+    observed_hosts: z
+      .array(z.string().min(1).max(256))
+      .max(10)
+      .optional()
+      .describe("Deprecated alias for api_hosts; removed next minor"),
     auth_shape: z
       .string()
       .max(120)
@@ -61,29 +65,6 @@ export const storeCredentialTool: Tool<z.infer<typeof inputSchema>> = {
   name: "store_credential",
   description: DESCRIPTION,
   inputSchema,
-  jsonInputSchema: {
-    type: "object",
-    required: ["service"],
-    properties: {
-      service: { type: "string" },
-      label: { type: "string" },
-      value: { type: "string" },
-      fields: { type: "object", additionalProperties: { type: "string" } },
-      env_var_suggestion: { type: "string" },
-      type: { type: "string" },
-      auth_strategy: { type: "string" },
-      signin_url: { type: "string" },
-      login_hosts: { type: "array", items: { type: "string" } },
-      api_hosts: { type: "array", items: { type: "string" } },
-      observed_hosts: {
-        type: "array",
-        items: { type: "string" },
-        deprecated: true,
-        description: "Deprecated alias for api_hosts; removed next minor",
-      },
-      auth_shape: { type: "string" },
-    },
-  },
   annotations: { idempotentHint: true },
   meta: ALWAYS_LOAD_META,
   async handler(args, api) {

@@ -50,26 +50,6 @@ export const useCredentialTool: Tool<z.infer<typeof inputSchema>> = {
   name: "use_credential",
   description: DESCRIPTION,
   inputSchema,
-  jsonInputSchema: {
-    type: "object",
-    required: ["http"],
-    properties: {
-      reference: { type: "string" },
-      service: { type: "string" },
-      name: { type: "string" },
-      http: {
-        type: "object",
-        required: ["method", "url"],
-        properties: {
-          method: { type: "string" },
-          url: { type: "string" },
-          headers: { type: "object", additionalProperties: { type: "string" } },
-          body: { type: "string" },
-          query: { type: "object", additionalProperties: { type: "string" } },
-        },
-      },
-    },
-  },
   annotations: { destructiveHint: true },
   meta: ALWAYS_LOAD_META,
   async handler(args, api) {

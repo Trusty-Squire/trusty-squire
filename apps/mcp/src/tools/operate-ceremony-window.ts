@@ -15,14 +15,6 @@ export const operateCeremonyWindowTool: Tool<z.infer<typeof ceremonyWindowSchema
   name: "operate_ceremony_window",
   description: "Internal broker-only connect ceremony window resize and restore. Not agent-facing.",
   inputSchema: ceremonyWindowSchema,
-  jsonInputSchema: {
-    type: "object",
-    required: ["session_id", "action"],
-    properties: {
-      session_id: { type: "string" },
-      action: { type: "string", enum: ["show_phone", "restore"] },
-    },
-  },
   async handler(args) {
     const session = sessionForCall(args.session_id);
     if (session === undefined) throw new Error(`unknown provision session ${args.session_id}`);

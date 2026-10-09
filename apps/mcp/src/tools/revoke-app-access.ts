@@ -21,11 +21,6 @@ export const revokeAppAccessTool: Tool<z.infer<typeof revokeInput>> = {
   name: "revoke_app_access",
   description: REVOKE_DESCRIPTION,
   inputSchema: revokeInput,
-  jsonInputSchema: {
-    type: "object",
-    properties: { grant_id: { type: "string" } },
-    required: ["grant_id"],
-  },
   annotations: { destructiveHint: true, idempotentHint: true },
   meta: ALWAYS_LOAD_META,
   async handler(args, api) {
@@ -49,7 +44,6 @@ export const listAppAccessTool: Tool<z.infer<typeof listInput>> = {
   name: "list_app_access",
   description: LIST_DESCRIPTION,
   inputSchema: listInput,
-  jsonInputSchema: { type: "object", properties: {} },
   annotations: { readOnlyHint: true },
   meta: ALWAYS_LOAD_META,
   async handler(_args, api) {

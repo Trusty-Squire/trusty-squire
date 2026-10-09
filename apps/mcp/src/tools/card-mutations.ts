@@ -76,25 +76,6 @@ export const editPaymentCardTool: Tool<z.infer<typeof cardInput>> = {
   name: "edit_payment_card",
   description: DESCRIPTION,
   inputSchema: cardInput,
-  jsonInputSchema: {
-    type: "object",
-    oneOf: [
-      {
-        type: "object",
-        properties: {
-          card_id: { type: "string" },
-          label: { type: "string" },
-        },
-        additionalProperties: false,
-      },
-      {
-        type: "object",
-        required: ["approval_id"],
-        properties: { approval_id: { type: "string" } },
-        additionalProperties: false,
-      },
-    ],
-  },
   annotations: { destructiveHint: true, idempotentHint: true },
   meta: ALWAYS_LOAD_META,
   async handler(args, api) {

@@ -1,3 +1,4 @@
+import { inputJsonSchema } from "../tools/input-json-schema.js";
 // Tests for the surviving MCP tools.
 //
 // The native-provision cluster (provision/cancel/get_usage/list_services/
@@ -352,7 +353,7 @@ describe("TOOLS registry", () => {
       if (!Array.isArray(schema)) expect(Object.keys(schema)).not.toContain("kind");
       for (const child of Object.values(schema)) assertNoKind(child);
     };
-    for (const name of target) assertNoKind(findTool(name)!.jsonInputSchema);
+    for (const name of target) assertNoKind(inputJsonSchema(findTool(name)!.inputSchema));
   });
 
   it("drops every legacy payment orchestration alias", () => {
@@ -475,17 +476,19 @@ describe("TOOLS registry", () => {
     ]) {
       expect(findTool(name)).toBeNull();
     }
-    expect(findTool("operate_login")?.jsonInputSchema).toEqual(operateLoginTool.jsonInputSchema);
+    expect(inputJsonSchema(findTool("operate_login")!.inputSchema)).toEqual(
+      inputJsonSchema(operateLoginTool.inputSchema),
+    );
   });
 
   it("exposes consolidated lifecycle/recipe schemas and drops their former standalone tool names", () => {
-    const finishProperties = operateFinishTool.jsonInputSchema.properties as Record<
+    const finishProperties = inputJsonSchema(operateFinishTool.inputSchema).properties as Record<
       string,
       unknown
     >;
     expect(finishProperties.outcome).toMatchObject({
       type: "string",
-      enum: ["none", "result", "credentials"],
+      enum: ["none", "credentials", "result"],
     });
 
     const names = TOOLS.map((tool) => tool.name);

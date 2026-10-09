@@ -18,6 +18,7 @@ import {
   withOperatorRequestContext,
 } from "./bot/request-cancellation.js";
 import { buildToolRegistry, findTool } from "./tools/index.js";
+import { inputJsonSchema } from "./tools/input-json-schema.js";
 import { createSessionGuard, withServingAccountId, type SessionGuard } from "./session-guard.js";
 import { VERSION } from "./version.js";
 
@@ -188,6 +189,14 @@ export async function buildServer(
 ): Promise<Server> {
   let activeApi = api;
   const tools = buildToolRegistry();
+  const advertisedTools = tools.map((t) => ({
+    name: t.name,
+    description: t.description,
+    inputSchema: inputJsonSchema(t.inputSchema),
+    ...(t.jsonOutputSchema !== undefined ? { outputSchema: t.jsonOutputSchema } : {}),
+    ...(t.annotations !== undefined ? { annotations: t.annotations } : {}),
+    ...(t.meta !== undefined ? { _meta: t.meta } : {}),
+  }));
   const server = new Server(
     { name: SERVER_NAME, version: VERSION },
     { capabilities: { tools: {}, logging: {} }, instructions: SERVER_INSTRUCTIONS },
@@ -195,14 +204,7 @@ export async function buildServer(
   const approvalNotifier = new ApprovalDecidedNotifier(server, connectionSignal, approvalClaims);
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: tools.map((t) => ({
-      name: t.name,
-      description: t.description,
-      inputSchema: t.jsonInputSchema,
-      ...(t.jsonOutputSchema !== undefined ? { outputSchema: t.jsonOutputSchema } : {}),
-      ...(t.annotations !== undefined ? { annotations: t.annotations } : {}),
-      ...(t.meta !== undefined ? { _meta: t.meta } : {}),
-    })),
+    tools: advertisedTools,
   }));
 
   server.setRequestHandler(CallToolRequestSchema, async (req, extra) => {

@@ -1,3 +1,4 @@
+import { inputJsonSchema } from "../input-json-schema.js";
 // Tool descriptions and the server instructions are the ONLY steering the
 // model gets before it picks a route. They are product surface, so they are
 // pinned: a snapshot catches any unreviewed drift, and targeted assertions pin
@@ -100,11 +101,11 @@ describe("the screenshot path is steered for visual state", () => {
 describe("capture schemas match their handlers", () => {
   const captureFor = (name: string) => {
     const tool = OPERATE_TOOLS.find((entry) => entry.name === name)!;
-    return (tool.jsonInputSchema.properties as Record<string, unknown>).capture as {
+    return (inputJsonSchema(tool.inputSchema).properties as Record<string, unknown>).capture as {
       properties: {
         store?: unknown;
         write_id?: unknown;
-        source: { oneOf: unknown[]; properties: Record<string, unknown> };
+        source: { anyOf: { properties: Record<string, unknown> }[] };
       };
     };
   };
@@ -113,13 +114,16 @@ describe("capture schemas match their handlers", () => {
     for (const name of ["operate_click", "operate_extract"]) {
       const capture = captureFor(name);
       expect("write_id" in capture.properties).toBe(name === "operate_extract");
-      expect("clipboard" in capture.properties.source.properties).toBe(name === "operate_click");
-      expect(capture.properties.source.oneOf).toHaveLength(name === "operate_click" ? 3 : 2);
+      expect(
+        capture.properties.source.anyOf.some((branch) => "clipboard" in branch.properties),
+      ).toBe(name === "operate_click");
+      expect(capture.properties.source.anyOf).toHaveLength(name === "operate_click" ? 3 : 2);
       expect(capture.properties.store).toBeDefined();
     }
     for (const name of ["operate_type", "operate_select", "operate_press"]) {
       const tool = OPERATE_TOOLS.find((entry) => entry.name === name)!;
-      const capture = (tool.jsonInputSchema.properties as Record<string, unknown>).capture;
+      const capture = (inputJsonSchema(tool.inputSchema).properties as Record<string, unknown>)
+        .capture;
       expect(capture).toMatchObject({ deprecated: true });
       expect(capture).not.toHaveProperty("properties");
     }
@@ -212,7 +216,7 @@ describe("still-true contracts survive the cleanup", () => {
     expect(injectCardTool.description).toContain("show the link now, then call inject_card again");
     expect(injectCardTool.description).toContain("fill only the supplied observation refs");
     expect(injectCardTool.description).toContain("competing saved-card control");
-    expect(injectCardTool.jsonInputSchema.required).toContain("session_id");
+    expect(inputJsonSchema(injectCardTool.inputSchema).required).toContain("session_id");
     expect(provisionStartTool.description).toContain("inject_card");
     expect(injectCardTool.description).toContain("operator notifies the cardholder once");
     for (const description of [injectCardTool.description, operateClickTool.description]) {
@@ -227,7 +231,7 @@ describe("still-true contracts survive the cleanup", () => {
 
   it("states the minor-unit rule on every payment amount prompt", () => {
     const amountDescription = (
-      injectCardTool.jsonInputSchema.properties as {
+      inputJsonSchema(injectCardTool.inputSchema).properties as {
         amount_cents: { description: string };
       }
     ).amount_cents.description;

@@ -6,7 +6,6 @@ export const listPaymentCardsTool: Tool = {
   description:
     "List saved payment cards by opaque ID and user-visible label only. Never returns encrypted blobs or card data.",
   inputSchema: z.object({}),
-  jsonInputSchema: { type: "object", properties: {} },
   annotations: { readOnlyHint: true },
   async handler(_args, api) {
     assertApi(api);

@@ -43,17 +43,6 @@ export const listExtractFailuresTool: Tool<z.infer<typeof ListInputSchema>> = {
     "Returns metadata only — id, service, url, step_label, upload time, byte sizes. " +
     "Snapshots auto-expire after 7 days.",
   inputSchema: ListInputSchema,
-  jsonInputSchema: {
-    type: "object",
-    properties: {
-      limit: {
-        type: "number",
-        description: "Max snapshots to return (default 10, max 50)",
-        minimum: 1,
-        maximum: 50,
-      },
-    },
-  },
   async handler(args, api) {
     assertApi(api);
     const limit = args.limit ?? 10;
@@ -84,21 +73,6 @@ export const getExtractFailureTool: Tool<z.infer<typeof GetInputSchema>> = {
     "targeted fix. `include_screenshot: false` by default to save context; set true to also " +
     "get the JPEG bytes the LLM planner saw.",
   inputSchema: GetInputSchema,
-  jsonInputSchema: {
-    type: "object",
-    properties: {
-      id: {
-        type: "string",
-        description: "Snapshot id (from list_extract_failures)",
-      },
-      include_screenshot: {
-        type: "boolean",
-        description:
-          "If true, include base64 JPEG screenshot in the response. Default false.",
-      },
-    },
-    required: ["id"],
-  },
   async handler(args, api) {
     assertApi(api);
     const full = await api.getExtractFailure(args.id);
