@@ -1526,9 +1526,15 @@ export function looksLikeMaskedSecretDisplay(text: string): boolean {
   return MASKED_SECRET_DISPLAY.test(text) || (isMaskedDisplay(text) && /[_-]/.test(text));
 }
 
+function visibleCredentialFacts(row: WireRow): string {
+  // Link destinations are navigation metadata, not displayed key values.
+  return (row[2] ?? "").split("|").filter((fact) => !fact.startsWith("u=")).join("|");
+}
+
 export function rowShowsSecretEvidence(row: WireRow): boolean {
-  const facts = `${row[1]}\t${row[2] ?? ""}`;
-  if (row[0] === REVEALED_SECRET_REF || /(?:^|\|)secret=1(?:\||$)/.test(row[2] ?? "")) {
+  const visibleFacts = visibleCredentialFacts(row);
+  const facts = `${row[1]}\t${visibleFacts}`;
+  if (row[0] === REVEALED_SECRET_REF || /(?:^|\|)secret=1(?:\||$)/.test(visibleFacts)) {
     return true;
   }
   if (findCredentialTokens(facts).length > 0) return true;
@@ -1603,7 +1609,7 @@ export function driveSecretsPresent(rows: readonly WireRow[]): DriveSecretsPrese
   const seen = new Set<string>();
   for (const row of rows) {
     const marker = row[0] === REVEALED_SECRET_REF;
-    const masked = looksLikeMaskedSecretDisplay(row[2] ?? "");
+    const masked = looksLikeMaskedSecretDisplay(visibleCredentialFacts(row));
     if (!marker && !masked && !rowShowsSecretEvidence(row)) continue;
     const near = marker ? "the revealed secret value" : readableLabel(row);
     const key = `${near}\t${masked}`;
@@ -1692,7 +1698,7 @@ export function attachRevealedSecretMarker(
     observation.semantic?.title ?? "",
     ...(observation.semantic?.headings ?? []),
     ...(observation.semantic?.blockers ?? []).map((blocker) => blocker.text),
-    ...rows.map((row) => row[2] ?? ""),
+    ...rows.map(visibleCredentialFacts),
   ];
   const tokens = new Set<string>();
   for (const blob of blobs) {

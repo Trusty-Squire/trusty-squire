@@ -29,6 +29,12 @@ const copyKeyPage = `<main><h1>API keys</h1><div role="dialog" aria-label="API k
   <button type="button" aria-label="Copy API key"
     onclick="navigator.clipboard.writeText('${key}')">Copy</button></div></main>`;
 
+const orderConfirmationPage = `<main><h1>Confirmation #TPVQCHG5A</h1>
+  <p>Your order is confirmed</p>
+  <a href="/orders/TPVQCHG5A?_r=AQABU67ys2zHpjQ-qf-F9aIciaVmu5AD1dZrp8iPPu30NxrXXi8k">View order</a>
+  <a href="/account?_r=AQABU67ys2zHpjQ-qf-F9aIciaVmu5AD1dZrp8iPPu30NxrXXi8k">Continue shopping</a>
+</main>`;
+
 async function withKeyPage(
   body: string,
   run: (sessionId: string) => Promise<void>,
@@ -186,6 +192,38 @@ it("trusts the model's DONE on a page without a key", async () => {
     expect(askJev).toHaveBeenCalledTimes(1);
     expect(result.status).toBe("complete");
   });
+}, 15_000);
+
+it("completes a confirmed order with a key-shaped Shopify token only in link destinations", async () => {
+  await withKeyPage(orderConfirmationPage, async (sessionId) => {
+    const askJev = vi.fn<DriveDependencies["askJev"]>(async (_api, _state, questions) => ({
+      attempts: 1,
+      elapsedMs: 1,
+      result: {
+        answers: Object.fromEntries(
+          Object.entries(questions).flatMap(([name, question]) => {
+            if (question.type !== "choice") return [];
+            const keys = Object.keys(question.criteria);
+            const choice = name === "operation" ? "DONE" : keys[0]!;
+            return [[name, {
+              choice,
+              confidence: 1,
+              probabilities: Object.fromEntries(keys.map((key) => [key, key === choice ? 1 : 0])),
+            }]];
+          }),
+        ),
+      },
+    }));
+    const result = await runOperateDrive(
+      { session_id: sessionId, goal: "buy The Glow Serum", max_steps: 3, max_seconds: 10 },
+      api,
+      undefined,
+      dependencies(askJev),
+    );
+    expect(askJev).toHaveBeenCalled();
+    expect(result.status).toBe("complete");
+    expect(JSON.stringify(result.observation?.safe_table)).not.toContain("@key-value");
+  }, "/thank-you");
 }, 15_000);
 
 it.each([
