@@ -687,9 +687,24 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
     if (role === null) continue;
     if (role === "gridcell" && element.querySelector("button,[role='button']") !== null) continue;
     const rect = element.getBoundingClientRect();
-    if (rect.width <= 0 || rect.height <= 0) continue;
+    // Stores such as Oura render a zero-size native radio inside a visible,
+    // clickable label. The input carries the radio state and accessible name;
+    // dropping it leaves the model with only cart text and the submit button.
+    const labeledChoice =
+      element instanceof HTMLInputElement && ["radio", "checkbox"].includes(element.type)
+        ? Array.from(element.labels ?? []).find((label) => {
+            const box = label.getBoundingClientRect();
+            return visible(label) && box.width > 0 && box.height > 0;
+          })
+        : undefined;
+    const targetRect =
+      rect.width > 0 && rect.height > 0 ? rect : labeledChoice?.getBoundingClientRect();
+    if (targetRect === undefined) continue;
     const inViewport =
-      rect.bottom > 0 && rect.top < innerHeight && rect.right > 0 && rect.left < innerWidth;
+      targetRect.bottom > 0 &&
+      targetRect.top < innerHeight &&
+      targetRect.right > 0 &&
+      targetRect.left < innerWidth;
     const buttonLike = role === "button" || element.tagName === "BUTTON";
     const keepOffscreen =
       role === "textbox" ||
@@ -699,7 +714,7 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
       role === "radio" ||
       role === "combobox" ||
       element.tagName === "SELECT" ||
-      (buttonLike && arg.keepOffscreenButtons);
+      ((buttonLike || role === "link") && arg.keepOffscreenButtons);
     const pinned =
       element.closest(
         "header,nav,footer,[role='banner'],[role='navigation'],[role='contentinfo']",

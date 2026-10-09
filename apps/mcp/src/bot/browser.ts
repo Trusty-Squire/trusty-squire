@@ -1852,6 +1852,7 @@ export class BrowserController implements BrowserDriver {
 
   private async clickInner(selector: string): Promise<void> {
     if (!this.page) throw new Error("Browser not started");
+    if (await this.clickZeroSizeChoiceLabel(this.page, selector)) return;
     // ARIA toggle that ignores synthetic clicks: a <button role="switch"> whose
     // handler binds to keydown only (Firebase's Google-provider "Enable"
     // switch). A plain click() returns success but aria-checked never moves —
@@ -2533,7 +2534,43 @@ export class BrowserController implements BrowserDriver {
   }
 
   async clickOnPage(page: Page, selector: string): Promise<void> {
+    if (await this.clickZeroSizeChoiceLabel(page, selector)) return;
     await page.locator(selector).click({ timeout: 8000, noWaitAfter: true });
+  }
+
+  /** Press the visible label of a zero-size choice, preserving the input's
+   * identity and checked state as the drive target. */
+  private async clickZeroSizeChoiceLabel(page: Page, selector: string): Promise<boolean> {
+    const labelHandle = await page
+      .locator(selector)
+      .first()
+      .evaluateHandle((node) => {
+        if (!(node instanceof HTMLInputElement) || !["radio", "checkbox"].includes(node.type)) {
+          return null;
+        }
+        const rect = node.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0) return null;
+        return (
+          Array.from(node.labels ?? []).find((label) => {
+            const box = label.getBoundingClientRect();
+            return (
+              box.width > 0 &&
+              box.height > 0 &&
+              label.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })
+            );
+          }) ?? null
+        );
+      })
+      .catch(() => null);
+    if (labelHandle === null) return false;
+    try {
+      const label = labelHandle.asElement();
+      if (label === null) return false;
+      await label.click({ timeout: 8000, noWaitAfter: true });
+      return true;
+    } finally {
+      await labelHandle.dispose().catch(() => undefined);
+    }
   }
 
   async typeHandle(handle: ElementHandle<Element>, text: string, sealed = false): Promise<void> {
