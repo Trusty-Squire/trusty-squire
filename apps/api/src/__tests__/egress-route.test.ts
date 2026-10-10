@@ -29,17 +29,36 @@ const seen: Array<{
   method: string;
   headers: Record<string, string>;
   body: string | undefined;
+  bodyBytes: number;
+  maxRequestBytes?: number;
 }> = [];
 function fakeExecutor(): HttpProxyExecutor {
   return new HttpProxyExecutor({
     lookup: async () => ({ address: "203.0.113.9", family: 4 }),
     dispatch: async (input) => {
+      let bodyBytes = 0;
+      const chunks: Buffer[] = [];
+      if (input.bodyStream !== undefined) {
+        for await (const chunk of input.bodyStream) {
+          bodyBytes += chunk.length;
+          // Keep only small bodies for the placeholder assertions. A large
+          // request must be measured without the fixture buffering it too.
+          if (bodyBytes <= 64 * 1024) chunks.push(Buffer.from(chunk));
+        }
+      }
       seen.push({
         url: input.url.toString(),
         auth: input.headers.authorization,
         method: input.method,
         headers: { ...input.headers },
-        body: input.body,
+        body:
+          input.bodyStream === undefined
+            ? input.body
+            : bodyBytes <= 64 * 1024
+              ? Buffer.concat(chunks).toString("utf8")
+              : undefined,
+        bodyBytes,
+        ...(input.maxRequestBytes !== undefined ? { maxRequestBytes: input.maxRequestBytes } : {}),
       });
       return {
         status: 200,
@@ -81,6 +100,34 @@ async function setup(opts: { egressGrantStore?: EgressGrantStore } = {}): Promis
     ...(opts.egressGrantStore !== undefined ? { egressGrantStore: opts.egressGrantStore } : {}),
   });
   return { server, deps };
+}
+async function postLive(
+  h: Harness,
+  path: string,
+  authorization: string,
+  payload: string,
+): Promise<number> {
+  await h.server.listen({ host: "127.0.0.1", port: 0 });
+  const address = h.server.server.address();
+  const port = typeof address === "object" && address !== null ? address.port : 0;
+  return new Promise<number>((resolve, reject) => {
+    const req = httpRequest(
+      {
+        host: "127.0.0.1",
+        port,
+        method: "POST",
+        path,
+        headers: { authorization, "content-type": "application/json" },
+      },
+      (res) => {
+        res.resume();
+        res.once("end", () => resolve(res.statusCode ?? 0));
+        res.once("error", reject);
+      },
+    );
+    req.once("error", reject);
+    req.end(payload);
+  });
 }
 async function webCookie(deps: ApiDeps, accountId: string): Promise<string> {
   const { record, jwt } = issueSession({
@@ -172,14 +219,54 @@ describe("Egress Grants — /v1/egress", () => {
     // Past Fastify's 1MiB default bodyLimit but well under the egress route's
     // raised 256MiB cap — this is the payload shape that used to 413.
     const bigContent = "x".repeat(5 * 1024 * 1024);
-    const res = await h.server.inject({
-      method: "POST",
-      url: `/v1/egress/${grant_id}/v1/chat/completions`,
-      headers: { authorization: `Bearer ${egressToken}`, "content-type": "application/json" },
-      payload: { model: "gpt-4o", messages: [{ role: "user", content: bigContent }] },
+    const status = await postLive(
+      h,
+      `/v1/egress/${grant_id}/v1/chat/completions`,
+      `Bearer ${egressToken}`,
+      JSON.stringify({ model: "gpt-4o", messages: [{ role: "user", content: bigContent }] }),
+    );
+    expect(status).toBe(200);
+    expect(seen.at(-1)?.bodyBytes).toBeGreaterThan(5 * 1024 * 1024);
+    expect(seen.at(-1)?.body).toBeUndefined();
+    expect(seen.at(-1)?.maxRequestBytes).toBe(256 * 1024 * 1024);
+  });
+
+  it("rejects a declared body above the unchanged 256 MiB limit", async () => {
+    const account = await h.deps.accountStore.createAccount("overlimit@example.test", "O");
+    const cookie = await webCookie(h.deps, account.id);
+    const token = await agentToken(h.deps, account.id);
+    await storeCred(h, cookie, "OpenAI");
+    const { grant_id, egressToken } = await mintGrantHttp(h, token, { service: "OpenAI" });
+    await h.server.listen({ host: "127.0.0.1", port: 0 });
+    const address = h.server.server.address();
+    const port = typeof address === "object" && address !== null ? address.port : 0;
+    const status = await new Promise<number>((resolve, reject) => {
+      const req = httpRequest(
+        {
+          host: "127.0.0.1",
+          port,
+          method: "POST",
+          path: `/v1/egress/${grant_id}/v1/chat/completions`,
+          headers: {
+            authorization: `Bearer ${egressToken}`,
+            "content-type": "application/json",
+            "content-length": String(256 * 1024 * 1024 + 1),
+          },
+        },
+        (res) => {
+          res.resume();
+          res.once("end", () => {
+            const code = res.statusCode ?? 0;
+            req.destroy();
+            resolve(code);
+          });
+        },
+      );
+      req.once("error", reject);
+      req.flushHeaders();
     });
-    expect(res.statusCode).toBe(200);
-    expect(seen.at(-1)?.body?.length ?? 0).toBeGreaterThan(5 * 1024 * 1024);
+    expect(status).toBe(413);
+    expect(seen).toHaveLength(0);
   });
 
   it("returns and revokes a persisted grant when lifecycle audit writes fail", async () => {
@@ -672,13 +759,13 @@ describe("Egress Grants — /v1/egress", () => {
         },
       ],
     };
-    const res = await h.server.inject({
-      method: "POST",
-      url: `/v1/egress/${grant_id}/api/v1/chat/completions`,
-      headers: { authorization: `Bearer ${egressToken}`, "content-type": "application/json" },
-      payload,
-    });
-    expect(res.statusCode).toBe(200);
+    const status = await postLive(
+      h,
+      `/v1/egress/${grant_id}/api/v1/chat/completions`,
+      `Bearer ${egressToken}`,
+      JSON.stringify(payload),
+    );
+    expect(status).toBe(200);
     const last = seen.at(-1)!;
     // Body reached upstream byte-for-byte — the placeholder text was never
     // scanned, resolved, or replaced with the real secret.
@@ -710,7 +797,9 @@ describe("Egress Grants — /v1/egress", () => {
       method: "POST",
       url: `/v1/egress/${grant_id}/api/v1/chat/completions`,
       headers: { authorization: `Bearer ${egressToken}`, "content-type": "application/json" },
-      payload: { messages: [{ role: "user", content: "please use ${SECRET.field_that_does_not_exist}" }] },
+      payload: {
+        messages: [{ role: "user", content: "please use ${SECRET.field_that_does_not_exist}" }],
+      },
     });
     expect(res.statusCode).toBe(200);
     const [audit] = await h.deps.vaultAuditStore.list(account.id, {
@@ -829,6 +918,7 @@ describe("Egress Grants — /v1/egress", () => {
           method: input.method,
           headers: { ...input.headers },
           body: input.body,
+          bodyBytes: 0,
         });
         return {
           status: 200,

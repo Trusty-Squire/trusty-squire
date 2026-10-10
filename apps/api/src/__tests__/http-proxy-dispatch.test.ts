@@ -11,6 +11,8 @@
 
 import { describe, it, expect } from "vitest";
 import { createServer, type IncomingMessage } from "node:http";
+import { createHash } from "node:crypto";
+import { Readable } from "node:stream";
 import { gzipSync, brotliCompressSync } from "node:zlib";
 import { HttpProxyExecutor, substituteSecret } from "../services/http-proxy.js";
 
@@ -51,7 +53,11 @@ describe("HttpProxyExecutor — real defaultDispatch", () => {
     await withServer(async (port) => {
       const res = await realProxy().execute({
         accountId: "acct-test",
-        http: { method: "GET", url: `http://127.0.0.1:${port}/v4/x`, headers: { accept: "application/json" } },
+        http: {
+          method: "GET",
+          url: `http://127.0.0.1:${port}/v4/x`,
+          headers: { accept: "application/json" },
+        },
         fields: {},
       });
       expect(res.status).toBe(200);
@@ -159,6 +165,107 @@ describe("HttpProxyExecutor — real defaultDispatch", () => {
 });
 
 describe("HttpProxyExecutor.executeStream", () => {
+  it("cuts off an over-limit streamed request before forwarding excess bytes", async () => {
+    let receivedBytes = 0;
+    const server = createServer((req) => {
+      req.on("data", (chunk: Buffer) => {
+        receivedBytes += chunk.length;
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    const port = typeof address === "object" && address !== null ? address.port : 0;
+    const bodyStream = Readable.from(
+      (async function* () {
+        for (let i = 0; i < 32; i += 1) yield Buffer.alloc(64 * 1024, 0x61);
+      })(),
+    );
+    try {
+      await expect(
+        realProxy().executeStream({
+          accountId: "acct-test",
+          http: { method: "POST", url: `http://127.0.0.1:${port}/upload`, headers: {} },
+          fields: {},
+          bodyStream,
+          maxRequestBytes: 1024 * 1024,
+        }),
+      ).rejects.toMatchObject({ code: "request_too_large" });
+      expect(receivedBytes).toBeLessThanOrEqual(1024 * 1024);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("streams a 32 MiB request through a slow upstream with backpressure", async () => {
+    const chunkSize = 64 * 1024;
+    const chunkCount = 512;
+    const totalBytes = chunkSize * chunkCount;
+    let producedBytes = 0;
+    let receivedBytes = 0;
+    const receivedHash = createHash("sha256");
+    let firstChunk: () => void = () => undefined;
+    let resumeUpload: () => void = () => undefined;
+    const firstChunkReceived = new Promise<void>((resolve) => {
+      firstChunk = resolve;
+    });
+    const server = createServer((req, res) => {
+      let held = false;
+      req.on("data", (chunk: Buffer) => {
+        receivedBytes += chunk.length;
+        receivedHash.update(chunk);
+        if (!held) {
+          held = true;
+          req.pause();
+          resumeUpload = () => req.resume();
+          firstChunk();
+        }
+      });
+      req.on("end", () => {
+        res.writeHead(200, { "content-type": "text/plain" });
+        res.end(String(receivedBytes));
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    const port = typeof address === "object" && address !== null ? address.port : 0;
+    const expectedHash = createHash("sha256");
+    const bodyStream = Readable.from(
+      (async function* () {
+        for (let i = 0; i < chunkCount; i += 1) {
+          const chunk = Buffer.alloc(chunkSize, i % 256);
+          expectedHash.update(chunk);
+          producedBytes += chunk.length;
+          yield chunk;
+        }
+      })(),
+    );
+    try {
+      const pending = realProxy().executeStream({
+        accountId: "acct-test",
+        http: { method: "POST", url: `http://127.0.0.1:${port}/upload`, headers: {} },
+        fields: {},
+        bodyStream,
+        maxRequestBytes: 256 * 1024 * 1024,
+      });
+      await firstChunkReceived;
+      // With upstream reads paused, the producer must stop well before the
+      // 32 MiB body has been read into the proxy.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(producedBytes).toBeLessThan(totalBytes);
+      resumeUpload();
+      const streamed = await pending;
+      expect(streamed.status).toBe(200);
+      let response = "";
+      for await (const chunk of streamed.body) response += chunk.toString();
+      expect(response).toBe(String(totalBytes));
+      expect(receivedBytes).toBe(totalBytes);
+      expect(receivedHash.digest("hex")).toBe(expectedHash.digest("hex"));
+    } finally {
+      resumeUpload();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
   it("emits the first upstream chunk before later chunks arrive", async () => {
     const server = createServer((_req, res) => {
       res.writeHead(200, { "content-type": "text/event-stream" });
@@ -608,7 +715,11 @@ describe("substituteSecret — field names with spaces / hyphens", () => {
 
   it("resolves a hyphenated field name and stops at the closing brace", () => {
     const out = substituteSecret(
-      { method: "GET", url: "https://x/y", headers: { "x-key": "${SECRET.access-key}/${SECRET.Api key}" } },
+      {
+        method: "GET",
+        url: "https://x/y",
+        headers: { "x-key": "${SECRET.access-key}/${SECRET.Api key}" },
+      },
       { "access-key": "abc", "Api key": "def" },
     );
     expect(out.headers?.["x-key"]).toBe("abc/def");

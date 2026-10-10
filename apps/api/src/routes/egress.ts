@@ -16,6 +16,7 @@
 // the secret goes (bearer / header / query) so any provider works.
 
 import { z } from "zod";
+import type { Readable } from "node:stream";
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
 import {
   AllowlistViolationError,
@@ -91,6 +92,8 @@ function proxyErrorStatus(code: ProxyError["code"]): number {
       return 403;
     case "timeout":
       return 504;
+    case "request_too_large":
+      return 413;
     default:
       return 502;
   }
@@ -355,194 +358,211 @@ export const registerEgressRoutes: FastifyPluginAsync<{
   );
 
   // ── Transparent egress proxy (grant token) ────────────────────
-  fastify.all<{ Params: { grant: string; "*": string } }>(
-    "/v1/egress/:grant/*",
-    { bodyLimit: EGRESS_PROXY_BODY_LIMIT_BYTES },
-    async (req, reply) => {
-      // EGRESS_DISABLED kills the proxy for EXISTING grants too — the panic
-      // switch must stop live workloads, not just new mints.
-      if (opts.egressDisabled) {
-        reply.code(503).send({ error: "egress_disabled" });
-        return;
-      }
-      const authz = req.headers.authorization ?? "";
-      const token = /^Bearer\s+(.+)$/i.exec(authz)?.[1]?.trim() ?? "";
-      let grant;
-      try {
-        grant = await opts.egressGrantStore.getById(req.params.grant);
-      } catch (err) {
-        if (
-          err instanceof EgressGrantStoreUnavailableError ||
-          isRetryablePrismaConnectionError(err)
-        ) {
-          sendEgressStoreUnavailable(reply);
+  await fastify.register(async (proxy) => {
+    // The global JSON parser retains rawBody and parses JSON for webhooks and
+    // regular API routes. Only transparent egress treats JSON as opaque bytes.
+    proxy.removeContentTypeParser(["application/json", "text/plain"]);
+    proxy.addContentTypeParser(["application/json", "text/plain"], (_req, stream, done) => {
+      done(null, stream);
+    });
+    proxy.all<{ Params: { grant: string; "*": string } }>(
+      "/v1/egress/:grant/*",
+      { bodyLimit: EGRESS_PROXY_BODY_LIMIT_BYTES },
+      async (req, reply) => {
+        // Stream parsers bypass Fastify's buffered bodyLimit check. Reject a
+        // declared oversize body now; the byte meter catches chunked uploads.
+        if (Number(req.headers["content-length"]) > EGRESS_PROXY_BODY_LIMIT_BYTES) {
+          reply.code(413).send({ error: "request_too_large" });
           return;
         }
-        throw err;
-      }
-      if (grant === null || !verifyEgressToken(token, grant.token_hash)) {
-        reply.code(401).send({ error: "invalid_egress_token" });
-        return;
-      }
-      if (!grantIsLive(grant)) {
-        reply.code(403).send({ error: "grant_revoked" });
-        return;
-      }
-      const requestNow = now().getTime();
-      const rate = limiter.check(grant.id, grant.rate_limit_per_hour, requestNow);
-      if (!rate.allowed) {
-        const retryAfterSeconds = Math.max(1, Math.ceil((rate.resetAt - requestNow) / 1000));
-        reply.header("Retry-After", String(retryAfterSeconds));
-        reply.code(429).send({
-          error: "rate_limited",
-          scope: "grant",
-          limit_per_hour: grant.rate_limit_per_hour,
-          window_seconds: 3600,
-          retry_after_seconds: retryAfterSeconds,
-          reset_at: new Date(rate.resetAt).toISOString(),
-        });
-        return;
-      }
+        // EGRESS_DISABLED kills the proxy for EXISTING grants too — the panic
+        // switch must stop live workloads, not just new mints.
+        if (opts.egressDisabled) {
+          reply.code(503).send({ error: "egress_disabled" });
+          return;
+        }
+        const authz = req.headers.authorization ?? "";
+        const token = /^Bearer\s+(.+)$/i.exec(authz)?.[1]?.trim() ?? "";
+        let grant;
+        try {
+          grant = await opts.egressGrantStore.getById(req.params.grant);
+        } catch (err) {
+          if (
+            err instanceof EgressGrantStoreUnavailableError ||
+            isRetryablePrismaConnectionError(err)
+          ) {
+            sendEgressStoreUnavailable(reply);
+            return;
+          }
+          throw err;
+        }
+        if (grant === null || !verifyEgressToken(token, grant.token_hash)) {
+          reply.code(401).send({ error: "invalid_egress_token" });
+          return;
+        }
+        if (!grantIsLive(grant)) {
+          reply.code(403).send({ error: "grant_revoked" });
+          return;
+        }
+        const requestNow = now().getTime();
+        const rate = limiter.check(grant.id, grant.rate_limit_per_hour, requestNow);
+        if (!rate.allowed) {
+          const retryAfterSeconds = Math.max(1, Math.ceil((rate.resetAt - requestNow) / 1000));
+          reply.header("Retry-After", String(retryAfterSeconds));
+          reply.code(429).send({
+            error: "rate_limited",
+            scope: "grant",
+            limit_per_hour: grant.rate_limit_per_hour,
+            window_seconds: 3600,
+            retry_after_seconds: retryAfterSeconds,
+            reset_at: new Date(rate.resetAt).toISOString(),
+          });
+          return;
+        }
 
-      // Resolve the credential (account-scoped to the grant) for its upstream
-      // host + auth_shape. The secret itself is injected by vault.proxy. Served
-      // from the short-TTL cache when warm so a streaming burst doesn't hammer
-      // the connection pool (#227/#231).
-      let cred: CredentialRecord | null;
-      try {
-        cred = await resolveCredential(grant.credential_ref);
-      } catch (err) {
-        if (isRetryablePrismaConnectionError(err)) {
-          sendEgressStoreUnavailable(reply);
+        // Resolve the credential (account-scoped to the grant) for its upstream
+        // host + auth_shape. The secret itself is injected by vault.proxy. Served
+        // from the short-TTL cache when warm so a streaming burst doesn't hammer
+        // the connection pool (#227/#231).
+        let cred: CredentialRecord | null;
+        try {
+          cred = await resolveCredential(grant.credential_ref);
+        } catch (err) {
+          if (isRetryablePrismaConnectionError(err)) {
+            sendEgressStoreUnavailable(reply);
+            return;
+          }
+          throw err;
+        }
+        if (cred !== null && cred.account_id !== grant.account_id) {
+          cred = null;
+        }
+        if (cred === null) {
+          reply.code(404).send({ error: "credential_unavailable" });
           return;
         }
-        throw err;
-      }
-      if (cred !== null && cred.account_id !== grant.account_id) {
-        cred = null;
-      }
-      if (cred === null) {
-        reply.code(404).send({ error: "credential_unavailable" });
-        return;
-      }
-      const path = req.params["*"] ?? "";
+        const path = req.params["*"] ?? "";
 
-      // App's inbound headers (minus hop-by-hop) → auth injected per shape with a
-      // ${SECRET} placeholder the executor substitutes. URL carries no query
-      // (host check runs clean); query goes via http.query (incl. ${SECRET} for
-      // query-auth providers).
-      const inboundHeaders: Record<string, string> = {};
-      for (const [k, v] of Object.entries(req.headers)) {
-        const key = k.toLowerCase();
-        if (["host", "content-length", "connection", "authorization"].includes(key)) continue;
-        if (typeof v === "string") inboundHeaders[key] = v;
-      }
-      const inboundQuery: Record<string, string> = {};
-      const qIdx = req.url.indexOf("?");
-      if (qIdx >= 0)
-        for (const [k, v] of new URLSearchParams(req.url.slice(qIdx + 1))) inboundQuery[k] = v;
+        // App's inbound headers (minus hop-by-hop) → auth injected per shape with a
+        // ${SECRET} placeholder the executor substitutes. URL carries no query
+        // (host check runs clean); query goes via http.query (incl. ${SECRET} for
+        // query-auth providers).
+        const inboundHeaders: Record<string, string> = {};
+        for (const [k, v] of Object.entries(req.headers)) {
+          const key = k.toLowerCase();
+          if (["host", "content-length", "connection", "authorization"].includes(key)) continue;
+          if (typeof v === "string") inboundHeaders[key] = v;
+        }
+        const inboundQuery: Record<string, string> = {};
+        const qIdx = req.url.indexOf("?");
+        if (qIdx >= 0)
+          for (const [k, v] of new URLSearchParams(req.url.slice(qIdx + 1))) inboundQuery[k] = v;
 
-      const body =
-        req.body === undefined || req.body === null
-          ? undefined
-          : typeof req.body === "string"
-            ? req.body
-            : JSON.stringify(req.body);
+        const requestBodyStream = req.body as Readable | undefined;
 
-      // If the app already placed a ${SECRET} marker in a header/query value it is
-      // telling us exactly where the key goes — honor that and do NOT also stamp
-      // the stored auth_shape on top. A bearer-default shape would otherwise
-      // collide with, e.g., an `xi-api-key: ${SECRET}` placement, and the
-      // upstream rejects the extra Authorization header. The inbound
-      // `authorization` (the grant token) is already stripped above, so nothing
-      // leaks; the executor substitutes ${SECRET} wherever the app put it.
-      // auth_shape stays the fallback for dumb SDKs that can't place a marker.
-      //
-      // The BODY is deliberately excluded from this check (and from
-      // substitution entirely — see bodyVerbatim below). Unlike a header/query
-      // value the app sets to signal intent, the body is opaque application
-      // payload the app didn't author to talk to Squire — e.g. an LLM chat
-      // completion whose conversation can legitimately contain the literal
-      // text "${SECRET}" or "${SECRET.<field>}" (this repo's own docs, tool
-      // descriptions, and this very file quote that syntax). Treating that as
-      // a placement signal either skipped auth injection entirely (401s
-      // upstream) or spliced the real credential into the third-party
-      // provider's prompt body (a leak) — the bug this fix closes.
-      const clientPlacedSecret =
-        Object.values(inboundHeaders).some((v) => v.includes("${SECRET}")) ||
-        Object.values(inboundQuery).some((v) => v.includes("${SECRET}"));
-      try {
-        // Stream is captured outside the vault response so the vault type
-        // (string body) stays unchanged; executeStream returns as soon as
-        // upstream headers arrive.
-        let bodyStream: StreamedProxyResult["body"] | undefined;
-        const response = await opts.deps.vault.proxyResolvedCredential(
-          cred,
-          grant.account_id,
-          (current) => {
-            const host = current.allowed_hosts[0];
-            if (host === undefined) throw new CredentialNotFoundError(current.reference);
-            const shape = parseAuthShape(
-              typeof current.metadata.auth_shape === "string"
-                ? current.metadata.auth_shape
-                : undefined,
-            );
-            const injected = clientPlacedSecret
-              ? { headers: inboundHeaders, query: inboundQuery }
-              : applyAuthShape(shape, "${SECRET}", inboundHeaders, inboundQuery);
-            return {
-              method: req.method,
-              url: `https://${host}/${path}`,
-              headers: injected.headers,
-              ...(Object.keys(injected.query).length > 0 ? { query: injected.query } : {}),
-              ...(body !== undefined ? { body } : {}),
-            };
-          },
-          // bodyVerbatim: the body above is the client workload's opaque
-          // payload, never a Squire-authored ${SECRET} template — forward it
-          // byte-for-byte, never scanned or substituted.
-          async (input) => {
-            const streamed = await executor.executeStream({ ...input, bodyVerbatim: true });
-            bodyStream = streamed.body;
-            return {
-              status: streamed.status,
-              headers: streamed.headers,
-              body: "",
-              truncated: streamed.truncated,
-              // The audit row lands now with an empty body; this settles when
-              // the last byte leaves, and the vault amends the row.
-              bodyComplete: streamed.bodyComplete,
-            };
-          },
-          {
-            purpose: "egress_proxy",
-            grant_id: grant.id,
-            attribution: unattributedVaultAuditAttribution("egress_proxy"),
-          },
-        );
-        for (const [key, value] of Object.entries(response.headers)) {
-          reply.header(key, value);
+        // If the app already placed a ${SECRET} marker in a header/query value it is
+        // telling us exactly where the key goes — honor that and do NOT also stamp
+        // the stored auth_shape on top. A bearer-default shape would otherwise
+        // collide with, e.g., an `xi-api-key: ${SECRET}` placement, and the
+        // upstream rejects the extra Authorization header. The inbound
+        // `authorization` (the grant token) is already stripped above, so nothing
+        // leaks; the executor substitutes ${SECRET} wherever the app put it.
+        // auth_shape stays the fallback for dumb SDKs that can't place a marker.
+        //
+        // The BODY is deliberately excluded from this check (and from
+        // substitution entirely — see bodyVerbatim below). Unlike a header/query
+        // value the app sets to signal intent, the body is opaque application
+        // payload the app didn't author to talk to Squire — e.g. an LLM chat
+        // completion whose conversation can legitimately contain the literal
+        // text "${SECRET}" or "${SECRET.<field>}" (this repo's own docs, tool
+        // descriptions, and this very file quote that syntax). Treating that as
+        // a placement signal either skipped auth injection entirely (401s
+        // upstream) or spliced the real credential into the third-party
+        // provider's prompt body (a leak) — the bug this fix closes.
+        const clientPlacedSecret =
+          Object.values(inboundHeaders).some((v) => v.includes("${SECRET}")) ||
+          Object.values(inboundQuery).some((v) => v.includes("${SECRET}"));
+        try {
+          // Stream is captured outside the vault response so the vault type
+          // (string body) stays unchanged; executeStream returns as soon as
+          // upstream headers arrive.
+          let bodyStream: StreamedProxyResult["body"] | undefined;
+          const response = await opts.deps.vault.proxyResolvedCredential(
+            cred,
+            grant.account_id,
+            (current) => {
+              const host = current.allowed_hosts[0];
+              if (host === undefined) throw new CredentialNotFoundError(current.reference);
+              const shape = parseAuthShape(
+                typeof current.metadata.auth_shape === "string"
+                  ? current.metadata.auth_shape
+                  : undefined,
+              );
+              const injected = clientPlacedSecret
+                ? { headers: inboundHeaders, query: inboundQuery }
+                : applyAuthShape(shape, "${SECRET}", inboundHeaders, inboundQuery);
+              return {
+                method: req.method,
+                url: `https://${host}/${path}`,
+                headers: injected.headers,
+                ...(Object.keys(injected.query).length > 0 ? { query: injected.query } : {}),
+              };
+            },
+            // The vault checks host and injects credentials using only the
+            // template's URL, headers and query. The opaque body stays in this
+            // closure and bypasses both vault templates and secret substitution.
+            async (input) => {
+              const streamed = await executor.executeStream({
+                ...input,
+                bodyVerbatim: true,
+                ...(requestBodyStream !== undefined
+                  ? {
+                      bodyStream: requestBodyStream,
+                      maxRequestBytes: EGRESS_PROXY_BODY_LIMIT_BYTES,
+                    }
+                  : {}),
+              });
+              bodyStream = streamed.body;
+              return {
+                status: streamed.status,
+                headers: streamed.headers,
+                body: "",
+                truncated: streamed.truncated,
+                // The audit row lands now with an empty body; this settles when
+                // the last byte leaves, and the vault amends the row.
+                bodyComplete: streamed.bodyComplete,
+              };
+            },
+            {
+              purpose: "egress_proxy",
+              grant_id: grant.id,
+              attribution: unattributedVaultAuditAttribution("egress_proxy"),
+            },
+          );
+          for (const [key, value] of Object.entries(response.headers)) {
+            reply.header(key, value);
+          }
+          return reply.code(response.status).send(bodyStream);
+        } catch (err) {
+          if (isRetryablePrismaConnectionError(err)) {
+            sendEgressStoreUnavailable(reply);
+            return;
+          }
+          if (err instanceof AllowlistViolationError) {
+            reply.code(403).send({ error: "host_not_allowed", host: err.host });
+            return;
+          }
+          if (err instanceof CredentialNotFoundError) {
+            reply.code(404).send({ error: "credential_not_found" });
+            return;
+          }
+          if (err instanceof ProxyError) {
+            reply.code(proxyErrorStatus(err.code)).send({ error: err.code });
+            return;
+          }
+          throw err;
         }
-        return reply.code(response.status).send(bodyStream);
-      } catch (err) {
-        if (isRetryablePrismaConnectionError(err)) {
-          sendEgressStoreUnavailable(reply);
-          return;
-        }
-        if (err instanceof AllowlistViolationError) {
-          reply.code(403).send({ error: "host_not_allowed", host: err.host });
-          return;
-        }
-        if (err instanceof CredentialNotFoundError) {
-          reply.code(404).send({ error: "credential_not_found" });
-          return;
-        }
-        if (err instanceof ProxyError) {
-          reply.code(proxyErrorStatus(err.code)).send({ error: err.code });
-          return;
-        }
-        throw err;
-      }
-    },
-  );
+      },
+    );
+  });
 };

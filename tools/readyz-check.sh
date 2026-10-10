@@ -20,7 +20,7 @@ URL="${API_BASE}/readyz"
 # Two attempts 10s apart so a single transient blip doesn't page.
 healthy=0
 for attempt in 1 2; do
-  code=$(curl -s --max-time 10 -o /tmp/readyz-body -w '%{http_code}' "$URL" 2>/dev/null || echo "000")
+  code=$( : > /tmp/readyz-body; curl -s --max-time 10 -o /tmp/readyz-body -w '%{http_code}' "$URL" 2>/dev/null || true)
   body=$(cat /tmp/readyz-body 2>/dev/null || true)
   printf 'attempt %s: HTTP %s — %s\n' "$attempt" "$code" "$body"
   if [ "$code" = "200" ] && printf '%s' "$body" | grep -q '"ready":true'; then
