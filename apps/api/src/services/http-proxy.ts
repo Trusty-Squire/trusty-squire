@@ -83,6 +83,7 @@ export type ProxyErrorCode =
   | "blocked_address"
   | "dns_failed"
   | "response_too_large"
+  | "request_too_large"
   | "unsupported_response_type"
   | "upstream_error"
   | "timeout";
@@ -163,19 +164,22 @@ function resolveField(fields: Record<string, string>, name: string | undefined):
 }
 
 function substituteAll(s: string, fields: Record<string, string>): string {
-  return s.replace(new RegExp(TOKEN_SRC, "g"), (_m, variant: string | undefined, name: string | undefined) => {
-    if (variant === "_BASIC") {
-      // Basic auth: base64("<username>:<secret>"), or base64("<secret>:") when
-      // no username (key-as-username, blank-password). The username rides in the
-      // `.` slot — ${SECRET_BASIC} vs ${SECRET_BASIC.<username>} — so the secret
-      // itself is always the default field, never a named one.
-      const secret = resolveField(fields, undefined);
-      const userpass = name !== undefined ? `${name}:${secret}` : `${secret}:`;
-      return Buffer.from(userpass, "utf8").toString("base64");
-    }
-    const value = resolveField(fields, name);
-    return variant === "_JSON" ? jsonEscapeSecret(value) : value;
-  });
+  return s.replace(
+    new RegExp(TOKEN_SRC, "g"),
+    (_m, variant: string | undefined, name: string | undefined) => {
+      if (variant === "_BASIC") {
+        // Basic auth: base64("<username>:<secret>"), or base64("<secret>:") when
+        // no username (key-as-username, blank-password). The username rides in the
+        // `.` slot — ${SECRET_BASIC} vs ${SECRET_BASIC.<username>} — so the secret
+        // itself is always the default field, never a named one.
+        const secret = resolveField(fields, undefined);
+        const userpass = name !== undefined ? `${name}:${secret}` : `${secret}:`;
+        return Buffer.from(userpass, "utf8").toString("base64");
+      }
+      const value = resolveField(fields, name);
+      return variant === "_JSON" ? jsonEscapeSecret(value) : value;
+    },
+  );
 }
 
 export function substituteSecret(
@@ -198,11 +202,17 @@ export function substituteSecret(
   const headers: Record<string, string> = {};
   for (const [key, value] of Object.entries(http.headers ?? {})) {
     if (hasToken(key)) {
-      throw new ProxyError("secret_in_header_key", "secret placeholder not allowed in a header key");
+      throw new ProxyError(
+        "secret_in_header_key",
+        "secret placeholder not allowed in a header key",
+      );
     }
     const resolved = substituteAll(value, fields);
     if (Buffer.byteLength(resolved, "utf8") > MAX_HEADER_VALUE_BYTES) {
-      throw new ProxyError("header_too_large", `header ${key} exceeds ${MAX_HEADER_VALUE_BYTES} bytes`);
+      throw new ProxyError(
+        "header_too_large",
+        `header ${key} exceeds ${MAX_HEADER_VALUE_BYTES} bytes`,
+      );
     }
     headers[key] = resolved;
   }
@@ -214,7 +224,10 @@ export function substituteSecret(
       // A secret in a query KEY makes no sense and would be a smuggling
       // vector — block it like header keys. Values may carry ${SECRET}.
       if (hasToken(key)) {
-        throw new ProxyError("secret_in_header_key", "secret placeholder not allowed in a query-param key");
+        throw new ProxyError(
+          "secret_in_header_key",
+          "secret placeholder not allowed in a query-param key",
+        );
       }
       query[key] = substituteAll(value, fields);
     }
@@ -279,6 +292,8 @@ export interface DispatchInput {
   url: URL;
   headers: Record<string, string>;
   body: string | undefined;
+  bodyStream?: Readable;
+  maxRequestBytes?: number;
   pinnedAddress: string;
   family: number;
   headersTimeoutMs: number;
@@ -364,6 +379,8 @@ export class HttpProxyExecutor {
     http: ProxyHttpRequest;
     fields: Record<string, string>;
     bodyVerbatim?: boolean;
+    bodyStream?: Readable;
+    maxRequestBytes?: number;
   }): Promise<StreamedProxyResult> {
     const dispatchInput = await this.buildDispatchInput(input);
     const dispatched = await this.dispatch(dispatchInput);
@@ -390,6 +407,8 @@ export class HttpProxyExecutor {
     http: ProxyHttpRequest;
     fields: Record<string, string>;
     bodyVerbatim?: boolean;
+    bodyStream?: Readable;
+    maxRequestBytes?: number;
   }): Promise<DispatchInput> {
     const resolved = substituteSecret(input.http, input.fields, {
       ...(input.bodyVerbatim !== undefined ? { bodyVerbatim: input.bodyVerbatim } : {}),
@@ -429,6 +448,8 @@ export class HttpProxyExecutor {
         host: url.host,
       },
       body: resolved.body,
+      ...(input.bodyStream !== undefined ? { bodyStream: input.bodyStream } : {}),
+      ...(input.maxRequestBytes !== undefined ? { maxRequestBytes: input.maxRequestBytes } : {}),
       pinnedAddress: address,
       family,
       headersTimeoutMs: this.headersTimeoutMs,
@@ -436,9 +457,7 @@ export class HttpProxyExecutor {
     };
   }
 
-  private async resolveAndPin(
-    hostname: string,
-  ): Promise<{ address: string; family: number }> {
+  private async resolveAndPin(hostname: string): Promise<{ address: string; family: number }> {
     if (isIP(hostname) !== 0) {
       if (this.blockPrivate && isBlockedAddress(hostname)) {
         throw new ProxyError("blocked_address", `target ${hostname} is in a blocked range`);
@@ -496,9 +515,7 @@ export class HttpProxyExecutor {
   }
 }
 
-function defaultLookup(
-  hostname: string,
-): Promise<{ address: string; family: number }> {
+function defaultLookup(hostname: string): Promise<{ address: string; family: number }> {
   return new Promise((resolve, reject) => {
     dnsLookup(hostname, (err, address, family) => {
       if (err !== null) reject(err);
@@ -558,8 +575,32 @@ function defaultDispatch(input: DispatchInput): Promise<DispatchResult> {
     req.on("error", (err) => {
       reject(err instanceof ProxyError ? err : new ProxyError("upstream_error", err.message));
     });
-    if (input.body !== undefined) req.write(input.body);
-    req.end();
+    if (input.bodyStream !== undefined) {
+      const source = input.bodyStream;
+      let bytes = 0;
+      const meter = new Transform({
+        transform(chunk: Buffer, _encoding, done) {
+          bytes += chunk.length;
+          if (bytes > (input.maxRequestBytes ?? Number.POSITIVE_INFINITY)) {
+            done(new ProxyError("request_too_large", "egress request body exceeds cap"));
+          } else {
+            done(null, chunk);
+          }
+        },
+      });
+      source.once("error", (err) => req.destroy(err));
+      meter.once("error", (err) => {
+        source.unpipe(meter);
+        // Leave the client socket usable long enough to send the 413. Bytes
+        // beyond the cap are discarded, never forwarded or retained.
+        source.resume();
+        req.destroy(err);
+      });
+      source.pipe(meter).pipe(req);
+    } else {
+      if (input.body !== undefined) req.write(input.body);
+      req.end();
+    }
   });
 }
 
