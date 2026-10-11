@@ -1,0 +1,64 @@
+# Operate live share and Beeline proxy contract
+
+`operate_share({session_id})` returns `{url, expires_at, control}` for an active
+operate session. The URL is a bearer capability for **that session's current
+page only**, following a tab handoff when the session adopts a new page. It is
+not a VNC or shared-display address. Repeating the call while
+the share is active returns the same URL and current `control` (`agent` or
+`human`). Shares expire ten minutes after creation. `operate_finish`, broker
+disconnect or forced session close invalidates the URL. A later
+`operate_share` can create a fresh share while the session remains active.
+
+The broker hosts a loopback HTTP server for each share and exposes it through
+the existing `cloudflared` quick-tunnel helper used by connect's live view. A
+share request fails if `cloudflared` is unavailable or the tunnel cannot start.
+The agent receives the upstream URL in the tool result and must pass it only to
+a trusted server-side proxy. The live JPEG stream is raw page pixels; it does
+not use the released-card mask applied to `operate_screenshot`. Anyone able to
+open the bearer URL can see those pixels, including visible card fields. A
+fresh 256-bit token appears as `/s/<token>/` in the upstream URL. Beeline must
+keep this upstream URL and token on its server. Its card and "Open in browser"
+action should both link to Beeline's own `https://computer.usebeeline.app/s/<id>/`
+URL; neither the browser HTML nor any user-visible redirect should reveal the
+upstream host or token. Treat the upstream URL like a password: do not log it,
+include it in analytics, or send it to another client. The tunnel and token
+provide access without a separate security prompt.
+
+Proxy these paths, preserving `GET`, WebSocket Upgrade, and bidirectional
+WebSocket frames:
+
+| Beeline path | Upstream path | Purpose |
+| --- | --- | --- |
+| `/s/<id>/` | `/s/<token>/` | Viewer HTML (`text/html`, no-store) |
+| `/s/<id>/stream` | `/s/<token>/stream` | WebSocket frames and input |
+
+The viewer HTML uses a relative `stream` URL, so the Beeline path must end in
+`/`. There is no cookie, query parameter, or extra authorization header on the
+upstream. The token is the whole upstream authorization. A bad token returns
+404; a stopped share returns 410 or a closed connection. Beeline should close
+the upstream WebSocket when its viewer leaves the artifact or browser tab.
+Multiple viewers may watch the same link, including an embedded viewer and a
+system browser.
+
+The WebSocket sends JSON text messages:
+
+- Server to viewer: `{ "type": "frame", "data": "<base64 JPEG>" }`,
+  `{ "type": "blank" }` while the session switches pages, and
+  `{ "type": "control", "state": "agent" | "human" }`.
+- Viewer to server: `{ "type": "pointer", "phase": "down" | "move" | "up", "x": 0..1, "y": 0..1, "button": "left" | "middle" | "right" }`,
+  `{ "type": "touch", "phase": "start" | "move" | "end", "x": 0..1, "y": 0..1 }`,
+  `{ "type": "wheel", "x": 0..1, "y": 0..1, "delta_x": number, "delta_y": number }`,
+  `{ "type": "text", "text": "..." }`, or
+  `{ "type": "key", "key": "Backspace" | "Tab" | "Enter" | "Escape" | "ArrowLeft" | "ArrowUp" | "ArrowRight" | "ArrowDown" | "Delete" | "a".."z", "ctrl"?: boolean, "meta"?: boolean, "alt"?: boolean, "shift"?: boolean }`.
+
+Coordinates are fractions of the rendered JPEG's width and height. The first
+valid input claims control, pauses agent browser actions, and broadcasts
+`control: human`. If another viewer sends input, it becomes the controller.
+When that controlling viewer's WebSocket disconnects, the broker broadcasts
+`control: agent` and allows waiting agent actions to resume. A long
+`operate_drive` yields at each step so a viewer can take over between actions.
+Read-only observations continue during human control. The broker streams and
+dispatches only through the operate session's Playwright page CDP session.
+Chromium can withhold screencast frames from a background tab, so the broker
+captures fallback frames from that same CDP target without activating it;
+other tabs and the host display never enter this transport.

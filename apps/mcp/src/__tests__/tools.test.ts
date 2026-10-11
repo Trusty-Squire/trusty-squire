@@ -330,6 +330,7 @@ describe("TOOLS registry", () => {
       "operate_read_inbox",
       "operate_login",
       "operate_extract",
+      "operate_share",
       "inject_card",
       "list_credentials",
       "list_payment_cards",
@@ -346,7 +347,7 @@ describe("TOOLS registry", () => {
       "store_credential",
       "use_credential",
     ];
-    expect(target).toHaveLength(22);
+    expect(target).toHaveLength(23);
     expect(TOOLS.map((tool) => tool.name).sort()).toEqual([...target, ...unchanged].sort());
     const assertNoKind = (schema: unknown): void => {
       if (typeof schema !== "object" || schema === null) return;
@@ -368,14 +369,14 @@ describe("TOOLS registry", () => {
       const tools = buildToolRegistry(
         disabled === undefined ? {} : { TRUSTY_SQUIRE_DIAGNOSTICS: disabled },
       );
-      expect(tools).toHaveLength(31);
+      expect(tools).toHaveLength(32);
       expect(tools.map((tool) => tool.name)).not.toEqual(
         expect.arrayContaining(["list_extract_failures", "get_extract_failure"]),
       );
     }
 
     const tools = buildToolRegistry({ TRUSTY_SQUIRE_DIAGNOSTICS: "1" });
-    expect(tools).toHaveLength(33);
+    expect(tools).toHaveLength(34);
     expect(tools.map((tool) => tool.name)).toEqual(
       expect.arrayContaining(["list_extract_failures", "get_extract_failure"]),
     );

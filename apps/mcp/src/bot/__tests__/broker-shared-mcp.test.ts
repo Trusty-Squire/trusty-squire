@@ -3,6 +3,7 @@ import { createConnection, createServer as createNetServer, type Socket } from "
 import { spawn } from "node:child_process";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -74,7 +75,7 @@ afterEach(async () => {
 });
 
 it("relay sends the agent identity before MCP traffic and exits with its pipe", async () => {
-  const root = await mkdtemp(join(process.cwd(), ".relay-test-"));
+  const root = await mkdtemp(join(tmpdir(), "ts-relay-test-"));
   cleanup.push(async () => await rm(root, { recursive: true, force: true }));
   const operator = new OperatorBroker({ registryBaseUrl: "http://unused.test" });
   const path = join(root, ".trusty-squire", "mcp.sock");
@@ -128,7 +129,7 @@ it("relay sends the agent identity before MCP traffic and exits with its pipe", 
 });
 
 it("`mcp server` proxies to the shared socket without starting a second operator stack", async () => {
-  const root = await mkdtemp(join(process.cwd(), ".server-relay-"));
+  const root = await mkdtemp(join(tmpdir(), "ts-server-relay-"));
   cleanup.push(async () => await rm(root, { recursive: true, force: true }));
   const operator = new OperatorBroker({ registryBaseUrl: "http://unused.test" });
   const path = join(root, ".trusty-squire", "mcp.sock");
@@ -187,7 +188,7 @@ it("`mcp server` proxies to the shared socket without starting a second operator
 });
 
 it("serves two profile brokers through their own relays at the same time", async () => {
-  const root = await mkdtemp(join(process.cwd(), "../..", ".mp-"));
+  const root = await mkdtemp(join(tmpdir(), "ts-mp-"));
   cleanup.push(async () => await rm(root, { recursive: true, force: true }));
   const profiles = [
     join(root, ".trusty-squire", "chrome-profile"),
@@ -242,7 +243,7 @@ it("serves two profile brokers through their own relays at the same time", async
 });
 
 it("relay restores initialization after a broker restart and fails a dropped in-flight call", async () => {
-  const root = await mkdtemp(join(process.cwd(), ".rr-"));
+  const root = await mkdtemp(join(tmpdir(), "ts-rr-"));
   cleanup.push(async () => await rm(root, { recursive: true, force: true }));
   const path = join(root, ".trusty-squire", "mcp.sock");
   await mkdir(join(root, ".trusty-squire"), { mode: 0o700 });
@@ -357,7 +358,7 @@ it("relay restores initialization after a broker restart and fails a dropped in-
 });
 
 it("isolates concurrent socket principals, attributes vault calls, coexists with stdio, and reaccepts after restart", async () => {
-  const root = await mkdtemp(join(process.cwd(), ".shared-mcp-test-"));
+  const root = await mkdtemp(join(tmpdir(), "ts-shared-mcp-test-"));
   cleanup.push(async () => await rm(root, { recursive: true, force: true }));
   const headers: string[] = [];
   const apiServer: HttpServer = createServer((request, response) => {
@@ -503,7 +504,7 @@ it("isolates concurrent socket principals, attributes vault calls, coexists with
 });
 
 it("refuses a second connection on the first connection's session", async () => {
-  const root = await mkdtemp(join(process.cwd(), ".relay-grace-"));
+  const root = await mkdtemp(join(tmpdir(), "ts-relay-grace-"));
   cleanup.push(async () => await rm(root, { recursive: true, force: true }));
   const operator = new OperatorBroker({ registryBaseUrl: "http://unused.test" });
   const closed: string[] = [];
@@ -549,8 +550,9 @@ it("refuses a second connection on the first connection's session", async () => 
 
   const alice = await connect("alice");
   const bob = await connect("bob");
-  const aSession = text(await alice.tool("operate_start", { service_url: "https://example.test/a" }))
-    .session_id as string;
+  const aSession = text(
+    await alice.tool("operate_start", { service_url: "https://example.test/a" }),
+  ).session_id as string;
   const bSession = text(await bob.tool("operate_start", { service_url: "https://example.test/b" }))
     .session_id as string;
   expect(aSession).not.toBe(bSession);
@@ -573,7 +575,7 @@ it("refuses a second connection on the first connection's session", async () => 
 });
 
 it("closes the agent's session when a `server` relay process is killed", async () => {
-  const root = await mkdtemp(join(process.cwd(), ".server-kill-"));
+  const root = await mkdtemp(join(tmpdir(), "ts-server-kill-"));
   cleanup.push(async () => await rm(root, { recursive: true, force: true }));
   const operator = new OperatorBroker({ registryBaseUrl: "http://unused.test" });
   const closed: string[] = [];

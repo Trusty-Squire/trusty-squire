@@ -14,7 +14,7 @@ Ask your coding agent to:
 
 - **Get an API key.** "Sign me up for Pinecone and get an API key." It signs up, verifies the email, creates the key, and stores it in your vault instead of the chat.
 - **Sign in anywhere.** It uses your Google or GitHub account on any site that offers it.
-- **Buy things.** "Order one Glow Serum from whitejade.xyz." You approve the purchase once, and your card number never reaches the agent.
+- **Buy things.** "Order one Glow Serum from whitejade.xyz." You approve the purchase once, and Trusty Squire fills the card fields in its browser.
 - **Call APIs with stored keys.** The agent uses a saved key without ever seeing it.
 - **Finish setup.** OAuth apps, dashboards, and verification steps, end to end.
 

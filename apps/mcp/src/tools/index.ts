@@ -25,6 +25,7 @@ import { editPaymentCardTool } from "./card-mutations.js";
 import { fetchCredentialTool } from "./fetch-credential.js";
 import { operateFetchTextTool } from "./operate-fetch-text.js";
 import { operateCeremonyWindowTool } from "./operate-ceremony-window.js";
+import { operateShareTool } from "./operate-share.js";
 
 export interface Tool<TArgs extends Record<string, unknown> = Record<string, unknown>> {
   name: string;
@@ -103,6 +104,7 @@ export function buildToolRegistry(env: NodeJS.ProcessEnv = process.env): Tool[] 
     // Interactive host-driven provisioning through discoverable flat verbs,
     // plus the unchanged recipe save/run tools.
     ...OPERATE_TOOLS,
+    operateShareTool,
   ] as Tool[];
 }
 

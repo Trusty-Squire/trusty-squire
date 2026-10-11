@@ -299,6 +299,7 @@ describe("characterization: registered operator tool surface", () => {
       "operate_read_inbox",
       "operate_login",
       "operate_extract",
+      "operate_share",
     ]);
   });
 

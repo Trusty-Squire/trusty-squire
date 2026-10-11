@@ -15,11 +15,11 @@
 </p>
 
 <p align="center"><strong>Empower agents with auth and payments.</strong></p>
-<p align="center">MCP tools to automate auth and pay — your keys and card stay out of agent context.</p>
+<p align="center">MCP tools to automate auth and pay with vault-backed keys and approved card entry.</p>
 
 Trusty Squire is an **MCP server that lets Claude Code, Codex, Cursor, OpenCode, Goose, and other coding agents sign up, provision, and purchase on your behalf**. It opens a real browser, works through signup, sign-in, setup, and checkout flows one step at a time, clears the bot-detection and email-verification steps that make operator tools stall, and hands the job back to a person only when one is actually required. That covers wiring up OAuth and API keys for the app you're building as much as it covers paying a checkout, sending a gift, or booking something — the same operator primitives drive all of it.
 
-Provider secrets and payment cards are write-only: the agent's credential tools return references and authenticated results, never stored plaintext. The raw secret never needs to enter the agent's context, so it can't be pasted into a commit, leaked in a log, or read back out over chat. When a task genuinely needs the plaintext somewhere the agent controls, `fetch_credential` releases it — for one credential, once, and only after you sign that exact request with your passkey. Backend access is a host-scoped, rate-limited, independently revocable grant, so a leaked token is killed without rotating the provider key — and you connect Google or GitHub yourself in a real browser, so the agent never types your password. Full [threat model below](#security-and-threat-model).
+Provider secrets and payment cards are write-only through the agent's credential tools: those tools return references and authenticated results, never stored plaintext. Normal operator observations mask released card values; the separate [live-share contract](docs/operate-live-share.md) defines the raw view's bearer URL boundary. When a task genuinely needs credential plaintext somewhere the agent controls, `fetch_credential` releases it — for one credential, once, and only after you sign that exact request with your passkey. Backend access is a host-scoped, rate-limited, independently revocable grant, so a leaked token is killed without rotating the provider key — and you connect Google or GitHub yourself in a real browser, so the agent never types your password. Full [threat model below](#security-and-threat-model).
 
 ## Direct payment observation
 
