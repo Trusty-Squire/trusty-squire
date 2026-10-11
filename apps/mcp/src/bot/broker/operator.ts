@@ -21,6 +21,7 @@ import { BrokerAuthority, type BrokerPrincipal } from "./authority.js";
 import { BrokerRefusal } from "./refusal.js";
 import type { BrokerTransportPort } from "./transport.js";
 import { provenPreDispatchMutationFailure } from "../mutation-dispatch-evidence.js";
+import { withAgentShareControl } from "../live-share.js";
 import { attachOperatorRequestAbort, withOperatorRequestContext } from "../request-cancellation.js";
 import type { BrokerAccount, CloseResult, CommandResult, OpenResult } from "./protocol.js";
 
@@ -100,6 +101,16 @@ function remapSession(value: unknown, from: string, to: string): unknown {
 
 function isOperatorCommand(name: string): boolean {
   return name.startsWith("operate_") || name === "inject_card";
+}
+
+function needsAgentBrowserControl(name: string): boolean {
+  return ![
+    "operate_observe",
+    "operate_screenshot",
+    "operate_network",
+    "operate_share",
+    "operate_fetch_text",
+  ].includes(name);
 }
 
 /** Derive the operate_start arguments an `open` request maps to. Exported for
@@ -351,7 +362,14 @@ export class OperatorBroker implements BrokerTransportPort {
               const result =
                 name === "operate_finish"
                   ? await executeOwned()
-                  : await withProvisionSessionCall(internalId, executeOwned, signal);
+                  : await withProvisionSessionCall(
+                      internalId,
+                      async () =>
+                        needsAgentBrowserControl(name)
+                          ? await withAgentShareControl(session, executeOwned, signal)
+                          : await executeOwned(),
+                      signal,
+                    );
               return maskSessionOutput(session, remapSession(result, internalId, id));
             } catch (error) {
               const preDispatch = provenPreDispatchMutationFailure(error);

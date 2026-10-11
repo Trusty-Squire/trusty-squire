@@ -38,6 +38,7 @@ import type { ApiClient } from "../../api-client.js";
 import { loginSessionGuidance } from "../skill-hint.js";
 import type { OAuthProviderId } from "../oauth-providers.js";
 import { createSession } from "./model.js";
+import { stopOperateShare } from "../live-share.js";
 import type { AllowedHostEntry, Session, SessionTerminalTeardownOwner } from "./model.js";
 import { hostStrings, registrableHost } from "./hosts.js";
 // Type-only, so no runtime cycle exists: the observation payload and the
@@ -747,6 +748,7 @@ function clearSessionArtifacts(session: Session): void {
 }
 
 function deregisterProvisionSession(session: Session): void {
+  stopOperateShare(session);
   clearSessionArtifacts(session);
   if (sessions.get(session.id) === session) sessions.delete(session.id);
 }
@@ -831,6 +833,7 @@ export async function finishProvisionSessionWithPreparation<T>(
   };
   session.terminalTeardownOwner = owner;
   session.closing = true;
+  stopOperateShare(session);
   stopSessionWatchdog(session);
   let closingStarted = false;
   const transition = (async (): Promise<PreparedFinishResult<T>> => {
@@ -908,6 +911,7 @@ export async function closeAllProvisionSessions(): Promise<void> {
       const closingSessions = [...sessions.values()];
       for (const session of closingSessions) {
         session.closing = true;
+        stopOperateShare(session);
         stopSessionWatchdog(session);
       }
       const closeErrors = await Promise.all(

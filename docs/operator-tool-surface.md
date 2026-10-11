@@ -17,11 +17,17 @@ still require another observation or an explicit wait.
 | Goal-shaped drive | `operate_drive` |
 | Start and finish | `operate_start`, `operate_finish` |
 | Read the page | `operate_observe`, `operate_screenshot`, `operate_network` |
+| Human live handoff | `operate_share` |
 | Drive ordinary UI | `operate_navigate`, `operate_click`, `operate_type`, `operate_select`, `operate_upload`, `operate_press`, `operate_scroll`, `operate_wait` |
 | Email verification read | `operate_read_inbox` |
 | Login | `operate_login` |
 | Vault-aware browser work | `operate_login({action:"load_saved"})`, `operate_extract` |
 | Payments and vault lists | `inject_card`, `list_credentials`, `list_payment_cards`, `edit_payment_card` |
+
+`operate_share({session_id})` gives a trusted server-side proxy a short-lived,
+interactive view of that session's tab. Human input pauses agent browser
+actions until the controlling viewer disconnects. The URL, WebSocket messages,
+and Beeline proxy mapping are specified in [Operate live share](operate-live-share.md).
 
 `operate_upload` takes `session_id`, a current `target` ref or `@label` for an
 upload button or file input, and an absolute local `path`. The file must exist

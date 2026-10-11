@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Live browser</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        background: #111;
+        color: white;
+        font:
+          14px system-ui,
+          sans-serif;
+      }
+      body {
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+      }
+      #bar {
+        padding: 8px 12px;
+        background: #222;
+      }
+      #screen {
+        flex: 1;
+        min-height: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        overflow: hidden;
+        touch-action: none;
+      }
+      canvas {
+        max-width: 100%;
+        max-height: 100%;
+        object-fit: contain;
+        touch-action: none;
+      }
+      #keyboard {
+        position: absolute;
+        opacity: 0;
+        left: -1000px;
+      }
+      button {
+        margin-left: 12px;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="bar">
+      <span id="state">Connecting…</span><button id="focus" type="button">Show keyboard</button>
+    </div>
+    <div id="screen">
+      <canvas id="canvas" tabindex="0" aria-label="Interactive browser view"></canvas>
+    </div>
+    <input id="keyboard" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" />
+    <script>
+      const canvas = document.getElementById("canvas");
+      const state = document.getElementById("state");
+      const keyboard = document.getElementById("keyboard");
+      const context = canvas.getContext("2d");
+      const endpoint = new URL("stream", location.href);
+      endpoint.protocol = location.protocol === "https:" ? "wss:" : "ws:";
+      const socket = new WebSocket(endpoint);
+      let drawing = false;
+      let nextFrame = null;
+      let frameEpoch = 0;
+      function send(message) {
+        if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
+      }
+      function sendText(value) {
+        for (let offset = 0; offset < value.length; offset += 500)
+          send({ type: "text", text: value.slice(offset, offset + 500) });
+      }
+      function paint(data) {
+        nextFrame = data;
+        if (drawing) return;
+        drawing = true;
+        const epoch = frameEpoch;
+        const image = new Image();
+        image.onload = () => {
+          if (epoch !== frameEpoch) {
+            drawing = false;
+            const queued = nextFrame;
+            nextFrame = null;
+            if (queued) paint(queued);
+            return;
+          }
+          canvas.width = image.naturalWidth;
+          canvas.height = image.naturalHeight;
+          context.drawImage(image, 0, 0);
+          drawing = false;
+          const queued = nextFrame;
+          nextFrame = null;
+          if (queued && queued !== data) paint(queued);
+        };
+        image.onerror = () => {
+          drawing = false;
+        };
+        image.src = "data:image/jpeg;base64," + data;
+      }
+      socket.onmessage = (event) => {
+        const message = JSON.parse(event.data);
+        if (message.type === "frame") paint(message.data);
+        if (message.type === "blank") {
+          frameEpoch++;
+          nextFrame = null;
+          context.clearRect(0, 0, canvas.width, canvas.height);
+        }
+        if (message.type === "control")
+          state.textContent =
+            message.state === "human"
+              ? "You are controlling the browser"
+              : "Watching — touch to take control";
+      };
+      socket.onclose = () => {
+        state.textContent = "Live view ended";
+      };
+      socket.onerror = () => {
+        state.textContent = "Live view connection failed";
+      };
+      function point(event) {
+        const bounds = canvas.getBoundingClientRect();
+        const imageRatio = canvas.width / canvas.height;
+        const boxRatio = bounds.width / bounds.height;
+        const width = boxRatio > imageRatio ? bounds.height * imageRatio : bounds.width;
+        const height = boxRatio > imageRatio ? bounds.height : bounds.width / imageRatio;
+        const left = bounds.left + (bounds.width - width) / 2;
+        const top = bounds.top + (bounds.height - height) / 2;
+        return {
+          x: Math.max(0, Math.min(1, (event.clientX - left) / width)),
+          y: Math.max(0, Math.min(1, (event.clientY - top) / height)),
+        };
+      }
+      canvas.addEventListener("pointerdown", (event) => {
+        event.preventDefault();
+        canvas.setPointerCapture(event.pointerId);
+        canvas.focus();
+        send({
+          type: event.pointerType === "touch" ? "touch" : "pointer",
+          phase: event.pointerType === "touch" ? "start" : "down",
+          button: ["left", "middle", "right"][event.button] || "left",
+          ...point(event),
+        });
+      });
+      canvas.addEventListener("pointermove", (event) => {
+        if (!event.buttons) return;
+        send({
+          type: event.pointerType === "touch" ? "touch" : "pointer",
+          phase: "move",
+          ...point(event),
+        });
+      });
+      canvas.addEventListener("pointerup", (event) => {
+        send({
+          type: event.pointerType === "touch" ? "touch" : "pointer",
+          phase: event.pointerType === "touch" ? "end" : "up",
+          button: ["left", "middle", "right"][event.button] || "left",
+          ...point(event),
+        });
+      });
+      canvas.addEventListener("contextmenu", (event) => event.preventDefault());
+      canvas.addEventListener(
+        "wheel",
+        (event) => {
+          event.preventDefault();
+          send({ type: "wheel", delta_x: event.deltaX, delta_y: event.deltaY, ...point(event) });
+        },
+        { passive: false },
+      );
+      canvas.addEventListener("keydown", (event) => {
+        if ((event.ctrlKey || event.metaKey || event.altKey) && /^[a-z]$/i.test(event.key)) {
+          event.preventDefault();
+          send({
+            type: "key",
+            key: event.key,
+            ctrl: event.ctrlKey,
+            meta: event.metaKey,
+            alt: event.altKey,
+            shift: event.shiftKey,
+          });
+          return;
+        }
+        if (
+          [
+            "Backspace",
+            "Tab",
+            "Enter",
+            "Escape",
+            "ArrowLeft",
+            "ArrowUp",
+            "ArrowRight",
+            "ArrowDown",
+            "Delete",
+          ].includes(event.key)
+        ) {
+          event.preventDefault();
+          send({ type: "key", key: event.key });
+        } else if (event.key.length === 1 && !event.ctrlKey && !event.metaKey) {
+          event.preventDefault();
+          sendText(event.key);
+        }
+      });
+      document.getElementById("focus").onclick = () => keyboard.focus();
+      keyboard.addEventListener("input", () => {
+        if (keyboard.value) sendText(keyboard.value);
+        keyboard.value = "";
+      });
+      keyboard.addEventListener("keydown", (event) => {
+        if (
+          [
+            "Backspace",
+            "Tab",
+            "Enter",
+            "Escape",
+            "ArrowLeft",
+            "ArrowUp",
+            "ArrowRight",
+            "ArrowDown",
+            "Delete",
+          ].includes(event.key)
+        ) {
+          event.preventDefault();
+          send({ type: "key", key: event.key });
+        }
+      });
+      document.addEventListener("paste", (event) => {
+        if (document.activeElement !== canvas) return;
+        const text = event.clipboardData?.getData("text/plain");
+        if (text) {
+          event.preventDefault();
+          sendText(text);
+        }
+      });
+      window.addEventListener("pagehide", () => socket.close());
+    </script>
+  </body>
+</html>

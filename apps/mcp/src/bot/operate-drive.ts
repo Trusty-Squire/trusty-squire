@@ -38,6 +38,7 @@ import {
 } from "./provision-session.js";
 import type { VerificationResult } from "./capture/verification.js";
 import { liveProviderSessionsForSession, sessionForCall } from "./session/lifecycle.js";
+import { yieldOperateDriveToHuman } from "./live-share.js";
 import type { OAuthProviderId } from "./oauth-providers.js";
 import {
   compactV2EpochDoc,
@@ -1528,7 +1529,10 @@ export function looksLikeMaskedSecretDisplay(text: string): boolean {
 
 function visibleCredentialFacts(row: WireRow): string {
   // Link destinations are navigation metadata, not displayed key values.
-  return (row[2] ?? "").split("|").filter((fact) => !fact.startsWith("u=")).join("|");
+  return (row[2] ?? "")
+    .split("|")
+    .filter((fact) => !fact.startsWith("u="))
+    .join("|");
 }
 
 export function rowShowsSecretEvidence(row: WireRow): boolean {
@@ -7195,6 +7199,7 @@ async function driveLoop(input: {
   };
 
   while (steps < maxSteps && remainingMs() > 0) {
+    await yieldOperateDriveToHuman(session, context?.signal);
     automaticDecisionRefused = false;
     if (api === null) {
       return finish("jev_unavailable", {

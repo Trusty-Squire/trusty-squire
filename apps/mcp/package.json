@@ -93,6 +93,7 @@
     "sharp": "^0.34.5",
     "smol-toml": "^1.6.1",
     "tldts": "^7.0.30",
+    "ws": "^8.18.3",
     "yaml": "^2.6.1",
     "zod": "^3.25.28",
     "zod-to-json-schema": "^3.25.2"
@@ -100,6 +101,7 @@
   "devDependencies": {
     "@types/better-sqlite3": "7.6.13",
     "@types/node": "^22.10.2",
+    "@types/ws": "^8.18.1",
     "@vitest/coverage-v8": "^2.1.8",
     "@vouchflow/web": "0.3.1",
     "tsx": "^4.7.0",

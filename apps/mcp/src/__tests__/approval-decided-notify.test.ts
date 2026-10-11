@@ -2,6 +2,7 @@ import { createServer } from "node:http";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { afterEach, expect, it, vi } from "vitest";
 import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -150,7 +151,7 @@ async function relay(root: string, identity: string) {
 }
 
 it("sends each approved or denied decision once on the originating stdio relay only", async () => {
-  const root = await mkdtemp(join(process.cwd(), ".approval-notify-"));
+  const root = await mkdtemp(join(tmpdir(), "ts-approval-notify-"));
   cleanup.push(async () => await rm(root, { recursive: true, force: true }));
   const approvals = new Map<string, "pending" | "approved" | "denied">();
   let created = 0;
