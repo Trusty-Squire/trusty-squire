@@ -3,9 +3,10 @@ import type { AddressInfo } from "node:net";
 import { chromium, type Browser, type Page } from "playwright";
 import { WebSocket } from "ws";
 import sharp from "sharp";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { BrowserController } from "../browser.js";
 import {
+  LiveShare,
   shareOperateSession,
   withAgentShareControl,
   yieldOperateDriveToHuman,
@@ -22,6 +23,7 @@ let sessionId: string | undefined;
 let secondSessionId: string | undefined;
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   if (sessionId !== undefined) await finishProvisionSession(sessionId).catch(() => undefined);
   if (secondSessionId !== undefined)
     await finishProvisionSession(secondSessionId).catch(() => undefined);
@@ -102,7 +104,7 @@ describe("operate live share", () => {
     socket.close();
   }, 60_000);
 
-  it("keeps agent control paused until disconnected viewer input settles", async () => {
+  it("keeps old input ahead of agent actions and replacement shares", async () => {
     fixture = createServer((_request, response) => {
       response.setHeader("Content-Type", "text/html");
       response.end('<!doctype html><input id="answer" autofocus>');
@@ -137,10 +139,18 @@ describe("operate live share", () => {
     });
     sessionId = started.session_id;
     const session = paymentSession(sessionId);
-    const shared = await shareOperateSession(session, async (port) => ({
+    let liveShare!: LiveShare;
+    const originalStart = LiveShare.prototype.start;
+    const startSpy = vi.spyOn(LiveShare.prototype, "start").mockImplementation(function (this: LiveShare, tunnelFactory) {
+      liveShare = this;
+      return originalStart.call(this, tunnelFactory);
+    });
+    const localTunnel = async (port: number) => ({
       url: `http://127.0.0.1:${port}`,
       close: async () => undefined,
-    }));
+    });
+    const shared = await shareOperateSession(session, localTunnel);
+    startSpy.mockRestore();
     const socket = new WebSocket(new URL("stream", shared.url));
     await new Promise<void>((resolve, reject) => {
       socket.once("open", resolve);
@@ -156,10 +166,30 @@ describe("operate live share", () => {
     socket.close();
     await new Promise<void>((resolve) => socket.once("close", resolve));
     expect(agentRan).toBe(false);
-    finishInput();
-    await agent;
+    liveShare.stop();
+    let replacementFinished = false;
+    let nextAgentRan = false;
+    const replacement = shareOperateSession(session, localTunnel).then((value) => {
+      replacementFinished = true;
+      return value;
+    });
+    const competingReplacement = shareOperateSession(session, localTunnel);
+    const nextAgent = withAgentShareControl(session, async () => {
+      nextAgentRan = true;
+    });
+    try {
+      await Promise.resolve();
+      expect(replacementFinished).toBe(false);
+      expect(nextAgentRan).toBe(false);
+    } finally {
+      finishInput();
+    }
+    const [, , renewed, competing] = await Promise.all([agent, nextAgent, replacement, competingReplacement]);
     expect(await page.locator("#answer").inputValue()).toBe("from human");
     expect(agentRan).toBe(true);
+    expect(nextAgentRan).toBe(true);
+    expect(replacementFinished).toBe(true);
+    expect(competing.url).toBe(renewed.url);
   }, 60_000);
 
   it("streams one session, hands control to input, resumes on disconnect, and dies with the session", async () => {

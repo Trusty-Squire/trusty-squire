@@ -18,6 +18,8 @@ type Tunnel = { url: string; close: () => Promise<void> };
 type TunnelFactory = (port: number) => Promise<Tunnel>;
 
 const shares = new WeakMap<Session, LiveShare>();
+type ShareDetails = { url: string; expires_at: string; control: "agent" | "human" };
+const pendingShares = new WeakMap<Session, Promise<ShareDetails>>();
 const agentTurn = new AsyncLocalStorage<LiveShare>();
 
 function isInput(value: unknown): value is Record<string, unknown> {
@@ -147,6 +149,11 @@ export class LiveShare {
 
   get activeUrl(): string | null {
     return this.expired ? null : this.publicUrl;
+  }
+
+  async waitForInputToSettle(): Promise<void> {
+    await this.inputTail;
+    while (this.humanWanted) await waitForSignal(this.agentWaiters);
   }
 
   async withAgentAction<T>(action: () => Promise<T>, signal?: AbortSignal): Promise<T> {
@@ -460,31 +467,44 @@ export class LiveShare {
 export async function shareOperateSession(
   session: Session,
   tunnelFactory: TunnelFactory = startQuickViewTunnel,
-): Promise<{ url: string; expires_at: string; control: "agent" | "human" }> {
-  const page = session.browser.page;
-  if (page === null || page.isClosed() || session.closing)
-    throw new Error("operate session is closed");
-  const old = shares.get(session);
-  const existingUrl = old?.activeUrl;
-  if (old !== undefined && existingUrl !== null && existingUrl !== undefined)
-    return {
-      url: existingUrl,
-      expires_at: new Date(old.expiresAt).toISOString(),
-      control: old.controlState,
-    };
-  old?.stop();
-  const share = new LiveShare(session, page);
-  shares.set(session, share);
+): Promise<ShareDetails> {
+  const pending = pendingShares.get(session);
+  if (pending !== undefined) return await pending;
+  const starting = (async (): Promise<ShareDetails> => {
+    const page = session.browser.page;
+    if (page === null || page.isClosed() || session.closing)
+      throw new Error("operate session is closed");
+    const old = shares.get(session);
+    const existingUrl = old?.activeUrl;
+    if (old !== undefined && existingUrl !== null && existingUrl !== undefined)
+      return {
+        url: existingUrl,
+        expires_at: new Date(old.expiresAt).toISOString(),
+        control: old.controlState,
+      };
+    old?.stop();
+    await old?.waitForInputToSettle();
+    if (session.closing || session.browser.page === null || session.browser.page.isClosed())
+      throw new Error("operate session is closed");
+    const share = new LiveShare(session, session.browser.page);
+    shares.set(session, share);
+    try {
+      const url = await share.start(tunnelFactory);
+      return {
+        url,
+        expires_at: new Date(share.expiresAt).toISOString(),
+        control: share.controlState,
+      };
+    } catch (error) {
+      if (shares.get(session) === share) shares.delete(session);
+      throw error;
+    }
+  })();
+  pendingShares.set(session, starting);
   try {
-    const url = await share.start(tunnelFactory);
-    return {
-      url,
-      expires_at: new Date(share.expiresAt).toISOString(),
-      control: share.controlState,
-    };
-  } catch (error) {
-    if (shares.get(session) === share) shares.delete(session);
-    throw error;
+    return await starting;
+  } finally {
+    if (pendingShares.get(session) === starting) pendingShares.delete(session);
   }
 }
 
