@@ -1057,6 +1057,7 @@ export class BrowserProcessOwner {
       const page = this.pages.page;
       const context = this.context;
       const cdp = this.cdpBrowser;
+      const ownsChrome = this.childChromeIdentity !== null;
       this.pages.page = null;
       this.pages.primaryPage = null;
       this.pages.oauthProductPage = null;
@@ -1065,9 +1066,18 @@ export class BrowserProcessOwner {
       this.cdpBrowser = null;
       this.childChrome = null;
       if (page !== null) await closeBrowserContextWithin(page, 1_000);
-      if (context !== null) await closeBrowserContextWithin(context, 1_000);
-      if (cdp !== null) await closeBrowserContextWithin(cdp, 1_000);
+      if (ownsChrome && cdp !== null) {
+        // Let Chrome flush its profile before the scope reaps surviving helpers.
+        await closeBrowserContextWithin({
+          close: async () => {
+            const session = await cdp.newBrowserCDPSession();
+            await session.send("Browser.close");
+          },
+        }, 1_000);
+      }
+      if (!ownsChrome && context !== null) await closeBrowserContextWithin(context, 1_000);
       await stopBrowserScope(this.profileDir);
+      if (cdp !== null) await closeBrowserContextWithin(cdp, 1_000);
       await this.teardownOwnedDisplay().catch(() => undefined);
       return await browserScopeIsEmpty(this.profileDir) ? "closed" : "unknown";
     }

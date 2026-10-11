@@ -265,6 +265,12 @@ vi.mock("../broker/custody.js", async () => {
 vi.mock("../browser.js", async (importOriginal) => ({
   BrowserClickDispatchError: (await importOriginal<typeof BrowserModule>())
     .BrowserClickDispatchError,
+  isSelfManagedChromeTerminationSignalExitEnabled: (
+    await importOriginal<typeof BrowserModule>()
+  ).isSelfManagedChromeTerminationSignalExitEnabled,
+  setSelfManagedChromeTerminationSignalExitEnabled: (
+    await importOriginal<typeof BrowserModule>()
+  ).setSelfManagedChromeTerminationSignalExitEnabled,
   registerLocalBrowserLaunch: (
     _profileDir: string,
     baseEnv: NodeJS.ProcessEnv = process.env,

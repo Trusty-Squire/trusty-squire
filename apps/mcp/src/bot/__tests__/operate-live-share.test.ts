@@ -58,7 +58,8 @@ describe("operate live share", () => {
     await new Promise<void>((resolve) => fixture!.listen(0, "127.0.0.1", resolve));
     const fixtureUrl = `http://127.0.0.1:${(fixture.address() as AddressInfo).port}/`;
     browser = await chromium.launch({ headless: true });
-    const oldPage = await browser.newPage();
+    const context = await browser.newContext();
+    const oldPage = await context.newPage();
     const controller = BrowserController.fromHarnessPage(oldPage);
     const started = await startHarnessProvisionSession({
       serviceUrl: fixtureUrl,
@@ -328,6 +329,8 @@ describe("operate live share", () => {
       const canvas = document.querySelector("canvas");
       return canvas instanceof HTMLCanvasElement && canvas.width === 800 && canvas.height === 600;
     });
+    if (process.env.OPERATE_SHARE_EVIDENCE_SCREENSHOT)
+      await viewerPage.screenshot({ path: process.env.OPERATE_SHARE_EVIDENCE_SCREENSHOT });
     const canvasBox = await viewerPage.locator("canvas").boundingBox();
     if (canvasBox === null) throw new Error("viewer canvas unavailable");
     await viewerPage.mouse.click(
