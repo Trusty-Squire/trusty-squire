@@ -82,15 +82,21 @@ describe("operate live share", () => {
 
     let finishAgent!: () => void;
     let agentEntered!: () => void;
-    const entered = new Promise<void>((resolve) => { agentEntered = resolve; });
-    const finish = new Promise<void>((resolve) => { finishAgent = resolve; });
+    const entered = new Promise<void>((resolve) => {
+      agentEntered = resolve;
+    });
+    const finish = new Promise<void>((resolve) => {
+      finishAgent = resolve;
+    });
     const action = withAgentShareControl(session, async () => {
       agentEntered();
       await finish;
     });
     await entered;
     socket.send(JSON.stringify({ type: "text", text: "stale input" }));
-    await expect.poll(() => shareOperateSession(session).then((value) => value.control)).toBe("human");
+    await expect
+      .poll(() => shareOperateSession(session).then((value) => value.control))
+      .toBe("human");
     const newPage = await oldPage.context().newPage();
     await newPage.goto(fixtureUrl);
     await newPage.locator("#answer").focus();
@@ -118,8 +124,12 @@ describe("operate live share", () => {
     const originalSession = context.newCDPSession.bind(context);
     let inputStarted!: () => void;
     let finishInput!: () => void;
-    const startedInput = new Promise<void>((resolve) => { inputStarted = resolve; });
-    const inputGate = new Promise<void>((resolve) => { finishInput = resolve; });
+    const startedInput = new Promise<void>((resolve) => {
+      inputStarted = resolve;
+    });
+    const inputGate = new Promise<void>((resolve) => {
+      finishInput = resolve;
+    });
     context.newCDPSession = async (target) => {
       const cdp = await originalSession(target);
       const send = cdp.send.bind(cdp);
@@ -142,7 +152,10 @@ describe("operate live share", () => {
     const session = paymentSession(sessionId);
     let liveShare!: LiveShare;
     const originalStart = LiveShare.prototype.start;
-    const startSpy = vi.spyOn(LiveShare.prototype, "start").mockImplementation(function (this: LiveShare, tunnelFactory) {
+    const startSpy = vi.spyOn(LiveShare.prototype, "start").mockImplementation(function (
+      this: LiveShare,
+      tunnelFactory,
+    ) {
       liveShare = this;
       return originalStart.call(this, tunnelFactory);
     });
@@ -185,7 +198,12 @@ describe("operate live share", () => {
     } finally {
       finishInput();
     }
-    const [, , renewed, competing] = await Promise.all([agent, nextAgent, replacement, competingReplacement]);
+    const [, , renewed, competing] = await Promise.all([
+      agent,
+      nextAgent,
+      replacement,
+      competingReplacement,
+    ]);
     expect(await page.locator("#answer").inputValue()).toBe("from human");
     expect(agentRan).toBe(true);
     expect(nextAgentRan).toBe(true);

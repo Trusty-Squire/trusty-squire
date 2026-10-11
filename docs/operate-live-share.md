@@ -11,6 +11,11 @@ disconnect or forced session close invalidates the URL. A later
 
 The broker hosts a loopback HTTP server for each share and exposes it through
 the existing `cloudflared` quick-tunnel helper used by connect's live view. A
+share request fails if `cloudflared` is unavailable or the tunnel cannot start.
+The agent receives the upstream URL in the tool result and must pass it only to
+a trusted server-side proxy. The live JPEG stream is raw page pixels; it does
+not use the released-card mask applied to `operate_screenshot`. Anyone able to
+open the bearer URL can see those pixels, including visible card fields. A
 fresh 256-bit token appears as `/s/<token>/` in the upstream URL. Beeline must
 keep this upstream URL and token on its server. Its card and "Open in browser"
 action should both link to Beeline's own `https://computer.usebeeline.app/s/<id>/`

@@ -190,9 +190,20 @@ export class LiveShare {
     if (this.expired || !this.viewers.has(viewer) || this.session.closing) return false;
     this.controlOwner = viewer;
     this.humanWanted = true;
-    while (this.activeAgentActions > 0 && this.controlOwner === viewer && this.viewers.has(viewer) && !this.expired)
+    while (
+      this.activeAgentActions > 0 &&
+      this.controlOwner === viewer &&
+      this.viewers.has(viewer) &&
+      !this.expired
+    )
       await waitForSignal(this.idleWaiters);
-    if (this.expired || !this.viewers.has(viewer) || this.controlOwner !== viewer || this.session.closing) return false;
+    if (
+      this.expired ||
+      !this.viewers.has(viewer) ||
+      this.controlOwner !== viewer ||
+      this.session.closing
+    )
+      return false;
     if (!this.humanDriving) {
       this.humanDriving = true;
       this.broadcast({ type: "control", state: "human" });

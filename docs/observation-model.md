@@ -239,6 +239,8 @@ rerenders, navigation, partial fills, or cleared controls.
   labels, validation errors, and surrounding pixels. An active mask is never
   bypassed; if the mask cannot scan or composite the capture, the screenshot
   call fails rather than returning the unmasked image.
+- The separate [`operate_share` live stream](operate-live-share.md) sends raw page
+  pixels; its bearer URL is outside this screenshot mask boundary.
 - Merchant last4, brand/issuer, cardholder name, expiry, billing address, amount,
   currency, DCC text, OTP/3DS controls, HTTP error bodies, API keys, cookies, PII,
   and all unrelated three- or four-digit values remain visible. This is not a
