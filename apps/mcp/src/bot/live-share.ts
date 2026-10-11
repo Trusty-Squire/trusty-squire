@@ -150,7 +150,7 @@ export class LiveShare {
   }
 
   async withAgentAction<T>(action: () => Promise<T>, signal?: AbortSignal): Promise<T> {
-    while (this.humanWanted && !this.expired) await waitForSignal(this.agentWaiters, signal);
+    while (this.humanWanted) await waitForSignal(this.agentWaiters, signal);
     if (signal?.aborted) throw signal.reason;
     if (this.session.closing) throw new Error("operate session is closing");
     this.activeAgentActions += 1;
@@ -171,7 +171,7 @@ export class LiveShare {
       if (this.activeAgentActions === 0) wakeAll(this.idleWaiters);
     }
     try {
-      while (this.humanWanted && !this.expired) await waitForSignal(this.agentWaiters, signal);
+      while (this.humanWanted) await waitForSignal(this.agentWaiters, signal);
       if (signal?.aborted) throw signal.reason;
       if (this.session.closing) throw new Error("operate session is closing");
     } finally {
@@ -183,9 +183,9 @@ export class LiveShare {
     if (this.expired || !this.viewers.has(viewer) || this.session.closing) return false;
     this.controlOwner = viewer;
     this.humanWanted = true;
-    while (this.activeAgentActions > 0 && this.controlOwner === viewer && !this.expired)
+    while (this.activeAgentActions > 0 && this.controlOwner === viewer && this.viewers.has(viewer) && !this.expired)
       await waitForSignal(this.idleWaiters);
-    if (this.expired || this.controlOwner !== viewer || this.session.closing) return false;
+    if (this.expired || !this.viewers.has(viewer) || this.controlOwner !== viewer || this.session.closing) return false;
     if (!this.humanDriving) {
       this.humanDriving = true;
       this.broadcast({ type: "control", state: "human" });
@@ -195,16 +195,19 @@ export class LiveShare {
 
   private release(viewer: WebSocket): void {
     if (!this.viewers.delete(viewer)) return;
-    if (this.controlOwner === viewer) {
-      this.controlOwner = null;
-      this.humanWanted = false;
-      this.humanDriving = false;
-      this.broadcast({ type: "control", state: "agent" });
-      wakeAll(this.agentWaiters);
-      wakeAll(this.idleWaiters);
-    }
-    if (this.viewers.size > 0) return;
-    this.stopStream();
+    wakeAll(this.idleWaiters);
+    const pendingInput = this.inputTail;
+    void pendingInput.then(() => {
+      if (this.controlOwner === viewer) {
+        this.controlOwner = null;
+        this.humanWanted = false;
+        this.humanDriving = false;
+        this.broadcast({ type: "control", state: "agent" });
+        wakeAll(this.agentWaiters);
+        wakeAll(this.idleWaiters);
+      }
+      if (this.viewers.size === 0) this.stopStream();
+    });
   }
 
   private stopStream(): void {
@@ -325,13 +328,14 @@ export class LiveShare {
       return;
     }
     if (!isInput(message)) return;
-    const cdp = this.cdp;
     if (message.type === "pointer" && coordinate(message.x) && coordinate(message.y)) {
       if (!["move", "down", "up"].includes(String(message.phase))) return;
       const button = ["left", "middle", "right"].includes(String(message.button))
         ? (message.button as "left" | "middle" | "right")
         : "left";
       if (!(await this.takeControl(viewer))) return;
+      const cdp = this.currentInputTarget();
+      if (cdp === null) return;
       const type =
         message.phase === "down"
           ? "mousePressed"
@@ -355,6 +359,8 @@ export class LiveShare {
       Number.isFinite(message.delta_y)
     ) {
       if (!(await this.takeControl(viewer))) return;
+      const cdp = this.currentInputTarget();
+      if (cdp === null) return;
       await cdp.send("Input.dispatchMouseEvent", {
         type: "mouseWheel",
         x: message.x * this.frameWidth,
@@ -365,6 +371,8 @@ export class LiveShare {
     } else if (message.type === "touch" && coordinate(message.x) && coordinate(message.y)) {
       if (!["start", "move", "end"].includes(String(message.phase))) return;
       if (!(await this.takeControl(viewer))) return;
+      const cdp = this.currentInputTarget();
+      if (cdp === null) return;
       await cdp.send("Input.dispatchTouchEvent", {
         type:
           message.phase === "start"
@@ -383,6 +391,8 @@ export class LiveShare {
       message.text.length <= 500
     ) {
       if (!(await this.takeControl(viewer))) return;
+      const cdp = this.currentInputTarget();
+      if (cdp === null) return;
       await cdp.send("Input.insertText", { text: message.text });
     } else if (message.type === "key" && typeof message.key === "string") {
       const key = message.key;
@@ -400,6 +410,8 @@ export class LiveShare {
       const letter = /^[a-z]$/i.test(key) ? key.toUpperCase().charCodeAt(0) : undefined;
       const code = codes[key] ?? letter;
       if (code === undefined || !(await this.takeControl(viewer))) return;
+      const cdp = this.currentInputTarget();
+      if (cdp === null) return;
       const modifiers =
         (message.alt === true ? 1 : 0) +
         (message.ctrl === true ? 2 : 0) +
@@ -418,6 +430,14 @@ export class LiveShare {
         modifiers,
       });
     }
+  }
+
+  private currentInputTarget(): CDPSession | null {
+    if (this.session.browser.page !== this.page || this.page.isClosed()) {
+      this.refreshPage();
+      return null;
+    }
+    return this.cdp;
   }
 
   stop(): void {

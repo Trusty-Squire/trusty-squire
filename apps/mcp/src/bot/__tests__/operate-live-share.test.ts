@@ -48,6 +48,120 @@ function waitForMessage(socket: WebSocket, match: (message: Record<string, unkno
 }
 
 describe("operate live share", () => {
+  it("does not send waiting input to a page the agent replaced", async () => {
+    fixture = createServer((_request, response) => {
+      response.setHeader("Content-Type", "text/html");
+      response.end('<!doctype html><input id="answer" autofocus>');
+    });
+    await new Promise<void>((resolve) => fixture!.listen(0, "127.0.0.1", resolve));
+    const fixtureUrl = `http://127.0.0.1:${(fixture.address() as AddressInfo).port}/`;
+    browser = await chromium.launch({ headless: true });
+    const oldPage = await browser.newPage();
+    const controller = BrowserController.fromHarnessPage(oldPage);
+    const started = await startHarnessProvisionSession({
+      serviceUrl: fixtureUrl,
+      browser: controller,
+      initialObservation: "drive",
+    });
+    sessionId = started.session_id;
+    const session = paymentSession(sessionId);
+    await oldPage.locator("#answer").focus();
+    const shared = await shareOperateSession(session, async (port) => ({
+      url: `http://127.0.0.1:${port}`,
+      close: async () => undefined,
+    }));
+    const socket = new WebSocket(new URL("stream", shared.url));
+    await new Promise<void>((resolve, reject) => {
+      socket.once("open", resolve);
+      socket.once("error", reject);
+    });
+    await waitForMessage(socket, (message) => message.type === "frame");
+
+    let finishAgent!: () => void;
+    let agentEntered!: () => void;
+    const entered = new Promise<void>((resolve) => { agentEntered = resolve; });
+    const finish = new Promise<void>((resolve) => { finishAgent = resolve; });
+    const action = withAgentShareControl(session, async () => {
+      agentEntered();
+      await finish;
+    });
+    await entered;
+    socket.send(JSON.stringify({ type: "text", text: "stale input" }));
+    await expect.poll(() => shareOperateSession(session).then((value) => value.control)).toBe("human");
+    const newPage = await oldPage.context().newPage();
+    await newPage.goto(fixtureUrl);
+    await newPage.locator("#answer").focus();
+    controller.page = newPage;
+    const nextFrame = waitForMessage(socket, (message) => message.type === "frame");
+    finishAgent();
+    await action;
+    await nextFrame;
+    socket.send(JSON.stringify({ type: "text", text: "current input" }));
+    await expect.poll(() => newPage.locator("#answer").inputValue()).toBe("current input");
+    expect(await oldPage.locator("#answer").inputValue()).toBe("");
+    socket.close();
+  }, 60_000);
+
+  it("keeps agent control paused until disconnected viewer input settles", async () => {
+    fixture = createServer((_request, response) => {
+      response.setHeader("Content-Type", "text/html");
+      response.end('<!doctype html><input id="answer" autofocus>');
+    });
+    await new Promise<void>((resolve) => fixture!.listen(0, "127.0.0.1", resolve));
+    const fixtureUrl = `http://127.0.0.1:${(fixture.address() as AddressInfo).port}/`;
+    browser = await chromium.launch({ headless: true });
+    const page = await browser.newPage();
+    const context = page.context();
+    const originalSession = context.newCDPSession.bind(context);
+    let inputStarted!: () => void;
+    let finishInput!: () => void;
+    const startedInput = new Promise<void>((resolve) => { inputStarted = resolve; });
+    const inputGate = new Promise<void>((resolve) => { finishInput = resolve; });
+    context.newCDPSession = async (target) => {
+      const cdp = await originalSession(target);
+      const send = cdp.send.bind(cdp);
+      cdp.send = (async (method: string, params?: object) => {
+        if (method === "Input.insertText") {
+          inputStarted();
+          await inputGate;
+        }
+        return await Reflect.apply(send, cdp, [method, params]);
+      }) as typeof cdp.send;
+      return cdp;
+    };
+    const controller = BrowserController.fromHarnessPage(page);
+    const started = await startHarnessProvisionSession({
+      serviceUrl: fixtureUrl,
+      browser: controller,
+      initialObservation: "drive",
+    });
+    sessionId = started.session_id;
+    const session = paymentSession(sessionId);
+    const shared = await shareOperateSession(session, async (port) => ({
+      url: `http://127.0.0.1:${port}`,
+      close: async () => undefined,
+    }));
+    const socket = new WebSocket(new URL("stream", shared.url));
+    await new Promise<void>((resolve, reject) => {
+      socket.once("open", resolve);
+      socket.once("error", reject);
+    });
+    await waitForMessage(socket, (message) => message.type === "frame");
+    socket.send(JSON.stringify({ type: "text", text: "from human" }));
+    await startedInput;
+    let agentRan = false;
+    const agent = withAgentShareControl(session, async () => {
+      agentRan = true;
+    });
+    socket.close();
+    await new Promise<void>((resolve) => socket.once("close", resolve));
+    expect(agentRan).toBe(false);
+    finishInput();
+    await agent;
+    expect(await page.locator("#answer").inputValue()).toBe("from human");
+    expect(agentRan).toBe(true);
+  }, 60_000);
+
   it("streams one session, hands control to input, resumes on disconnect, and dies with the session", async () => {
     fixture = createServer((_request, response) => {
       response.setHeader("Content-Type", "text/html");
