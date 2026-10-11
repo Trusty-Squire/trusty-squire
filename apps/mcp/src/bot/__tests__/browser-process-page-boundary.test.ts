@@ -63,11 +63,11 @@ describe("browser process and page boundary", () => {
     expect(events).toEqual(["dispose-pages"]);
   });
 
-  it.skipIf(process.platform !== "linux")("closes handles before draining the Chrome scope", async () => {
+  it.skipIf(process.platform !== "linux")("closes page handles, drains the Chrome scope, then closes transport", async () => {
     const { controller, pages } = fixture();
     await expect(controller.close()).resolves.toBe("closed");
     expect(events).toEqual([
-      "dispose-pages", "page-close", "context-close", "transport-close", "scope-stop",
+      "dispose-pages", "page-close", "context-close", "scope-stop", "transport-close",
     ]);
     expect(pages.page).toBeNull();
     expect(pages.primaryPage).toBeNull();

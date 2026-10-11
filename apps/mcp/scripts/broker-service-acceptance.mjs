@@ -56,6 +56,7 @@ async function stage(version) {
   const pkg = join(cache, "node_modules", "@trusty-squire", "mcp");
   await mkdir(pkg, { recursive: true });
   await cp(join(packageRoot, "dist"), join(pkg, "dist"), { recursive: true });
+  await cp(join(packageRoot, "assets"), join(pkg, "assets"), { recursive: true });
   const metadata = JSON.parse(await readFile(join(packageRoot, "package.json"), "utf8"));
   await writeFile(join(pkg, "package.json"), JSON.stringify({ ...metadata, version }));
   await symlink(join(packageRoot, "node_modules"), join(pkg, "node_modules"));
