@@ -74,6 +74,7 @@ describe("live-share session lifetime", () => {
         await initialized;
       }
       const viewer = [...share.webSockets.clients][0];
+      if (viewer === undefined) throw new Error("Expected a connected server-side viewer");
       const buffered = vi.spyOn(viewer, "bufferedAmount", "get").mockReturnValue(1_000_001);
       const frame = (data: string) =>
         cdp.emit("Page.screencastFrame", {
@@ -81,7 +82,9 @@ describe("live-share session lifetime", () => {
           sessionId: 1,
           metadata: { deviceWidth: 800, deviceHeight: 600 },
         });
-      const dropped = nextMessage(sockets[1]);
+      const uncongestedSocket = sockets[1];
+      if (uncongestedSocket === undefined) throw new Error("Expected a second viewer socket");
+      const dropped = nextMessage(uncongestedSocket);
       frame("congested-frame");
       expect(await dropped).toEqual({ type: "frame", data: "congested-frame" });
       const navigations = sockets.map(nextMessage);
