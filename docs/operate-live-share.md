@@ -4,10 +4,13 @@
 operate session. The URL is a bearer capability for **that session's current
 page only**, following a tab handoff when the session adopts a new page. It is
 not a VNC or shared-display address. Repeating the call while
-the share is active returns the same URL and current `control` (`agent` or
-`human`). Shares expire ten minutes after creation. `operate_finish`, broker
-disconnect or forced session close invalidates the URL. A later
-`operate_share` can create a fresh share while the session remains active.
+the share is active returns the same URL, renews `expires_at`, and returns current
+`control` (`agent` or `human`). The ten-minute compatibility expiry rolls forward
+automatically while the operate session is alive; it is not a fixed stop time.
+Clients may repeat `operate_share` before their returned expiry to refresh that
+timestamp without replacing the link. `operate_finish`, broker disconnect,
+forced session close/reaping, or an explicit share stop invalidates the URL.
+A later `operate_share` can create a fresh share while the session remains active.
 
 The broker hosts a loopback HTTP server for each share and exposes it through
 the existing `cloudflared` quick-tunnel helper used by connect's live view. A
@@ -44,7 +47,8 @@ The WebSocket sends JSON text messages:
 
 - Server to viewer: `{ "type": "frame", "data": "<base64 JPEG>" }`,
   `{ "type": "blank" }` while the session switches pages, and
-  `{ "type": "control", "state": "agent" | "human" }`.
+  `{ "type": "control", "state": "agent" | "human" }`, and
+  `{ "type": "navigation", "url": "<current main-frame URL>", "origin": "<URL origin>" }`.
 - Viewer to server: `{ "type": "pointer", "phase": "down" | "move" | "up", "x": 0..1, "y": 0..1, "button": "left" | "middle" | "right" }`,
   `{ "type": "touch", "phase": "start" | "move" | "end", "x": 0..1, "y": 0..1 }`,
   `{ "type": "wheel", "x": 0..1, "y": 0..1, "delta_x": number, "delta_y": number }`,
@@ -62,3 +66,9 @@ dispatches only through the operate session's Playwright page CDP session.
 Chromium can withhold screencast frames from a background tab, so the broker
 captures fallback frames from that same CDP target without activating it;
 other tabs and the host display never enter this transport.
+
+Navigation messages report the current page when streaming starts or switches
+pages and every main-frame navigation, including same-document history/hash
+changes. Subframe navigations and the previously shared page after a tab handoff
+do not emit navigation messages. These URL/origin fields use the session's narrow
+released-card value mask; the frame pixels remain raw as described above.

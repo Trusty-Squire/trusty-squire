@@ -3,7 +3,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { readFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import type { CDPSession, Page } from "playwright";
+import type { CDPSession, Frame, Page } from "playwright";
 import { WebSocket, WebSocketServer } from "ws";
 import type { Session } from "./session/model.js";
 import { startQuickViewTunnel } from "./remote-login-display.js";
@@ -56,7 +56,7 @@ function wakeAll(wakers: Set<() => void>): void {
 
 export class LiveShare {
   readonly token = randomBytes(32).toString("base64url");
-  readonly expiresAt = Date.now() + SHARE_LIFETIME_MS;
+  expiresAt = Date.now() + SHARE_LIFETIME_MS;
   readonly path = `/s/${this.token}/`;
   readonly server: Server;
   readonly webSockets = new WebSocketServer({ noServer: true, maxPayload: MAX_INPUT_BYTES });
@@ -69,7 +69,8 @@ export class LiveShare {
   private fallbackBusy = false;
   private streamStartup: Promise<void> | null = null;
   private expired = false;
-  private readonly timer: NodeJS.Timeout;
+  private timer: NodeJS.Timeout | null = null;
+  private navigationCleanup: (() => void) | null = null;
   private humanWanted = false;
   private humanDriving = false;
   private activeAgentActions = 0;
@@ -113,8 +114,7 @@ export class LiveShare {
         void this.attach(viewer);
       });
     });
-    this.timer = setTimeout(() => this.stop(), SHARE_LIFETIME_MS);
-    this.timer.unref();
+    this.renew();
     this.pagePoll = setInterval(() => this.refreshPage(), 250);
     this.pagePoll.unref();
   }
@@ -149,6 +149,19 @@ export class LiveShare {
 
   get activeUrl(): string | null {
     return this.expired ? null : this.publicUrl;
+  }
+
+  /** The compatibility expiry rolls forward for the owning session's lifetime. */
+  renew(): void {
+    if (this.expired) return;
+    if (this.session.closing) {
+      this.stop();
+      return;
+    }
+    if (this.timer !== null) clearTimeout(this.timer);
+    this.expiresAt = Date.now() + SHARE_LIFETIME_MS;
+    this.timer = setTimeout(() => this.renew(), SHARE_LIFETIME_MS);
+    this.timer.unref();
   }
 
   async waitForInputToSettle(): Promise<void> {
@@ -229,6 +242,8 @@ export class LiveShare {
   }
 
   private stopStream(): void {
+    this.navigationCleanup?.();
+    this.navigationCleanup = null;
     if (this.fallbackFrames !== null) clearInterval(this.fallbackFrames);
     this.fallbackFrames = null;
     const cdp = this.cdp;
@@ -271,6 +286,10 @@ export class LiveShare {
         .catch(() => viewer.close(1011));
     });
     viewer.send(JSON.stringify({ type: "control", state: this.humanWanted ? "human" : "agent" }));
+    if (this.cdp !== null) {
+      viewer.send(JSON.stringify(this.navigationMessage(this.page)));
+      return;
+    }
     if (this.streamStartup !== null) return;
     this.streamStartup = this.startStream();
     await this.streamStartup;
@@ -283,16 +302,39 @@ export class LiveShare {
         viewer.send(wire);
   }
 
+  private navigationMessage(page: Page): Record<string, unknown> {
+    const url = page.url();
+    return this.session.browser.maskOperatorOutput({
+      type: "navigation",
+      url,
+      origin: new URL(url).origin,
+    });
+  }
+
   private async startStream(): Promise<void> {
     try {
       const page = this.page;
       if (page.isClosed() || this.session.browser.page !== page) return;
       const cdp = await page.context().newCDPSession(page);
-      if (this.viewers.size === 0 || this.expired || page !== this.page) {
+      if (
+        this.viewers.size === 0 || this.expired || page !== this.page ||
+        this.session.browser.page !== page
+      ) {
         await cdp.detach();
         return;
       }
       this.cdp = cdp;
+      const reportNavigation = (): void => {
+        if (this.expired || this.cdp !== cdp || this.session.browser.page !== page || this.session.closing)
+          return;
+        this.broadcast(this.navigationMessage(page));
+      };
+      const onNavigation = (frame: Frame): void => {
+        if (frame === page.mainFrame()) reportNavigation();
+      };
+      page.on("framenavigated", onNavigation);
+      this.navigationCleanup = () => page.off("framenavigated", onNavigation);
+      reportNavigation();
       cdp.on("Page.screencastFrame", (frame) => {
         if (this.cdp !== cdp) return;
         this.lastFrameAt = Date.now();
@@ -304,6 +346,7 @@ export class LiveShare {
           .catch(() => undefined);
       });
       await cdp.send("Page.startScreencast", { format: "jpeg", quality: 70, everyNthFrame: 2 });
+      if (this.cdp !== cdp || this.expired) return;
       // Chromium can withhold screencast frames from a background tab. Capture
       // that same target directly so concurrent shares never switch the user's
       // foreground tab or silently freeze one another.
@@ -461,8 +504,12 @@ export class LiveShare {
   stop(): void {
     if (this.expired) return;
     this.expired = true;
-    clearTimeout(this.timer);
+    if (this.timer !== null) clearTimeout(this.timer);
+    this.timer = null;
     clearInterval(this.pagePoll);
+    this.navigationCleanup?.();
+    this.navigationCleanup = null;
+    if (this.viewers.size === 0) this.stopStream();
     for (const viewer of [...this.viewers]) {
       viewer.close(1000, "share ended");
       this.release(viewer);
@@ -487,12 +534,14 @@ export async function shareOperateSession(
       throw new Error("operate session is closed");
     const old = shares.get(session);
     const existingUrl = old?.activeUrl;
-    if (old !== undefined && existingUrl !== null && existingUrl !== undefined)
+    if (old !== undefined && existingUrl !== null && existingUrl !== undefined) {
+      old.renew();
       return {
         url: existingUrl,
         expires_at: new Date(old.expiresAt).toISOString(),
         control: old.controlState,
       };
+    }
     old?.stop();
     await old?.waitForInputToSettle();
     if (session.closing || session.browser.page === null || session.browser.page.isClosed())

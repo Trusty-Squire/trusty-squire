@@ -118,6 +118,7 @@ export const REQUIRED_BEHAVIOR_FILES = [
   "src/install/__tests__/broker-service.test.ts",
   "src/bot/__tests__/drive-act.test.ts",
   "src/bot/__tests__/page-ready.test.ts",
+  "src/bot/__tests__/live-share-lifetime.test.ts",
   "src/bot/__tests__/browser-display-geometry.test.ts",
   "src/__tests__/broker-default-start.test.ts",
   "src/bot/__tests__/broker-discovery.test.ts",
