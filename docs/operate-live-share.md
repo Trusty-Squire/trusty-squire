@@ -6,7 +6,8 @@ page only**, following a tab handoff when the session adopts a new page. It is
 not a VNC or shared-display address. Repeating the call while
 the share is active returns the same URL, renews `expires_at`, and returns current
 `control` (`agent` or `human`). The ten-minute compatibility expiry rolls forward
-automatically while the operate session is alive; it is not a fixed stop time.
+automatically while the operate session is alive; clients must not close the
+share when a previously returned `expires_at` passes.
 Clients may repeat `operate_share` before their returned expiry to refresh that
 timestamp without replacing the link. `operate_finish`, broker disconnect,
 forced session close/reaping, or an explicit share stop invalidates the URL.
@@ -46,7 +47,7 @@ system browser.
 The WebSocket sends JSON text messages:
 
 - Server to viewer: `{ "type": "frame", "data": "<base64 JPEG>" }`,
-  `{ "type": "blank" }` while the session switches pages, and
+  `{ "type": "blank" }` while the session switches pages,
   `{ "type": "control", "state": "agent" | "human" }`, and
   `{ "type": "navigation", "url": "<current main-frame URL>", "origin": "<URL origin>" }`.
 - Viewer to server: `{ "type": "pointer", "phase": "down" | "move" | "up", "x": 0..1, "y": 0..1, "button": "left" | "middle" | "right" }`,
@@ -67,8 +68,11 @@ Chromium can withhold screencast frames from a background tab, so the broker
 captures fallback frames from that same CDP target without activating it;
 other tabs and the host display never enter this transport.
 
-Navigation messages report the current page when streaming starts or switches
-pages and every main-frame navigation, including same-document history/hash
-changes. Subframe navigations and the previously shared page after a tab handoff
-do not emit navigation messages. These URL/origin fields use the session's narrow
+Navigation messages report the current page when a viewer joins an active stream,
+when streaming starts or switches pages, and every main-frame navigation,
+including same-document history/hash changes. Subframe navigations and the
+previously shared page after a tab handoff do not emit navigation messages.
+An outbound WebSocket queue of 1,000,000 bytes or more causes new frames to be
+dropped for that viewer; navigation and other metadata are still
+sent to every open viewer. These URL/origin fields use the session's narrow
 released-card value mask; the frame pixels remain raw as described above.

@@ -320,7 +320,9 @@ export class LiveShare {
       if (page.isClosed() || this.session.browser.page !== page) return;
       const cdp = await page.context().newCDPSession(page);
       if (
-        this.viewers.size === 0 || this.expired || page !== this.page ||
+        this.viewers.size === 0 ||
+        this.expired ||
+        page !== this.page ||
         this.session.browser.page !== page
       ) {
         await cdp.detach();
@@ -328,7 +330,12 @@ export class LiveShare {
       }
       this.cdp = cdp;
       const reportNavigation = (): void => {
-        if (this.expired || this.cdp !== cdp || this.session.browser.page !== page || this.session.closing)
+        if (
+          this.expired ||
+          this.cdp !== cdp ||
+          this.session.browser.page !== page ||
+          this.session.closing
+        )
           return;
         this.broadcast(this.navigationMessage(page));
       };
