@@ -298,7 +298,10 @@ export class LiveShare {
   private broadcast(message: Record<string, unknown>): void {
     const wire = JSON.stringify(message);
     for (const viewer of this.viewers)
-      if (viewer.readyState === WebSocket.OPEN && viewer.bufferedAmount < 1_000_000)
+      if (
+        viewer.readyState === WebSocket.OPEN &&
+        (message.type !== "frame" || viewer.bufferedAmount < 1_000_000)
+      )
         viewer.send(wire);
   }
 
