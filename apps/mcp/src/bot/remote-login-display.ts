@@ -579,13 +579,17 @@ export function fallbackCloudflaredArgs(webPort: number): string[] {
 /** Share the existing quick-tunnel process lifecycle with page-specific live views. */
 export async function startQuickViewTunnel(
   localPort: number,
-): Promise<{ url: string; close: () => Promise<void> }> {
+): Promise<{ url: string; close: () => Promise<void>; alive: () => boolean }> {
   const binary = resolveLoginBinary("cloudflared");
   if (binary === null) throw new Error("live view needs cloudflared installed");
   const child = spawnBackground(binary, fallbackCloudflaredArgs(localPort));
   try {
     const url = await waitForTunnelUrl(child, 30_000);
-    return { url, close: async () => await terminateLoginHelpers([child], 1_000) };
+    return {
+      url,
+      close: async () => await terminateLoginHelpers([child], 1_000),
+      alive: () => !childExited(child),
+    };
   } catch (error) {
     await terminateLoginHelpers([child], 1_000);
     throw error;

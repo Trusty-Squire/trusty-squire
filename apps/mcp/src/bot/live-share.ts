@@ -1,8 +1,9 @@
 import { randomBytes } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { readFileSync } from "node:fs";
-import { createServer, type Server } from "node:http";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
+import type { Duplex } from "node:stream";
 import type { CDPSession, Frame, Page } from "playwright";
 import { WebSocket, WebSocketServer } from "ws";
 import type { Session } from "./session/model.js";
@@ -14,13 +15,104 @@ const viewerHtml = readFileSync(
   new URL("../../assets/operate/share.html", import.meta.url),
   "utf8",
 );
-type Tunnel = { url: string; close: () => Promise<void> };
+type Tunnel = { url: string; close: () => Promise<void>; alive?: () => boolean };
 type TunnelFactory = (port: number) => Promise<Tunnel>;
 
 const shares = new WeakMap<Session, LiveShare>();
 type ShareDetails = { url: string; expires_at: string; control: "agent" | "human" };
 const pendingShares = new WeakMap<Session, Promise<ShareDetails>>();
 const agentTurn = new AsyncLocalStorage<LiveShare>();
+
+type ShareGateway = {
+  server: Server;
+  tunnel: Tunnel;
+  tunnelFactory: TunnelFactory;
+  shares: Map<string, LiveShare>;
+};
+let gatewayStartup: Promise<ShareGateway> | null = null;
+
+function shareForRequest(
+  gateway: ShareGateway,
+  request: IncomingMessage,
+): LiveShare | undefined {
+  const path = request.url?.match(/^\/s\/[A-Za-z0-9_-]{43}\//)?.[0];
+  return path === undefined ? undefined : gateway.shares.get(path);
+}
+
+async function createShareGateway(tunnelFactory: TunnelFactory): Promise<ShareGateway> {
+  const shares = new Map<string, LiveShare>();
+  const gateway = { shares, tunnelFactory } as ShareGateway;
+  const server = createServer((request, response: ServerResponse) => {
+    const share = shareForRequest(gateway, request);
+    if (share === undefined) {
+      response.writeHead(404).end();
+      return;
+    }
+    share.server.emit("request", request, response);
+  });
+  gateway.server = server;
+  server.on("upgrade", (request, socket: Duplex, head) => {
+    const share = shareForRequest(gateway, request);
+    if (share === undefined) {
+      socket.end("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n");
+      return;
+    }
+    share.server.emit("upgrade", request, socket, head);
+  });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", () => {
+        server.removeListener("error", reject);
+        resolve();
+      });
+    });
+    const tunnel = await tunnelFactory((server.address() as AddressInfo).port);
+    gateway.tunnel = tunnel;
+    return gateway;
+  } catch (error) {
+    server.close();
+    throw error;
+  }
+}
+
+/** Start the public route while the broker is idle, before a share needs its URL. */
+export async function warmOperateShareGateway(
+  tunnelFactory: TunnelFactory = startQuickViewTunnel,
+): Promise<void> {
+  const previous = gatewayStartup;
+  let nextFactory = tunnelFactory;
+  if (previous !== null) {
+    const gateway = await previous;
+    if (gateway.tunnel.alive?.() !== false) return;
+    nextFactory = gateway.tunnelFactory;
+    if (gatewayStartup === previous) {
+      gatewayStartup = null;
+      for (const share of gateway.shares.values()) share.stop();
+      await gateway.tunnel.close();
+      await new Promise<void>((resolve) => gateway.server.close(() => resolve()));
+    }
+  }
+  if (gatewayStartup === null) {
+    const starting = createShareGateway(nextFactory);
+    gatewayStartup = starting;
+    void starting.catch(() => {
+      if (gatewayStartup === starting) gatewayStartup = null;
+    });
+  }
+  await gatewayStartup;
+}
+
+export async function stopOperateShareGateway(): Promise<void> {
+  const starting = gatewayStartup;
+  gatewayStartup = null;
+  if (starting === null) return;
+  const gateway = await starting.catch(() => null);
+  if (gateway === null) return;
+  for (const share of gateway.shares.values()) share.stop();
+  await gateway.tunnel.close();
+  await new Promise<void>((resolve) => gateway.server.close(() => resolve()));
+}
 
 function isInput(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -80,6 +172,7 @@ export class LiveShare {
   private frameHeight = 1;
   private inputTail: Promise<void> = Promise.resolve();
   private publicUrl: string | null = null;
+  private gateway: ShareGateway | null = null;
   private readonly pagePoll: NodeJS.Timeout;
   private pageUnavailable = false;
 
@@ -121,6 +214,16 @@ export class LiveShare {
 
   async start(tunnelFactory: TunnelFactory): Promise<string> {
     try {
+      if (tunnelFactory === startQuickViewTunnel) {
+        await warmOperateShareGateway();
+        const gateway = await gatewayStartup;
+        if (gateway === null || this.expired || this.session.closing)
+          throw new Error("operate session ended during share");
+        this.gateway = gateway;
+        gateway.shares.set(this.path, this);
+        this.publicUrl = `${gateway.tunnel.url.replace(/\/$/, "")}${this.path}`;
+        return this.publicUrl;
+      }
       await new Promise<void>((resolve, reject) => {
         this.server.once("error", reject);
         this.server.listen(0, "127.0.0.1", () => {
@@ -148,7 +251,7 @@ export class LiveShare {
   }
 
   get activeUrl(): string | null {
-    return this.expired ? null : this.publicUrl;
+    return this.expired || this.gateway?.tunnel.alive?.() === false ? null : this.publicUrl;
   }
 
   /** The compatibility expiry rolls forward for the owning session's lifetime. */
@@ -525,6 +628,8 @@ export class LiveShare {
       this.release(viewer);
     }
     this.webSockets.close();
+    this.gateway?.shares.delete(this.path);
+    this.gateway = null;
     if (this.server.listening) this.server.close();
     const tunnel = this.tunnel;
     this.tunnel = null;

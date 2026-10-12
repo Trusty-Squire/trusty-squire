@@ -13,9 +13,12 @@ timestamp without replacing the link. `operate_finish`, broker disconnect,
 forced session close/reaping, or an explicit share stop invalidates the URL.
 A later `operate_share` can create a fresh share while the session remains active.
 
-The broker hosts a loopback HTTP server for each share and exposes it through
-the existing `cloudflared` quick-tunnel helper used by connect's live view. A
-share request fails if `cloudflared` is unavailable or the tunnel cannot start.
+The broker prepares one loopback HTTP gateway and `cloudflared` quick tunnel
+when it starts. The gateway routes each bearer-token path to its own share;
+opening a fresh share therefore does not wait for a new tunnel URL. Browser
+frames start when a viewer connects and do not delay `operate_share`'s result.
+If gateway preparation fails, the next share retries it and reports the error
+if the retry fails. The broker closes the gateway when it shuts down.
 The agent receives the upstream URL in the tool result and must pass it only to
 a trusted server-side proxy. The live JPEG stream is raw page pixels; it does
 not use the released-card mask applied to `operate_screenshot`. Anyone able to
@@ -38,8 +41,8 @@ WebSocket frames:
 
 The viewer HTML uses a relative `stream` URL, so the Beeline path must end in
 `/`. There is no cookie, query parameter, or extra authorization header on the
-upstream. The token is the whole upstream authorization. A bad token returns
-404; a stopped share returns 410 or a closed connection. Beeline should close
+upstream. The token is the whole upstream authorization. A bad or stopped token
+returns 404; existing viewer connections close when a share stops. Beeline should close
 the upstream WebSocket when its viewer leaves the artifact or browser tab.
 Multiple viewers may watch the same link, including an embedded viewer and a
 system browser.
