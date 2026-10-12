@@ -127,7 +127,6 @@ function readOwnCgroup(): string {
 
 const TAKEOVER_WAIT_MS = 10_000;
 
-
 /** lsof's `l` field must report the SQLite write lock, not merely an open fd. */
 function lockedBrokerPid(profileDir: string): number | null {
   const uid = process.getuid?.();

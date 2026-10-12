@@ -14,11 +14,17 @@ forced session close/reaping, or an explicit share stop invalidates the URL.
 A later `operate_share` can create a fresh share while the session remains active.
 
 The broker prepares one loopback HTTP gateway and `cloudflared` quick tunnel
-when it starts. The gateway routes each bearer-token path to its own share;
-opening a fresh share therefore does not wait for a new tunnel URL. Browser
-frames start when a viewer connects and do not delay `operate_share`'s result.
+in the background when it starts. Preparation completes only after a public
+readiness request reaches the gateway. The gateway routes each bearer-token
+path to its own share; once preparation completes, opening a fresh share does
+not wait for a new tunnel URL. A share requested during preparation waits for
+it to finish. Browser frames start when a viewer connects and do not delay
+`operate_share`'s result.
 If gateway preparation fails, the next share retries it and reports the error
-if the retry fails. The broker closes the gateway when it shuts down.
+if the retry fails. If the prepared tunnel process exits, the next share call
+replaces the gateway and invalidates all its old share URLs; active sessions
+must call `operate_share` again to obtain fresh links. Stopping an individual
+share leaves the gateway available. The broker closes it when it shuts down.
 The agent receives the upstream URL in the tool result and must pass it only to
 a trusted server-side proxy. The live JPEG stream is raw page pixels; it does
 not use the released-card mask applied to `operate_screenshot`. Anyone able to

@@ -31,10 +31,7 @@ type ShareGateway = {
 };
 let gatewayStartup: Promise<ShareGateway> | null = null;
 
-function shareForRequest(
-  gateway: ShareGateway,
-  request: IncomingMessage,
-): LiveShare | undefined {
+function shareForRequest(gateway: ShareGateway, request: IncomingMessage): LiveShare | undefined {
   const path = request.url?.match(/^\/s\/[A-Za-z0-9_-]{43}\//)?.[0];
   return path === undefined ? undefined : gateway.shares.get(path);
 }
