@@ -57,7 +57,7 @@ describe("operate live share", () => {
       response.end(
         request.url === "/start"
           ? '<!doctype html><a id="next" href="/next">Next</a><iframe src="/child"></iframe>'
-          : '<!doctype html><h1>Destination</h1>',
+          : "<!doctype html><h1>Destination</h1>",
       );
     });
     await new Promise<void>((resolve) => fixture!.listen(0, "127.0.0.1", resolve));
@@ -94,12 +94,16 @@ describe("operate live share", () => {
       const humanNavigation = waitForMessage(socket, (message) => message.type === "navigation");
       socket.send(JSON.stringify({ type: "key", key: "Enter" }));
       expect(await humanNavigation).toEqual({
-        type: "navigation", url: `${base}/next`, origin: base,
+        type: "navigation",
+        url: `${base}/next`,
+        origin: base,
       });
       const hashNavigation = waitForMessage(socket, (message) => message.type === "navigation");
       await page.evaluate(() => history.pushState({}, "", "#human-history"));
       expect(await hashNavigation).toEqual({
-        type: "navigation", url: `${base}/next#human-history`, origin: base,
+        type: "navigation",
+        url: `${base}/next#human-history`,
+        origin: base,
       });
 
       const replacement = await context.newPage();
@@ -108,7 +112,9 @@ describe("operate live share", () => {
       const switched = waitForMessage(socket, (message) => message.type === "navigation");
       controller.page = replacement;
       expect(await switched).toEqual({
-        type: "navigation", url: `${base}/replacement`, origin: base,
+        type: "navigation",
+        url: `${base}/replacement`,
+        origin: base,
       });
       expect(removeOldListener).toHaveBeenCalledWith("framenavigated", expect.any(Function));
       const afterSwitch = navigations.length;
@@ -127,7 +133,9 @@ describe("operate live share", () => {
       const next = waitForMessage(socket, (message) => message.type === "navigation");
       await replacement.goto(`${base}/new-page`);
       expect(await next).toEqual({
-        type: "navigation", url: `${base}/new-page`, origin: base,
+        type: "navigation",
+        url: `${base}/new-page`,
+        origin: base,
       });
       expect(navigations.slice(afterSwitch)).toEqual([
         { type: "navigation", url: `${base}/new-page`, origin: base },
@@ -135,7 +143,11 @@ describe("operate live share", () => {
       socket.close();
       await new Promise<void>((resolve) => socket.once("close", resolve));
       await expect
-        .poll(() => removeReplacementListener.mock.calls.some(([event]) => String(event) === "framenavigated"))
+        .poll(() =>
+          removeReplacementListener.mock.calls.some(
+            ([event]) => String(event) === "framenavigated",
+          ),
+        )
         .toBe(true);
       expect(await forceFinishProvisionSession(sessionId)).toBe(true);
       sessionId = undefined;
