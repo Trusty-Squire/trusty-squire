@@ -42,7 +42,12 @@ function shareForRequest(
 async function createShareGateway(tunnelFactory: TunnelFactory): Promise<ShareGateway> {
   const shares = new Map<string, LiveShare>();
   const gateway = { shares, tunnelFactory } as ShareGateway;
+  const readyPath = `/ready/${randomBytes(32).toString("base64url")}`;
   const server = createServer((request, response: ServerResponse) => {
+    if (request.method === "GET" && request.url === readyPath) {
+      response.writeHead(204).end();
+      return;
+    }
     const share = shareForRequest(gateway, request);
     if (share === undefined) {
       response.writeHead(404).end();
@@ -69,8 +74,27 @@ async function createShareGateway(tunnelFactory: TunnelFactory): Promise<ShareGa
     });
     const tunnel = await tunnelFactory((server.address() as AddressInfo).port);
     gateway.tunnel = tunnel;
-    return gateway;
+    // A printed quick-tunnel URL precedes DNS and edge-route readiness. Prove
+    // the route reaches this gateway before declaring idle preparation done.
+    const deadline = Date.now() + 30_000;
+    let lastError: unknown;
+    while (Date.now() < deadline) {
+      try {
+        const response = await fetch(new URL(readyPath, tunnel.url), {
+          signal: AbortSignal.timeout(Math.min(2_000, deadline - Date.now())),
+          redirect: "error",
+        });
+        await response.body?.cancel();
+        if (response.status === 204) return gateway;
+        lastError = new Error(`share gateway returned ${response.status}`);
+      } catch (error) {
+        lastError = error;
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, 250));
+    }
+    throw new Error("share gateway public route did not become ready", { cause: lastError });
   } catch (error) {
+    await gateway.tunnel?.close();
     server.close();
     throw error;
   }

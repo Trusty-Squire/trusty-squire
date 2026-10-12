@@ -1,4 +1,6 @@
 import { EventEmitter } from "node:events";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import type { Page } from "playwright";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WebSocket } from "ws";
@@ -41,6 +43,35 @@ const localTunnel = async (port: number) => ({
 });
 
 describe("live-share session lifetime", () => {
+  it("waits for the public route to reach the gateway before preparation completes", async () => {
+    let origin = "";
+    let attempts = 0;
+    const edge = createServer(async (request, response) => {
+      if (++attempts < 3) {
+        response.writeHead(503).end();
+        return;
+      }
+      const forwarded = await fetch(new URL(request.url!, origin));
+      response.writeHead(forwarded.status).end(await forwarded.text());
+    });
+    await new Promise<void>((resolve) => edge.listen(0, "127.0.0.1", resolve));
+    try {
+      await warmOperateShareGateway(async (port) => {
+        origin = `http://127.0.0.1:${port}`;
+        return {
+          url: `http://127.0.0.1:${(edge.address() as AddressInfo).port}`,
+          close: async () => undefined,
+        };
+      });
+      expect(attempts).toBe(3);
+      const shared = await shareOperateSession(startSession());
+      expect((await fetch(shared.url)).status).toBe(200);
+    } finally {
+      await stopOperateShareGateway();
+      await new Promise<void>((resolve) => edge.close(() => resolve()));
+    }
+  });
+
   it("retries gateway preparation after a failed tunnel startup", async () => {
     const active = startSession();
     let attempts = 0;
