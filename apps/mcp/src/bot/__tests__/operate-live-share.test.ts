@@ -8,6 +8,9 @@ import { BrowserController } from "../browser.js";
 import {
   LiveShare,
   shareOperateSession,
+  stopOperateShare,
+  stopOperateShareGateway,
+  warmOperateShareGateway,
   withAgentShareControl,
   yieldOperateDriveToHuman,
 } from "../live-share.js";
@@ -28,6 +31,7 @@ afterEach(async () => {
   if (sessionId !== undefined) await finishProvisionSession(sessionId).catch(() => undefined);
   if (secondSessionId !== undefined)
     await finishProvisionSession(secondSessionId).catch(() => undefined);
+  await stopOperateShareGateway();
   sessionId = undefined;
   secondSessionId = undefined;
   await browser?.close();
@@ -51,6 +55,76 @@ function waitForMessage(socket: WebSocket, match: (message: Record<string, unkno
 }
 
 describe("operate live share", () => {
+  it.skipIf(process.env.OPERATE_SHARE_BENCH !== "1")(
+    "benchmarks ten fresh public shares on one real browser session",
+    async () => {
+      fixture = createServer((_request, response) => {
+        response.setHeader("Content-Type", "text/html");
+        response.end("<!doctype html><title>Share benchmark</title><h1>Live</h1>");
+      });
+      await new Promise<void>((resolve) => fixture!.listen(0, "127.0.0.1", resolve));
+      browser = await chromium.launch({ headless: true });
+      const page = await browser.newPage();
+      const started = await startHarnessProvisionSession({
+        serviceUrl: `http://127.0.0.1:${(fixture.address() as AddressInfo).port}/`,
+        browser: BrowserController.fromHarnessPage(page),
+        initialObservation: "drive",
+      });
+      sessionId = started.session_id;
+      const session = paymentSession(sessionId);
+      const warmStart = performance.now();
+      await warmOperateShareGateway();
+      console.log(`OPERATE_SHARE_GATEWAY_WARM_MS ${Math.round(performance.now() - warmStart)}`);
+      const samples: number[] = [];
+      for (let index = 0; index < 10; index += 1) {
+        const start = performance.now();
+        await shareOperateSession(session);
+        samples.push(Math.round(performance.now() - start));
+        stopOperateShare(session);
+      }
+      console.log(`OPERATE_SHARE_BENCH_MS ${JSON.stringify(samples)}`);
+    },
+    180_000,
+  );
+
+  it("returns distinct fresh URLs through one prepared gateway before streaming starts", async () => {
+    fixture = createServer((_request, response) => {
+      response.setHeader("Content-Type", "text/html");
+      response.end("<!doctype html><title>Prepared share</title><h1>Live</h1>");
+    });
+    await new Promise<void>((resolve) => fixture!.listen(0, "127.0.0.1", resolve));
+    browser = await chromium.launch({ headless: true });
+    const page = await browser.newPage();
+    const started = await startHarnessProvisionSession({
+      serviceUrl: `http://127.0.0.1:${(fixture.address() as AddressInfo).port}/`,
+      browser: BrowserController.fromHarnessPage(page),
+      initialObservation: "drive",
+    });
+    sessionId = started.session_id;
+    const session = paymentSession(sessionId);
+    const factory = vi.fn(async (port: number) => ({
+      url: `http://127.0.0.1:${port}`,
+      close: async () => undefined,
+    }));
+    await warmOperateShareGateway(factory);
+    const first = await shareOperateSession(session);
+    expect(factory).toHaveBeenCalledTimes(1);
+    expect((await fetch(first.url)).status).toBe(200);
+    const socket = new WebSocket(new URL("stream", first.url));
+    try {
+      const frame = await waitForMessage(socket, (message) => message.type === "frame");
+      expect(typeof frame.data).toBe("string");
+    } finally {
+      socket.close();
+    }
+    stopOperateShare(session);
+    const second = await shareOperateSession(session);
+    expect(second.url).not.toBe(first.url);
+    expect(new URL(second.url).origin).toBe(new URL(first.url).origin);
+    expect((await fetch(first.url)).status).toBe(404);
+    expect((await fetch(second.url)).status).toBe(200);
+    expect(factory).toHaveBeenCalledTimes(1);
+  }, 60_000);
   it("reports human main-frame navigation, follows page switches, and ignores other frames", async () => {
     fixture = createServer((request, response) => {
       response.setHeader("Content-Type", "text/html");
@@ -503,8 +577,11 @@ describe("operate live share", () => {
       url: `http://127.0.0.1:${port}`,
       close: async () => undefined,
     });
-    const redShare = await shareOperateSession(paymentSession(sessionId), localTunnel);
-    const blueShare = await shareOperateSession(paymentSession(secondSessionId), localTunnel);
+    await warmOperateShareGateway(localTunnel);
+    const [redShare, blueShare] = await Promise.all([
+      shareOperateSession(paymentSession(sessionId)),
+      shareOperateSession(paymentSession(secondSessionId)),
+    ]);
     expect(redShare.url).not.toBe(blueShare.url);
     const redSocket = new WebSocket(new URL("stream", redShare.url));
     const blueSocket = new WebSocket(new URL("stream", blueShare.url));

@@ -29,6 +29,7 @@ import { listenBroker } from "./transport.js";
 import { listenSharedMcp } from "./mcp-socket.js";
 import { readBrokerUnitMarkerSync } from "./managed-marker.js";
 import { sharedMcpSocketPath } from "./mcp-socket-path.js";
+import { stopOperateShareGateway, warmOperateShareGateway } from "../live-share.js";
 
 /**
  * Wire connections that hold a claim on the browser. Status probes are reads
@@ -125,7 +126,6 @@ function readOwnCgroup(): string {
 }
 
 const TAKEOVER_WAIT_MS = 10_000;
-
 
 /** lsof's `l` field must report the SQLite write lock, not merely an open fd. */
 function lockedBrokerPid(profileDir: string): number | null {
@@ -428,6 +428,11 @@ export async function runBrokerDaemon(): Promise<void> {
   // The MCP listener is a separate surface on the elected broker. It does not
   // participate in profile election, Chrome custody, or the broker wire.
   const mcpListener = await listenSharedMcp(operator);
+  if (process.env.NODE_ENV !== "test") {
+    void warmOperateShareGateway().catch(() => {
+      // A later operate_share retries startup and reports the actual error.
+    });
+  }
   shutdown = retryableBrokerShutdown(async (): Promise<boolean> => {
     // A signal is an explicit stop even with live relay clients. Let an
     // in-flight call finish briefly, then abort the rest and close their tabs.
@@ -437,6 +442,7 @@ export async function runBrokerDaemon(): Promise<void> {
       process.stderr.write("[browser-broker] cleanup unproven; retaining physical custody\n");
       return false;
     }
+    await stopOperateShareGateway();
     if (!listenerClosed) {
       listenerClosed = true;
       await mcpListener.close();

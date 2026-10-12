@@ -1,15 +1,24 @@
 import { EventEmitter } from "node:events";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import type { Page } from "playwright";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WebSocket } from "ws";
 import type { BrowserController } from "../browser.js";
-import { LiveShare, shareOperateSession, stopOperateShare } from "../live-share.js";
+import {
+  LiveShare,
+  shareOperateSession,
+  stopOperateShare,
+  stopOperateShareGateway,
+  warmOperateShareGateway,
+} from "../live-share.js";
 import { createSession, type Session } from "../session/model.js";
 
 let session: Session | undefined;
 
-afterEach(() => {
+afterEach(async () => {
   if (session !== undefined) stopOperateShare(session);
+  await stopOperateShareGateway();
   session = undefined;
   vi.restoreAllMocks();
   vi.useRealTimers();
@@ -34,6 +43,70 @@ const localTunnel = async (port: number) => ({
 });
 
 describe("live-share session lifetime", () => {
+  it("waits for the public route to reach the gateway before preparation completes", async () => {
+    let origin = "";
+    let attempts = 0;
+    const edge = createServer(async (request, response) => {
+      if (++attempts < 3) {
+        response.writeHead(503).end();
+        return;
+      }
+      const forwarded = await fetch(new URL(request.url!, origin));
+      response.writeHead(forwarded.status).end(await forwarded.text());
+    });
+    await new Promise<void>((resolve) => edge.listen(0, "127.0.0.1", resolve));
+    try {
+      await warmOperateShareGateway(async (port) => {
+        origin = `http://127.0.0.1:${port}`;
+        return {
+          url: `http://127.0.0.1:${(edge.address() as AddressInfo).port}`,
+          close: async () => undefined,
+        };
+      });
+      expect(attempts).toBe(3);
+      const shared = await shareOperateSession(startSession());
+      expect((await fetch(shared.url)).status).toBe(200);
+    } finally {
+      await stopOperateShareGateway();
+      await new Promise<void>((resolve) => edge.close(() => resolve()));
+    }
+  });
+
+  it("retries gateway preparation after a failed tunnel startup", async () => {
+    const active = startSession();
+    let attempts = 0;
+    const factory = vi.fn(async (port: number) => {
+      if (++attempts === 1) throw new Error("tunnel unavailable");
+      return { url: `http://127.0.0.1:${port}`, close: async () => undefined };
+    });
+    await expect(warmOperateShareGateway(factory)).rejects.toThrow("tunnel unavailable");
+    await warmOperateShareGateway(factory);
+    const shared = await shareOperateSession(active);
+    expect((await fetch(shared.url)).status).toBe(200);
+    expect(factory).toHaveBeenCalledTimes(2);
+  });
+
+  it("replaces a dead prepared tunnel before renewing a share", async () => {
+    const active = startSession();
+    let firstAlive = true;
+    let generation = 0;
+    const factory = vi.fn(async (port: number) => {
+      const current = ++generation;
+      return {
+        url: `http://127.0.0.1:${port}`,
+        close: async () => undefined,
+        alive: () => current > 1 || firstAlive,
+      };
+    });
+    await warmOperateShareGateway(factory);
+    const first = await shareOperateSession(active);
+    firstAlive = false;
+    const second = await shareOperateSession(active);
+    expect(second.url).not.toBe(first.url);
+    expect(factory).toHaveBeenCalledTimes(2);
+    expect((await fetch(second.url)).status).toBe(200);
+  });
+
   it("delivers navigation to congested viewers while dropping only frames", async () => {
     const cdp = Object.assign(new EventEmitter(), {
       send: vi.fn(async () => undefined),
