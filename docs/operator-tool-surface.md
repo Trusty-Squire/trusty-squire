@@ -24,9 +24,8 @@ still require another observation or an explicit wait.
 | Vault-aware browser work | `operate_login({action:"load_saved"})`, `operate_extract` |
 | Payments and vault lists | `inject_card`, `list_credentials`, `list_payment_cards`, `edit_payment_card` |
 
-`operate_share({session_id})` gives a trusted server-side proxy a short-lived,
-interactive view of that session's tab. Human input pauses agent browser
-actions until the controlling viewer disconnects. The URL, WebSocket messages,
+`operate_share({session_id})` gives a trusted server-side proxy an interactive
+view of that session's tab. Lifetime, human control, navigation notifications,
 and Beeline proxy mapping are specified in [Operate live share](operate-live-share.md).
 
 `operate_upload` takes `session_id`, a current `target` ref or `@label` for an

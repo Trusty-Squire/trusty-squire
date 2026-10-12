@@ -1,5 +1,12 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.33-rc.1 (2026-10-11)
+
+- Keep live shares open while their operate session is alive and renew the
+  returned expiry on repeated `operate_share` calls.
+- Send main-frame URL and origin changes through the live-share stream,
+  following the session's current tab after a handoff.
+
 ## 1.1.24-rc.1 (2026-10-02)
 
 - fix(mcp): one broker per physical profile with a marker-gated launch (#1007)
