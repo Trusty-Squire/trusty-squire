@@ -750,6 +750,8 @@ function clearSessionArtifacts(session: Session): void {
 function deregisterProvisionSession(session: Session): void {
   stopOperateShare(session);
   clearSessionArtifacts(session);
+  // The session folder and its handles end with the session.
+  void session.browser.downloads?.dispose().catch(() => undefined);
   if (sessions.get(session.id) === session) sessions.delete(session.id);
 }
 

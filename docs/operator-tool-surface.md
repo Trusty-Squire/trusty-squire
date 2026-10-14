@@ -19,6 +19,7 @@ still require another observation or an explicit wait.
 | Read the page | `operate_observe`, `operate_screenshot`, `operate_network` |
 | Human live handoff | `operate_share` |
 | Drive ordinary UI | `operate_navigate`, `operate_click`, `operate_type`, `operate_select`, `operate_upload`, `operate_press`, `operate_scroll`, `operate_wait` |
+| Browser downloads | `operate_download` |
 | Email verification read | `operate_read_inbox` |
 | Login | `operate_login` |
 | Vault-aware browser work | `operate_login({action:"load_saved"})`, `operate_extract` |
@@ -36,6 +37,30 @@ and single-dispatch guards as `operate_click`. Observe after an uncertain
 upload before choosing another action. The file must exist
 on the machine running the browser; the operator sets it through the browser
 file chooser without using an OS dialog.
+
+Every `operate_*` step result except start, finish, and `operate_download`
+carries `downloads` when a browser download started or changed state since the
+last report. Each record has `download_id`, `state` (`in_progress`, `complete`,
+or `failed`), `filename`, `mime_type`, `path` (absolute, on the broker host),
+`size_bytes`, and `sha256`; the last three are set once the download is
+complete. A download that starts during a step gets up to three seconds to
+finish before the step returns. Finished files live in a private per-session
+folder under `~/.trusty-squire/downloads` (override with
+`TRUSTY_SQUIRE_DOWNLOADS_DIR`), capped at 2 GiB per session
+(`TRUSTY_SQUIRE_DOWNLOAD_SESSION_CAP_BYTES`); the folder is deleted when the
+session ends. Records belong to their session: another session or connection
+cannot list or fetch them.
+
+`operate_download({session_id, download_id, dest_dir?, delivery?, timeout_ms?})`
+waits for the download to complete, then copies it into `dest_dir` on the
+broker host. Without `dest_dir`, with `delivery:"handle"`, or when the copy
+fails, it returns a single-use `handle` that expires after five minutes. Run
+`npx -y @trusty-squire/mcp download <handle> <dest_dir>` on the agent's machine;
+it reads the file over the shared MCP socket (`TRUSTY_SQUIRE_MCP_SOCKET`
+overrides the path, for example a forwarded socket) and checks the sha256.
+`operate_observe` on `chrome://downloads` returns guidance to use
+`operate_download`; Chrome's internal page is not read. A drive whose goal asks
+for one download completes after the first download it starts finishes.
 
 For a signup, checkout, or other goal-shaped website task, call `operate_drive`
 with the goal and a `facts` bag (email, name, address, `card_ref`, …). Pass

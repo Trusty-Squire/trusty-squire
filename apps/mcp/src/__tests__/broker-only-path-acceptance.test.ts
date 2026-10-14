@@ -16,6 +16,7 @@
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { createHash, randomBytes } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import { chromium } from "playwright";
 import { existsSync } from "node:fs";
@@ -40,6 +41,8 @@ const describeReal = canRun ? describe : describe.skip;
 const canRunScope = canRun && linuxBrowserUsesScope();
 
 const ACCOUNT_ID = "acceptance-account";
+const DOWNLOAD = randomBytes(5 * 1024 * 1024);
+const DOWNLOAD_SHA256 = createHash("sha256").update(DOWNLOAD).digest("hex");
 const FIRST_TOKEN = "acceptance-token-1";
 const SECOND_TOKEN = "acceptance-token-2";
 
@@ -84,6 +87,22 @@ async function startApiStub(): Promise<{
           ? "authenticated"
           : "signed out",
       );
+      return;
+    }
+    if (url === "/downloads") {
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      response.end(
+        `<!doctype html><title>downloads</title><button type="button" onclick="location.href='/downloads/clip'">Download the file</button>`,
+      );
+      return;
+    }
+    if (url === "/downloads/clip") {
+      response.writeHead(200, {
+        "content-type": "video/mp4",
+        "content-length": String(DOWNLOAD.length),
+        "content-disposition": 'attachment; filename="clip.mp4"',
+      });
+      response.end(DOWNLOAD);
       return;
     }
     if (url.startsWith("/v1/")) {
@@ -137,6 +156,8 @@ interface Stack {
   socket: string;
   baseUrl: string;
   calls: RecordedCall[];
+  /** The environment every broker, server, and CLI process of this stack runs in. */
+  env: Record<string, string>;
   /** Publish an enrollment exactly as `connect` completes one. */
   enroll: (token: string) => Promise<void>;
   startServer: () => Promise<Client>;
@@ -318,6 +339,7 @@ async function startStack(
     socket,
     baseUrl: options.apiBaseUrl,
     calls: options.calls,
+    env,
     enroll,
     startServer,
     startRelay,
@@ -625,6 +647,68 @@ describeReal("broker-only path acceptance", () => {
       } finally {
         await client.release().catch(() => undefined);
       }
+    },
+  );
+  it(
+    "reports a click's download and delivers it to the agent directly and by handle",
+    { timeout: 180_000 },
+    async () => {
+      const { stack } = await fixture(true);
+      await stack.startBroker();
+      const client = await stack.startServer();
+      const started = (await call(client, "operate_start", {
+        service_url: `${stack.baseUrl}/downloads`,
+      })) as Observation & { safe_table?: Array<[string, string, string?]> };
+      const sessionId = started.session_id as string;
+      const button = started.safe_table?.find(
+        (row) => row[2]?.split("|")[0] === "@download-the-file",
+      )?.[0];
+      expect(button).toEqual(expect.any(String));
+
+      const clicked = (await call(client, "operate_click", {
+        session_id: sessionId,
+        ref: button,
+      })) as Observation & { downloads?: Array<Record<string, unknown>> };
+      expect(clicked.downloads).toHaveLength(1);
+      const record = clicked.downloads![0]!;
+      expect(record).toMatchObject({
+        state: "complete",
+        filename: "clip.mp4",
+        mime_type: "video/mp4",
+        size_bytes: DOWNLOAD.length,
+        sha256: DOWNLOAD_SHA256,
+      });
+      expect(String(record.path)).toContain(join(stack.env.HOME!, ".trusty-squire", "downloads"));
+
+      const agentDir = await mkdtemp(join(stack.env.HOME!, "agent-"));
+      const copied = (await call(client, "operate_download", {
+        session_id: sessionId,
+        download_id: record.download_id,
+        dest_dir: agentDir,
+      })) as unknown as { delivered: { path: string; sha256: string } };
+      expect(copied.delivered.sha256).toBe(DOWNLOAD_SHA256);
+      expect(createHash("sha256").update(await readFile(copied.delivered.path)).digest("hex")).toBe(
+        DOWNLOAD_SHA256,
+      );
+
+      // A remote agent redeems a handle with the CLI over the shared socket.
+      const remoteDir = await mkdtemp(join(stack.env.HOME!, "remote-"));
+      const minted = (await call(client, "operate_download", {
+        session_id: sessionId,
+        download_id: record.download_id,
+        delivery: "handle",
+      })) as unknown as { handle: { id: string } };
+      const fetched = JSON.parse(
+        execFileSync(process.execPath, [DIST_BIN, "download", minted.handle.id, remoteDir], {
+          env: stack.env,
+          encoding: "utf8",
+        }),
+      ) as { path: string; sha256: string };
+      expect(fetched.sha256).toBe(DOWNLOAD_SHA256);
+      expect(createHash("sha256").update(await readFile(fetched.path)).digest("hex")).toBe(
+        DOWNLOAD_SHA256,
+      );
+      await call(client, "operate_finish", { session_id: sessionId });
     },
   );
 });

@@ -110,6 +110,7 @@ function needsAgentBrowserControl(name: string): boolean {
     "operate_network",
     "operate_share",
     "operate_fetch_text",
+    "operate_download",
   ].includes(name);
 }
 

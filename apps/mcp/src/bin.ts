@@ -31,6 +31,7 @@ if (isVersionFlag) {
 const isServer = argv[0] === "server";
 const isBroker = argv[0] === "broker";
 const isRelay = argv[0] === "relay";
+const isDownload = argv[0] === "download";
 // NB: the `housekeeper` subcommand moved to its own operator-only package
 // (@trusty-squire/housekeeper, the `ts-housekeeper` bin). `mcp housekeeper`
 // no longer exists here; the systemd timer invokes ts-housekeeper directly.
@@ -39,6 +40,20 @@ async function dispatch(): Promise<number> {
   if (isBroker) {
     const { runBrokerDaemon } = await import("./bot/broker/daemon.js");
     await runBrokerDaemon();
+    return 0;
+  }
+  if (isDownload) {
+    const [, handle, destDir] = argv;
+    if (!handle || !destDir) {
+      process.stderr.write("usage: mcp download <handle> <dest_dir>\n");
+      return 2;
+    }
+    const { resolve } = await import("node:path");
+    const { fetchDownloadHandle } = await import("./bot/download-transfer.js");
+    const { sharedMcpSocketPath } = await import("./bot/broker/mcp-socket-path.js");
+    const socketPath = process.env.TRUSTY_SQUIRE_MCP_SOCKET?.trim() || sharedMcpSocketPath();
+    const fetched = await fetchDownloadHandle(socketPath, handle, resolve(destDir));
+    process.stdout.write(`${JSON.stringify(fetched)}\n`);
     return 0;
   }
   if (isServer || isRelay) {

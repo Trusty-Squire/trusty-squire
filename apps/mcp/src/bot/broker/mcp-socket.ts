@@ -11,6 +11,7 @@ import { createSessionGuard } from "../../session-guard.js";
 import type { OperatorBroker } from "./operator.js";
 import { InProcessOperatorPrincipal } from "./mcp-principal.js";
 import { sharedMcpSocketPath } from "./mcp-socket-path.js";
+import { DOWNLOAD_HANDLE_PREFIX, serveDownloadHandle } from "../download-transfer.js";
 
 export { sharedMcpSocketPath } from "./mcp-socket-path.js";
 
@@ -95,6 +96,10 @@ export async function listenSharedMcp(
       prefix = Buffer.alloc(0);
       if (agentId.length === 0 || agentId.length > 128 || agentId.includes("\r")) {
         socket.destroy();
+        return;
+      }
+      if (agentId.startsWith(DOWNLOAD_HANDLE_PREFIX)) {
+        serveDownloadHandle(socket, agentId.slice(DOWNLOAD_HANDLE_PREFIX.length));
         return;
       }
       if (rest.length) socket.unshift(rest);

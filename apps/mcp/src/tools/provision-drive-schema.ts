@@ -369,6 +369,14 @@ const uploadSchema = z
   })
   .describe("Provide exactly one of target or screenshot.");
 
+const downloadSchema = z.object({
+  ...sessionShape,
+  download_id: z.string().min(1).max(64),
+  dest_dir: z.string().startsWith("/").optional(),
+  delivery: z.enum(["copy", "handle"]).optional(),
+  timeout_ms: z.number().int().min(0).max(600_000).default(120_000),
+});
+
 const pressSchema = z.object({
   ...sessionShape,
   key: z.string().min(1).max(40),
@@ -635,6 +643,18 @@ export const operateUploadTool: Tool = {
   },
 };
 
+export const operateDownloadTool: Tool = {
+  name: "operate_download",
+  description:
+    "Deliver a file this session downloaded. download_id comes from the downloads list in an operate_* step result. Waits up to timeout_ms for the download to complete. With dest_dir (absolute, on the machine running the browser) the file is copied there. Without dest_dir, with delivery:'handle', or when dest_dir is not writable there, returns a single-use handle that expires in minutes; run handle.fetch_command on the agent's machine to receive the file. Compare sha256 with the download record.",
+  inputSchema: downloadSchema,
+  async handler(args, api, context) {
+    return await (
+      await import("./provision-drive.js")
+    ).operateDownloadTool.handler(args as never, api, context);
+  },
+};
+
 export const operatePressTool: Tool = {
   name: "operate_press",
   description:
@@ -762,6 +782,7 @@ export const OPERATE_TOOLS: Tool[] = [
   operateTypeTool,
   operateSelectTool,
   operateUploadTool,
+  operateDownloadTool,
   operatePressTool,
   operateSolveCaptchaTool,
   operateScrollTool,

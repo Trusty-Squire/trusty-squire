@@ -10,7 +10,10 @@ export class OwnedPages {
   private readonly pages = new Map<Page, () => void>();
   private readonly openers = new WeakMap<Page, Page>();
 
-  constructor(private readonly onPopup: (page: Page) => void) {}
+  constructor(
+    private readonly onPopup: (page: Page) => void,
+    private readonly onRegister: (page: Page) => void = () => undefined,
+  ) {}
 
   /** Only call for a known primary/recovery page, or a proven popup below. */
   register(page: Page): void {
@@ -36,6 +39,7 @@ export class OwnedPages {
       this.pages.delete(page);
     };
     this.pages.set(page, dispose);
+    this.onRegister(page);
     page.on("popup", popup);
     page.on("close", dispose);
   }

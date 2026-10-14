@@ -636,6 +636,27 @@ export function compactV2PublicObservation(
   return degraded as unknown as Observation;
 }
 
+export const CHROME_DOWNLOADS_HINT =
+  "chrome://downloads is Chrome's internal downloads page, which observe cannot read. Use operate_download with session_id and a download_id from the downloads list in an operate_* step result.";
+
+// Chrome renders its downloads page in internal components that the page
+// reader cannot see. Point the agent at the session's download records instead.
+function chromeDownloadsObservation(
+  session: Session,
+  page: Page,
+  outputFormat: "compact" | "full" = "compact",
+): Observation | undefined {
+  const url = page.url();
+  if (!/^chrome:\/\/downloads(?:[/?#]|$)/.test(url)) return undefined;
+  invalidateCompactV2Snapshot(session);
+  retainSessionElements(session, []);
+  return compactV2PublicObservation(
+    session,
+    { url, stage: safeStageV2(url, []), guidance: CHROME_DOWNLOADS_HINT },
+    outputFormat,
+  );
+}
+
 function pendingPageObservation(
   session: Session,
   page: Page,
@@ -990,6 +1011,8 @@ async function observeQueryOwned(
   // and semantic page hints once, together, before filtering.
   const queryPage = sourcePage ?? session.browser.activePage();
   if (queryPage !== null && queryPage !== undefined) {
+    const downloadsPage = chromeDownloadsObservation(session, queryPage);
+    if (downloadsPage !== undefined) return { ...downloadsPage };
     const readiness = await waitForPageReady(queryPage, { kind: "observation" });
     if (!readiness.ready) return { ...pendingPageObservation(session, queryPage, readiness) };
   }
@@ -1297,6 +1320,8 @@ export async function observeSession(
     }
     const observationPage = sourcePage ?? session.browser.activePage();
     if (observationPage !== null && observationPage !== undefined) {
+      const downloadsPage = chromeDownloadsObservation(session, observationPage, outputFormat);
+      if (downloadsPage !== undefined) return downloadsPage;
       const readiness = await waitForPageReady(observationPage, { kind: "observation" });
       if (!readiness.ready) {
         return pendingPageObservation(
