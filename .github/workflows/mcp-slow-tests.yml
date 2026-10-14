@@ -22,7 +22,6 @@ on:
   schedule:
     - cron: "17 5 * * *"
   workflow_dispatch:
-  pull_request: # TEMPORARY: PR-head evidence run; reverted before merge
 
 concurrency:
   group: mcp-slow-${{ github.ref }}
@@ -51,17 +50,17 @@ jobs:
       - name: Build MCP workspace dependencies
         run: pnpm --filter '@trusty-squire/skill-schema' --filter '@trusty-squire/recipe-schema' build
       - name: Run slow integration tier after merge
-        if: github.event_name == 'push' || github.event_name == 'pull_request'
+        if: github.event_name == 'push'
         env:
           MCP_SKIP_PACK_SMOKE: "1"
         run: pnpm --filter @trusty-squire/mcp test:slow
       - name: Run real-browser tier after merge
-        if: github.event_name == 'push' || github.event_name == 'pull_request'
+        if: github.event_name == 'push'
         env:
           MCP_SKIP_PACK_SMOKE: "1"
         run: pnpm --filter @trusty-squire/mcp test:real-browser
       - name: Run complete MCP suite nightly
-        if: github.event_name != 'push' && github.event_name != 'pull_request'
+        if: github.event_name != 'push'
         env:
           MCP_SKIP_PACK_SMOKE: "1"
         run: pnpm --filter @trusty-squire/mcp test
