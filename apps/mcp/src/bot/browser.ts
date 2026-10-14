@@ -1558,7 +1558,7 @@ export class BrowserController implements BrowserDriver {
 
   async uploadFileOnPage(
     page: Page,
-    selector: string | ((armChooser: () => void) => Promise<void>),
+    selector: string | ((armChooser: () => Promise<void>) => Promise<void>),
     filePath: string,
   ): Promise<void> {
     if (!existsSync(filePath) || !statSync(filePath).isFile()) {
@@ -1588,7 +1588,19 @@ export class BrowserController implements BrowserDriver {
     // waiter instead of racing it.
     let chooserPromise: Promise<FileChooser | null> | undefined;
     let chooserCause: UploadFailure["cause"] = "chooser_failed";
-    const armChooser = (): void => {
+    const armChooser = async (): Promise<void> => {
+      // Page.on/waitForEvent sends this subscription without awaiting its
+      // acknowledgement. Enable it first so the native click cannot overtake
+      // interception setup. The server also enables each child renderer.
+      try {
+        await (page as unknown as {
+          _channel: {
+            updateSubscription(args: { event: "fileChooser"; enabled: true }): Promise<void>;
+          };
+        })._channel.updateSubscription({ event: "fileChooser", enabled: true });
+      } catch {
+        throw new UploadError("chooser_wait", "chooser_failed");
+      }
       chooserPromise = page
         .waitForEvent("filechooser", { timeout: 15_000 })
         .then((c): FileChooser | null => c)
@@ -1601,7 +1613,7 @@ export class BrowserController implements BrowserDriver {
         });
     };
     if (typeof selector === "string") {
-      armChooser();
+      await armChooser();
       await locator!.click({ timeout: 8000 });
     } else {
       // The screenshot executor validates before arming and repeats its

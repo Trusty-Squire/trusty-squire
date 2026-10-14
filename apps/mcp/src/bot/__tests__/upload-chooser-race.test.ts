@@ -7,7 +7,7 @@
 // clean "did not open a file picker" per-call error.
 
 import { fileURLToPath } from "node:url";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BrowserController } from "../browser.js";
 import type { Page } from "playwright";
 
@@ -15,6 +15,28 @@ const thisFile = fileURLToPath(import.meta.url);
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 describe("uploadFile filechooser-timeout race", () => {
+  it("refuses a failed interception setup before clicking and exposes only a safe cause", async () => {
+    const controller = new BrowserController({ humanize: false });
+    const click = vi.fn();
+    const waiter = vi.fn();
+    const page = {
+      _channel: {
+        updateSubscription: async () => {
+          throw new Error("private path and page content");
+        },
+      },
+      waitForEvent: waiter,
+      locator: () => ({ first: () => ({ evaluate: async () => false, click }) }),
+    } as unknown as Page;
+    Object.defineProperty(controller, "page", { value: page });
+    await expect(controller.uploadFile("#up", thisFile)).rejects.toMatchObject({
+      message: "upload: chooser_failed",
+      failure: { phase: "chooser_wait", cause: "chooser_failed" },
+    });
+    expect(click).not.toHaveBeenCalled();
+    expect(waiter).not.toHaveBeenCalled();
+  });
+
   const leaked: unknown[] = [];
   const track = (reason: unknown): void => {
     leaked.push(reason);
@@ -39,6 +61,7 @@ describe("uploadFile filechooser-timeout race", () => {
       click: () => sleep(60),
     };
     const page = {
+      _channel: { updateSubscription: async () => {} },
       locator: () => ({ first: () => fakeLocator }),
       waitForEvent: (event: string) =>
         sleep(10).then(() => {
@@ -63,13 +86,14 @@ describe("uploadFile filechooser-timeout race", () => {
     async (mode) => {
       const controller = new BrowserController({ humanize: false });
       const page = {
+        _channel: { updateSubscription: async () => {} },
         waitForEvent: () =>
           sleep(10).then(() => {
             throw Object.assign(new Error("chooser timeout"), { name: "TimeoutError" });
           }),
       } as unknown as Page;
-      const click = async (armChooser: () => void) => {
-        armChooser();
+      const click = async (armChooser: () => Promise<void>) => {
+        await armChooser();
         if (mode === "click-failure") throw new Error("guarded click failed");
         await sleep(60);
       };

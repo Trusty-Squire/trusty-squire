@@ -392,7 +392,7 @@ export async function clickScreenshot(
   page: Page,
   point: ScreenshotPoint,
   authorize: (target: ScreenshotClickTarget) => void,
-  prepare?: () => void,
+  prepare?: () => void | Promise<void>,
 ): Promise<"dispatched"> {
   const binding = bindings.get(page);
   if (
@@ -456,7 +456,7 @@ export async function clickScreenshot(
     throwIfOperatorRequestCancelled();
     // Subscribe a chooser before the final protocol reads, so interception
     // setup can finish before the native click. Recheck authority afterwards.
-    prepare?.();
+    await prepare?.();
     await markOperatorMutationDispatchAttempted();
     const final = await geometry(page, cdp);
     assertFresh(final);
