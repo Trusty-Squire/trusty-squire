@@ -178,6 +178,11 @@ jobs:
       - name: Install Chromium for browser-backed MCP tests
         if: steps.fast_path.outputs.already_released != 'true' && steps.resolve.outputs.is_prerelease == 'false'
         run: pnpm --filter '@trusty-squire/mcp' exec playwright install --with-deps chromium
+      # Patchright pins its own Chromium revision, separate from Playwright's.
+      # The headed operator-upload cases launch through Patchright.
+      - name: Install Patchright Chromium for headed MCP tests
+        if: steps.fast_path.outputs.already_released != 'true' && steps.resolve.outputs.is_prerelease == 'false'
+        run: pnpm --filter '@trusty-squire/mcp' exec patchright install chromium
 
       # NOTE: lint + typecheck are intentionally NOT gating this pipeline yet.
       # The repo has pre-existing lint/typecheck debt (see ci.yml signal).
