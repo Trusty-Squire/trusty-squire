@@ -63,6 +63,7 @@ import { elementRef, provisionElementRefs } from "../observe/refs.js";
 import { audit, googleSessionGateForSession, sessionForCall } from "../session/lifecycle.js";
 import { substituteCardTokens } from "../card-secret-tokens.js";
 import { clickScreenshot, ScreenshotClickError } from "../screenshot-click.js";
+import { UploadError } from "../upload-error.js";
 import {
   composeOperatorSignals,
   currentOperatorRequestSignal,
@@ -663,7 +664,15 @@ export async function act(
     if ((action.kind === "click" || action.kind === "upload") && action.screenshot) {
       if (error instanceof ScreenshotClickError) throw error;
       if (screenshotDispatched)
-        throw new ScreenshotClickError("screenshot_click_uncertain", "dispatched");
+        throw new ScreenshotClickError(
+          "screenshot_click_uncertain",
+          "dispatched",
+          action.kind === "upload"
+            ? error instanceof UploadError
+              ? error.failure
+              : { phase: "post_upload", cause: "post_upload_failed" }
+            : undefined,
+        );
     }
     if (session !== undefined && (action.kind === "oauth_login" || action.kind === "oauth_click")) {
       const progress = oauthErrorAfterDispatchAttempt(session, error);

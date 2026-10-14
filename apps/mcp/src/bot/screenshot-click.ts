@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { CDPSession, Frame, Page } from "playwright";
+import type { UploadFailure } from "./upload-error.js";
 import {
   markOperatorMutationDispatchAttempted,
   throwIfOperatorRequestCancelled,
@@ -70,6 +71,7 @@ export class ScreenshotClickError extends Error {
   constructor(
     readonly code: "stale_screenshot" | "invalid_screenshot_point" | "screenshot_click_uncertain",
     readonly dispatch: "not_dispatched" | "dispatched" | "unknown",
+    readonly uploadFailure?: UploadFailure,
   ) {
     super(code);
   }
@@ -390,7 +392,7 @@ export async function clickScreenshot(
   page: Page,
   point: ScreenshotPoint,
   authorize: (target: ScreenshotClickTarget) => void,
-  prepare?: () => void,
+  prepare?: () => void | Promise<void>,
 ): Promise<"dispatched"> {
   const binding = bindings.get(page);
   if (
@@ -454,7 +456,7 @@ export async function clickScreenshot(
     throwIfOperatorRequestCancelled();
     // Subscribe a chooser before the final protocol reads, so interception
     // setup can finish before the native click. Recheck authority afterwards.
-    prepare?.();
+    await prepare?.();
     await markOperatorMutationDispatchAttempted();
     const final = await geometry(page, cdp);
     assertFresh(final);

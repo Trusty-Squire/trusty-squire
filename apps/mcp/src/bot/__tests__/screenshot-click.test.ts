@@ -88,6 +88,53 @@ function point(
 }
 
 describe("screenshot-bound native pointer dispatch", () => {
+  it.each(["stale", "expired", "cancelled"] as const)(
+    "awaits chooser readiness and rechecks %s before dispatch",
+    async (mode) => {
+      const f = await fixture();
+      const cancel = new AbortController();
+      const reason = new Error("cancelled during chooser setup");
+      let entered!: () => void;
+      const started = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      let release!: () => void;
+      const ready = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const authorize = vi.fn();
+      const mouse = vi.spyOn(f.page.mouse, "click");
+      try {
+        const shot = await f.controller.captureOperatorScreenshot();
+        const result = withOperatorRequestContext(cancel.signal, () =>
+          clickScreenshot(f.page, point(shot, 174, 244), authorize, async () => {
+            entered();
+            await ready;
+          }),
+        );
+        const observed = result.catch((error: unknown) => error);
+        await started;
+        // Keep interception pending while the old synchronous preparation path
+        // would have already dispatched its click.
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        expect(mouse).not.toHaveBeenCalled();
+        if (mode === "cancelled") cancel.abort(reason);
+        else if (mode === "expired") vi.spyOn(Date, "now").mockReturnValue(Date.now() + 61_000);
+        else await f.frame.locator("#host").evaluate((el) => el.remove());
+        release();
+        const error = await observed;
+        if (mode === "cancelled") expect(error).toBe(reason);
+        else expect(error).toMatchObject({ code: "stale_screenshot", dispatch: "not_dispatched" });
+        expect(authorize).not.toHaveBeenCalled();
+        expect(mouse).not.toHaveBeenCalled();
+      } finally {
+        release();
+        vi.restoreAllMocks();
+        await f.close();
+      }
+    },
+  );
+
   it.each(["stale", "cancelled"] as const)(
     "rechecks %s authority after chooser preparation",
     async (mode) => {

@@ -88,6 +88,7 @@ export const REAL_BROWSER_FILES = [
   "src/bot/__tests__/operate-drive-matrix.test.ts",
   "src/bot/__tests__/operator-click-fallback.test.ts",
   "src/bot/__tests__/operator-upload.test.ts",
+  "src/bot/__tests__/upload-cdp-diagnostic.test.ts",
   "src/bot/__tests__/operator-download.test.ts",
   "src/bot/__tests__/operator-login-read-browser.test.ts",
   "src/bot/__tests__/operator-ref-recovery-flow.test.ts",

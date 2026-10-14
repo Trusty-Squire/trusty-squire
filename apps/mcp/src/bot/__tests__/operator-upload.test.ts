@@ -1,6 +1,7 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { chromium, type Browser, type Page } from "playwright";
+import { chromium as patchrightChromium } from "patchright";
 import { expect, it, vi } from "vitest";
 import { BrowserController } from "../browser.js";
 import {
@@ -11,6 +12,19 @@ import {
 import { operateUploadTool } from "../../tools/provision-drive.js";
 import { inputJsonSchema } from "../../tools/input-json-schema.js";
 import { withOperatorRequestContext } from "../request-cancellation.js";
+import { hostDisplayAcceptsConnections } from "../display-env.js";
+import {
+  createXvfbDisplayRig,
+  startRemoteLoginDisplay,
+  remoteLoginEnvironment,
+  teardownRemoteLoginRig,
+  type RemoteLoginRig,
+} from "../remote-login-display.js";
+
+const FIRST_FRAME_PNG = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAeklEQVR4nO3PUQkAIBTAwJfEYEY0pSH8OITBAtxmnf11wwUNaEEDWtCAFjSgBQ1oQQNa0IAWNKAFDWhBA1rQgBY0oAUNaEEDWtCAFjSgBQ1oQQNa0IAWNKAFDWhBA1rQgBY0oAUNaEEDWtCAFjSgBQ1oQQNa0IAWPHYBEIYhD+7aWsEAAAAASUVORK5CYII=",
+  "base64",
+);
 
 it.each(["button", "hidden-input", "opacity-zero-input"])(
   "uploads a local file through %s",
@@ -71,22 +85,32 @@ async function detachedFixture(
     fixtureDir: string;
   }) => Promise<void>,
   childFrame = false,
+  headed = false,
 ) {
   const fixtureDir = await mkdtemp(join(process.cwd(), ".operator-upload-fixture-"));
   const filePath = join(fixtureDir, "first-frame.png");
   let browser: Browser | undefined;
   let sessionId: string | undefined;
+  let rig: RemoteLoginRig | undefined;
   const url = "https://upload-fixture.test/";
   try {
-    await writeFile(filePath, "synthetic first frame");
-    browser = await chromium.launch({ headless: true, args: ["--no-sandbox"] });
+    await writeFile(filePath, FIRST_FRAME_PNG);
+    if (headed && !(await hostDisplayAcceptsConnections())) {
+      rig = createXvfbDisplayRig({ width: 1280, height: 960 });
+      await startRemoteLoginDisplay(rig);
+    }
+    browser = (await (headed ? patchrightChromium : chromium).launch({
+      headless: !headed,
+      args: ["--no-sandbox"],
+      ...(rig ? { env: remoteLoginEnvironment(rig) } : {}),
+    })) as unknown as Browser;
     const page = await browser.newPage();
     const markup = `<div id="card" style="position:absolute;left:20px;top:30px;width:200px;height:100px">Add first frame</div>
         <output></output><script>
-        window.cardClicks = 0;
+        document.body.dataset.cardClicks = '0';
         document.addEventListener('click', e => {
           if (!e.target.closest('#card')) return;
-          window.cardClicks++;
+          document.body.dataset.cardClicks = String(Number(document.body.dataset.cardClicks) + 1);
           const input = document.createElement('input');
           input.type = 'file';
           input.onchange = () => document.querySelector('output').textContent = input.files[0].name + ':' + input.files[0].size;
@@ -128,6 +152,7 @@ async function detachedFixture(
     vi.restoreAllMocks();
     if (sessionId) await finishProvisionSession(sessionId);
     await browser?.close();
+    if (rig) await teardownRemoteLoginRig(rig);
     await rm(fixtureDir, { recursive: true, force: true });
   }
 }
@@ -155,8 +180,8 @@ it.each([false, true])(
       const frame = childFrame
         ? page.frames().find((f) => f.url().includes("upload-child.test"))!
         : page.mainFrame();
-      expect(await frame.locator("output").textContent()).toBe("first-frame.png:21");
-      expect(await frame.evaluate("window.cardClicks")).toBe(1);
+      expect(await frame.locator("output").textContent()).toBe("first-frame.png:179");
+      expect(Number(await frame.locator("body").getAttribute("data-card-clicks"))).toBe(1);
       const replay = await operateUploadTool.handler(request, null);
       expect(replay).toMatchObject({
         status: "stale_screenshot",
@@ -164,7 +189,7 @@ it.each([false, true])(
       });
       expect(mouse).toHaveBeenCalledOnce();
       console.warn(
-        `Reproduction dreamina-upload-target-1: ref-only upload returned stale_ref; screenshot upload attached first-frame.png:21 with one click (child frame: ${childFrame}); replay refused`,
+        `Reproduction dreamina-upload-target-1: ref-only upload returned stale_ref; screenshot upload attached first-frame.png:179 with one click (child frame: ${childFrame}); replay refused`,
       );
     }, childFrame);
   },
@@ -201,27 +226,44 @@ it.each(["stale", "expired", "outside", "missing-file", "directory", "cancelled"
       }
       expect(mouse).not.toHaveBeenCalled();
       expect(waiter).not.toHaveBeenCalled();
-      expect(await page.evaluate("window.cardClicks")).toBe(0);
+      expect(Number(await page.locator("body").getAttribute("data-card-clicks"))).toBe(0);
       expect(await page.locator("output").textContent()).toBe("");
     });
   },
   30_000,
 );
 
-it.each(["timeout", "click-failure", "cancel-after-click"] as const)(
+it.each([
+  "timeout",
+  "chooser-failure",
+  "file-write-failure",
+  "click-failure",
+  "cancel-after-click",
+] as const)(
   "does not replay or attach after %s",
   async (mode) => {
     await detachedFixture(async ({ page, request }) => {
       const originalClick = page.mouse.click.bind(page.mouse);
       const mouse = vi.spyOn(page.mouse, "click");
       const abort = new AbortController();
-      if (mode === "timeout") {
+      if (mode === "timeout" || mode === "chooser-failure") {
         await page.evaluate(() =>
           document.addEventListener("click", (e) => e.stopImmediatePropagation(), true),
         );
         vi.spyOn(page, "waitForEvent").mockImplementation(async () => {
           await new Promise((resolve) => setTimeout(resolve, 20));
-          throw new Error("Timeout 15000ms exceeded while waiting for filechooser");
+          throw Object.assign(
+            new Error("Failure for /private/synthetic.png at secret page content"),
+            {
+              name: mode === "timeout" ? "TimeoutError" : "Error",
+            },
+          );
+        });
+      } else if (mode === "file-write-failure") {
+        page.once("filechooser", (chooser) => {
+          vi.spyOn(chooser, "setFiles").mockRejectedValue(
+            new Error("/private/synthetic.png: secret page content"),
+          );
         });
       } else if (mode === "click-failure") {
         mouse.mockRejectedValue(new Error("pointer acknowledgement lost"));
@@ -241,13 +283,29 @@ it.each(["timeout", "click-failure", "cancel-after-click"] as const)(
           retry_policy: "observe_before_new_action",
         },
       });
+      if (mode !== "click-failure") {
+        expect(result).toHaveProperty("upload_failure", {
+          phase: mode === "timeout" || mode === "chooser-failure" ? "chooser_wait" : "file_write",
+          cause:
+            mode === "timeout"
+              ? "chooser_timeout"
+              : mode === "chooser-failure"
+                ? "chooser_failed"
+                : mode === "file-write-failure"
+                  ? "file_write_failed"
+                  : "cancelled",
+        });
+        expect(JSON.stringify(result)).not.toMatch(/private|secret page content/);
+      }
       expect(await page.locator("output").textContent()).toBe("");
       // A new request can observe the spent binding without replaying the click.
       expect(await operateUploadTool.handler(request, null)).toMatchObject({
         status: "stale_screenshot",
       });
       expect(mouse).toHaveBeenCalledOnce();
-      expect(await page.evaluate("window.cardClicks")).toBe(mode === "cancel-after-click" ? 1 : 0);
+      expect(Number(await page.locator("body").getAttribute("data-card-clicks"))).toBe(
+        mode === "cancel-after-click" || mode === "file-write-failure" ? 1 : 0,
+      );
     });
   },
   30_000,
@@ -275,3 +333,81 @@ it("requires exactly one upload target and finite original-image coordinates", (
   expect(inputJsonSchema(operateUploadTool.inputSchema).properties).toHaveProperty("screenshot");
   expect(operateUploadTool.jsonOutputSchema?.properties).toHaveProperty("screenshot_click");
 });
+
+// Reproduction dreamina-live-upload-2: these headed fixtures qualify the
+// deferred chooser and frame path, not the real site's unexplained failure.
+it.each([false, true])(
+  "headed Patchright attaches a synthetic first frame (child frame: %s)",
+  async (childFrame) => {
+    await detachedFixture(
+      async ({ page, request }) => {
+        const mouse = vi.spyOn(page.mouse, "click");
+        const result = await operateUploadTool.handler(request, null);
+        expect(result).toMatchObject({
+          session_id: request.session_id,
+          screenshot_click: { dispatch: "dispatched" },
+        });
+        const frame = childFrame
+          ? page.frames().find((f) => f.url().includes("upload-child.test"))!
+          : page.mainFrame();
+        expect(await frame.locator("output").textContent()).toBe("first-frame.png:179");
+        expect(Number(await frame.locator("body").getAttribute("data-card-clicks"))).toBe(1);
+        expect(mouse).toHaveBeenCalledOnce();
+        console.warn(
+          `Reproduction dreamina-live-upload-2 fixture: headed Patchright attached first-frame.png:179 with one native click (child frame: ${childFrame}); real Dreamina repair not demonstrated`,
+        );
+      },
+      childFrame,
+      true,
+    );
+  },
+  30_000,
+);
+
+it("headed completed click followed by real chooser timeout retains safe diagnostics", async () => {
+  await detachedFixture(
+    async ({ page, request }) => {
+      await page.evaluate(() =>
+        document.addEventListener("click", (e) => e.stopImmediatePropagation(), true),
+      );
+      const mouse = vi.spyOn(page.mouse, "click");
+      const result = await operateUploadTool.handler(request, null);
+      expect(result).toMatchObject({
+        status: "screenshot_click_uncertain",
+        screenshot_click: { dispatch: "dispatched", retry_policy: "observe_before_new_action" },
+        upload_failure: { phase: "chooser_wait", cause: "chooser_timeout" },
+      });
+      expect(await page.locator("output").textContent()).toBe("");
+      expect(await operateUploadTool.handler(request, null)).toMatchObject({
+        status: "stale_screenshot",
+      });
+      expect(mouse).toHaveBeenCalledOnce();
+      console.warn(
+        "Reproduction dreamina-live-upload-2 fixture: native click completed, chooser timed out, safe phase/cause returned, second click refused",
+      );
+    },
+    false,
+    true,
+  );
+}, 30_000);
+
+it("retains post-upload uncertainty when the file attached but observation failed", async () => {
+  await detachedFixture(async ({ page, request }) => {
+    const mouse = vi.spyOn(page.mouse, "click");
+    vi.spyOn(BrowserController.prototype, "extractBrowserUseObservation").mockRejectedValue(
+      new Error("/private/synthetic.png: secret page content"),
+    );
+    const result = await operateUploadTool.handler(request, null);
+    expect(result).toMatchObject({
+      status: "screenshot_click_uncertain",
+      screenshot_click: { dispatch: "dispatched", retry_policy: "observe_before_new_action" },
+      upload_failure: { phase: "post_upload", cause: "post_upload_failed" },
+    });
+    expect(await page.locator("output").textContent()).toBe("first-frame.png:179");
+    expect(JSON.stringify(result)).not.toMatch(/private|secret page content/);
+    expect(await operateUploadTool.handler(request, null)).toMatchObject({
+      status: "stale_screenshot",
+    });
+    expect(mouse).toHaveBeenCalledOnce();
+  });
+}, 30_000);
