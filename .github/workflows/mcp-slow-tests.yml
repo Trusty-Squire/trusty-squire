@@ -43,6 +43,10 @@ jobs:
         run: pnpm install --frozen-lockfile --filter '@trusty-squire/mcp...'
       - name: Install Chromium for browser-backed MCP tests
         run: pnpm --filter '@trusty-squire/mcp' exec playwright install --with-deps chromium
+      # Patchright pins its own Chromium revision, separate from Playwright's.
+      # The headed operator-upload cases launch through Patchright.
+      - name: Install Patchright Chromium for headed MCP tests
+        run: pnpm --filter '@trusty-squire/mcp' exec patchright install chromium
       - name: Build MCP workspace dependencies
         run: pnpm --filter '@trusty-squire/skill-schema' --filter '@trusty-squire/recipe-schema' build
       - name: Run slow integration tier after merge
