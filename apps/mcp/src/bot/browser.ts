@@ -55,6 +55,7 @@ import {
   throwIfOperatorRequestCancelled,
 } from "./request-cancellation.js";
 import { BrowserProcessOwner } from "./browser-process-owner.js";
+import { UploadError, type UploadFailure } from "./upload-error.js";
 import { resizeCeremonyWindow, type CeremonyDisplayClip } from "./ceremony-window.js";
 import { PageDriver } from "./page-driver.js";
 import { waitForPageReady } from "./page-ready.js";
@@ -1561,7 +1562,7 @@ export class BrowserController implements BrowserDriver {
     filePath: string,
   ): Promise<void> {
     if (!existsSync(filePath) || !statSync(filePath).isFile()) {
-      throw new Error(`upload: local file not found or not a regular file: ${filePath}`);
+      throw new UploadError("file_validation", "file_unavailable");
     }
     // A screenshot caller supplies the existing guarded pointer dispatch.
     const locator = typeof selector === "string" ? page.locator(selector).first() : undefined;
@@ -1571,7 +1572,11 @@ export class BrowserController implements BrowserDriver {
           .catch(() => false)
       : false;
     if (isFileInput) {
-      await locator!.setInputFiles(filePath);
+      try {
+        await locator!.setInputFiles(filePath);
+      } catch {
+        throw new UploadError("file_write", "file_write_failed");
+      }
       return;
     }
     // Register the chooser waiter BEFORE the click so the event can't be missed.
@@ -1582,11 +1587,18 @@ export class BrowserController implements BrowserDriver {
     // is bounded to 8s so it resolves before the 15s
     // waiter instead of racing it.
     let chooserPromise: Promise<FileChooser | null> | undefined;
+    let chooserCause: UploadFailure["cause"] = "chooser_failed";
     const armChooser = (): void => {
       chooserPromise = page
         .waitForEvent("filechooser", { timeout: 15_000 })
         .then((c): FileChooser | null => c)
-        .catch((): null => null);
+        .catch((error): null => {
+          chooserCause =
+            error instanceof Error && error.name === "TimeoutError"
+              ? "chooser_timeout"
+              : "chooser_failed";
+          return null;
+        });
     };
     if (typeof selector === "string") {
       armChooser();
@@ -1598,13 +1610,17 @@ export class BrowserController implements BrowserDriver {
     }
     const chooser = (await chooserPromise) ?? null;
     if (chooser === null) {
-      throw new Error(
-        `upload: clicking "${typeof selector === "string" ? selector : "<screenshot-point>"}" did not open a file picker within 15s. ` +
-          `Target the upload button (or the file <input>) and retry.`,
+      throw new UploadError("chooser_wait", chooserCause);
+    }
+    try {
+      if (typeof selector !== "string") throwIfOperatorRequestCancelled();
+      await chooser.setFiles(filePath);
+    } catch {
+      throw new UploadError(
+        "file_write",
+        currentOperatorRequestSignal()?.aborted ? "cancelled" : "file_write_failed",
       );
     }
-    if (typeof selector !== "string") throwIfOperatorRequestCancelled();
-    await chooser.setFiles(filePath);
   }
 
   // Ancestors marked `inert` for a "hide the background while a modal is

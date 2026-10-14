@@ -42,7 +42,9 @@ describe("uploadFile filechooser-timeout race", () => {
       locator: () => ({ first: () => fakeLocator }),
       waitForEvent: (event: string) =>
         sleep(10).then(() => {
-          throw new Error(`Timeout 15000ms exceeded while waiting for event "${event}"`);
+          throw Object.assign(new Error(`Timeout waiting for "${event}"`), {
+            name: "TimeoutError",
+          });
         }),
     };
     Object.defineProperty(controller, "page", { value: page });
@@ -63,7 +65,7 @@ describe("uploadFile filechooser-timeout race", () => {
       const page = {
         waitForEvent: () =>
           sleep(10).then(() => {
-            throw new Error("chooser timeout");
+            throw Object.assign(new Error("chooser timeout"), { name: "TimeoutError" });
           }),
       } as unknown as Page;
       const click = async (armChooser: () => void) => {

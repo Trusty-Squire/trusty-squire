@@ -1,4 +1,5 @@
 import { ScreenshotClickError } from "../bot/screenshot-click.js";
+import { UPLOAD_PHASES, UPLOAD_CAUSES } from "../bot/upload-error.js";
 import { captureSourceSchema, describeCaptureSource } from "../bot/credential-capture.js";
 import {
   currentOperatorOperationId,
@@ -1110,6 +1111,7 @@ export const operateUploadTool: Tool<z.infer<typeof uploadSchema>> = {
       if (args.screenshot && error instanceof ScreenshotClickError)
         return {
           status: error.code,
+          ...(error.uploadFailure ? { upload_failure: error.uploadFailure } : {}),
           screenshot_click: {
             dispatch: error.dispatch,
             outcome: "unknown",
@@ -1632,7 +1634,7 @@ for (const tool of OPERATE_TOOLS) {
 }
 
 // Keep the additive click receipt discoverable alongside the shared capture result.
-operateClickTool.jsonOutputSchema = {
+const screenshotClickOutputSchema = {
   ...captureOutputSchema,
   properties: {
     ...captureOutputSchema.properties,
@@ -1647,4 +1649,19 @@ operateClickTool.jsonOutputSchema = {
     },
   },
 };
-operateUploadTool.jsonOutputSchema = operateClickTool.jsonOutputSchema;
+operateClickTool.jsonOutputSchema = screenshotClickOutputSchema;
+operateUploadTool.jsonOutputSchema = {
+  ...screenshotClickOutputSchema,
+  properties: {
+    ...screenshotClickOutputSchema.properties,
+    upload_failure: {
+      type: "object",
+      additionalProperties: false,
+      required: ["phase", "cause"],
+      properties: {
+        phase: { enum: [...UPLOAD_PHASES] },
+        cause: { enum: [...UPLOAD_CAUSES] },
+      },
+    },
+  },
+};

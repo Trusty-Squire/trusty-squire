@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { CDPSession, Frame, Page } from "playwright";
+import type { UploadFailure } from "./upload-error.js";
 import {
   markOperatorMutationDispatchAttempted,
   throwIfOperatorRequestCancelled,
@@ -70,6 +71,7 @@ export class ScreenshotClickError extends Error {
   constructor(
     readonly code: "stale_screenshot" | "invalid_screenshot_point" | "screenshot_click_uncertain",
     readonly dispatch: "not_dispatched" | "dispatched" | "unknown",
+    readonly uploadFailure?: UploadFailure,
   ) {
     super(code);
   }
