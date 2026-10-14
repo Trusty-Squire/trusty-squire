@@ -236,7 +236,7 @@ export type ProvisionAction =
   // file <input>); path = an absolute local file path. The bot sets the file via
   // Playwright (filechooser/setInputFiles), so the OS dialog is never driven.
   // Not recorded in skill recipes — a machine-local path isn't portable.
-  | { kind: "upload"; target: string; path: string };
+  | { kind: "upload"; target: string; path: string; screenshot?: ScreenshotPoint };
 
 export type { AllowedHostEntry, HostSource, Session } from "./session/model.js";
 import { egressSeedHosts } from "./session/hosts.js";

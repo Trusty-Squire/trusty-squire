@@ -52,6 +52,7 @@ import type { MailResultRow, OpenedMailMessage } from "./capture/verification.js
 import {
   currentOperatorRequestSignal,
   markOperatorMutationDispatchAttempted,
+  throwIfOperatorRequestCancelled,
 } from "./request-cancellation.js";
 import { BrowserProcessOwner } from "./browser-process-owner.js";
 import { resizeCeremonyWindow, type CeremonyDisplayClip } from "./ceremony-window.js";
@@ -1550,37 +1551,55 @@ export class BrowserController implements BrowserDriver {
     await this.uploadFileOnPage(this.page, selector, filePath);
   }
 
-  async uploadFileOnPage(page: Page, selector: string, filePath: string): Promise<void> {
+  async uploadFileOnPage(
+    page: Page,
+    selector: string | ((armChooser: () => void) => Promise<void>),
+    filePath: string,
+  ): Promise<void> {
     if (!existsSync(filePath) || !statSync(filePath).isFile()) {
       throw new Error(`upload: local file not found or not a regular file: ${filePath}`);
     }
-    const locator = page.locator(selector).first();
-    const isFileInput = await locator
-      .evaluate((el) => el instanceof HTMLInputElement && el.type === "file")
-      .catch(() => false);
+    // A screenshot caller supplies the existing guarded pointer dispatch.
+    const locator = typeof selector === "string" ? page.locator(selector).first() : undefined;
+    const isFileInput = locator
+      ? await locator
+          .evaluate((el) => el instanceof HTMLInputElement && el.type === "file")
+          .catch(() => false)
+      : false;
     if (isFileInput) {
-      await locator.setInputFiles(filePath);
+      await locator!.setInputFiles(filePath);
       return;
     }
     // Register the chooser waiter BEFORE the click so the event can't be missed.
     // The catch must attach at creation, not after the click resolves: the click
     // actionability-waits (e.g. an occluded button), so the waiter's 15s timeout
     // can reject while the click is still pending — a bare rejection here is an
-    // unhandledRejection that kills the whole MCP server process. The click is
-    // bounded to 8s like the other click paths so it resolves before the 15s
+    // unhandledRejection that kills the whole MCP server process. The ref click
+    // is bounded to 8s so it resolves before the 15s
     // waiter instead of racing it.
-    const chooserPromise: Promise<FileChooser | null> = page
-      .waitForEvent("filechooser", { timeout: 15_000 })
-      .then((c): FileChooser | null => c)
-      .catch((): null => null);
-    await locator.click({ timeout: 8000 });
-    const chooser = await chooserPromise;
+    let chooserPromise: Promise<FileChooser | null> | undefined;
+    const armChooser = (): void => {
+      chooserPromise = page
+        .waitForEvent("filechooser", { timeout: 15_000 })
+        .then((c): FileChooser | null => c)
+        .catch((): null => null);
+    };
+    if (typeof selector === "string") {
+      armChooser();
+      await locator!.click({ timeout: 8000 });
+    } else {
+      // The screenshot executor validates before arming and repeats its
+      // freshness/cancellation checks after interception setup, before dispatch.
+      await selector(armChooser);
+    }
+    const chooser = (await chooserPromise) ?? null;
     if (chooser === null) {
       throw new Error(
-        `upload: clicking "${selector}" did not open a file picker within 15s. ` +
+        `upload: clicking "${typeof selector === "string" ? selector : "<screenshot-point>"}" did not open a file picker within 15s. ` +
           `Target the upload button (or the file <input>) and retry.`,
       );
     }
+    if (typeof selector !== "string") throwIfOperatorRequestCancelled();
     await chooser.setFiles(filePath);
   }
 

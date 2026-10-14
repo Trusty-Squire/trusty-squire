@@ -9,6 +9,7 @@
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { BrowserController } from "../browser.js";
+import type { Page } from "playwright";
 
 const thisFile = fileURLToPath(import.meta.url);
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -54,4 +55,27 @@ describe("uploadFile filechooser-timeout race", () => {
     await sleep(50);
     expect(leaked).toEqual([]);
   });
+
+  it.each(["slow-click", "click-failure"] as const)(
+    "a guarded screenshot %s cannot leak the chooser rejection",
+    async (mode) => {
+      const controller = new BrowserController({ humanize: false });
+      const page = {
+        waitForEvent: () =>
+          sleep(10).then(() => {
+            throw new Error("chooser timeout");
+          }),
+      } as unknown as Page;
+      const click = async (armChooser: () => void) => {
+        armChooser();
+        if (mode === "click-failure") throw new Error("guarded click failed");
+        await sleep(60);
+      };
+      await expect(controller.uploadFileOnPage(page, click, thisFile)).rejects.toThrow(
+        mode === "click-failure" ? "guarded click failed" : /did not open a file picker/,
+      );
+      await sleep(50);
+      expect(leaked).toEqual([]);
+    },
+  );
 });

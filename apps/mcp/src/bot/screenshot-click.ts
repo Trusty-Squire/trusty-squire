@@ -390,6 +390,7 @@ export async function clickScreenshot(
   page: Page,
   point: ScreenshotPoint,
   authorize: (target: ScreenshotClickTarget) => void,
+  prepare?: () => void,
 ): Promise<"dispatched"> {
   const binding = bindings.get(page);
   if (
@@ -435,22 +436,28 @@ export async function clickScreenshot(
     if (x < 0 || y < 0 || x >= current.viewport.clientWidth || y >= current.viewport.clientHeight)
       throw new ScreenshotClickError("invalid_screenshot_point", "not_dispatched");
     const target = await hitTarget(page, cdp, x, y, binding.frameOrigin);
-    await markOperatorMutationDispatchAttempted();
-    const final = await geometry(page, cdp);
     const originalNode = binding.beforeNodes.get(target.nodeKey);
     const originalOcclusion = occlusionIdentity(binding.beforeOcclusion, target.nodeKey);
-    if (
-      binding.expires < Date.now() ||
-      final.state !== binding.state ||
-      originalOcclusion !== occlusionIdentity(binding.afterOcclusion, target.nodeKey) ||
-      originalOcclusion !== occlusionIdentity(current.occlusion, target.nodeKey) ||
-      originalOcclusion !== occlusionIdentity(final.occlusion, target.nodeKey) ||
-      originalNode === undefined ||
-      originalNode !== binding.afterNodes.get(target.nodeKey) ||
-      originalNode !== current.nodes.get(target.nodeKey) ||
-      originalNode !== final.nodes.get(target.nodeKey)
-    )
-      throw new ScreenshotClickError("stale_screenshot", "not_dispatched");
+    const assertFresh = (state: Awaited<ReturnType<typeof geometry>>): void => {
+      if (
+        binding.expires < Date.now() ||
+        state.state !== binding.state ||
+        originalOcclusion !== occlusionIdentity(binding.afterOcclusion, target.nodeKey) ||
+        originalOcclusion !== occlusionIdentity(state.occlusion, target.nodeKey) ||
+        originalNode === undefined ||
+        originalNode !== binding.afterNodes.get(target.nodeKey) ||
+        originalNode !== state.nodes.get(target.nodeKey)
+      )
+        throw new ScreenshotClickError("stale_screenshot", "not_dispatched");
+    };
+    assertFresh(current);
+    throwIfOperatorRequestCancelled();
+    // Subscribe a chooser before the final protocol reads, so interception
+    // setup can finish before the native click. Recheck authority afterwards.
+    prepare?.();
+    await markOperatorMutationDispatchAttempted();
+    const final = await geometry(page, cdp);
+    assertFresh(final);
     throwIfOperatorRequestCancelled();
     authorize(target);
     attempted = true;

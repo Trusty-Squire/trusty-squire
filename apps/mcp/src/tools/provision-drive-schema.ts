@@ -356,12 +356,18 @@ const selectSchema = z
   })
   .describe("Provide ref with one value, a selections map, or a country.");
 
-const uploadSchema = z.object({
-  ...sessionShape,
-  target: refSchema,
-  path: z.string().startsWith("/"),
-  format: actionFormatSchema.optional(),
-});
+const uploadSchema = z
+  .object({
+    ...sessionShape,
+    target: refSchema.optional(),
+    screenshot: screenshotPointSchema.optional(),
+    path: z.string().startsWith("/"),
+    format: actionFormatSchema.optional(),
+  })
+  .refine((args) => (args.target !== undefined) !== (args.screenshot !== undefined), {
+    message: "Provide exactly one of target or screenshot",
+  })
+  .describe("Provide exactly one of target or screenshot.");
 
 const pressSchema = z.object({
   ...sessionShape,
@@ -492,7 +498,7 @@ export const provisionScreenshotTool: Tool = {
     "including a captcha or 3-D Secure ACS frame. During bank approval, short, non-blocking screenshots or observations " +
     "can watch for a change. This read does not interact with the page. Released PAN and security code in injected " +
     "controls and identified displayed copies are covered; if masking fails, capture fails. " +
-    "A click_binding authorizes one dispatched operate_click point in original image pixels for 60 seconds; " +
+    "A click_binding authorizes one dispatched operate_click or operate_upload point in original image pixels for 60 seconds; " +
     "navigation, scroll, viewport, or frame changes invalidate it. Without a binding, capture again before a coordinate click.",
   inputSchema: screenshotSchema,
   jsonOutputSchema: {
@@ -620,7 +626,7 @@ export const operateSelectTool: Tool = {
 export const operateUploadTool: Tool = {
   name: "operate_upload",
   description:
-    "Attach a local file through the browser file chooser. The file must exist on the machine running the browser. Target a current ref or @label for the upload button or file input; path must be absolute.",
+    "Attach a local file through the browser file chooser. The file must exist on the machine running the browser; path must be absolute. Provide exactly one of target (a current ref or @label for the upload button or file input) or screenshot:{screenshot_id,x,y} from operate_screenshot.click_binding for a visible upload card with no usable ref. Screenshot coordinates use original image pixels and the existing freshness and single-dispatch guards. After an uncertain upload, observe before deciding any new action; never repeat the click blindly.",
   inputSchema: uploadSchema,
   async handler(args, api, context) {
     return await (
@@ -843,3 +849,4 @@ operateClickTool.jsonOutputSchema = {
     },
   },
 };
+operateUploadTool.jsonOutputSchema = operateClickTool.jsonOutputSchema;

@@ -660,7 +660,7 @@ export async function act(
       : { ...result.observation, three_ds: threeDs };
   } catch (error) {
     timing.enter("reply");
-    if (action.kind === "click" && action.screenshot) {
+    if ((action.kind === "click" || action.kind === "upload") && action.screenshot) {
       if (error instanceof ScreenshotClickError) throw error;
       if (screenshotDispatched)
         throw new ScreenshotClickError("screenshot_click_uncertain", "dispatched");
@@ -935,7 +935,10 @@ async function executeAct(
   let resolutionTarget: string | undefined;
   let auditTarget: string | undefined;
   let compactV2Authorization = internalAuthorization;
-  if ("target" in action && !(action.kind === "click" && action.screenshot)) {
+  if (
+    "target" in action &&
+    !((action.kind === "click" || action.kind === "upload") && action.screenshot)
+  ) {
     if (session.compactV2Active && !internalAccess) {
       try {
         compactV2Authorization ??= compactV2AuthorizationForTarget(
@@ -960,7 +963,7 @@ async function executeAct(
     }
   }
   if (compactV2ActionPage?.isClosed()) {
-    if (action.kind === "click" && action.screenshot)
+    if ((action.kind === "click" || action.kind === "upload") && action.screenshot)
       throw new ScreenshotClickError("stale_screenshot", "not_dispatched");
     if (!("target" in action)) throw new Error("action source page is closed");
     if (session.compactV2Active) throwCompactV2StaleRef();
@@ -1161,6 +1164,30 @@ async function executeAct(
           if (browser.isActivePage(compactV2ActionPage)) {
             actionPageAfter = (await adoptOpenedTab(session, browser, 0)) ?? actionPageAfter;
           }
+          break;
+        }
+        if (action.kind === "upload" && action.screenshot) {
+          if (!compactV2ActionPage)
+            throw new ScreenshotClickError("stale_screenshot", "not_dispatched");
+          await browser.uploadFileOnPage(
+            compactV2ActionPage,
+            async (armChooser) => {
+              await clickScreenshot(
+                compactV2ActionPage,
+                action.screenshot!,
+                () => undefined,
+                armChooser,
+              );
+              onScreenshotDispatched?.();
+            },
+            action.path,
+          );
+          audit(sessionId, "upload", {
+            target: "<screenshot-point>",
+            path: "<local-file>",
+            host: registrableHost(urlBeforeAction),
+          });
+          await settle();
           break;
         }
         // Locator-form target (`text=…` / `css=…`): the host is pointing at a
