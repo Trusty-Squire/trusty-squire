@@ -137,6 +137,13 @@ it.each([false, true])(
   async (childFrame) => {
     await detachedFixture(async ({ page, request }) => {
       const mouse = vi.spyOn(page.mouse, "click");
+      await expect(
+        operateUploadTool.handler(
+          { session_id: request.session_id, target: "@add-first-frame", path: request.path },
+          null,
+        ),
+      ).rejects.toThrow("stale_ref");
+      expect(mouse).not.toHaveBeenCalled();
       const result = await operateUploadTool.handler(
         operateUploadTool.inputSchema.parse(request),
         null,
@@ -157,7 +164,7 @@ it.each([false, true])(
       });
       expect(mouse).toHaveBeenCalledOnce();
       console.warn(
-        `Reproduction dreamina-upload-target-1: no upload ref; screenshot upload attached first-frame.png:21 with one click (child frame: ${childFrame}); replay refused`,
+        `Reproduction dreamina-upload-target-1: ref-only upload returned stale_ref; screenshot upload attached first-frame.png:21 with one click (child frame: ${childFrame}); replay refused`,
       );
     }, childFrame);
   },
