@@ -6,6 +6,8 @@ import type { Tool } from "./index.js";
 
 import { captureSourceSchema } from "../bot/credential-capture.js";
 
+import { UPLOAD_PHASES, UPLOAD_CAUSES } from "../bot/upload-error.js";
+
 const proxySchema = z
   .string()
   .min(1)
@@ -855,7 +857,7 @@ for (const tool of OPERATE_TOOLS) {
 }
 
 // Keep the additive click receipt discoverable alongside the shared capture result.
-operateClickTool.jsonOutputSchema = {
+const screenshotClickOutputSchema = {
   ...captureOutputSchema,
   properties: {
     ...captureOutputSchema.properties,
@@ -870,4 +872,19 @@ operateClickTool.jsonOutputSchema = {
     },
   },
 };
-operateUploadTool.jsonOutputSchema = operateClickTool.jsonOutputSchema;
+operateClickTool.jsonOutputSchema = screenshotClickOutputSchema;
+operateUploadTool.jsonOutputSchema = {
+  ...screenshotClickOutputSchema,
+  properties: {
+    ...screenshotClickOutputSchema.properties,
+    upload_failure: {
+      type: "object",
+      additionalProperties: false,
+      required: ["phase", "cause"],
+      properties: {
+        phase: { enum: [...UPLOAD_PHASES] },
+        cause: { enum: [...UPLOAD_CAUSES] },
+      },
+    },
+  },
+};

@@ -57,7 +57,10 @@ for (const base of ["provision-drive", "inject-card"]) {
     'import { z } from "zod";',
     'import type { Tool } from "./index.js";',
     ...(base === "provision-drive"
-      ? ['import { captureSourceSchema } from "../bot/credential-capture.js";']
+      ? [
+          'import { captureSourceSchema } from "../bot/credential-capture.js";',
+          'import { UPLOAD_PHASES, UPLOAD_CAUSES } from "../bot/upload-error.js";',
+        ]
       : []),
   ];
   for (const statement of ast.statements)
