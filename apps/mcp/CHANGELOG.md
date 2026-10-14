@@ -1,5 +1,12 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.35-rc.1 (2026-10-14)
+
+- ci(mcp): install Patchright Chromium for real-browser tests (#1093)
+- Await chooser interception before screenshot uploads (#1092)
+- feat(mcp): report browser downloads and deliver them with operate_download (#1090)
+- fix(mcp): upload files through guarded screenshot targets (#1089)
+
 ## 1.1.33-rc.1 (2026-10-11)
 
 - Keep live shares open while their operate session is alive and renew the
