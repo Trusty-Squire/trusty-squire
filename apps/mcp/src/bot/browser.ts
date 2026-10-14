@@ -1588,8 +1588,8 @@ export class BrowserController implements BrowserDriver {
       armChooser();
       await locator!.click({ timeout: 8000 });
     } else {
-      // The screenshot executor arms only after its final freshness and
-      // cancellation checks, immediately before the native pointer dispatch.
+      // The screenshot executor validates before arming and repeats its
+      // freshness/cancellation checks after interception setup, before dispatch.
       await selector(armChooser);
     }
     const chooser = (await chooserPromise) ?? null;

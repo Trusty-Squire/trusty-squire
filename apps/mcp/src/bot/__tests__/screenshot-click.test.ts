@@ -88,6 +88,42 @@ function point(
 }
 
 describe("screenshot-bound native pointer dispatch", () => {
+  it.each(["stale", "cancelled"] as const)(
+    "rechecks %s authority after chooser preparation",
+    async (mode) => {
+      const f = await fixture();
+      const cancel = new AbortController();
+      const reason = new Error("cancelled after chooser preparation");
+      const prepare = vi.fn();
+      const authorize = vi.fn();
+      const mouse = vi.spyOn(f.page.mouse, "click");
+      try {
+        const shot = await f.controller.captureOperatorScreenshot();
+        const result = withOperatorRequestContext(
+          cancel.signal,
+          () => clickScreenshot(f.page, point(shot, 174, 244), authorize, prepare),
+          async () => {
+            expect(prepare).toHaveBeenCalledOnce();
+            if (mode === "cancelled") cancel.abort(reason);
+            else await f.frame.locator("#host").evaluate((el) => el.remove());
+          },
+        );
+        if (mode === "cancelled") await expect(result).rejects.toBe(reason);
+        else
+          await expect(result).rejects.toMatchObject({
+            code: "stale_screenshot",
+            dispatch: "not_dispatched",
+          });
+        expect(prepare).toHaveBeenCalledOnce();
+        expect(authorize).not.toHaveBeenCalled();
+        expect(mouse).not.toHaveBeenCalled();
+      } finally {
+        vi.restoreAllMocks();
+        await f.close();
+      }
+    },
+  );
+
   it("clicks a main-page control after an unrelated child frame navigates", async () => {
     const f = await fixture(
       1,

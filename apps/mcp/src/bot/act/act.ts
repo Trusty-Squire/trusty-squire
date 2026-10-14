@@ -1172,7 +1172,12 @@ async function executeAct(
           await browser.uploadFileOnPage(
             compactV2ActionPage,
             async (armChooser) => {
-              await clickScreenshot(compactV2ActionPage, action.screenshot!, armChooser);
+              await clickScreenshot(
+                compactV2ActionPage,
+                action.screenshot!,
+                () => undefined,
+                armChooser,
+              );
               onScreenshotDispatched?.();
             },
             action.path,
