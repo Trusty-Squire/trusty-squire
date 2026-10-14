@@ -28,8 +28,12 @@ still require another observation or an explicit wait.
 view of that session's tab. Lifetime, human control, navigation notifications,
 and Beeline proxy mapping are specified in [Operate live share](operate-live-share.md).
 
-`operate_upload` takes `session_id`, a current `target` ref or `@label` for an
-upload button or file input, and an absolute local `path`. The file must exist
+`operate_upload` takes `session_id`, exactly one of a current `target` ref or
+`@label` for an upload button/file input or `screenshot:{screenshot_id,x,y}`
+from `operate_screenshot.click_binding`, and an absolute local `path`.
+Screenshot upload uses the same original-image coordinates, freshness, frame,
+and single-dispatch guards as `operate_click`. Observe after an uncertain
+upload before choosing another action. The file must exist
 on the machine running the browser; the operator sets it through the browser
 file chooser without using an OS dialog.
 
