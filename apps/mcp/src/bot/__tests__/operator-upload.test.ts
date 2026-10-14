@@ -86,6 +86,7 @@ async function detachedFixture(
   }) => Promise<void>,
   childFrame = false,
   headed = false,
+  picker = false,
 ) {
   const fixtureDir = await mkdtemp(join(process.cwd(), ".operator-upload-fixture-"));
   const filePath = join(fixtureDir, "first-frame.png");
@@ -116,13 +117,34 @@ async function detachedFixture(
           input.onchange = () => document.querySelector('output').textContent = input.files[0].name + ':' + input.files[0].size;
           input.click();
         });</script>`;
+    // Reproduction R-1092b: Dreamina's card calls showOpenFilePicker during the
+    // trusted click and reads the file through the returned handle.
+    const pickerMarkup = `<div id="card" style="position:absolute;left:20px;top:30px;width:200px;height:100px">Add first frame</div>
+        <output></output><script>
+        document.body.dataset.cardClicks = '0';
+        document.addEventListener('click', e => {
+          if (!e.target.closest('#card')) return;
+          document.body.dataset.cardClicks = String(Number(document.body.dataset.cardClicks) + 1);
+          window.showOpenFilePicker({
+            excludeAcceptAllOption: true,
+            multiple: false,
+            types: [{ accept: { 'image/png': ['.png'], 'image/jpeg': ['.jpeg'] } }],
+          }).then(
+            handles => handles[0].getFile(),
+          ).then(
+            file => document.querySelector('output').textContent = file.name + ':' + file.size,
+            error => document.querySelector('output').textContent = 'picker:' + error.name,
+          );
+        });</script>`;
     await page.route("https://**/*", (route) =>
       route.fulfill({
         contentType: "text/html",
         body:
           childFrame && route.request().url() === url
             ? '<iframe style="position:absolute;left:100px;top:120px;width:400px;height:300px;border:0" src="https://upload-child.test/"></iframe>'
-            : markup,
+            : picker
+              ? pickerMarkup
+              : markup,
       }),
     );
     const started = await startHarnessProvisionSession({
@@ -410,4 +432,71 @@ it("retains post-upload uncertainty when the file attached but observation faile
     });
     expect(mouse).toHaveBeenCalledOnce();
   });
+}, 30_000);
+
+// Reproduction R-1092b: on 1.1.35-rc.1 this card returned
+// screenshot_click_uncertain with chooser_wait/chooser_timeout because
+// showOpenFilePicker opens no <input type=file> for Playwright to intercept.
+it.each([
+  [false, false],
+  [true, false],
+  [false, true],
+  [true, true],
+])(
+  "attaches a first frame through a showOpenFilePicker card (child frame: %s, headed: %s)",
+  async (childFrame, headed) => {
+    await detachedFixture(
+      async ({ page, request }) => {
+        const frame = childFrame
+          ? page.frames().find((f) => f.url().includes("upload-child.test"))!
+          : page.mainFrame();
+        expect(await frame.evaluate(() => typeof Reflect.get(window, "showOpenFilePicker"))).toBe(
+          "function",
+        );
+        const mouse = vi.spyOn(page.mouse, "click");
+        const result = await operateUploadTool.handler(request, null);
+        expect(result).toMatchObject({
+          session_id: request.session_id,
+          screenshot_click: { dispatch: "dispatched" },
+        });
+        expect(result).not.toHaveProperty("upload_failure");
+        await expect.poll(() => frame.locator("output").textContent()).toBe("first-frame.png:179");
+        expect(Number(await frame.locator("body").getAttribute("data-card-clicks"))).toBe(1);
+        expect(mouse).toHaveBeenCalledOnce();
+        expect(
+          await frame.evaluate(() => String(Reflect.get(window, "showOpenFilePicker"))),
+        ).toContain("[native code]");
+        console.warn(
+          `Reproduction R-1092b fixture: showOpenFilePicker card attached first-frame.png:179 with one click (child frame: ${childFrame}, headed: ${headed})`,
+        );
+      },
+      childFrame,
+      headed,
+      true,
+    );
+  },
+  30_000,
+);
+
+it("names an unrouted showOpenFilePicker call instead of a bare chooser timeout", async () => {
+  await detachedFixture(
+    async ({ page, request }) => {
+      vi.spyOn(page, "waitForEvent").mockImplementation(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        throw Object.assign(new Error("chooser timeout"), { name: "TimeoutError" });
+      });
+      const result = await operateUploadTool.handler(request, null);
+      expect(result).toMatchObject({
+        status: "screenshot_click_uncertain",
+        screenshot_click: { dispatch: "dispatched", retry_policy: "observe_before_new_action" },
+        upload_failure: { phase: "chooser_wait", cause: "file_picker_unrouted" },
+      });
+      expect(
+        await page.evaluate(() => String(Reflect.get(window, "showOpenFilePicker"))),
+      ).toContain("[native code]");
+    },
+    false,
+    false,
+    true,
+  );
 }, 30_000);
