@@ -292,6 +292,7 @@ describe("characterization: registered operator tool surface", () => {
       "operate_type",
       "operate_select",
       "operate_upload",
+      "operate_download",
       "operate_press",
       "operate_solve_captcha",
       "operate_scroll",

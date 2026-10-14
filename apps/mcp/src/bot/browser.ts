@@ -509,6 +509,10 @@ export class BrowserController implements BrowserDriver {
     return this.pageDriver.ownedPages;
   }
 
+  get downloads() {
+    return this.pageDriver.downloads;
+  }
+
   private readonly cardValueOutputMask = new CardValueOutputMask();
   private readonly operatorEvidence = new OperatorEvidenceCollector(this.cardValueOutputMask);
   private clickDispatchSequence = 0;

@@ -52,7 +52,15 @@ import {
 } from "../bot/provision-session.js";
 import { openSessionStorage } from "../session.js";
 import { servingAccountId } from "../session-guard.js";
-import { googleSessionGateForSession, sessionForCall } from "../bot/session/lifecycle.js";
+import {
+  googleSessionGateForSession,
+  sessionForCall,
+  UnknownProvisionSessionError,
+} from "../bot/session/lifecycle.js";
+import { mintDownloadHandle, sha256File, type DownloadRecord } from "../bot/downloads.js";
+import { constants as fsConstants } from "node:fs";
+import { copyFile, rm, stat } from "node:fs/promises";
+import { join, parse as parsePath } from "node:path";
 import { clickDispatchStatusForError } from "../bot/browser.js";
 
 // Read the install-time inbox-read preference. Inbox reads default on; an
@@ -1116,6 +1124,71 @@ export const operateUploadTool: Tool<z.infer<typeof uploadSchema>> = {
   },
 };
 
+const downloadSchema = z.object({
+  ...sessionShape,
+  download_id: z.string().min(1).max(64),
+  dest_dir: z.string().startsWith("/").optional(),
+  delivery: z.enum(["copy", "handle"]).optional(),
+  timeout_ms: z.number().int().min(0).max(600_000).default(120_000),
+});
+export const operateDownloadTool: Tool<z.infer<typeof downloadSchema>> = {
+  name: "operate_download",
+  description:
+    "Deliver a file this session downloaded. download_id comes from the downloads list in an operate_* step result. Waits up to timeout_ms for the download to complete. With dest_dir (absolute, on the machine running the browser) the file is copied there. Without dest_dir, with delivery:'handle', or when dest_dir is not writable there, returns a single-use handle that expires in minutes; run handle.fetch_command on the agent's machine to receive the file. Compare sha256 with the download record.",
+  inputSchema: downloadSchema,
+  async handler(args, _api, context) {
+    const session = sessionForCall(args.session_id);
+    if (session === undefined) throw new UnknownProvisionSessionError(args.session_id);
+    const downloads = session.browser.downloads;
+    const record = await downloads.wait(args.download_id, args.timeout_ms, context?.signal);
+    if (record === undefined)
+      throw new Error(`unknown_download: ${args.download_id} is not a download of this session`);
+    if (record.state !== "complete")
+      return { session_id: args.session_id, status: record.state, download: record };
+    let copyError: string | undefined;
+    if (args.dest_dir !== undefined && args.delivery !== "handle") {
+      try {
+        const delivered = await copyDownload(record, args.dest_dir);
+        return { session_id: args.session_id, status: "delivered", download: record, delivered };
+      } catch (error) {
+        copyError = error instanceof Error ? error.message : String(error);
+      }
+    }
+    const handle = mintDownloadHandle(downloads, record);
+    return {
+      session_id: args.session_id,
+      status: "handle",
+      download: record,
+      handle: {
+        ...handle,
+        fetch_command: `npx -y @trusty-squire/mcp download ${handle.id} ${args.dest_dir ?? "<dest_dir>"}`,
+      },
+      ...(copyError === undefined ? {} : { copy_error: copyError }),
+    };
+  },
+};
+
+async function copyDownload(record: DownloadRecord, destDir: string) {
+  if (record.path === null) throw new Error("download has no file");
+  const { name, ext } = parsePath(record.filename);
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const path = join(destDir, attempt === 0 ? record.filename : `${name} (${attempt})${ext}`);
+    try {
+      await copyFile(record.path, path, fsConstants.COPYFILE_EXCL);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") continue;
+      throw error;
+    }
+    const sha256 = await sha256File(path);
+    if (sha256 !== record.sha256) {
+      await rm(path, { force: true });
+      throw new Error("copied file does not match the download sha256");
+    }
+    return { path, size_bytes: (await stat(path)).size, sha256 };
+  }
+  throw new Error("dest_dir already holds 100 files with this name");
+}
+
 const pressSchema = z.object({
   ...sessionShape,
   key: z.string().min(1).max(40),
@@ -1367,6 +1440,7 @@ export const OPERATE_TOOLS: Tool[] = [
   operateTypeTool,
   operateSelectTool,
   operateUploadTool,
+  operateDownloadTool,
   operatePressTool,
   operateSolveCaptchaTool,
   operateScrollTool,
@@ -1528,6 +1602,32 @@ for (const tool of OPERATE_TOOLS) {
       };
     }
     return await captureIntoVault(args.session_id, capture, api);
+  };
+}
+
+// Every session step reports the downloads that started or changed since the
+// last report. A download that starts during the step gets a short window to
+// finish, so its record can already carry the size and sha256.
+const DOWNLOAD_REPORT_SETTLE_MS = 3_000;
+for (const tool of OPERATE_TOOLS) {
+  if (["operate_start", "operate_finish", "operate_download"].includes(tool.name)) continue;
+  const stepHandler = tool.handler;
+  tool.handler = async (args, api, context) => {
+    const before =
+      typeof args.session_id === "string" ? sessionForCall(args.session_id) : undefined;
+    const marker = before?.browser.downloads?.marker();
+    const result = await stepHandler(args, api, context);
+    if (result === null || typeof result !== "object" || Array.isArray(result)) return result;
+    const sessionId =
+      typeof args.session_id === "string"
+        ? args.session_id
+        : (result as { session_id?: unknown }).session_id;
+    const downloads =
+      typeof sessionId === "string" ? sessionForCall(sessionId)?.browser.downloads : undefined;
+    if (downloads === undefined) return result;
+    await downloads.settle(DOWNLOAD_REPORT_SETTLE_MS, context?.signal, marker ?? 0);
+    const report = downloads.takeReport();
+    return report.length === 0 ? result : { ...result, downloads: report };
   };
 }
 

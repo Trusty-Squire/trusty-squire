@@ -1,4 +1,5 @@
 import type { BrowserContext, Frame, Page } from "playwright";
+import { SessionDownloads } from "./downloads.js";
 import { OwnedPages } from "./owned-pages.js";
 import { waitForPageReady } from "./page-ready.js";
 
@@ -20,11 +21,17 @@ export class PageDriver {
   // handed to the model as text.
   private openedTabs: Page[] = [];
 
-  readonly ownedPages = new OwnedPages((page) => {
-    this.trackMainDocument(page);
-    this.openedTabs.push(page);
-    if (this.openedTabs.length > 8) this.openedTabs.splice(0, this.openedTabs.length - 8);
-  });
+  // Every page this session owns reports the downloads it starts here.
+  readonly downloads = new SessionDownloads();
+
+  readonly ownedPages = new OwnedPages(
+    (page) => {
+      this.trackMainDocument(page);
+      this.openedTabs.push(page);
+      if (this.openedTabs.length > 8) this.openedTabs.splice(0, this.openedTabs.length - 8);
+    },
+    (page) => this.downloads.watch(page),
+  );
 
   private readonly documentSubscriptions = new Map<Page, () => void>();
 

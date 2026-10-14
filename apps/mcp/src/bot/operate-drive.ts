@@ -5572,6 +5572,57 @@ export async function runOperateDrive(
   }
 }
 
+/** A goal that asks for one download: it names a download and no count or set. */
+export function isSingleDownloadGoal(goal: string): boolean {
+  return (
+    /\bdownload/i.test(goal) &&
+    !/\b(?:all|every|each|both|several|multiple|files|downloads|two|three|four|five|\d+)\b/i.test(
+      goal,
+    )
+  );
+}
+
+/** Notices that tell the decider which downloads this drive started. */
+export function driveDownloadNotices(session: Session, marker: number): string[] {
+  return (session.browser.downloads?.since(marker) ?? []).map((record) =>
+    record.state === "complete"
+      ? `Browser download complete: ${record.filename} (${record.size_bytes} bytes, ${record.mime_type})`
+      : record.state === "failed"
+        ? `Browser download failed: ${record.filename}`
+        : `Browser download in progress: ${record.filename}`,
+  );
+}
+
+// A single-download goal is met by the first download this drive completes.
+// While one is still running, wait for it instead of deciding again: another
+// click would start a duplicate download.
+async function driveDownloadOutcome(
+  session: Session,
+  marker: number,
+  goal: string,
+  remainingMs: number,
+  signal?: AbortSignal,
+): Promise<{ status: "complete" | "budget"; reason: string } | undefined> {
+  const downloads = session.browser.downloads;
+  if (downloads === undefined || !isSingleDownloadGoal(goal)) return undefined;
+  if (downloads.since(marker).length === 0) return undefined;
+  await downloads.settle(remainingMs, signal, marker);
+  const records = downloads.since(marker);
+  const complete = records.find((record) => record.state === "complete");
+  if (complete !== undefined)
+    return {
+      status: "complete",
+      reason: `Downloaded ${complete.filename} (${complete.size_bytes} bytes); fetch it with operate_download download_id=${complete.download_id}`,
+    };
+  const running = records.find((record) => record.state === "in_progress");
+  return running === undefined
+    ? undefined
+    : {
+        status: "budget",
+        reason: `Download ${running.filename} is still in progress; fetch it with operate_download download_id=${running.download_id}`,
+      };
+}
+
 async function driveLoop(input: {
   session: Session;
   sessionId: string;
@@ -5590,6 +5641,9 @@ async function driveLoop(input: {
   const driveState = session.drive;
   if (driveState === null) throw new Error("drive state missing");
   const drive = driveState;
+  // Downloads this drive call starts. A download usually leaves the page as it
+  // was, so the records are the only evidence a download goal is met.
+  const downloadMarker = session.browser.downloads?.marker() ?? 0;
   if (!Array.isArray(drive.maskedValueRefs)) drive.maskedValueRefs = [];
   if (drive.lastDocumentEpoch === undefined) drive.lastDocumentEpoch = null;
   const priorCompact = input.observation ?? session.lastCompactObservation;
@@ -7206,6 +7260,14 @@ async function driveLoop(input: {
         jevRetried: "askJev requires an active Trusty Squire session (vaulted typesafe credential)",
       });
     }
+    const downloaded = await driveDownloadOutcome(
+      session,
+      downloadMarker,
+      drive.goal,
+      remainingMs(),
+      context?.signal,
+    );
+    if (downloaded !== undefined) return finish(downloaded.status, { reason: downloaded.reason });
     if (!pageReadiness.ready) {
       // The readiness module has already spent the bounded wait for this
       // reason. Retry only while the document is actually not ready; never
@@ -7763,10 +7825,16 @@ async function driveLoop(input: {
       }),
       // The decider sees the page's own visible text (notices first, capped)
       // so a page's prose can answer for it, not just its headings.
-      composeDrivePageText(observationNoticeTexts(observation), observation.dom ?? ""),
+      composeDrivePageText(
+        [...observationNoticeTexts(observation), ...driveDownloadNotices(session, downloadMarker)],
+        observation.dom ?? "",
+      ),
       {
         pageUrl,
-        notices: observationNoticeTexts(observation),
+        notices: [
+          ...observationNoticeTexts(observation),
+          ...driveDownloadNotices(session, downloadMarker),
+        ],
         secretsPresent: driveSecretsPresent(rows),
         trail: (drive.outcomeTrail ?? []).slice(-DRIVE_TRAIL_CAP),
         triedHere: drive.triedHere ?? [],
