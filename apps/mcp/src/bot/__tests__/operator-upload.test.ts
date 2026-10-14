@@ -169,6 +169,7 @@ it.each(["stale", "expired", "outside", "missing-file", "directory", "cancelled"
   async (mode) => {
     await detachedFixture(async ({ page, request, fixtureDir }) => {
       const mouse = vi.spyOn(page.mouse, "click");
+      const waiter = vi.spyOn(page, "waitForEvent");
       if (mode === "stale")
         await page.locator("#card").evaluate((el) => {
           el.textContent = "Different action";
@@ -192,6 +193,7 @@ it.each(["stale", "expired", "outside", "missing-file", "directory", "cancelled"
         });
       }
       expect(mouse).not.toHaveBeenCalled();
+      expect(waiter).not.toHaveBeenCalled();
       expect(await page.evaluate("window.cardClicks")).toBe(0);
       expect(await page.locator("output").textContent()).toBe("");
     });

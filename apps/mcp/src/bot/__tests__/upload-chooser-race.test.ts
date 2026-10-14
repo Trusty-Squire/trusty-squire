@@ -66,7 +66,8 @@ describe("uploadFile filechooser-timeout race", () => {
             throw new Error("chooser timeout");
           }),
       } as unknown as Page;
-      const click = async () => {
+      const click = async (armChooser: () => void) => {
+        armChooser();
         if (mode === "click-failure") throw new Error("guarded click failed");
         await sleep(60);
       };

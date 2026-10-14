@@ -1553,7 +1553,7 @@ export class BrowserController implements BrowserDriver {
 
   async uploadFileOnPage(
     page: Page,
-    selector: string | (() => Promise<void>),
+    selector: string | ((armChooser: () => void) => Promise<void>),
     filePath: string,
   ): Promise<void> {
     if (!existsSync(filePath) || !statSync(filePath).isFile()) {
@@ -1574,16 +1574,25 @@ export class BrowserController implements BrowserDriver {
     // The catch must attach at creation, not after the click resolves: the click
     // actionability-waits (e.g. an occluded button), so the waiter's 15s timeout
     // can reject while the click is still pending — a bare rejection here is an
-    // unhandledRejection that kills the whole MCP server process. The click is
-    // bounded to 8s like the other click paths so it resolves before the 15s
+    // unhandledRejection that kills the whole MCP server process. The ref click
+    // is bounded to 8s so it resolves before the 15s
     // waiter instead of racing it.
-    const chooserPromise: Promise<FileChooser | null> = page
-      .waitForEvent("filechooser", { timeout: 15_000 })
-      .then((c): FileChooser | null => c)
-      .catch((): null => null);
-    if (typeof selector === "string") await locator!.click({ timeout: 8000 });
-    else await selector();
-    const chooser = await chooserPromise;
+    let chooserPromise: Promise<FileChooser | null> | undefined;
+    const armChooser = (): void => {
+      chooserPromise = page
+        .waitForEvent("filechooser", { timeout: 15_000 })
+        .then((c): FileChooser | null => c)
+        .catch((): null => null);
+    };
+    if (typeof selector === "string") {
+      armChooser();
+      await locator!.click({ timeout: 8000 });
+    } else {
+      // The screenshot executor arms only after its final freshness and
+      // cancellation checks, immediately before the native pointer dispatch.
+      await selector(armChooser);
+    }
+    const chooser = (await chooserPromise) ?? null;
     if (chooser === null) {
       throw new Error(
         `upload: clicking "${typeof selector === "string" ? selector : "<screenshot-point>"}" did not open a file picker within 15s. ` +

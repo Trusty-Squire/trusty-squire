@@ -1171,8 +1171,8 @@ async function executeAct(
             throw new ScreenshotClickError("stale_screenshot", "not_dispatched");
           await browser.uploadFileOnPage(
             compactV2ActionPage,
-            async () => {
-              await clickScreenshot(compactV2ActionPage, action.screenshot!, () => undefined);
+            async (armChooser) => {
+              await clickScreenshot(compactV2ActionPage, action.screenshot!, armChooser);
               onScreenshotDispatched?.();
             },
             action.path,
