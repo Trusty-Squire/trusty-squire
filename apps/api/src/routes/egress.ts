@@ -360,9 +360,10 @@ export const registerEgressRoutes: FastifyPluginAsync<{
   // ── Transparent egress proxy (grant token) ────────────────────
   await fastify.register(async (proxy) => {
     // The global JSON parser retains rawBody and parses JSON for webhooks and
-    // regular API routes. Only transparent egress treats JSON as opaque bytes.
+    // regular API routes. Only transparent egress treats every body as opaque
+    // bytes, including multipart boundaries and binary audio uploads.
     proxy.removeContentTypeParser(["application/json", "text/plain"]);
-    proxy.addContentTypeParser(["application/json", "text/plain"], (_req, stream, done) => {
+    proxy.addContentTypeParser(["application/json", "text/plain", "*"], (_req, stream, done) => {
       done(null, stream);
     });
     proxy.all<{ Params: { grant: string; "*": string } }>(

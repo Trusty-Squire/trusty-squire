@@ -29,6 +29,7 @@ const seen: Array<{
   method: string;
   headers: Record<string, string>;
   body: string | undefined;
+  bodyRaw?: Buffer | undefined;
   bodyBytes: number;
   maxRequestBytes?: number;
 }> = [];
@@ -57,6 +58,10 @@ function fakeExecutor(): HttpProxyExecutor {
             : bodyBytes <= 64 * 1024
               ? Buffer.concat(chunks).toString("utf8")
               : undefined,
+        bodyRaw:
+          input.bodyStream !== undefined && bodyBytes <= 64 * 1024
+            ? Buffer.concat(chunks)
+            : undefined,
         bodyBytes,
         ...(input.maxRequestBytes !== undefined ? { maxRequestBytes: input.maxRequestBytes } : {}),
       });
@@ -207,7 +212,54 @@ describe("Egress Grants — /v1/egress", () => {
     expect(seen.at(-1)?.url).toBe("https://api.openai.com/v1/chat/completions");
     expect(seen.at(-1)?.auth).toBe("Bearer sk-the-real-secret");
     expect(seen.at(-1)?.method).toBe("POST");
+    expect(seen.at(-1)?.headers["content-type"]).toBe("application/json");
+    expect(seen.at(-1)?.body).toBe(JSON.stringify({ model: "gpt-4o", messages: [] }));
   });
+
+  it.each([
+    {
+      name: "multipart file upload",
+      contentType: "multipart/form-data; boundary=voice-test-boundary",
+      body: Buffer.concat([
+        Buffer.from(
+          '--voice-test-boundary\r\nContent-Disposition: form-data; name="file"; filename="voice.mp3"\r\nContent-Type: audio/mpeg\r\n\r\n',
+        ),
+        Buffer.from([0x00, 0xff, 0x80, 0x0d, 0x0a, 0x41]),
+        Buffer.from("\r\n--voice-test-boundary--\r\n"),
+      ]),
+    },
+    {
+      name: "audio body",
+      contentType: "audio/mpeg",
+      body: Buffer.from([0x49, 0x44, 0x33, 0x00, 0xff, 0x80, 0x01]),
+    },
+    {
+      name: "opaque binary body",
+      contentType: "application/octet-stream",
+      body: Buffer.from([0x00, 0xff, 0x7f, 0x80]),
+    },
+  ])(
+    "forwards a $name byte-for-byte with its original content type",
+    async ({ contentType, body }) => {
+      const account = await h.deps.accountStore.createAccount("voice@example.test", "V");
+      const cookie = await webCookie(h.deps, account.id);
+      const token = await agentToken(h.deps, account.id);
+      await storeCred(h, cookie, "OpenAI");
+      const { grant_id, egressToken } = await mintGrantHttp(h, token, { service: "OpenAI" });
+
+      const res = await h.server.inject({
+        method: "POST",
+        url: `/v1/egress/${grant_id}/v1/audio/transcriptions`,
+        headers: { authorization: `Bearer ${egressToken}`, "content-type": contentType },
+        payload: body,
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(seen.at(-1)?.headers["content-type"]).toBe(contentType);
+      expect(seen.at(-1)?.bodyRaw).toEqual(body);
+      expect(seen.at(-1)?.maxRequestBytes).toBe(256 * 1024 * 1024);
+    },
+  );
 
   it("forwards a multi-MiB egress body instead of 413ing (long LLM context)", async () => {
     const account = await h.deps.accountStore.createAccount("bigbody@example.test", "B");
