@@ -36,7 +36,11 @@ Screenshot upload uses the same original-image coordinates, freshness, frame,
 and single-dispatch guards as `operate_click`. Observe after an uncertain
 upload before choosing another action. The file must exist
 on the machine running the browser; the operator sets it through the browser
-file chooser without using an OS dialog.
+file chooser without using an OS dialog. A control that calls
+`window.showOpenFilePicker` instead of opening a file input (Dreamina's
+first-frame card) is routed through that same chooser while the upload is
+armed; if the page called the picker and still no chooser opened, the upload
+failure cause is `file_picker_unrouted`.
 
 Every `operate_*` step result except start, finish, and `operate_download`
 carries `downloads` when a browser download started or changed state since the
