@@ -56,6 +56,7 @@ import {
 } from "./request-cancellation.js";
 import { BrowserProcessOwner } from "./browser-process-owner.js";
 import { UploadError, type UploadFailure } from "./upload-error.js";
+import { routeFilePickerToChooser, type FilePickerRoute } from "./file-picker-route.js";
 import { resizeCeremonyWindow, type CeremonyDisplayClip } from "./ceremony-window.js";
 import { PageDriver } from "./page-driver.js";
 import { waitForPageReady } from "./page-ready.js";
@@ -1587,7 +1588,8 @@ export class BrowserController implements BrowserDriver {
     // is bounded to 8s so it resolves before the 15s
     // waiter instead of racing it.
     let chooserPromise: Promise<FileChooser | null> | undefined;
-    let chooserCause: UploadFailure["cause"] = "chooser_failed";
+    let chooserCause = "chooser_failed" as UploadFailure["cause"];
+    let pickerRoute: FilePickerRoute | undefined;
     const armChooser = async (): Promise<void> => {
       // Page.on/waitForEvent sends this subscription without awaiting its
       // acknowledgement. Enable it first so the native click cannot overtake
@@ -1601,6 +1603,7 @@ export class BrowserController implements BrowserDriver {
       } catch {
         throw new UploadError("chooser_wait", "chooser_failed");
       }
+      pickerRoute = await routeFilePickerToChooser(page);
       chooserPromise = page
         .waitForEvent("filechooser", { timeout: 15_000 })
         .then((c): FileChooser | null => c)
@@ -1612,17 +1615,26 @@ export class BrowserController implements BrowserDriver {
           return null;
         });
     };
-    if (typeof selector === "string") {
-      await armChooser();
-      await locator!.click({ timeout: 8000 });
-    } else {
-      // The screenshot executor validates before arming and repeats its
-      // freshness/cancellation checks after interception setup, before dispatch.
-      await selector(armChooser);
+    let chooser: FileChooser | null;
+    let pickerCalled = false;
+    try {
+      if (typeof selector === "string") {
+        await armChooser();
+        await locator!.click({ timeout: 8000 });
+      } else {
+        // The screenshot executor validates before arming and repeats its
+        // freshness/cancellation checks after interception setup, before dispatch.
+        await selector(armChooser);
+      }
+      chooser = (await chooserPromise) ?? null;
+    } finally {
+      pickerCalled = (await pickerRoute?.restore())?.pickerCalled ?? false;
     }
-    const chooser = (await chooserPromise) ?? null;
     if (chooser === null) {
-      throw new UploadError("chooser_wait", chooserCause);
+      throw new UploadError(
+        "chooser_wait",
+        pickerCalled && chooserCause === "chooser_timeout" ? "file_picker_unrouted" : chooserCause,
+      );
     }
     try {
       if (typeof selector !== "string") throwIfOperatorRequestCancelled();

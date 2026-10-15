@@ -8,6 +8,7 @@ export const UPLOAD_CAUSES = [
   "file_unavailable",
   "chooser_timeout",
   "chooser_failed",
+  "file_picker_unrouted",
   "file_write_failed",
   "cancelled",
   "post_upload_failed",
@@ -27,7 +28,9 @@ export class UploadError extends Error {
     super(
       cause === "chooser_timeout"
         ? "upload: did not open a file picker within 15s"
-        : `upload: ${cause}`,
+        : cause === "file_picker_unrouted"
+          ? "upload: the page called showOpenFilePicker, but no file chooser opened within 15s"
+          : `upload: ${cause}`,
     );
     this.failure = { phase, cause };
   }
