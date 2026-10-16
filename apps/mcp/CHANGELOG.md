@@ -20,6 +20,11 @@
 
 ## Unreleased
 
+- Expose login and approval inputs as flat object schemas for clients that
+  cannot populate root unions. **Breaking change:** these calls now require an
+  explicit action, and retired input aliases are rejected. See the
+  [operator contract](../../docs/operator-tool-surface.md#explicit-action-inputs)
+  for call shapes and the egress, finish, and capture sections for removals.
 - Make `mcp server` a stdio proxy onto the host broker's shared MCP socket.
   There is one operator stack per profile. A session belongs to the
   connection that opened it and closes when that connection dies.

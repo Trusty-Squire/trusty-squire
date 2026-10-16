@@ -386,8 +386,12 @@ fixtures prove pointer mechanics; they do not guarantee Cloudflare clearance.
 
 ## Explicit action inputs
 
-The login tool uses an explicit `action`: `oauth`, `prepare_signup`,
-`store_signup`, or `load_saved`. Approval-based `fetch_credential`,
+Login and approval tools expose a single object at the schema root, with visible
+fields and a required `action` enum, so clients do not need to discover inputs
+through a root union. `operate_login` requires `action`: `oauth`, `prepare_signup`,
+`store_signup`, or `load_saved`. For OAuth, use
+`{session_id, action:"oauth", provider, ref}`; omitting `action` is rejected.
+Approval-based `fetch_credential`,
 `edit_credential`, `delete_credential`, and `edit_payment_card` calls start with
 `action:"start"` and their existing target fields. Resume with `action:"resume"`
 and the returned `approval_id`; do not repeat the target or mutation fields.
@@ -399,7 +403,8 @@ frames, fingerprinting, authentication providers, analytics, and arbitrary
 third-party resources need no host declaration. This holds before, during, and
 after payment; there is no payment-network window or scope-denial reporting.
 
-`operate_start` uses unrestricted browser egress; it has no host-scope arguments or host-widening tool.
+`operate_start` rejects the removed `allowed_hosts` and `extra_allowed_hosts`
+arguments. There is no host-widening tool.
 Existing control-plane action restrictions, credential vault egress, card-fill
 recognition and sealing, and the purchase's single human approval are unchanged.
 
@@ -422,7 +427,8 @@ recognition and sealing, and the purchase's single human approval are unchanged.
 
 `result` requires `summary` or `data`. To store credentials, call
 `operate_extract({session_id, store})` and inspect its storage result before
-calling `operate_finish`. The accepted outcomes are `none` and `result`.
+calling `operate_finish`. The accepted outcomes are `none` and `result`;
+the removed `credentials` outcome and `store` argument are rejected.
 Agent-supplied data is reported data, not proof that login, provisioning, or a
 mutation completed. Preserve booleans as booleans in result data.
 
@@ -482,10 +488,12 @@ redact those surfaces.
 `api_hosts` names API hosts this credential may be sent to. It is unioned with
 the same session-observed hosts and service defaults as before. `store_credential`
 also accepts `api_hosts`; `login_hosts` remains the separate browser sign-in
-allowlist. `api_hosts` is the public spelling for these API host hints.
+allowlist. The removed aliases `observed_hosts` on `store_credential` and
+`egress_hosts` in extraction and capture stores are rejected; use `api_hosts`.
 
 Perform typing, selection, or keyboard actions first, then use
-`operate_extract({capture})` for a DOM credential capture.
+`operate_extract({capture})` for a DOM credential capture. `operate_type`,
+`operate_select`, and `operate_press` reject the removed `capture` argument.
 
 The source role is `textbox` or `code`. For a plain-text copy field without
 those roles, use `source: {"selector": "<observed CSS selector>"}` instead of
@@ -581,7 +589,8 @@ selector that does not depend on the secret value. The read policy is owned by
 
 `fetch_credential` is the only raw-value path. Its first call returns an
 approval link and no value; only a user’s passkey signature for that exact fetch
-permits one resumed call with the returned `approval_id` to receive the value.
+permits one resumed call to receive the value. Use the
+[explicit action inputs](#explicit-action-inputs) for start and resume calls.
 Omitting `field` requests every field on that credential in the same approval;
 passing `field` requests only the named field. The approval page names every
 field that will be released.
@@ -592,7 +601,8 @@ job without exposing plaintext to the agent.
 ## Using the rest of the surface
 
 - `operate_login` keeps OAuth and password lifecycle actions on the real
-  profile. For OAuth, use `{session_id, action:"oauth", provider, ref}`. A chooser, challenge, return with uncertain authentication,
+  profile using the [explicit action inputs](#explicit-action-inputs).
+  A chooser, challenge, return with uncertain authentication,
   or other human step is an honest pending result; stop automation and observe
   the owned session rather than treating a page title or same-origin URL as
   success. A browser error after dispatch follows the same contract as request
