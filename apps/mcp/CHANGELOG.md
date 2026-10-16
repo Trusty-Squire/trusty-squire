@@ -1,5 +1,12 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.36-rc.1 (2026-10-16)
+
+- Flatten tool inputs and reject retired aliases. Login and approval calls now
+  require an explicit action; see the [operator contract](../../docs/operator-tool-surface.md#explicit-action-inputs)
+  for migration details ([PR](https://github.com/Trusty-Squire/trusty-squire/pull/1099)).
+- Omit rotation staleness from credential listings ([PR](https://github.com/Trusty-Squire/trusty-squire/pull/1098)).
+
 ## 1.1.35-rc.1 (2026-10-14)
 
 - ci(mcp): install Patchright Chromium for real-browser tests (#1093)
