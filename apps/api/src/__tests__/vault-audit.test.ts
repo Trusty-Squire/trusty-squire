@@ -3,7 +3,7 @@
 // up, that filters + the keyset cursor work, that it's web-only and
 // account-scoped, and that no secret value ever appears in the payload.
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { issueSession, signSessionJwt, SESSION_COOKIE_NAME } from "../auth/session.js";
 import { issueAgentSession } from "../auth/agent.js";
@@ -66,6 +66,35 @@ describe("GET /v1/vault/audit", () => {
   let h: Harness;
   beforeEach(async () => { h = await setup(); });
   afterEach(async () => { await h.server.close(); });
+
+  it("serves account-scoped daily proxy totals with filters", async () => {
+    const account = await h.deps.accountStore.createAccount("daily@example.test", "Daily");
+    const cookie = await makeWebSession(h.deps, account.id);
+    const total = {
+      day: "2026-10-16",
+      reference: "vault://ref",
+      target_host: "api.example.com",
+      requester: "agent",
+      grant_id: "grant-1",
+      calls: 5,
+      status_breakdown: { "200": 5 },
+      total_bytes: 500,
+      first_at: "2026-10-16T10:00:00.000Z",
+      last_at: "2026-10-16T11:00:00.000Z",
+    };
+    const list = vi.spyOn(h.deps.vault, "listProxyDailyTotals").mockResolvedValue([total]);
+    const res = await h.server.inject({
+      method: "GET",
+      url: "/v1/vault/audit/daily?limit=1&reference=vault%3A%2F%2Fref",
+      headers: { cookie },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ totals: [total], next_before: total.last_at });
+    expect(list).toHaveBeenCalledWith(account.id, { limit: 1, reference: total.reference });
+    expect(
+      (await h.server.inject({ method: "GET", url: "/v1/vault/audit/daily" })).statusCode,
+    ).not.toBe(200);
+  });
 
   it("returns the full event trail newest-first, no secret values", async () => {
     const account = await h.deps.accountStore.createAccount("u@example.test", "U");

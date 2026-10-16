@@ -114,6 +114,53 @@ async function runLedger(
 }
 
 describe("audit_log ledger view", () => {
+  it("builds daily rollups and grant totals from persisted counters", async () => {
+    const total = {
+      day: "2026-09-03",
+      reference: REF,
+      target_host: HOST,
+      requester: "agent",
+      grant_id: "g1",
+      calls: 12,
+      status_breakdown: { "200": 11, "302": 1 },
+      total_bytes: 1800,
+      first_at: at(0),
+      last_at: at(60_000),
+    };
+    const failure: AuditEvent = { ...egressBurst(1, { status: 429 })[0]!, id: "failed" };
+    const listAuditDaily = vi.fn().mockResolvedValue({ totals: [total], next_before: null });
+    const listEgressGrants = vi.fn().mockResolvedValue({
+      grants: [
+        {
+          grant_id: "g1",
+          credential_ref: REF,
+          created_at: at(-60_000),
+          revoked_at: null,
+        },
+      ],
+    });
+    const { api } = pagedApi([failure], { listAuditDaily, listEgressGrants });
+    const ledger = await runLedger(api);
+    expect(ledger.events.map((e) => e.id)).toEqual(["failed"]);
+    expect(ledger.egress.calls).toBe(13);
+    expect(ledger.egress.rollups.find((r) => r.count === 12)).toMatchObject({
+      status_breakdown: { "200": 11, "302": 1 },
+      total_bytes: 1800,
+      grants: [{ grant_id: "g1" }],
+    });
+    expect(ledger.grant_totals[0]).toMatchObject({ calls: 13, total_bytes: 1900 });
+    const id = ledger.egress.rollups.find((r) => r.count === 12)!.id;
+    const expanded = (await auditLogTool.handler(
+      auditLogTool.inputSchema.parse({ expand: id }),
+      api,
+    )) as {
+      daily_totals: unknown[];
+      calls_total: number;
+    };
+    expect(expanded.daily_totals).toEqual([total]);
+    expect(expanded.calls_total).toBe(12);
+  });
+
   it("collapses a page of identical egress calls into one rollup", async () => {
     const { api } = pagedApi(egressBurst(245));
     const res = await runLedger(api);

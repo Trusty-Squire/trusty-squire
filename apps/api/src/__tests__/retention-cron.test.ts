@@ -93,6 +93,14 @@ function makeFakes(
   return {
     calls,
     authPrisma: {
+      $executeRawUnsafe: async (_sql: string, cutoff: string) => {
+        calls.push({
+          table: "VaultProxyDailyTotal",
+          op: "deleteMany",
+          where: { day: { lt: cutoff } },
+        });
+        return 7;
+      },
       machineToken: {} as never,
       pairingToken: {
         deleteMany: async (args: { where: Record<string, unknown> }) => {
@@ -182,7 +190,9 @@ describe("RetentionCron", () => {
   it("uses a stable expiry audit key that fits the database id column", async () => {
     const keys: string[] = [];
     class WidthCheckedAuditStore extends InMemoryVaultAuditStore {
-      override async record(event: Parameters<InMemoryVaultAuditStore["record"]>[0]): Promise<void> {
+      override async record(
+        event: Parameters<InMemoryVaultAuditStore["record"]>[0],
+      ): Promise<void> {
         const key = event.idempotency_key;
         if (key === undefined || key.length > 26) throw new Error("audit id exceeds VarChar(26)");
         keys.push(key);
@@ -358,6 +368,7 @@ describe("RetentionCron", () => {
     const now = new Date("2026-01-15T12:00:00Z");
     const cron = new RetentionCron({
       authPrisma: {
+        $executeRawUnsafe: async () => 0,
         machineToken: {} as never,
         pairingToken: {
           deleteMany: async () => {

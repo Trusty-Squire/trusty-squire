@@ -180,6 +180,17 @@ export class NotifyingVaultAuditStore implements VaultAuditStore {
     return this.inner.list(accountId, opts);
   }
 
+  listProxyDailyTotals(
+    accountId: string,
+    opts?: { before?: Date; reference?: string; limit?: number },
+  ) {
+    return this.inner.listProxyDailyTotals?.(accountId, opts) ?? Promise.resolve([]);
+  }
+
+  exportProxyDailyTotals(accountId: string) {
+    return this.inner.exportProxyDailyTotals?.(accountId) ?? Promise.resolve([]);
+  }
+
   exportAll(accountId: string): Promise<VaultAuditRecord[]> {
     return this.inner.exportAll(accountId);
   }

@@ -254,8 +254,12 @@ interface EgressGrantRow {
 }
 
 export interface ApiPrismaClient {
-  $transaction<T>(fn: (tx: ApiPrismaClient) => Promise<T>): Promise<T>;
+  $transaction<T>(
+    fn: (tx: ApiPrismaClient) => Promise<T>,
+    options?: { maxWait?: number; timeout?: number },
+  ): Promise<T>;
   $queryRaw<T = unknown[]>(query: TemplateStringsArray, ...values: unknown[]): Promise<T>;
+  $queryRawUnsafe<T = unknown[]>(query: string, ...values: unknown[]): Promise<T>;
   $executeRawUnsafe(query: string, ...values: unknown[]): Promise<number>;
   machineToken: {
     create(args: { data: Record<string, unknown> }): Promise<MachineTokenRow>;
