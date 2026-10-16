@@ -121,6 +121,7 @@ import type {
   VaultAuditListOptions,
   VaultAuditPayload,
   VaultAuditRecord,
+  VaultProxyDailyTotal,
   VaultAuditStore,
   VaultAuditType,
   VaultRequester,
@@ -257,6 +258,7 @@ export interface VaultAccountExport {
   account_id: string;
   credentials: VaultCredentialExport[];
   audit_events: VaultAuditRecord[];
+  proxy_daily_totals: VaultProxyDailyTotal[];
 }
 
 export interface DeviceAssertion {
@@ -1036,6 +1038,7 @@ export class CredentialVault implements VaultClient {
             upstream_duration_ms: this.now().getTime() - startedAt,
           },
           auditId,
+          response.bodyComplete !== undefined,
         );
       if (this.deps.proxyAuditFailureMode === "best_effort") {
         await Promise.all([markRetrieved(), recordExecuted()]);
@@ -1066,13 +1069,23 @@ export class CredentialVault implements VaultClient {
     return this.deps.audit.list(accountId, opts);
   }
 
+  async listProxyDailyTotals(
+    accountId: string,
+    opts?: { before?: Date; reference?: string; limit?: number },
+  ) {
+    return this.deps.audit.listProxyDailyTotals?.(accountId, opts) ?? [];
+  }
+
   // GDPR data export: the complete metadata + audit trail the vault holds
   // for an account. NEVER includes secret values or the encrypted
   // envelope — only the non-secret metadata (field NAMES, hosts, counts,
   // timestamps) plus the full audit history.
   async exportAccount(accountId: string): Promise<VaultAccountExport> {
     const credentials = await this.deps.store.listByAccountIncludingDeleted(accountId);
-    const audit = await this.deps.audit.exportAll(accountId);
+    const [audit, proxyDailyTotals] = await Promise.all([
+      this.deps.audit.exportAll(accountId),
+      this.deps.audit.exportProxyDailyTotals?.(accountId) ?? Promise.resolve([]),
+    ]);
     return {
       account_id: accountId,
       credentials: credentials.map((c) => ({
@@ -1091,6 +1104,7 @@ export class CredentialVault implements VaultClient {
         deleted_at: c.deleted_at,
       })),
       audit_events: audit,
+      proxy_daily_totals: proxyDailyTotals,
     };
   }
 
@@ -1274,12 +1288,14 @@ export class CredentialVault implements VaultClient {
     type: VaultAuditType,
     payload: VaultAuditEventInput["payload"],
     rowId?: string,
+    deferProxyRollup?: boolean,
   ): Promise<void> {
     await this.deps.audit.record({
       account_id: accountId,
       type,
       payload,
       ...(rowId !== undefined ? { idempotency_key: rowId } : {}),
+      ...(deferProxyRollup === true ? { defer_proxy_rollup: true } : {}),
     });
   }
 
@@ -1288,8 +1304,11 @@ export class CredentialVault implements VaultClient {
     type: VaultAuditType,
     payload: VaultAuditEventInput["payload"],
     rowId?: string,
+    deferProxyRollup?: boolean,
   ): Promise<void> {
-    await this.runProxyAuditSideEffect(() => this.recordAudit(accountId, type, payload, rowId));
+    await this.runProxyAuditSideEffect(() =>
+      this.recordAudit(accountId, type, payload, rowId, deferProxyRollup),
+    );
   }
 
   // The streamed row landed at dispatch with a placeholder size; the true
@@ -1301,13 +1320,18 @@ export class CredentialVault implements VaultClient {
     bodyComplete: Promise<ProxyBodyOutcome>,
   ): void {
     void bodyComplete
-      .then((outcome) =>
-        this.deps.audit.amend(auditId, {
-          response_size: outcome.bytes,
-          upstream_duration_ms: this.now().getTime() - startedAt,
-          ...(outcome.error !== undefined ? { proxy_error: outcome.error } : {}),
-          ...(outcome.clientClosed === true ? { client_closed: true } : {}),
-        }),
+      .then(
+        (outcome) =>
+          this.deps.audit.amend(auditId, {
+            response_size: outcome.bytes,
+            upstream_duration_ms: this.now().getTime() - startedAt,
+            ...(outcome.error !== undefined ? { proxy_error: outcome.error } : {}),
+            ...(outcome.clientClosed === true ? { client_closed: true } : {}),
+          }),
+        (err: unknown) =>
+          this.deps.audit.amend(auditId, {
+            proxy_error: err instanceof Error ? err.message : String(err),
+          }),
       )
       .catch(() => undefined);
   }

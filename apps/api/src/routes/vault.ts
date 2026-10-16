@@ -247,6 +247,29 @@ export const registerVaultRoute: FastifyPluginAsync<{
     });
   });
 
+  fastify.get("/v1/vault/audit/daily", { preHandler: opts.requireAny }, async (req, reply) => {
+    const parsed = auditQuery
+      .omit({ type: true })
+      .extend({ limit: z.coerce.number().int().min(1).max(2000).optional() })
+      .safeParse(req.query);
+    if (!parsed.success) {
+      reply.code(400).send({ error: "invalid_request", issues: parsed.error.issues });
+      return;
+    }
+    const q = parsed.data;
+    const totals = await opts.deps.vault.listProxyDailyTotals(req.auth!.account_id, {
+      ...(q.before !== undefined ? { before: new Date(q.before) } : {}),
+      ...(q.reference !== undefined ? { reference: q.reference } : {}),
+      ...(q.limit !== undefined ? { limit: q.limit } : {}),
+    });
+    return reply
+      .code(200)
+      .send({
+        totals,
+        next_before: totals.length === (q.limit ?? 200) ? (totals.at(-1)?.last_at ?? null) : null,
+      });
+  });
+
   // ── reveal (web only): decrypt fields for the human ──────────
   fastify.post<{ Params: { id: string } }>(
     "/v1/vault/credentials/:id/reveal",

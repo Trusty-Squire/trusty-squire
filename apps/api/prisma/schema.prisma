@@ -276,15 +276,13 @@ model Credential {
   @@index([subscription_id])
 }
 
-// Vault audit log. One row per vault state-change or retrieval attempt.
-// Used both for the in-vault rate limiter (counts recent retrievals)
-// and for the user-facing "who touched my credentials" timeline. The
+// Vault audit log. One row per security event or failed proxy call.
+// Successful proxy calls use VaultProxyDailyTotal instead. Used both for the
+// in-vault retrieval rate limiter and the user-facing audit timeline. The
 // payload is a free-form JSON object whose shape depends on `type`
 // (see VaultAuditPayload in packages/vault/src/types.ts).
 //
-// Retention: indefinite for v0 — this is the user's own forensic
-// trail. Add a sweep later if the table grows past a few million
-// rows per account.
+// Retention: 365 days, swept by retention-cron.ts.
 model VaultAuditEvent {
   id         String   @id @db.VarChar(26)
   account_id String   @db.VarChar(26)
@@ -295,6 +293,27 @@ model VaultAuditEvent {
   @@index([account_id, emitted_at])
   @@index([type, emitted_at])
   @@index([account_id, type, emitted_at])
+}
+
+// One atomic daily counter per successful proxy attribution. Failed calls and
+// security events remain individual VaultAuditEvent rows. Deployed by the API
+// release's prisma db push before the separate backfill command is run.
+model VaultProxyDailyTotal {
+  account_id       String   @db.VarChar(26)
+  day              DateTime @db.Date
+  reference        String
+  target_host      String
+  requester        String
+  grant_id         String   @default("")
+  calls            Int
+  status_breakdown Json
+  total_bytes      BigInt
+  first_at         DateTime
+  last_at          DateTime
+
+  @@id([account_id, day, reference, target_host, requester, grant_id])
+  @@index([account_id, last_at])
+  @@index([day])
 }
 
 // Opaque client-encrypted credential blobs. The API stores the blob
