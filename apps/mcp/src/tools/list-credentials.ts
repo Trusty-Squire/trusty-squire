@@ -9,13 +9,13 @@ const inputSchema = z.object({
     .optional()
     .describe("Filter by service (case-insensitive exact match); string or array of strings"),
   // Compact projection for provisioning checks: enough to decide reuse
-  // (reference, service, label, field names, hosts, age, staleness)
+  // (reference, service, label, field names, hosts, age)
   // without the full metadata payload.
   fields: z
     .literal("summary")
     .optional()
     .describe(
-      '"summary" returns a compact projection: reference, service, label, field_names, allowed_hosts, created_at, stale',
+      '"summary" returns a compact projection: reference, service, label, field_names, allowed_hosts, created_at',
     ),
 });
 
@@ -39,8 +39,8 @@ FILTERS (all optional — with no filter the full metadata list is returned):
 - \`service\`: case-insensitive exact match on the service field;
   pass a string for one service or an array to match any of several
 - \`fields: "summary"\`: return only a compact projection per credential —
-  reference, service, label, field_names, allowed_hosts, created_at,
-  stale — instead of the full metadata object
+  reference, service, label, field_names, allowed_hosts, created_at —
+  instead of the full metadata object
 
 When checking whether a key exists for a specific service (e.g. before
 provisioning), pass \`service\` (and \`fields: "summary"\`) so the answer
@@ -73,10 +73,11 @@ export const listCredentialsTool: Tool<z.infer<typeof inputSchema>> = {
           field_names: c.field_names,
           allowed_hosts: c.allowed_hosts,
           created_at: c.created_at,
-          stale: c.stale === true,
         })),
       };
     }
-    return { credentials: filtered };
+    return {
+      credentials: filtered.map(({ stale: _stale, ...credential }) => credential),
+    };
   },
 };
