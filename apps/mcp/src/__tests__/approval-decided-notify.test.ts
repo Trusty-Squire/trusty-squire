@@ -214,15 +214,21 @@ it("sends each approved or denied decision once on the originating stdio relay o
   const start = (client: typeof alice) =>
     client.call("tools/call", {
       name: "fetch_credential",
-      arguments: { reference: "credential_1" },
+      arguments: { action: "start", reference: "credential_1" },
     });
   const [aliceResult, bobResult] = await Promise.all([start(alice), start(bob)]);
   const aliceId = String(aliceResult.structuredContent?.approval_id);
   const bobId = String(bobResult.structuredContent?.approval_id);
   expect(new Set([aliceId, bobId])).toEqual(new Set(["fetch_1", "fetch_2"]));
   // Repeated pending results for the same approval must not add another watch.
-  await alice.call("tools/call", { name: "fetch_credential", arguments: { approval_id: aliceId } });
-  await bob.call("tools/call", { name: "fetch_credential", arguments: { approval_id: aliceId } });
+  await alice.call("tools/call", {
+    name: "fetch_credential",
+    arguments: { action: "resume", approval_id: aliceId },
+  });
+  await bob.call("tools/call", {
+    name: "fetch_credential",
+    arguments: { action: "resume", approval_id: aliceId },
+  });
   await new Promise((resolve) => setTimeout(resolve, 3_300));
   expect(statusReads.get(aliceId)).toBeLessThanOrEqual(2);
   expect(statusReads.get(bobId)).toBeLessThanOrEqual(2);
