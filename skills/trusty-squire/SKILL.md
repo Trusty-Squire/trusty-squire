@@ -34,11 +34,8 @@ flat operator verbs — `operate_start`, `operate_observe`, `operate_click`,
 `operate_finish` — as the fallback for a single step the drive handed back;
 they are not separate one-shot tools.
 
-The login tool uses an explicit `action`: `oauth`, `prepare_signup`,
-`store_signup`, or `load_saved`. Approval-based `fetch_credential`,
-`edit_credential`, `delete_credential`, and `edit_payment_card` calls start with
-`action:"start"` and their existing target fields. Resume with `action:"resume"`
-and the returned `approval_id`; do not repeat the target or mutation fields.
+For login and approval call shapes, follow the
+[explicit action contract](https://github.com/Trusty-Squire/trusty-squire/blob/main/docs/operator-tool-surface.md#explicit-action-inputs).
 
 ## 1. When Trusty Squire is appropriate
 
@@ -99,8 +96,7 @@ Once connected and restarted, the `squire` MCP tools appear. The core loop:
   `operate_select`, `operate_press`, `operate_scroll`, and `operate_navigate`
   open the real website and drive a single step — the fallback after a drive
   handoff, or for a task that is not a goal. Use `operate_login` for
-  OAuth and the username/password lifecycle. For browser host behavior and legacy
-  parameter compatibility, see the
+  OAuth and the username/password lifecycle. For browser host behavior, see the
   [operator egress contract](https://github.com/Trusty-Squire/trusty-squire/blob/main/docs/operator-tool-surface.md#browser-egress-is-unrestricted).
 - When a Compact V2 observation does not render the control you need, call
   `operate_observe` with `query`. The query searches the whole live document,

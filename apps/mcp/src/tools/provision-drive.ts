@@ -155,9 +155,6 @@ const startSchema = rejectRemovedFields(
     // Sensitive: may include proxy credentials. It is launch-only and is never
     // retained in the session state, action trail, or status.
     proxy: proxySchema.optional(),
-    // Operate tasks that act AS the user (drive a gated app on an existing
-    // account) set this so start fails closed to a connect hand-back if no live
-    // Google session exists — rather than driving into a mid-task login wall.
   }),
   ["allowed_hosts", "extra_allowed_hosts"],
   "Browser egress is unrestricted; omit removed host-scope arguments",
@@ -333,8 +330,8 @@ const storeShape = rejectRemovedFields(
     type: z.string().min(1).max(60).optional(),
     // Explicit API hosts: where this key may LATER be sent by the proxy.
     // Read them off the API base URL the page/SDK snippet shows — a grounded
-    // read, not a guess. Unioned with the service-default + start/auto_widen
-    // scope (never mid_session task scope). Omit for a single-service key.
+    // read, not a guess. Unioned with session-observed hosts and service
+    // defaults. Omit for a single-service key.
     api_hosts: z.array(z.string().min(1).max(253)).max(10).optional(),
     auth_shape: z
       .string()

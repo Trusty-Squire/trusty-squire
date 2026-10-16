@@ -29,9 +29,8 @@
   clipboard. Otherwise it stores nothing and returns an `error` telling the
   agent to read the page with `operate_observe` and point `capture` at the
   key. Agents that relied on untargeted extraction of a visible key need that
-  extra `capture` step. `operate_finish` with `outcome: credentials` and
-  `into_slot` follow the same rule; `secret_label`, `candidate_count` and
-  `masked_remaining` are removed.
+  extra `capture` step. `into_slot` follows the same rule; `secret_label`,
+  `candidate_count` and `masked_remaining` are removed.
 - A key-goal `operate_drive` accepts DONE once extraction yields a key from a
   Copy click, whatever the value looks like (hex, short, uppercase,
   UUID-like). A page that shows a key only as text now ends `stuck` with that

@@ -384,6 +384,8 @@ are not promoted into replay recipes. They do not change vault storage,
 credential capture, payment approval, or 3-D Secure behavior. Local regression
 fixtures prove pointer mechanics; they do not guarantee Cloudflare clearance.
 
+## Explicit action inputs
+
 The login tool uses an explicit `action`: `oauth`, `prepare_signup`,
 `store_signup`, or `load_saved`. Approval-based `fetch_credential`,
 `edit_credential`, `delete_credential`, and `edit_payment_card` calls start with
@@ -420,7 +422,7 @@ recognition and sealing, and the purchase's single human approval are unchanged.
 
 `result` requires `summary` or `data`. To store credentials, call
 `operate_extract({session_id, store})` and inspect its storage result before
-calling `operate_finish`. The accepted outcomes are `none` and `result`; store credentials before finishing.
+calling `operate_finish`. The accepted outcomes are `none` and `result`.
 Agent-supplied data is reported data, not proof that login, provisioning, or a
 mutation completed. Preserve booleans as booleans in result data.
 
@@ -589,8 +591,8 @@ job without exposing plaintext to the agent.
 
 ## Using the rest of the surface
 
-- `operate_login(provider, ref)` keeps OAuth and password lifecycle actions on
-  the real profile. A chooser, challenge, return with uncertain authentication,
+- `operate_login` keeps OAuth and password lifecycle actions on the real
+  profile. For OAuth, use `{session_id, action:"oauth", provider, ref}`. A chooser, challenge, return with uncertain authentication,
   or other human step is an honest pending result; stop automation and observe
   the owned session rather than treating a page title or same-origin URL as
   success. A browser error after dispatch follows the same contract as request
