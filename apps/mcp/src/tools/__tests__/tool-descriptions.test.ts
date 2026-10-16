@@ -22,9 +22,15 @@ import { injectCardTool } from "../inject-card.js";
 import { useCredentialTool } from "../use-credential.js";
 import { fetchCredentialTool } from "../fetch-credential.js";
 import { storeCredentialTool } from "../store-credential.js";
+import { listCredentialsTool } from "../list-credentials.js";
 import { SERVER_INSTRUCTIONS } from "../../server.js";
 
-const STEERING_SURFACE = [...OPERATE_TOOLS, useCredentialTool, fetchCredentialTool];
+const STEERING_SURFACE = [
+  ...OPERATE_TOOLS,
+  useCredentialTool,
+  fetchCredentialTool,
+  listCredentialsTool,
+];
 const PRESERVED_SURFACE = [injectCardTool];
 
 describe("agent-facing steering text", () => {

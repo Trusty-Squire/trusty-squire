@@ -45,6 +45,7 @@ describe("list_credentials", () => {
           key_name: "RESEND_API_KEY",
           type: "api_key",
           created_at: "now",
+          stale: true,
           last_retrieved_at: null,
           retrieval_count: 0,
         },
@@ -57,6 +58,7 @@ describe("list_credentials", () => {
     };
     expect(res.credentials).toHaveLength(1);
     expect(res.credentials[0]?.reference).toBe("vault://acct/c1");
+    expect(res.credentials[0]).not.toHaveProperty("stale");
     expect(listCredentials).toHaveBeenCalledOnce();
   });
 
@@ -113,6 +115,7 @@ describe("list_credentials", () => {
           signin_url: null,
           login_hosts: [],
           created_at: "2026-09-11T00:00:00.000Z",
+          stale: true,
           last_retrieved_at: null,
           retrieval_count: 0,
         },
@@ -132,10 +135,8 @@ describe("list_credentials", () => {
       "label",
       "reference",
       "service",
-      "stale",
     ]);
-    // stale is a boolean even when the API omits the field.
-    expect(res.credentials[0]!.stale).toBe(false);
+    expect(res.credentials[0]).not.toHaveProperty("stale");
   });
 
   it("requires an active session", async () => {

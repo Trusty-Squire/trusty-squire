@@ -15,7 +15,7 @@ it("discovers Exa, Groq and Cartesia through MCP without returning the 68-record
     field_names: ["api_key"],
     allowed_hosts: [`api.service-${i}.example`],
     created_at: "2026-09-11T00:00:00.000Z",
-    stale: i === 1,
+    stale: i === 0,
     key_name: "API_KEY",
     type: "api_key",
     auth_strategy: "api_key",
@@ -63,7 +63,8 @@ it("discovers Exa, Groq and Cartesia through MCP without returning the 68-record
       return JSON.parse((response.content as Array<{ text: string }>)[0]!.text);
     };
     const full = parse(await call({}));
-    expect(full.credentials).toEqual(credentials);
+    expect(full.credentials).toEqual(credentials.map(({ stale: _stale, ...row }) => row));
+    expect(full.credentials[0]).not.toHaveProperty("stale");
     const compact = parse(await call({ service: ["EXA", "groq", "Cartesia"], fields: "summary" }));
     expect(compact.credentials).toEqual(
       credentials.slice(0, 3).map((row) => ({
@@ -73,10 +74,10 @@ it("discovers Exa, Groq and Cartesia through MCP without returning the 68-record
         field_names: row.field_names,
         allowed_hosts: row.allowed_hosts,
         created_at: row.created_at,
-        stale: row.stale,
       })),
     );
-    expect(parse(await call({ service: "exa" })).credentials).toEqual([credentials[0]]);
+    expect(compact.credentials[0]).not.toHaveProperty("stale");
+    expect(parse(await call({ service: "exa" })).credentials).toEqual([full.credentials[0]]);
     expect(parse(await call({ service: "missing", fields: "summary" }))).toEqual({
       credentials: [],
     });

@@ -33,6 +33,35 @@ grant on the existing credential with \`grant_app_access\` or use it with
 
 exports[`agent-facing steering text > inject_card description is unchanged 1`] = `"Release one saved card under the existing single human purchase approval and fill only the supplied observation refs. Amount_cents is the amount in the currency's smallest unit: USD $12.34 -> 1234; JPY ¥65,800 -> 65800 (do not multiply by 100); KRW works like JPY. A new approval returns approval_pending and approval_url immediately: show the link now, then call inject_card again with the same arguments to wait for the human. The resumed call waits for the same approval. Supply session_id and refs for pan/cvv from operate_observe; each may target the main document or any reachable frame. Expiry, cardholder name, and billing are NOT inject targets and are not secret: after approval the result carries exp_month, exp_year, name, and any stored billing alongside last4, and you type those with operate_type/operate_select like any other field. After approval the session also exposes the card as opaque per-digit masked tokens you can place into ANY field ref yourself with operate_type: {{pan}} and {{cvv}} type the whole value, {{pan:N}} and {{cvv:N}} type one digit (1-based, N up to the returned pan_length/cvv_length); the broker substitutes the real digit at the keystroke boundary and the digits are never shown to you or masked out of every observation, screenshot, and error. Use the refs for the ordinary path and the tokens for arbitrary layouts, single-digit boxes, remounts, re-validation, or post-error re-arm. Avoid provider helper/autofill/focus inputs and choose the actual card control. This tool never searches for payment providers, chooses a card UI, reads or validates the total, clicks submit, clears fields, or diagnoses the checkout. Partial results are ordinary browser outcomes; retry changed refs with the same approval_id. Before placing the order, re-observe and confirm no competing saved-card control is selected. If a 3-D Secure challenge appears, the operator notifies the cardholder once. While bank approval is in progress, do not click, type, navigate, reload, resubmit, or trigger another verification. Only watch with operate_screenshot or operate_observe (short, non-blocking checks) until checkout resolves. The released PAN/CVV are masked from all normal operator output before the first write."`;
 
+exports[`agent-facing steering text > list_credentials description is unchanged 1`] = `
+"List the credentials already stored in the user's vault for this account.
+
+WHEN TO CALL THIS TOOL:
+- BEFORE provisioning a service — check whether the account already has
+  a usable key for it, so you reuse the existing key instead of signing
+  up for a duplicate
+- At the start of a task, to see what API keys are already available
+- Whenever you need a service's key and aren't sure it exists yet
+
+BEHAVIOR:
+- Returns metadata only — service, key name, type, age, and a vault
+  \`reference\` — never the secret values themselves
+- The raw secret is never returned to you; to *use* a key, call
+  use_credential with its \`reference\` (the server injects it)
+- Scoped to the user's account; only this account's credentials list
+
+FILTERS (all optional — with no filter the full metadata list is returned):
+- \`service\`: case-insensitive exact match on the service field;
+  pass a string for one service or an array to match any of several
+- \`fields: "summary"\`: return only a compact projection per credential —
+  reference, service, label, field_names, allowed_hosts, created_at —
+  instead of the full metadata object
+
+When checking whether a key exists for a specific service (e.g. before
+provisioning), pass \`service\` (and \`fields: "summary"\`) so the answer
+stays small instead of pulling the whole vault inventory into context."
+`;
+
 exports[`agent-facing steering text > operate_click description is unchanged 1`] = `"Returns a compact control map; \`delta:true\` lists changed rows in \`safe_table\` and departed refs in \`removed\`. \`w=acted\` marks the acted row. Use \`format:"full"\` for the DOM tree. Prefer a current observation ref or unique @label. If a screenshot-visible control has no usable ref, pass screenshot:{screenshot_id,x,y} from operate_screenshot.click_binding, in original image pixels. Provide exactly one of ref or screenshot. target_unresolved means the label was never issued in this document; stale_ref means its reference or alias expired. stale_screenshot requires a new image. Each image binding permits one DISPATCHED attempt; invalid_screenshot_point (a point outside the image or one that resolves no node) does not consume the binding, so a corrected point may retry the same image. After an uncertain click, observe before deciding any new action. If 3-D Secure bank approval is in progress, do not click, type, navigate, reload, resubmit, or trigger another verification. Only watch with operate_screenshot or operate_observe (short, non-blocking checks) until checkout resolves. Use inject_card for saved-card field entry. A pointer-interception failure may use guarded DOM dispatch internally only when the executor proves no click was dispatched. Optional capture:{store,source:{role,name?,container?}|{selector,container?}} stores one revealed value after the action and returns metadata, not the value; resolved_source names the element. Use store.api_hosts for API hosts this credential may be sent to; store.egress_hosts is a deprecated alias removed next minor. Role and value-free CSS selector sources can cross open shadow roots; a unique secret-shaped textbox can match without an id. capture_unresolved returns candidate_count 0 and found roles/names; capture_ambiguous means several matches. An unresolved capture does not block unrelated actions. Never paste a secret into a page field to read it. On operate_click, source:{clipboard:true} stores only a new clipboard value written by that click; an unchanged or empty clipboard stores nothing and reports capture_clipboard_unchanged or capture_clipboard_empty."`;
 
 exports[`agent-facing steering text > operate_download description is unchanged 1`] = `"Deliver a file this session downloaded. download_id comes from the downloads list in an operate_* step result. Waits up to timeout_ms for the download to complete. With dest_dir (absolute, on the machine running the browser) the file is copied there. Without dest_dir, with delivery:'handle', or when dest_dir is not writable there, returns a single-use handle that expires in minutes; run handle.fetch_command on the agent's machine to receive the file. Compare sha256 with the download record."`;
