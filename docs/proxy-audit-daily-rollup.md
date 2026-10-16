@@ -19,13 +19,17 @@ node apps/api/dist/scripts/backfill-proxy-daily.bin.js
 node apps/api/dist/scripts/backfill-proxy-daily.bin.js --apply
 ```
 
-The first command is a dry-run count. `--apply` selects at most 500 eligible
-rows per transaction with `FOR UPDATE SKIP LOCKED`, folds each into a daily
-counter, then deletes exactly those source rows in that transaction. A stopped
-run can be resumed safely: rollback leaves both source row and counter intact.
-It does not take a long table lock or run `VACUUM FULL`. Ordinary PostgreSQL
-autovacuum reclaims the dead rows over time. The existing hourly retention cron
-deletes daily totals older than the same 365-day audit horizon.
+The first command prints an eligible-row count for each completed UTC day,
+oldest first. `--apply` aggregates one day at a time with an indexed
+`(type, emitted_at)` range, then deletes that day's eligible source rows in
+the same repeatable-read transaction. Each transaction has a 30-minute timeout.
+Today is skipped so live API writes own its totals; rerun after midnight for
+rows from that day. A stopped run can be resumed safely: rollback leaves both
+source rows and counters intact, and a completed day has no source rows to
+count again. It does not take a long table lock or run `VACUUM FULL`.
+Ordinary PostgreSQL autovacuum reclaims the dead rows over time. The existing
+hourly retention cron deletes daily totals older than the same 365-day audit
+horizon.
 
 The MCP `audit_log` ledger reads daily totals and retains failed calls as
 anomalies. `expand` returns daily totals; old per-call successes may still

@@ -4,7 +4,7 @@ import {
   incrementProxyDailyTotal,
   type SuccessfulProxyCall,
 } from "../../services/proxy-daily-totals.js";
-import { dryRunCount, foldBatch } from "../backfill-proxy-daily.js";
+import { dryRunDays, foldDay } from "../backfill-proxy-daily.js";
 
 const call: SuccessfulProxyCall = {
   account_id: "acct",
@@ -14,7 +14,7 @@ const call: SuccessfulProxyCall = {
   grant_id: "grant",
   status: 200,
   bytes: 12,
-  at: new Date("2026-10-16T12:00:00.000Z"),
+  at: new Date("2026-01-16T12:00:00.000Z"),
 };
 
 describe("proxy daily counters", () => {
@@ -38,150 +38,69 @@ describe("proxy daily counters", () => {
       "ON CONFLICT (account_id, day, reference, target_host, requester, grant_id)",
     );
     expect(sql[0]).toContain('"VaultProxyDailyTotal".calls + 1');
-    expect(sql[0]).toContain('"VaultProxyDailyTotal".total_bytes + EXCLUDED.total_bytes');
   });
 
-  it("folds and deletes each batch in one transaction; a second run is empty", async () => {
-    const source = [
-      {
-        id: "event-1",
-        account_id: call.account_id,
-        emitted_at: call.at,
-        payload: {
-          reference: call.reference,
-          requester: call.requester,
-          target_host: call.target_host,
-          grant_id: call.grant_id,
-          response_status: 200,
-          response_size: 12,
-        },
-      },
-    ];
-    let counter = 0;
+  it("summarizes completed UTC days oldest first", async () => {
     const db = {
-      $transaction: async (fn: (tx: ApiPrismaClient) => Promise<number>) =>
-        fn(db as ApiPrismaClient),
-      $queryRawUnsafe: async (sql: string) =>
-        sql.includes("count(*)") ? [{ count: BigInt(source.length) }] : [...source],
-      $executeRawUnsafe: async (sql: string, ...params: unknown[]) => {
-        if (sql.includes('INSERT INTO "VaultProxyDailyTotal"')) counter += 1;
-        if (sql.includes('DELETE FROM "VaultAuditEvent"')) {
-          const ids = params[0] as string[];
-          for (const id of ids)
-            source.splice(
-              source.findIndex((row) => row.id === id),
-              1,
-            );
-        }
-        return 1;
+      $queryRawUnsafe: async (sql: string, today: string) => {
+        expect(today).toBe("2026-01-17");
+        expect(sql).toContain("emitted_at < $1::date");
+        expect(sql).toContain("GROUP BY emitted_at::date ORDER BY day");
+        return [
+          { day: new Date("2026-01-15T00:00:00Z"), count: 2n },
+          { day: new Date("2026-01-16T00:00:00Z"), count: 3n },
+        ];
       },
     } as unknown as ApiPrismaClient;
-    expect(await dryRunCount(db)).toBe(1);
-    expect(await foldBatch(db)).toBe(1);
-    expect(await foldBatch(db)).toBe(0);
-    expect(await dryRunCount(db)).toBe(0);
-    expect(counter).toBe(1);
+    expect(await dryRunDays(db, "2026-01-17")).toEqual([
+      { day: "2026-01-15", count: 2 },
+      { day: "2026-01-16", count: 3 },
+    ]);
   });
 
-  it("aggregates a full batch into one increment per daily key", async () => {
-    const rows = Array.from({ length: 500 }, (_, i) => ({
-      id: `event-${i}`,
-      account_id: "acct",
-      emitted_at: new Date(`2026-10-16T${String(i % 24).padStart(2, "0")}:00:00.000Z`),
-      payload: {
-        reference: "vault://ref",
-        target_host: "api.example.com",
-        requester: "agent",
-        grant_id: "grant",
-        response_status: i % 2 ? 201 : 200,
-        response_size: i,
-      },
-    }));
-    const increments: unknown[][] = [];
-    const deleted: string[][] = [];
+  it("uses one indexed day range for set-based insert and delete in a repeatable-read transaction", async () => {
+    const statements: string[] = [];
+    const parameters: unknown[][] = [];
     const options: unknown[] = [];
     const db = {
       $transaction: async (fn: (tx: ApiPrismaClient) => Promise<number>, opts: unknown) => {
         options.push(opts);
         return fn(db as ApiPrismaClient);
       },
-      $queryRawUnsafe: async (_sql: string, limit: number) => rows.slice(0, limit),
       $executeRawUnsafe: async (sql: string, ...params: unknown[]) => {
-        if (sql.includes('INSERT INTO "VaultProxyDailyTotal"')) increments.push(params);
-        if (sql.includes('DELETE FROM "VaultAuditEvent"')) deleted.push(params[0] as string[]);
-        return 1;
+        statements.push(sql);
+        parameters.push(params);
+        return sql.startsWith("DELETE") ? 3 : 1;
       },
     } as unknown as ApiPrismaClient;
 
-    expect(await foldBatch(db, 500)).toBe(500);
-    expect(increments).toHaveLength(1);
-    expect(increments[0]?.slice(0, 7)).toEqual([
-      "acct",
-      "2026-10-16",
-      "vault://ref",
-      "api.example.com",
-      "agent",
-      "grant",
-      500,
+    expect(await foldDay(db, "2026-01-16")).toBe(3);
+    expect(statements).toHaveLength(2);
+    for (const sql of statements) {
+      expect(sql).toContain(
+        "emitted_at >= $1::date AND emitted_at < ($1::date + interval '1 day')",
+      );
+      expect(sql).toContain("type = 'vault.proxy_executed'");
+      expect(sql).toContain("(payload->>'response_status')::int BETWEEN 100 AND 399");
+      expect(sql).toContain("NOT (payload ? 'proxy_error')");
+      expect(sql).toContain("payload->>'outcome' = 'success'");
+      expect(sql).toContain("emitted_at < now() - interval '10 minutes'");
+    }
+    expect(statements[0]).toContain('INSERT INTO "VaultProxyDailyTotal"');
+    expect(statements[0]).toContain("jsonb_object_agg(status::text, calls)");
+    expect(statements[0]).toContain('"VaultProxyDailyTotal".calls + EXCLUDED.calls');
+    expect(statements[0]).toContain('"VaultProxyDailyTotal".total_bytes + EXCLUDED.total_bytes');
+    expect(statements[1]).toContain('DELETE FROM "VaultAuditEvent"');
+    expect(parameters).toEqual([["2026-01-16"], ["2026-01-16"]]);
+    expect(options).toEqual([
+      { maxWait: 30_000, timeout: 1_800_000, isolationLevel: "RepeatableRead" },
     ]);
-    expect(JSON.parse(increments[0]?.[7] as string)).toEqual({ "200": 250, "201": 250 });
-    expect(increments[0]?.[8]).toBe(124750n);
-    expect(increments[0]?.[9]).toEqual(new Date("2026-10-16T00:00:00.000Z"));
-    expect(increments[0]?.[10]).toEqual(new Date("2026-10-16T23:00:00.000Z"));
-    expect(deleted).toEqual([rows.map((row) => row.id)]);
-    expect(options).toEqual([{ maxWait: 30_000, timeout: 60_000 }]);
   });
 
-  it("keeps distinct daily keys separate and adds all status counts on conflict", async () => {
-    const rows = [
-      {
-        id: "a",
-        account_id: "acct",
-        emitted_at: new Date("2026-10-16T23:59:00Z"),
-        payload: { response_status: 200, response_size: 4, reference: "ref" },
-      },
-      {
-        id: "b",
-        account_id: "acct",
-        emitted_at: new Date("2026-10-16T01:00:00Z"),
-        payload: { response_status: 201, response_size: 6, reference: "ref" },
-      },
-      {
-        id: "c",
-        account_id: "acct",
-        emitted_at: new Date("2026-10-17T00:00:00Z"),
-        payload: { response_status: 200, response_size: 8, reference: "ref" },
-      },
-      {
-        id: "d",
-        account_id: "acct",
-        emitted_at: new Date("2026-10-16T12:00:00Z"),
-        payload: { response_status: 200, response_size: 10, reference: "other" },
-      },
-    ];
-    const increments: Array<{ sql: string; params: unknown[] }> = [];
-    const db = {
-      $transaction: async (fn: (tx: ApiPrismaClient) => Promise<number>) =>
-        fn(db as ApiPrismaClient),
-      $queryRawUnsafe: async () => rows,
-      $executeRawUnsafe: async (sql: string, ...params: unknown[]) => {
-        if (sql.includes('INSERT INTO "VaultProxyDailyTotal"')) increments.push({ sql, params });
-        return 1;
-      },
-    } as unknown as ApiPrismaClient;
-
-    expect(await foldBatch(db)).toBe(4);
-    expect(increments).toHaveLength(3);
-    const first = increments.find(
-      ({ params }) => params[1] === "2026-10-16" && params[2] === "ref",
+  it("refuses to fold the current UTC day", async () => {
+    const db = {} as ApiPrismaClient;
+    await expect(foldDay(db, new Date().toISOString().slice(0, 10))).rejects.toThrow(
+      "only completed UTC days",
     );
-    expect(first?.params[6]).toBe(2);
-    expect(JSON.parse(first?.params[7] as string)).toEqual({ "200": 1, "201": 1 });
-    expect(first?.params[8]).toBe(10n);
-    expect(first?.params[9]).toEqual(rows[1]?.emitted_at);
-    expect(first?.params[10]).toEqual(rows[0]?.emitted_at);
-    expect(first?.sql).toContain('"VaultProxyDailyTotal".calls + EXCLUDED.calls');
-    expect(first?.sql).toContain("jsonb_each_text(EXCLUDED.status_breakdown)");
-    expect(first?.sql).toContain('"VaultProxyDailyTotal".total_bytes + EXCLUDED.total_bytes');
   });
 });
