@@ -89,10 +89,12 @@ describe("operate_* bad input is a per-call error, never a server failure", () =
         name: "operate_login",
         arguments: {
           session_id: "retained-login-session",
+          action: "oauth",
           provider: "google",
           ref: "@login",
         },
       });
+      expect(forwarder.invoke).toHaveBeenCalledOnce();
       expect(result.isError).toBe(true);
       expect(JSON.parse(resultText(result)).error).toMatchObject({
         code,
@@ -172,6 +174,7 @@ describe("operate_* bad input is a per-call error, never a server failure", () =
         name: "operate_login",
         arguments: {
           session_id: started.session_id,
+          action: "oauth",
           provider: "google",
           ref: "Missing OAuth button",
         },
@@ -368,7 +371,7 @@ it("roundtrips flat finish schemas and typed receipts through the MCP SDK", asyn
     const finish = listed.tools.find((tool) => tool.name === "operate_finish");
     expect(finish?.inputSchema.properties?.outcome).toMatchObject({
       type: "string",
-      enum: ["none", "credentials", "result"],
+      enum: ["none", "result"],
     });
     expect(finish?.outputSchema).toMatchObject({
       type: "object",
@@ -388,13 +391,6 @@ it("roundtrips flat finish schemas and typed receipts through the MCP SDK", asyn
           closed: { type: "boolean" },
         },
       });
-    }
-    for (const name of ["operate_type", "operate_select", "operate_press"]) {
-      const tool = listed.tools.find((candidate) => candidate.name === name);
-      expect(tool?.inputSchema.properties?.capture).toMatchObject({
-        deprecated: true,
-      });
-      expect(tool?.outputSchema).toBeUndefined();
     }
     const result = await client.callTool({
       name: "operate_finish",
@@ -485,7 +481,7 @@ it("publishes literal role constraints matching the observe runtime validator", 
   }
 });
 
-it("publishes action format and capture migration schemas matching the runtime validators", async () => {
+it("publishes action format and capture schemas matching the runtime validators", async () => {
   const client = await connectedClient();
   const cases = [
     [operateClickTool, { session_id: "fixture", ref: "@continue" }],
@@ -547,16 +543,6 @@ it("publishes action format and capture migration schemas matching the runtime v
           accepted,
         );
       }
-    }
-    for (const [runtimeTool, baseArgs] of cases.slice(1, 4)) {
-      const published = listed.tools.find((candidate) => candidate.name === runtimeTool.name)!;
-      expect(published.inputSchema.properties?.capture).toMatchObject({ deprecated: true });
-      const validate = new AjvJsonSchemaValidator().getValidator(
-        published.inputSchema as JsonSchemaType,
-      );
-      const args = { ...baseArgs, capture: { store: { service: "Fixture" } } };
-      expect(validate(args).valid).toBe(true);
-      expect(runtimeTool.inputSchema.safeParse(args).success).toBe(true);
     }
   } finally {
     await client.close();

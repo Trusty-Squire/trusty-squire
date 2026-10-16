@@ -384,6 +384,18 @@ are not promoted into replay recipes. They do not change vault storage,
 credential capture, payment approval, or 3-D Secure behavior. Local regression
 fixtures prove pointer mechanics; they do not guarantee Cloudflare clearance.
 
+## Explicit action inputs
+
+Login and approval tools expose a single object at the schema root, with visible
+fields and a required `action` enum, so clients do not need to discover inputs
+through a root union. `operate_login` requires `action`: `oauth`, `prepare_signup`,
+`store_signup`, or `load_saved`. For OAuth, use
+`{session_id, action:"oauth", provider, ref}`; omitting `action` is rejected.
+Approval-based `fetch_credential`,
+`edit_credential`, `delete_credential`, and `edit_payment_card` calls start with
+`action:"start"` and their existing target fields. Resume with `action:"resume"`
+and the returned `approval_id`; do not repeat the target or mutation fields.
+
 ## Browser egress is unrestricted
 
 The operator does not filter browser requests by host. Payment SDKs, issuer/ACS
@@ -391,8 +403,8 @@ frames, fingerprinting, authentication providers, analytics, and arbitrary
 third-party resources need no host declaration. This holds before, during, and
 after payment; there is no payment-network window or scope-denial reporting.
 
-`operate_start` accepts `allowed_hosts` and `extra_allowed_hosts` for backward
-compatibility and ignores them. There is no host-widening tool.
+`operate_start` rejects the removed `allowed_hosts` and `extra_allowed_hosts`
+arguments. There is no host-widening tool.
 Existing control-plane action restrictions, credential vault egress, card-fill
 recognition and sealing, and the purchase's single human approval are unchanged.
 
@@ -415,9 +427,8 @@ recognition and sealing, and the purchase's single human approval are unchanged.
 
 `result` requires `summary` or `data`. To store credentials, call
 `operate_extract({session_id, store})` and inspect its storage result before
-calling `operate_finish`. The deprecated `outcome:"credentials"` spelling
-returns a migration error without closing the session; it will be removed in
-the next minor release.
+calling `operate_finish`. The accepted outcomes are `none` and `result`;
+the removed `credentials` outcome and `store` argument are rejected.
 Agent-supplied data is reported data, not proof that login, provisioning, or a
 mutation completed. Preserve booleans as booleans in result data.
 
@@ -477,14 +488,12 @@ redact those surfaces.
 `api_hosts` names API hosts this credential may be sent to. It is unioned with
 the same session-observed hosts and service defaults as before. `store_credential`
 also accepts `api_hosts`; `login_hosts` remains the separate browser sign-in
-allowlist. The former public names `observed_hosts` on `store_credential` and
-`egress_hosts` in extraction and capture stores remain accepted as deprecated
-aliases for one release and are removed next minor. When both spellings are
-supplied, their host lists are merged and deduplicated.
+allowlist. The removed aliases `observed_hosts` on `store_credential` and
+`egress_hosts` in extraction and capture stores are rejected; use `api_hosts`.
 
-`operate_type`, `operate_select`, and `operate_press` reject deprecated `capture`
-with an error directing the caller to perform the action, then call
-`operate_extract({capture})`. Their `capture` aliases are removed next minor.
+Perform typing, selection, or keyboard actions first, then use
+`operate_extract({capture})` for a DOM credential capture. `operate_type`,
+`operate_select`, and `operate_press` reject the removed `capture` argument.
 
 The source role is `textbox` or `code`. For a plain-text copy field without
 those roles, use `source: {"selector": "<observed CSS selector>"}` instead of
@@ -580,7 +589,8 @@ selector that does not depend on the secret value. The read policy is owned by
 
 `fetch_credential` is the only raw-value path. Its first call returns an
 approval link and no value; only a user’s passkey signature for that exact fetch
-permits one resumed call with the returned `approval_id` to receive the value.
+permits one resumed call to receive the value. Use the
+[explicit action inputs](#explicit-action-inputs) for start and resume calls.
 Omitting `field` requests every field on that credential in the same approval;
 passing `field` requests only the named field. The approval page names every
 field that will be released.
@@ -590,8 +600,9 @@ job without exposing plaintext to the agent.
 
 ## Using the rest of the surface
 
-- `operate_login(provider, ref)` keeps OAuth and password lifecycle actions on
-  the real profile. A chooser, challenge, return with uncertain authentication,
+- `operate_login` keeps OAuth and password lifecycle actions on the real
+  profile using the [explicit action inputs](#explicit-action-inputs).
+  A chooser, challenge, return with uncertain authentication,
   or other human step is an honest pending result; stop automation and observe
   the owned session rather than treating a page title or same-origin URL as
   success. A browser error after dispatch follows the same contract as request

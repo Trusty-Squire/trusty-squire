@@ -1,3 +1,4 @@
+import { flatVariants } from "./flat-variants.js";
 import { z } from "zod";
 import type { CardMutationApproval } from "../api-client.js";
 import { ALWAYS_LOAD_META } from "./always-load.js";
@@ -19,7 +20,7 @@ const cardStart = z
     message: "one of card_id or label is required",
   });
 const cardResume = z.object({ approval_id: z.string().min(1).max(64) }).strict();
-const cardInput = z.union([cardStart, cardResume]);
+const cardInput = flatVariants({ start: cardStart, resume: cardResume });
 
 function toolResult(expectedOperation: "edit_card", approval: CardMutationApproval) {
   if (approval.operation !== expectedOperation) {
@@ -58,18 +59,18 @@ function toolResult(expectedOperation: "edit_card", approval: CardMutationApprov
     card: approval.card,
     before: approval.before,
     after: approval.after,
-    next: { tool: "edit_payment_card", approval_id: approval.approval_id },
+    next: { tool: "edit_payment_card", action: "resume", approval_id: approval.approval_id },
   };
 }
 
 const DESCRIPTION = `Request an edit of a saved PAYMENT CARD (label, number, expiry, name, billing)
 behind the user's passkey approval. Identify the card by its exact id from
-list_payment_cards, or by its exact label. The first call returns
+list_payment_cards, or by its exact label. Call with action="start" first. The first call returns
 approval_pending and an approval_id; the user opens the approval link and
 edits the card fields directly in the browser, where the card is decrypted
 and re-encrypted locally — the server stores only the new sealed blob and
 the agent never sees or chooses any card value. After the user finishes,
-call edit_payment_card again with ONLY that approval_id to confirm the
+call edit_payment_card again with action="resume" and that approval_id to confirm the
 result (idempotent). This tool can never read card data.`;
 
 export const editPaymentCardTool: Tool<z.infer<typeof cardInput>> = {

@@ -58,6 +58,7 @@ for (const base of ["provision-drive", "inject-card"]) {
     'import type { Tool } from "./index.js";',
     ...(base === "provision-drive"
       ? [
+          'import { flatVariants, rejectRemovedFields } from "./flat-variants.js";',
           'import { captureSourceSchema } from "../bot/credential-capture.js";',
           'import { UPLOAD_PHASES, UPLOAD_CAUSES } from "../bot/upload-error.js";',
         ]

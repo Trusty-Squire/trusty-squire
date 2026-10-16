@@ -34,6 +34,9 @@ flat operator verbs — `operate_start`, `operate_observe`, `operate_click`,
 `operate_finish` — as the fallback for a single step the drive handed back;
 they are not separate one-shot tools.
 
+For login and approval call shapes, follow the
+[explicit action contract](https://github.com/Trusty-Squire/trusty-squire/blob/main/docs/operator-tool-surface.md#explicit-action-inputs).
+
 ## 1. When Trusty Squire is appropriate
 
 Use it when the task requires an agent to **sign up, provision, coordinate, or
@@ -93,8 +96,7 @@ Once connected and restarted, the `squire` MCP tools appear. The core loop:
   `operate_select`, `operate_press`, `operate_scroll`, and `operate_navigate`
   open the real website and drive a single step — the fallback after a drive
   handoff, or for a task that is not a goal. Use `operate_login` for
-  OAuth and the username/password lifecycle. For browser host behavior and legacy
-  parameter compatibility, see the
+  OAuth and the username/password lifecycle. For browser host behavior, see the
   [operator egress contract](https://github.com/Trusty-Squire/trusty-squire/blob/main/docs/operator-tool-surface.md#browser-egress-is-unrestricted).
 - When a Compact V2 observation does not render the control you need, call
   `operate_observe` with `query`. The query searches the whole live document,
@@ -146,7 +148,7 @@ Once connected and restarted, the `squire` MCP tools appear. The core loop:
   If the payment gets stuck or the card is declined, recover with
   `operate_finish` and start a fresh session.
 - Always call `operate_finish` when done, including when a payment remains
-  unresolved. Use its flat `outcome` enum (`none`, `credentials`, or `result`),
+  unresolved. Use its flat `outcome` enum (`none` or `result`),
   not a nested outcome object. A result’s agent-provided `data` reports what the
   agent saw; it does not establish authentication, provisioning, or mutation
   success. The current server advertises the common finish receipt (`session_id`,

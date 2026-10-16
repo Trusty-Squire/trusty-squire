@@ -41,14 +41,18 @@ describe("fetch_credential", () => {
         return pending;
       },
     });
-    const res = (await fetchCredentialTool.handler({ service: "OpenAI" }, api)) as Record<
-      string,
-      unknown
-    >;
+    const res = (await fetchCredentialTool.handler(
+      { action: "start", service: "OpenAI" },
+      api,
+    )) as Record<string, unknown>;
     expect(seen).toEqual({ service: "OpenAI" });
     expect(res.status).toBe("approval_pending");
     expect(res.approval_url).toBe("https://trustysquire.ai/vault/fetch/fetch_1");
-    expect(res.next).toEqual({ tool: "fetch_credential", approval_id: "fetch_1" });
+    expect(res.next).toEqual({
+      tool: "fetch_credential",
+      action: "resume",
+      approval_id: "fetch_1",
+    });
     expect(JSON.stringify(res)).not.toContain(SECRET);
     expect(res).not.toHaveProperty("fields");
   });
@@ -65,10 +69,10 @@ describe("fetch_credential", () => {
         };
       },
     });
-    const res = (await fetchCredentialTool.handler({ approval_id: "fetch_1" }, api)) as Record<
-      string,
-      unknown
-    >;
+    const res = (await fetchCredentialTool.handler(
+      { action: "resume", approval_id: "fetch_1" },
+      api,
+    )) as Record<string, unknown>;
     expect(res.status).toBe("credential_fetched");
     expect(res.fields).toEqual({ value: SECRET });
   });
@@ -94,10 +98,10 @@ describe("fetch_credential", () => {
         };
       },
     });
-    const requested = (await fetchCredentialTool.handler({ service: "Beeline" }, api)) as Record<
-      string,
-      unknown
-    >;
+    const requested = (await fetchCredentialTool.handler(
+      { action: "start", service: "Beeline" },
+      api,
+    )) as Record<string, unknown>;
     expect(requested).toMatchObject({
       status: "approval_pending",
       approval_id: "fetch_1",
@@ -107,7 +111,7 @@ describe("fetch_credential", () => {
     expect(requested).not.toHaveProperty("fields");
 
     const delivered = (await fetchCredentialTool.handler(
-      { approval_id: "fetch_1" },
+      { action: "resume", approval_id: "fetch_1" },
       api,
     )) as Record<string, unknown>;
     expect(delivered).toMatchObject({
@@ -120,10 +124,10 @@ describe("fetch_credential", () => {
 
   it("keeps polling shape while the approval is still pending", async () => {
     const api = mockApi({ getCredentialFetchApproval: async () => pending });
-    const res = (await fetchCredentialTool.handler({ approval_id: "fetch_1" }, api)) as Record<
-      string,
-      unknown
-    >;
+    const res = (await fetchCredentialTool.handler(
+      { action: "resume", approval_id: "fetch_1" },
+      api,
+    )) as Record<string, unknown>;
     expect(res.status).toBe("approval_pending");
     expect(res).not.toHaveProperty("fields");
   });
@@ -144,10 +148,10 @@ describe("fetch_credential", () => {
           });
         },
       });
-      const res = (await fetchCredentialTool.handler({ approval_id: "fetch_1" }, api)) as Record<
-        string,
-        unknown
-      >;
+      const res = (await fetchCredentialTool.handler(
+        { action: "resume", approval_id: "fetch_1" },
+        api,
+      )) as Record<string, unknown>;
       expect(res.status, code).toBe("credential_fetch_refused");
       expect(res.reason, code).toBe(code);
       expect(res).not.toHaveProperty("fields");
@@ -170,10 +174,13 @@ describe("fetch_credential", () => {
         fetched_at: "2026-09-05T12:05:00.000Z",
       }),
     });
-    await fetchCredentialTool.handler({ service: "AWS", field: "secret_access_key" }, api);
+    await fetchCredentialTool.handler(
+      { action: "start", service: "AWS", field: "secret_access_key" },
+      api,
+    );
     expect(seen).toEqual({ service: "AWS", field: "secret_access_key" });
     const delivered = (await fetchCredentialTool.handler(
-      { approval_id: "fetch_1" },
+      { action: "resume", approval_id: "fetch_1" },
       api,
     )) as Record<string, unknown>;
     expect(delivered).toMatchObject({
@@ -192,7 +199,12 @@ describe("fetch_credential", () => {
       },
     });
     await fetchCredentialTool.handler(
-      { service: "Twilio", field: "account_sid", reason: "put the SID in the operator config" },
+      {
+        action: "start",
+        service: "Twilio",
+        field: "account_sid",
+        reason: "put the SID in the operator config",
+      },
       api,
     );
     expect(seen).toEqual({
@@ -204,12 +216,18 @@ describe("fetch_credential", () => {
 
   it("rejects a reason longer than 200 characters", () => {
     expect(
-      fetchCredentialTool.inputSchema.safeParse({ service: "Twilio", reason: "x".repeat(201) })
-        .success,
+      fetchCredentialTool.inputSchema.safeParse({
+        action: "start",
+        service: "Twilio",
+        reason: "x".repeat(201),
+      }).success,
     ).toBe(false);
     expect(
-      fetchCredentialTool.inputSchema.safeParse({ service: "Twilio", reason: "x".repeat(200) })
-        .success,
+      fetchCredentialTool.inputSchema.safeParse({
+        action: "start",
+        service: "Twilio",
+        reason: "x".repeat(200),
+      }).success,
     ).toBe(true);
   });
 
@@ -219,23 +237,31 @@ describe("fetch_credential", () => {
         throw new ApiCallError(404, "credential_not_found", "404 credential_not_found");
       },
     });
-    await expect(fetchCredentialTool.handler({ service: "Nope" }, api)).rejects.toThrow(
-      "credential_not_found",
-    );
+    await expect(
+      fetchCredentialTool.handler({ action: "start", service: "Nope" }, api),
+    ).rejects.toThrow("credential_not_found");
   });
 
   it("rejects a call that mixes a selector with an approval_id", () => {
     // The two modes are a union on purpose: resuming must not silently carry a
     // selector that the signed approval never covered.
     expect(
-      fetchCredentialTool.inputSchema.safeParse({ approval_id: "fetch_1", service: "OpenAI" })
-        .success,
+      fetchCredentialTool.inputSchema.safeParse({
+        action: "resume",
+        approval_id: "fetch_1",
+        service: "OpenAI",
+      }).success,
     ).toBe(false);
-    expect(fetchCredentialTool.inputSchema.safeParse({ field: "value" }).success).toBe(false);
-    expect(fetchCredentialTool.inputSchema.safeParse({ service: "OpenAI" }).success).toBe(true);
-    expect(fetchCredentialTool.inputSchema.safeParse({ approval_id: "fetch_1" }).success).toBe(
-      true,
-    );
+    expect(
+      fetchCredentialTool.inputSchema.safeParse({ action: "start", field: "value" }).success,
+    ).toBe(false);
+    expect(
+      fetchCredentialTool.inputSchema.safeParse({ action: "start", service: "OpenAI" }).success,
+    ).toBe(true);
+    expect(
+      fetchCredentialTool.inputSchema.safeParse({ action: "resume", approval_id: "fetch_1" })
+        .success,
+    ).toBe(true);
   });
 });
 
