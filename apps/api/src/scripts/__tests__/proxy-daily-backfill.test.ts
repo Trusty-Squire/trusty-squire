@@ -82,4 +82,106 @@ describe("proxy daily counters", () => {
     expect(await dryRunCount(db)).toBe(0);
     expect(counter).toBe(1);
   });
+
+  it("aggregates a full batch into one increment per daily key", async () => {
+    const rows = Array.from({ length: 500 }, (_, i) => ({
+      id: `event-${i}`,
+      account_id: "acct",
+      emitted_at: new Date(`2026-10-16T${String(i % 24).padStart(2, "0")}:00:00.000Z`),
+      payload: {
+        reference: "vault://ref",
+        target_host: "api.example.com",
+        requester: "agent",
+        grant_id: "grant",
+        response_status: i % 2 ? 201 : 200,
+        response_size: i,
+      },
+    }));
+    const increments: unknown[][] = [];
+    const deleted: string[][] = [];
+    const options: unknown[] = [];
+    const db = {
+      $transaction: async (fn: (tx: ApiPrismaClient) => Promise<number>, opts: unknown) => {
+        options.push(opts);
+        return fn(db as ApiPrismaClient);
+      },
+      $queryRawUnsafe: async (_sql: string, limit: number) => rows.slice(0, limit),
+      $executeRawUnsafe: async (sql: string, ...params: unknown[]) => {
+        if (sql.includes('INSERT INTO "VaultProxyDailyTotal"')) increments.push(params);
+        if (sql.includes('DELETE FROM "VaultAuditEvent"')) deleted.push(params[0] as string[]);
+        return 1;
+      },
+    } as unknown as ApiPrismaClient;
+
+    expect(await foldBatch(db, 500)).toBe(500);
+    expect(increments).toHaveLength(1);
+    expect(increments[0]?.slice(0, 7)).toEqual([
+      "acct",
+      "2026-10-16",
+      "vault://ref",
+      "api.example.com",
+      "agent",
+      "grant",
+      500,
+    ]);
+    expect(JSON.parse(increments[0]?.[7] as string)).toEqual({ "200": 250, "201": 250 });
+    expect(increments[0]?.[8]).toBe(124750n);
+    expect(increments[0]?.[9]).toEqual(new Date("2026-10-16T00:00:00.000Z"));
+    expect(increments[0]?.[10]).toEqual(new Date("2026-10-16T23:00:00.000Z"));
+    expect(deleted).toEqual([rows.map((row) => row.id)]);
+    expect(options).toEqual([{ maxWait: 30_000, timeout: 60_000 }]);
+  });
+
+  it("keeps distinct daily keys separate and adds all status counts on conflict", async () => {
+    const rows = [
+      {
+        id: "a",
+        account_id: "acct",
+        emitted_at: new Date("2026-10-16T23:59:00Z"),
+        payload: { response_status: 200, response_size: 4, reference: "ref" },
+      },
+      {
+        id: "b",
+        account_id: "acct",
+        emitted_at: new Date("2026-10-16T01:00:00Z"),
+        payload: { response_status: 201, response_size: 6, reference: "ref" },
+      },
+      {
+        id: "c",
+        account_id: "acct",
+        emitted_at: new Date("2026-10-17T00:00:00Z"),
+        payload: { response_status: 200, response_size: 8, reference: "ref" },
+      },
+      {
+        id: "d",
+        account_id: "acct",
+        emitted_at: new Date("2026-10-16T12:00:00Z"),
+        payload: { response_status: 200, response_size: 10, reference: "other" },
+      },
+    ];
+    const increments: Array<{ sql: string; params: unknown[] }> = [];
+    const db = {
+      $transaction: async (fn: (tx: ApiPrismaClient) => Promise<number>) =>
+        fn(db as ApiPrismaClient),
+      $queryRawUnsafe: async () => rows,
+      $executeRawUnsafe: async (sql: string, ...params: unknown[]) => {
+        if (sql.includes('INSERT INTO "VaultProxyDailyTotal"')) increments.push({ sql, params });
+        return 1;
+      },
+    } as unknown as ApiPrismaClient;
+
+    expect(await foldBatch(db)).toBe(4);
+    expect(increments).toHaveLength(3);
+    const first = increments.find(
+      ({ params }) => params[1] === "2026-10-16" && params[2] === "ref",
+    );
+    expect(first?.params[6]).toBe(2);
+    expect(JSON.parse(first?.params[7] as string)).toEqual({ "200": 1, "201": 1 });
+    expect(first?.params[8]).toBe(10n);
+    expect(first?.params[9]).toEqual(rows[1]?.emitted_at);
+    expect(first?.params[10]).toEqual(rows[0]?.emitted_at);
+    expect(first?.sql).toContain('"VaultProxyDailyTotal".calls + EXCLUDED.calls');
+    expect(first?.sql).toContain("jsonb_each_text(EXCLUDED.status_breakdown)");
+    expect(first?.sql).toContain('"VaultProxyDailyTotal".total_bytes + EXCLUDED.total_bytes');
+  });
 });
