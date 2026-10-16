@@ -48,6 +48,7 @@ export interface RetentionCronDeps {
 export interface RetentionCronStats {
   pairing_tokens_deleted: number;
   vault_audit_deleted: number;
+  vault_proxy_daily_deleted: number;
   payment_audit_deleted: number;
   payment_approvals_deleted: number;
   credential_mutation_approvals_deleted: number;
@@ -201,6 +202,7 @@ export class RetentionCron {
     const stats: RetentionCronStats = {
       pairing_tokens_deleted: 0,
       vault_audit_deleted: 0,
+      vault_proxy_daily_deleted: 0,
       payment_audit_deleted: 0,
       payment_approvals_deleted: 0,
       credential_mutation_approvals_deleted: 0,
@@ -237,6 +239,17 @@ export class RetentionCron {
       } catch (err) {
         stats.errors.push(
           `vault audit delete: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+
+      try {
+        stats.vault_proxy_daily_deleted = await this.deps.authPrisma.$executeRawUnsafe(
+          'DELETE FROM "VaultProxyDailyTotal" WHERE day < $1::date',
+          vaultAuditCutoff.toISOString().slice(0, 10),
+        );
+      } catch (err) {
+        stats.errors.push(
+          `vault proxy daily delete: ${err instanceof Error ? err.message : String(err)}`,
         );
       }
 

@@ -1,12 +1,10 @@
 // Read-side shaping for the vault audit ledger.
 //
-// The raw trail is a flat per-request stream: every proxied egress call is its
-// own `vault.proxy_executed` row with the same reference/host/requester, so a
-// few hundred LLM inferences bury the handful of events a human actually
-// audits (a credential stored/rotated/deleted, a payment, a rejected call).
-// This module groups that stream without touching how events are recorded:
+// Successful proxy calls are daily counters; failures and security events
+// remain per-event rows. Historical successful rows stay readable during
+// backfill. This module shapes both sources for the human audit ledger:
 //
-//   - routine egress   -> collapsed into per (reference x host x burst) rollups
+//   - routine egress   -> per (reference x host x UTC day) rollups
 //   - lifecycle events -> kept as individual ledger rows (the default view)
 //   - anomalies        -> pulled back OUT of the aggregate and marked, so a 429
 //                         or a rejected call is never hidden by a rollup
@@ -19,6 +17,19 @@ export interface AuditEvent {
   type: string;
   emitted_at: string;
   [key: string]: unknown;
+}
+
+export interface DailyTotal {
+  day: string;
+  reference: string;
+  target_host: string;
+  requester: string;
+  grant_id: string;
+  calls: number;
+  status_breakdown: Record<string, number>;
+  total_bytes: number;
+  first_at: string;
+  last_at: string;
 }
 
 export interface EgressGrantSummary {
@@ -35,10 +46,11 @@ export interface RollupKey {
   target_host: string;
   from: string;
   to: string;
+  daily?: true;
 }
 
 export interface EgressRollup extends RollupKey {
-  // Opaque handle a caller feeds back as `expand` to get the individual calls.
+  // Opaque handle a caller feeds back as `expand` for daily totals or calls.
   id: string;
   count: number;
   // e.g. { "200": 243, "429": 2 } — every call in the window, anomalies
@@ -96,10 +108,10 @@ export function anomalyReason(event: AuditEvent): string | null {
     if (str(event.proxy_error) !== null) return "proxy_error";
     const status = num(event.response_status);
     // No status and no error means we cannot show the call succeeded; only
-    // verifiably-2xx traffic is allowed to disappear into an aggregate.
+    // verifiably sub-400 traffic is allowed to disappear into an aggregate.
     if (status === null) return "unknown_status";
     if (status === 429) return "rate_limited";
-    if (status < 200 || status >= 300) return `http_${status}`;
+    if (status < 200 || status >= 400) return `http_${status}`;
   }
   const paymentStatus = str(event.payment_status);
   if (
@@ -119,17 +131,26 @@ export function isEgressCall(event: AuditEvent): boolean {
 }
 
 const ROLLUP_PREFIX = "rollup_";
+const DAILY_PREFIX = "daily_";
 
 export function encodeRollupId(key: RollupKey): string {
   const packed = JSON.stringify([key.reference, key.target_host, key.from, key.to]);
   return ROLLUP_PREFIX + Buffer.from(packed, "utf8").toString("base64url");
 }
 
+export function encodeDailyRollupId(key: RollupKey): string {
+  return DAILY_PREFIX + encodeRollupId(key).slice(ROLLUP_PREFIX.length);
+}
+
 export function decodeRollupId(id: string): RollupKey | null {
-  if (!id.startsWith(ROLLUP_PREFIX)) return null;
+  const daily = id.startsWith(DAILY_PREFIX);
+  if (!daily && !id.startsWith(ROLLUP_PREFIX)) return null;
   try {
     const parsed: unknown = JSON.parse(
-      Buffer.from(id.slice(ROLLUP_PREFIX.length), "base64url").toString("utf8"),
+      Buffer.from(
+        id.slice(daily ? DAILY_PREFIX.length : ROLLUP_PREFIX.length),
+        "base64url",
+      ).toString("utf8"),
     );
     if (!Array.isArray(parsed) || parsed.length !== 4) return null;
     const [reference, target_host, from, to] = parsed;
@@ -141,7 +162,7 @@ export function decodeRollupId(id: string): RollupKey | null {
     ) {
       return null;
     }
-    return { reference, target_host, from, to };
+    return { reference, target_host, from, to, ...(daily ? { daily: true as const } : {}) };
   } catch {
     return null;
   }
@@ -171,6 +192,7 @@ export function buildEgressRollups(
     windowMinutes: number;
     grants?: readonly EgressGrantSummary[];
     labels?: Map<string, string>;
+    dailyTotals?: readonly DailyTotal[];
   },
 ): EgressRollup[] {
   const gapMs = options.windowMinutes * 60_000;
@@ -245,6 +267,44 @@ export function buildEgressRollups(
       });
     }
   }
+  const dailyGroups = new Map<string, DailyTotal[]>();
+  for (const total of options.dailyTotals ?? []) {
+    const key = JSON.stringify([total.day, total.reference, total.target_host]);
+    const group = dailyGroups.get(key) ?? [];
+    group.push(total);
+    dailyGroups.set(key, group);
+  }
+  for (const group of dailyGroups.values()) {
+    const first = group[0]!;
+    const from = group.reduce((v, t) => (ms(t.first_at) < ms(v) ? t.first_at : v), first.first_at);
+    const to = group.reduce((v, t) => (ms(t.last_at) > ms(v) ? t.last_at : v), first.last_at);
+    const key = { reference: first.reference, target_host: first.target_host, from, to };
+    const statuses: Record<string, number> = {};
+    for (const total of group)
+      for (const [status, count] of Object.entries(total.status_breakdown)) {
+        statuses[status] = (statuses[status] ?? 0) + count;
+      }
+    const ids = new Set(group.map((t) => t.grant_id).filter(Boolean));
+    const grants = (options.grants ?? []).filter(
+      (g) =>
+        ids.has(g.grant_id) ||
+        (group.some((t) => t.grant_id === "") &&
+          grantsForWindow([g], first.reference, from, to).length > 0),
+    );
+    rollups.push({
+      ...key,
+      id: encodeDailyRollupId(key),
+      count: group.reduce((n, t) => n + t.calls, 0),
+      status_breakdown: statuses,
+      total_bytes: group.reduce((n, t) => n + t.total_bytes, 0),
+      error_count: 0,
+      anomaly_count: 0,
+      grants: grants.map((g) => {
+        const label = options.labels?.get(g.grant_id);
+        return label === undefined ? { grant_id: g.grant_id } : { grant_id: g.grant_id, label };
+      }),
+    });
+  }
   rollups.sort((a, b) => ms(b.to) - ms(a.to));
   return rollups;
 }
@@ -272,6 +332,7 @@ function grantsForWindow(
 export function buildGrantTotals(
   events: readonly AuditEvent[],
   grants: readonly EgressGrantSummary[],
+  dailyTotals: readonly DailyTotal[] = [],
 ): GrantTotals[] {
   return (
     grants
@@ -296,6 +357,24 @@ export function buildGrantTotals(
           bump(statuses, status === null ? "unknown" : String(status));
           if (anomalyReason(event) !== null) anomalies += 1;
           if (lastUsed === null || at > ms(lastUsed)) lastUsed = event.emitted_at;
+        }
+        for (const total of dailyTotals) {
+          if (total.reference !== grant.credential_ref) continue;
+          if (
+            total.grant_id !== grant.grant_id &&
+            !(
+              total.grant_id === "" &&
+              ms(total.last_at) >= ms(grant.created_at) &&
+              (grant.revoked_at === null || ms(total.first_at) <= ms(grant.revoked_at))
+            )
+          )
+            continue;
+          calls += total.calls;
+          bytes += total.total_bytes;
+          for (const [status, count] of Object.entries(total.status_breakdown)) {
+            statuses[status] = (statuses[status] ?? 0) + count;
+          }
+          if (lastUsed === null || ms(total.last_at) > ms(lastUsed)) lastUsed = total.last_at;
         }
         return {
           grant_id: grant.grant_id,

@@ -16,6 +16,7 @@
     "prisma:generate": "prisma generate --schema=prisma/schema.prisma",
     "dedup-credentials": "node dist/scripts/dedup-credentials.bin.js",
     "dedup-credentials:apply": "node dist/scripts/dedup-credentials.bin.js --apply",
+    "backfill-proxy-daily": "node dist/scripts/backfill-proxy-daily.bin.js",
     "active-credential-slot-index": "node dist/scripts/dedup-credentials.bin.js --apply --ensure-index"
   },
   "dependencies": {

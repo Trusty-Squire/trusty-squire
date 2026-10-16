@@ -7,6 +7,7 @@ export type {
   VaultAuditListOptions,
   VaultAuditPayload,
   VaultAuditRecord,
+  VaultProxyDailyTotal,
   VaultAuditStore,
   VaultAuditType,
   VaultRequester,

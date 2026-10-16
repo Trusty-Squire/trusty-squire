@@ -26,11 +26,13 @@ interface Fake {
   created: CreatedRow[];
   countCalls: CountCall[];
   countResult: number;
+  dailyWrites: unknown[][];
 }
 
 function fakePrisma(): Fake {
   const created: CreatedRow[] = [];
   const countCalls: CountCall[] = [];
+  const dailyWrites: unknown[][] = [];
   const state = { countResult: 0 };
   const vaultAuditEvent = {
     async create(args: { data: Record<string, unknown> }) {
@@ -60,12 +62,35 @@ function fakePrisma(): Fake {
     async findMany() {
       return [];
     },
+    async deleteMany(args: { where: { id: string } }) {
+      const index = created.findIndex((row) => row.id === args.where.id);
+      if (index >= 0) created.splice(index, 1);
+      return { count: index >= 0 ? 1 : 0 };
+    },
+    async updateMany(args: { where: { id: string }; data: { payload: unknown } }) {
+      const row = created.find((r) => r.id === args.where.id);
+      if (row) row.payload = args.data.payload;
+      return { count: row ? 1 : 0 };
+    },
   };
-  const prisma = { vaultAuditEvent } as unknown as ApiPrismaClient;
+  const prisma = {
+    vaultAuditEvent,
+    $transaction: async (fn: (tx: ApiPrismaClient) => Promise<unknown>) =>
+      fn(prisma as ApiPrismaClient),
+    $queryRawUnsafe: async (_sql: string, id: string) => {
+      const row = created.find((r) => r.id === id);
+      return row ? [{ ...row, emitted_at: new Date("2026-10-16T12:00:00Z") }] : [];
+    },
+    $executeRawUnsafe: async (_sql: string, ...values: unknown[]) => {
+      dailyWrites.push(values);
+      return 1;
+    },
+  } as unknown as ApiPrismaClient;
   return {
     prisma,
     created,
     countCalls,
+    dailyWrites,
     get countResult() {
       return state.countResult;
     },
@@ -78,6 +103,74 @@ function fakePrisma(): Fake {
 const ACCOUNT = "01HACCOUNTAAAAAAAAAAAAAAAA";
 
 describe("PrismaVaultAuditStore", () => {
+  it("increments the daily counter for a successful proxy call and keeps a failed call", async () => {
+    const fake = fakePrisma();
+    const store = new PrismaVaultAuditStore(fake.prisma);
+    const base: VaultAuditEventInput = {
+      account_id: ACCOUNT,
+      type: VAULT_AUDIT_TYPES.proxyExecuted,
+      payload: {
+        reference: "vault://ref",
+        target_host: "api.example.com",
+        requester: "agent",
+        grant_id: "grant-1",
+        response_status: 200,
+        response_size: 42,
+      },
+    };
+    await store.record(base);
+    await store.record({ ...base, payload: { ...base.payload, response_status: 429 } });
+    await store.record({ ...base, payload: { ...base.payload, proxy_error: "stream failed" } });
+    expect(fake.dailyWrites).toHaveLength(1);
+    expect(fake.dailyWrites[0]?.slice(0, 8)).toEqual([
+      ACCOUNT,
+      expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/),
+      "vault://ref",
+      "api.example.com",
+      "agent",
+      "grant-1",
+      "200",
+      42,
+    ]);
+    expect(fake.created).toHaveLength(2);
+    expect(
+      fake.created.map((r) => (r.payload as { response_status: number }).response_status),
+    ).toEqual([429, 200]);
+  });
+
+  it("finalizes a streamed success into the counter but retains a streamed error", async () => {
+    const fake = fakePrisma();
+    const store = new PrismaVaultAuditStore(fake.prisma);
+    const payload = {
+      reference: "vault://ref",
+      target_host: "api.example.com",
+      requester: "agent" as const,
+      response_status: 200,
+      response_size: 0,
+    };
+    await store.record({
+      idempotency_key: "stream-ok",
+      account_id: ACCOUNT,
+      type: VAULT_AUDIT_TYPES.proxyExecuted,
+      payload,
+      defer_proxy_rollup: true,
+    });
+    await store.record({
+      idempotency_key: "stream-bad",
+      account_id: ACCOUNT,
+      type: VAULT_AUDIT_TYPES.proxyExecuted,
+      payload,
+      defer_proxy_rollup: true,
+    });
+    expect(fake.created).toHaveLength(2);
+    await store.amend("stream-ok", { response_size: 300 });
+    await store.amend("stream-bad", { response_size: 10, proxy_error: "upstream reset" });
+    expect(fake.dailyWrites).toHaveLength(1);
+    expect(fake.dailyWrites[0]?.[7]).toBe(300);
+    expect(fake.created).toHaveLength(1);
+    expect(fake.created[0]?.payload).toMatchObject({ proxy_error: "upstream reset" });
+  });
+
   it("repairs retries through one durable audit identity", async () => {
     const fake = fakePrisma();
     const store = new PrismaVaultAuditStore(fake.prisma);

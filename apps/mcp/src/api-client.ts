@@ -564,6 +564,28 @@ export class ApiClient {
     return this.get(`/v1/vault/audit${qs.length > 0 ? `?${qs}` : ""}`);
   }
 
+  async listAuditDaily(input: { limit?: number; before?: string; reference?: string }): Promise<{
+    totals: Array<{
+      day: string;
+      reference: string;
+      target_host: string;
+      requester: string;
+      grant_id: string;
+      calls: number;
+      status_breakdown: Record<string, number>;
+      total_bytes: number;
+      first_at: string;
+      last_at: string;
+    }>;
+    next_before: string | null;
+  }> {
+    const q = new URLSearchParams();
+    if (input.limit !== undefined) q.set("limit", String(input.limit));
+    if (input.before !== undefined) q.set("before", input.before);
+    if (input.reference !== undefined) q.set("reference", input.reference);
+    return this.get(`/v1/vault/audit/daily?${q}`);
+  }
+
   // ── Subscriptions ─────────────────────────────────────────
 
   async listSubscriptions(): Promise<{ subscriptions: unknown[] }> {

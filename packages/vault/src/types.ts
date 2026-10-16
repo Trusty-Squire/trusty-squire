@@ -280,9 +280,25 @@ export interface VaultAuditEventInput {
   // the same key twice is a no-op. Pass one when the row must be `amend`-able
   // later (the streaming proxy does — see below).
   idempotency_key?: string;
+  // A streamed response is recorded provisionally, then finalized by amend.
+  // Its row is folded into daily totals only after the body succeeds.
+  defer_proxy_rollup?: boolean;
   account_id: string;
   type: VaultAuditType;
   payload: VaultAuditPayload;
+}
+
+export interface VaultProxyDailyTotal {
+  day: string;
+  reference: string;
+  target_host: string;
+  requester: string;
+  grant_id: string;
+  calls: number;
+  status_breakdown: Record<string, number>;
+  total_bytes: number;
+  first_at: string;
+  last_at: string;
 }
 
 // A persisted audit row, as read back for the who-touched-my-keys
@@ -310,14 +326,18 @@ export interface VaultAuditListOptions {
 
 export interface VaultAuditStore {
   record(event: VaultAuditEventInput): Promise<void>;
-  // Merge a patch into an already-written row's payload. The streaming proxy
-  // writes its row when the request is dispatched — so a crash mid-stream
-  // still leaves one — and amends it with the true byte count and
-  // time-to-last-byte once the body ends. Unknown id: no-op.
+  // Finalize a provisional streaming row with the true byte count and
+  // time-to-last-byte. The persistence store folds successes into daily
+  // totals and retains errored streams as rows. Unknown id: no-op.
   amend(id: string, patch: Partial<VaultAuditPayload>): Promise<void>;
   countRecentRetrievals(accountId: string, since: Date): Promise<number>;
   // Newest-first audit trail for an account, for the activity timeline.
   list(accountId: string, opts?: VaultAuditListOptions): Promise<VaultAuditRecord[]>;
+  listProxyDailyTotals?(
+    accountId: string,
+    opts?: { before?: Date; reference?: string; limit?: number },
+  ): Promise<VaultProxyDailyTotal[]>;
+  exportProxyDailyTotals?(accountId: string): Promise<VaultProxyDailyTotal[]>;
   // The entire trail for an account, unpaginated — for GDPR export.
   exportAll(accountId: string): Promise<VaultAuditRecord[]>;
   // Hard-delete every audit row for the account — offboarding purge.

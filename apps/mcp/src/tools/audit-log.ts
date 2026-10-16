@@ -14,6 +14,7 @@ import {
   normalizeAuditType,
   type AuditEvent,
   type EgressGrantSummary,
+  type DailyTotal,
 } from "./audit-rollup.js";
 
 // The who-touched-my-keys ledger. Every vault action — stored / retrieved /
@@ -38,9 +39,9 @@ const inputSchema = z.object({
   // of the rollup is to see past a page of near-identical egress calls, so the
   // scan is deliberately deeper than `limit`.
   scan: z.number().int().min(1).max(2000).optional(),
-  // Gap that splits one egress burst from the next, in minutes.
+  // Historical per-call rows retain the old burst grouping.
   window_minutes: z.number().int().min(1).max(1440).optional(),
-  // A rollup `id` from a ledger response — returns that rollup's individual calls.
+  // A rollup `id` from a ledger response — returns daily totals or historical calls.
   expand: z.string().min(1).optional(),
 });
 
@@ -57,21 +58,21 @@ Account-scoped, newest-first, NO secret values ever.
 By default (\`view:"ledger"\`) the response is SHAPED so it is readable:
 - \`events\` — the security ledger: credential stored / rotated / deleted /
   edited, grants minted / revoked, payments, plus every ANOMALY
-  (\`anomaly:true\` with an \`anomaly_reason\` — non-2xx, 429, proxy error,
+  (\`anomaly:true\` with an \`anomaly_reason\` — HTTP 4xx/5xx, proxy error,
   rejected call). Routine successful egress is NOT listed here.
-- \`egress.rollups\` — routine proxied calls collapsed per credential x target
-  host x burst: count, status breakdown, total bytes, first/last timestamp,
-  and the grants covering that window. Pass a rollup's \`id\` back as
-  \`expand\` to see its individual calls.
+- \`egress.rollups\` — successful proxied calls collapsed per credential x
+  target host x UTC day: count, status breakdown, total bytes, first/last
+  timestamp, and grants. Historical calls retain burst grouping. Pass \`id\`
+  as \`expand\` to see daily totals or historical calls.
 - \`grant_totals\` — per egress grant: cumulative calls, bytes, last used.
 - \`summary\` — one human-readable line per rollup / headline.
 
 Escape hatches and filters: \`view:"raw"\` returns the flat unaggregated page
-(the original shape). \`type\` (an event kind), \`reference\` (a single
+(individual security and failed-call rows). \`type\` (an event kind), \`reference\` (a single
 credential), \`limit\` (rows, default ${DEFAULT_LIMIT}, max 200), \`before\`
-(keyset cursor from \`next_before\`), \`scan\` (raw events read before shaping,
-default ${DEFAULT_SCAN}, max 2000) and \`window_minutes\` (burst gap, default
-${DEFAULT_WINDOW_MINUTES}) all still apply.`;
+(keyset cursor from \`next_before\`), \`scan\` (source rows read before shaping,
+default ${DEFAULT_SCAN}, max 2000) and \`window_minutes\` (historical burst gap,
+default ${DEFAULT_WINDOW_MINUTES}) are available.`;
 
 export const auditLogTool: Tool<AuditLogArgs> = {
   name: "audit_log",
@@ -169,8 +170,18 @@ async function buildLedgerView(
     },
     scan,
   );
+  const dailyPage =
+    (args.type === undefined || normalizeAuditType(args.type) === "proxy_executed") &&
+    typeof api.listAuditDaily === "function"
+      ? await api.listAuditDaily({
+          limit: scan,
+          ...(args.before !== undefined ? { before: args.before } : {}),
+          ...(args.reference !== undefined ? { reference: args.reference } : {}),
+        })
+      : { totals: [] as DailyTotal[], next_before: null };
+  const dailyTotals = dailyPage.totals;
   const egressCalls = events.filter(isEgressCall);
-  const grants = await loadGrants(api, egressCalls.length > 0);
+  const grants = await loadGrants(api, egressCalls.length > 0 || dailyTotals.length > 0);
 
   // Ledger rows: everything that is not routine egress. An egress call that
   // failed, was rate-limited, or errored is pulled back out of the aggregate
@@ -189,33 +200,43 @@ async function buildLedgerView(
     windowMinutes,
     ...(grants !== null ? { grants } : {}),
     labels,
+    dailyTotals,
   });
-  const grantTotals = grants === null ? [] : buildGrantTotals(events, grants);
+  const grantTotals = grants === null ? [] : buildGrantTotals(events, grants, dailyTotals);
 
-  const oldest = events[events.length - 1];
-  const newest = events[0];
+  const times = [...events.map((e) => e.emitted_at), ...dailyTotals.map((t) => t.last_at)].sort();
+  const oldest = times[0];
+  const newest = times.at(-1);
+  // A single timestamp cursor cannot encode independent stream positions.
+  // Resume from the newer cursor so no unseen row is skipped; a later page
+  // may repeat a few rows from the stream that advanced further.
+  const cursor =
+    [next_before, dailyPage.next_before]
+      .filter((v): v is string => v !== null)
+      .sort()
+      .at(-1) ?? null;
   return {
     view: "ledger",
     window: {
-      from: oldest?.emitted_at ?? null,
-      to: newest?.emitted_at ?? null,
+      from: oldest ?? null,
+      to: newest ?? null,
     },
-    scanned: events.length,
+    scanned: events.length + dailyTotals.length,
     // More history exists past the scan — page it with `before: next_before`.
-    truncated: next_before !== null,
-    next_before,
+    truncated: cursor !== null,
+    next_before: cursor,
     events: ledgerRows.slice(0, limit),
     events_total: ledgerRows.length,
     events_truncated: ledgerRows.length > limit,
     anomaly_count: anomalyCount,
     egress: {
-      calls: egressCalls.length,
+      calls: egressCalls.length + dailyTotals.reduce((n, t) => n + t.calls, 0),
       rolled_up_into: rollups.length,
       window_minutes: windowMinutes,
       rollups,
       ...(rollups.length > 0
         ? {
-            hint: 'Pass a rollup\'s `id` as `expand` to list its individual calls, or view:"raw" for the flat stream.',
+            hint: "Pass a rollup's `id` as `expand` to inspect daily totals or historical calls.",
           }
         : {}),
     },
@@ -224,7 +245,12 @@ async function buildLedgerView(
       grants === null
         ? "grants_unavailable"
         : "per_event (historical rows without provenance use credential-reference/lifetime fallback)",
-    summary: summarize(ledgerRows.length, anomalyCount, rollups, egressCalls.length),
+    summary: summarize(
+      ledgerRows.length,
+      anomalyCount,
+      rollups,
+      egressCalls.length + dailyTotals.reduce((n, t) => n + t.calls, 0),
+    ),
   };
 }
 
@@ -246,8 +272,8 @@ function summarize(
   return lines;
 }
 
-// Drill-down: the individual calls behind one rollup id. Stateless — the id
-// carries (reference, host, window), so no server-side rollup state is needed.
+// Drill-down: daily totals or historical calls behind one rollup id. The id
+// carries (reference, host, window), so no server-side state is needed.
 async function expandRollup(
   api: ApiClient,
   args: AuditLogArgs,
@@ -256,7 +282,7 @@ async function expandRollup(
   const key = decodeRollupId(expand);
   if (key === null) {
     throw new Error(
-      "audit_log expand expects a rollup `id` from a ledger response (rollup_…). Call audit_log with no expand first.",
+      "audit_log expand expects a rollup `id` from a ledger response (daily_… or rollup_…). Call audit_log with no expand first.",
     );
   }
   const limit = args.limit ?? DEFAULT_LIMIT;
@@ -267,30 +293,58 @@ async function expandRollup(
   // rollup's own upper bound is included.
   const cursor = Number.isNaN(to) ? undefined : new Date(to + 1).toISOString();
 
-  const { events } = await scanEvents(
-    api,
-    { reference: key.reference, ...(cursor !== undefined ? { before: cursor } : {}) },
-    scan,
-    Number.isNaN(from) ? undefined : from,
-  );
+  const { events } = key.daily
+    ? { events: [] as AuditEvent[] }
+    : await scanEvents(
+        api,
+        { reference: key.reference, ...(cursor !== undefined ? { before: cursor } : {}) },
+        scan,
+        Number.isNaN(from) ? undefined : from,
+      );
   const calls = events.filter((event) => {
     if (!isEgressCall(event)) return false;
     if (event.target_host !== key.target_host) return false;
     const at = Date.parse(event.emitted_at);
     return !Number.isNaN(at) && at >= from && at <= to;
   });
+  // Daily counters grow during the day; use the UTC day boundary rather than
+  // the rollup's last-call timestamp so an older rollup id stays expandable.
+  const dailyCursor = Number.isNaN(to)
+    ? undefined
+    : new Date(
+        Date.UTC(
+          new Date(to).getUTCFullYear(),
+          new Date(to).getUTCMonth(),
+          new Date(to).getUTCDate() + 1,
+        ),
+      ).toISOString();
+  const dailyPage =
+    key.daily && typeof api.listAuditDaily === "function"
+      ? await api.listAuditDaily({
+          reference: key.reference,
+          ...(dailyCursor !== undefined ? { before: dailyCursor } : {}),
+          limit: Math.min(scan, 2000),
+        })
+      : { totals: [] as DailyTotal[], next_before: null };
+  const dailyTotals = dailyPage.totals.filter(
+    (total) =>
+      total.target_host === key.target_host &&
+      total.day >= key.from.slice(0, 10) &&
+      total.day <= key.to.slice(0, 10),
+  );
   return {
     view: "expand",
     rollup: { id: expand, ...key },
+    daily_totals: dailyTotals.slice(0, limit),
     calls: calls.slice(0, limit).map((event) => {
       const reason = anomalyReason(event);
       return reason === null ? event : { ...event, anomaly: true, anomaly_reason: reason };
     }),
-    calls_total: calls.length,
-    calls_truncated: calls.length > limit,
+    calls_total: calls.length + dailyTotals.reduce((n, t) => n + t.calls, 0),
+    calls_truncated: calls.length > limit || dailyTotals.length > limit,
     // Raise `limit` (max 200) or narrow `window_minutes` on the ledger call to
     // see the rest of a very large burst.
-    scanned: events.length,
+    scanned: events.length + dailyTotals.length,
   };
 }
 
