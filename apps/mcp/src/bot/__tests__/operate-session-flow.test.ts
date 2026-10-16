@@ -1747,7 +1747,12 @@ describe("operate session — OAuth lifecycle", () => {
     h.oauthClickSimulate = "return";
     const started = await startProvisionSession({ serviceUrl: "https://app.example.com/login" });
     const result = (await operateLoginTool.handler(
-      { session_id: started.session_id, provider: "google", ref: googleRef(started) },
+      {
+        action: "oauth",
+        session_id: started.session_id,
+        provider: "google",
+        ref: googleRef(started),
+      },
       null,
     )) as Awaited<ReturnType<typeof act>>;
     // Plain-path dispatch: the outer clickWithDispatchTracking plus its nested
@@ -1811,7 +1816,12 @@ describe("operate session — OAuth lifecycle", () => {
     const started = await startProvisionSession({ serviceUrl: "https://app.example.com/login" });
 
     const login = operateLoginTool.handler(
-      { session_id: started.session_id, provider: "google", ref: googleRef(started) },
+      {
+        action: "oauth",
+        session_id: started.session_id,
+        provider: "google",
+        ref: googleRef(started),
+      },
       null,
     );
     let settledEarly = false;
@@ -1878,7 +1888,12 @@ describe("operate session — OAuth lifecycle", () => {
     );
     const started = await startProvisionSession({ serviceUrl: "https://app.example.com/login" });
     const timedOut = (await operateLoginTool.handler(
-      { session_id: started.session_id, provider: "google", ref: googleRef(started) },
+      {
+        action: "oauth",
+        session_id: started.session_id,
+        provider: "google",
+        ref: googleRef(started),
+      },
       null,
     )) as Awaited<ReturnType<typeof act>>;
     expect(timedOut.oauth).toMatchObject({
@@ -1942,7 +1957,12 @@ describe("operate session — OAuth lifecycle", () => {
       controller.signal,
       async () =>
         await operateLoginTool.handler(
-          { session_id: started.session_id, provider: "google", ref: googleRef(started) },
+          {
+            action: "oauth",
+            session_id: started.session_id,
+            provider: "google",
+            ref: googleRef(started),
+          },
           null,
         ),
       async (phase) => {
@@ -1999,7 +2019,12 @@ describe("operate session — OAuth lifecycle", () => {
       );
       const login = withOperatorRequestContext(controller.signal, () =>
         operateLoginTool.handler(
-          { session_id: started.session_id, provider: "google", ref: googleRef(started) },
+          {
+            action: "oauth",
+            session_id: started.session_id,
+            provider: "google",
+            ref: googleRef(started),
+          },
           null,
         ),
       );
@@ -2046,7 +2071,12 @@ describe("operate session — OAuth lifecycle", () => {
     await expect(
       withOperatorRequestContext(new AbortController().signal, () =>
         operateLoginTool.handler(
-          { session_id: started.session_id, provider: "google", ref: googleRef(started) },
+          {
+            action: "oauth",
+            session_id: started.session_id,
+            provider: "google",
+            ref: googleRef(started),
+          },
           null,
         ),
       ),
@@ -4666,16 +4696,7 @@ describe("operate_extract — stores by source, never by shape", () => {
       { session_id: started.session_id, store: { service: "example" } },
       api,
     );
-    await expect(
-      operateFinishTool.handler(
-        operateFinishTool.inputSchema.parse({
-          session_id: started.session_id,
-          outcome: "credentials",
-          store: { service: "example" },
-        }),
-        api,
-      ),
-    ).rejects.toThrow(/operate_extract\(\{store\}\) then operate_finish/);
+
     expect(storeCredential).not.toHaveBeenCalled();
     expect(stored).toMatchObject({ credentials: {}, error: extracted.error });
     expect(JSON.stringify(stored)).not.toContain(realKey);
@@ -5688,31 +5709,6 @@ function normalizeFinishReceipt(value: unknown): Record<string, unknown> {
 }
 
 describe("operate_finish lifecycle consolidation", () => {
-  it("rejects deprecated credential finish before extraction or teardown", async () => {
-    await showCopyDialog("https://app.example.com/api-keys", sk("live-finish-exclusive-123456789"));
-    const storeCredential = vi.fn();
-    const api = { storeCredential } as unknown as ApiClient;
-    const started = await startProvisionSession({
-      serviceUrl: "https://app.example.com/api-keys",
-    });
-    await expect(
-      operateFinishTool.handler(
-        {
-          session_id: started.session_id,
-          outcome: "credentials",
-          store: { service: "example" },
-        },
-        api,
-      ),
-    ).rejects.toThrow(/operate_extract\(\{store\}\) then operate_finish/);
-    expect(h.readClipboardCalls).toBe(0);
-    expect(h.closeCalls).toBe(0);
-    expect(storeCredential).not.toHaveBeenCalled();
-    await expect(
-      operateFinishTool.handler({ session_id: started.session_id, outcome: "none" }, null),
-    ).resolves.toMatchObject({ closed: true });
-  });
-
   it("keeps the no-outcome close shape identical with explicit or omitted kind=none", async () => {
     const legacySession = await startProvisionSession({
       serviceUrl: "https://app.example.com/done",
@@ -5739,34 +5735,6 @@ describe("operate_finish lifecycle consolidation", () => {
     expect(normalizeFinishReceipt(consolidated)).toEqual(normalizeFinishReceipt(legacy));
     expect(h.storageStateWrites).toEqual([]);
     expect(h.destroyedProfiles).toEqual([]);
-  });
-
-  it("preserves prior state when deprecated credential finish is rejected", async () => {
-    const canonical = "/tmp/trusty-squire-unit-canonical-failed-outcome";
-    const prior = { cookies: [{ name: "SID", value: "prior" }], origins: [] };
-    h.storageStates.set(canonical, prior);
-    h.visibleText = "No credential is present";
-    const storeCredential = vi.fn();
-    const session = await startProvisionSession({
-      serviceUrl: "https://app.example.com/done",
-      profileDir: canonical,
-    });
-
-    await expect(
-      operateFinishTool.handler(
-        operateFinishTool.inputSchema.parse({
-          session_id: session.session_id,
-          outcome: "credentials",
-          store: { service: "example" },
-        }),
-        { storeCredential } as unknown as ApiClient,
-      ),
-    ).rejects.toThrow(/operate_extract\(\{store\}\) then operate_finish/);
-
-    expect(storeCredential).not.toHaveBeenCalled();
-    expect(h.closeCalls).toBe(0);
-    expect(h.storageStateWrites).toEqual([]);
-    expect(h.storageStates.get(canonical)).toBe(prior);
   });
 
   it("preserves prior state for failed or unconfirmed result outcomes", async () => {
@@ -5906,9 +5874,9 @@ describe("operate_finish lifecycle consolidation", () => {
     expect(
       operateFinishTool.inputSchema.safeParse({
         session_id: "session_1",
-        outcome: "credentials",
+        outcome: "invalid",
       }).success,
-    ).toBe(true);
+    ).toBe(false);
     expect(
       operateFinishTool.inputSchema.safeParse({
         session_id: "session_1",

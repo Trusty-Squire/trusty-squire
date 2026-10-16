@@ -297,16 +297,16 @@ in [browser-use-serializer-port.md](docs/browser-use-serializer-port.md).
   `operate_extract` to [capture credentials](docs/operator-tool-surface.md#credential-capture-and-retrieval),
   and `operate_login({action:"load_saved"})` to load protected slots. The only mailbox
   access is `operate_read_inbox`, the consent-gated Gmail verification read;
-  CAPTCHA solving, general inbox polling, local upload, and specialized cart
-  mutation are not operator verbs; inspect and drive the page's ordinary UI or
-  hand the task back to the user.
+  `operate_solve_captcha` invokes the configured solver; `operate_upload`
+  attaches local files. Inspect and drive other ordinary UI or hand the task
+  back to the user.
   Browser requests need no host declarations. See the
   [egress contract](docs/operator-tool-surface.md#browser-egress-is-unrestricted)
-  for legacy parameter compatibility and the unchanged payment/vault boundaries.
+  for browser egress and the unchanged payment/vault boundaries.
   Operator servers automatically share the [browser broker](docs/browser-broker.md),
-  which owns the user's Chrome profile. Before a session starts,
-  the operator checks the live Google My Account identity; if the profile is
-  signed out, it returns a clear login handoff before navigating to the service.
+  which owns the user's Chrome profile. Identity-dependent actions check the
+  live profile at their operation boundary; `operate_start` does not require
+  Google sign-in.
   If a restart or reconnect leaves the browser profile busy, follow the
   [reconnect recovery guide](docs/DESIGN-warm-browser-reuse.md#recovering-after-reconnect).
   For proxy configuration and shared-browser compatibility, see the
@@ -367,9 +367,8 @@ in [browser-use-serializer-port.md](docs/browser-use-serializer-port.md).
   challenge UI at all — nothing is notified and nothing is gated; the checkout
   re-arms and a resubmitted payment is expected to launch the challenge.
 - `operate_finish` closes the session with a flat `outcome` enum — never a
-  nested union. `none` only closes; `credentials` requires `store` and preserves
-  credential extraction and vault storage; `result` requires `summary` or
-  `data`. Agent-provided result data is reported information, not proof that a
+  nested union. `none` only closes; `result` requires `summary` or `data`.
+  Store credentials with `operate_extract({store})` before finishing. Agent-provided result data is reported information, not proof that a
   login, provisioning operation, or mutation completed. Finish first fences new
   calls and drives the owned terminal transition; callers must not infer closure
   merely from a delivery timeout. Callers should finish promptly instead of
@@ -377,19 +376,6 @@ in [browser-use-serializer-port.md](docs/browser-use-serializer-port.md).
   `operation_id`, `execution`, `mutation`, `cleanup`, and `closed:boolean`.
   Closure is established only when `closed` is true. Older servers may omit
   these fields; a missing receipt never proves cleanup.
-- `operate_recipe_save` saves a postcondition-verified local recipe under a
-  closed task verb plus the service's registrable domain. It records stable target
-  attributes and exact provenance for Squire-supplied values, not observed refs
-  or plaintext secrets. Recipes that pass a share-eligibility check (no
-  personal or secret-shaped literals) and a registrable-domain lock are also
-  written live to the shared registry, making them immediately reusable by
-  other installs without a promotion step. `operate_recipe_run` binds the
-  replaying user's own values and replays those steps, preferring the local
-  recipe and falling back to the shared one. A recipe cannot navigate outside
-  the site it was recorded for; normal keyed replay refuses a violation before
-  navigation and continues with cold driving. On one ordinary missed step,
-  replay returns a local repair point and can continue in the same session.
-  Older name-only recipes remain planning hints.
 - `list_payment_cards` returns saved-card labels and opaque references.
   `inject_card` takes one explicit `card_ref`, purchase terms, and per-field
   refs plus the addressed `session_id`. It creates or resumes the single approval
@@ -405,10 +391,16 @@ in [browser-use-serializer-port.md](docs/browser-use-serializer-port.md).
   projection and inputs through the installed server's `tools/list` description
   and schema.
 - `fetch_credential` returns a credential's raw value to the agent — the one path that does. It first returns an approval link and no value; you open it and sign with your passkey; the agent resumes with the returned `approval_id` and receives the value once. The agent may pass a short `reason`; the page asks the reveal as a question naming the credential, shows which agent is asking, quotes that stated reason, and says when the approval expires. Denial or expiry releases nothing, and a mutation or payment approval cannot be used here. Reach for it only when the key must land somewhere the agent controls (a GitHub Actions secret, a `.env`) with no server-side injection path — `use_credential` is the right tool for calling an API.
+The login tool uses an explicit `action`: `oauth`, `prepare_signup`,
+`store_signup`, or `load_saved`. Approval-based `fetch_credential`,
+`edit_credential`, `delete_credential`, and `edit_payment_card` calls start with
+`action:"start"` and their existing target fields. Resume with `action:"resume"`
+and the returned `approval_id`; do not repeat the target or mutation fields.
+
 - `edit_credential` changes only an existing credential's non-secret name,
   `allowed_hosts`, or `login_hosts`; `delete_credential` soft-deletes one. Each
   first returns a Telegram/passkey approval link bound to the operation, exact
-  credential reference, and edit before→after. Resume with only the returned
+  credential reference, and edit before→after. Resume with `action:"resume"` and the returned
   `approval_id`. Neither tool can read or alter the secret value; use
   `store_credential` to rotate a secret.
 - `grant_app_access` and `revoke_app_access` create and remove scoped backend access.

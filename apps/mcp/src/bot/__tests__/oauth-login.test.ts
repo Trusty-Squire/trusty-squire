@@ -231,7 +231,10 @@ describe("BrowserController OAuth popup lifecycle", () => {
         const ref = started.dom?.match(/@e:[A-Za-z0-9_-]+/)?.[0];
         expect(ref).toBeDefined();
         const outcome = withOperatorRequestContext(new AbortController().signal, () =>
-          operateLoginTool.handler({ session_id: sessionId!, provider: "google", ref: ref! }, null),
+          operateLoginTool.handler(
+            { action: "oauth", session_id: sessionId!, provider: "google", ref: ref! },
+            null,
+          ),
         );
         if (destination === "denied") {
           const failure = await outcome.catch((error: Error) => error);

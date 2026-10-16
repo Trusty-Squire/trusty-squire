@@ -34,6 +34,12 @@ flat operator verbs — `operate_start`, `operate_observe`, `operate_click`,
 `operate_finish` — as the fallback for a single step the drive handed back;
 they are not separate one-shot tools.
 
+The login tool uses an explicit `action`: `oauth`, `prepare_signup`,
+`store_signup`, or `load_saved`. Approval-based `fetch_credential`,
+`edit_credential`, `delete_credential`, and `edit_payment_card` calls start with
+`action:"start"` and their existing target fields. Resume with `action:"resume"`
+and the returned `approval_id`; do not repeat the target or mutation fields.
+
 ## 1. When Trusty Squire is appropriate
 
 Use it when the task requires an agent to **sign up, provision, coordinate, or
@@ -146,7 +152,7 @@ Once connected and restarted, the `squire` MCP tools appear. The core loop:
   If the payment gets stuck or the card is declined, recover with
   `operate_finish` and start a fresh session.
 - Always call `operate_finish` when done, including when a payment remains
-  unresolved. Use its flat `outcome` enum (`none`, `credentials`, or `result`),
+  unresolved. Use its flat `outcome` enum (`none` or `result`),
   not a nested outcome object. A result’s agent-provided `data` reports what the
   agent saw; it does not establish authentication, provisioning, or mutation
   success. The current server advertises the common finish receipt (`session_id`,

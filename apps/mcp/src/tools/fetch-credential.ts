@@ -1,3 +1,4 @@
+import { flatVariants } from "./flat-variants.js";
 import { z } from "zod";
 import { ApiCallError, type CredentialFetchApproval } from "../api-client.js";
 import { ALWAYS_LOAD_META } from "./always-load.js";
@@ -18,7 +19,7 @@ const start = z
     { message: "one of reference, service, or name is required" },
   );
 const resume = z.object({ approval_id: z.string().min(1).max(64) }).strict();
-const inputSchema = z.union([start, resume]);
+const inputSchema = flatVariants({ start, resume });
 
 // The description is the only thing standing between a model and a needless
 // plaintext secret in its own transcript, so it leads with the cheaper route
@@ -38,9 +39,9 @@ GitHub Actions secret, a .env file, or a config file. If you can accomplish
 the task without the plaintext, do that instead.
 
 Every fetch requires an explicit human passkey approval; there is no way to
-skip it. The first call resolves the credential and returns approval_pending
+skip it. Call with action="start" first. The first call resolves the credential and returns approval_pending
 with an approval_url — NO value. The user opens that link and signs with their
-passkey. Then call fetch_credential again with ONLY that approval_id to receive
+passkey. Then call fetch_credential again with action="resume" and that approval_id to receive
 the value. Delivery is single-use: the same approval_id will not return the
 value twice, so store it where it needs to go on first receipt. A denied or
 expired approval returns a refusal and no value. Omit \`field\` to receive every
@@ -85,7 +86,7 @@ function toolResult(approval: CredentialFetchApproval): Record<string, unknown> 
       credential: approval.credential,
       field: approval.field,
       field_names: approval.field_names,
-      next: { tool: "fetch_credential", approval_id: approval.approval_id },
+      next: { tool: "fetch_credential", action: "resume", approval_id: approval.approval_id },
     };
   }
   return refusal(approval.error ?? `approval_${approval.status}`, approval);

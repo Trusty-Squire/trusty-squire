@@ -26,35 +26,8 @@ const SERVER_NAME = "trusty-squire";
 
 const DEFAULT_SHUTDOWN_DEADLINE_MS = 30_000;
 
-function loginValidationIssues(args: unknown, issues: readonly ZodIssue[]): readonly ZodIssue[] {
-  const union = issues.find((issue) => issue.code === "invalid_union");
-  if (union?.code !== "invalid_union") return issues;
-  const action =
-    args !== null && typeof args === "object" && "action" in args ? args.action : undefined;
-  const branch =
-    action === undefined || action === "oauth"
-      ? 0
-      : action === "prepare_signup"
-        ? 1
-        : action === "store_signup"
-          ? 2
-          : action === "load_saved"
-            ? 3
-            : -1;
-  if (branch < 0) {
-    return [
-      {
-        code: "custom",
-        path: ["action"],
-        message: "expected oauth, prepare_signup, store_signup, or load_saved",
-      },
-    ];
-  }
-  return union.unionErrors[branch]?.issues ?? issues;
-}
-
-function formatLoginValidation(args: unknown, issues: readonly ZodIssue[]): string {
-  return loginValidationIssues(args, issues)
+function formatLoginValidation(_args: unknown, issues: readonly ZodIssue[]): string {
+  return issues
     .map((issue) => {
       const field = issue.path.length > 0 ? issue.path.join(".") : "reference or service";
       const missingHosts =
@@ -96,7 +69,7 @@ Vault routing:
 - User wants to change allowed_hosts/login_hosts/name without changing the
   secret → call edit_credential. User wants a saved credential removed → call
   delete_credential. Both return a Telegram/passkey approval link first; resume
-  with the returned approval_id only after the user signs the exact mutation.
+  with action="resume" and the returned approval_id only after the user signs the exact mutation.
 - Rotating a secret value = call store_credential again with the new value (it
   overwrites). edit_credential cannot read or change secret fields.
 - The raw value reaches you ONLY via fetch_credential, and only after the

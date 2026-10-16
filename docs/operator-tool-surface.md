@@ -384,6 +384,12 @@ are not promoted into replay recipes. They do not change vault storage,
 credential capture, payment approval, or 3-D Secure behavior. Local regression
 fixtures prove pointer mechanics; they do not guarantee Cloudflare clearance.
 
+The login tool uses an explicit `action`: `oauth`, `prepare_signup`,
+`store_signup`, or `load_saved`. Approval-based `fetch_credential`,
+`edit_credential`, `delete_credential`, and `edit_payment_card` calls start with
+`action:"start"` and their existing target fields. Resume with `action:"resume"`
+and the returned `approval_id`; do not repeat the target or mutation fields.
+
 ## Browser egress is unrestricted
 
 The operator does not filter browser requests by host. Payment SDKs, issuer/ACS
@@ -391,8 +397,7 @@ frames, fingerprinting, authentication providers, analytics, and arbitrary
 third-party resources need no host declaration. This holds before, during, and
 after payment; there is no payment-network window or scope-denial reporting.
 
-`operate_start` accepts `allowed_hosts` and `extra_allowed_hosts` for backward
-compatibility and ignores them. There is no host-widening tool.
+`operate_start` uses unrestricted browser egress; it has no host-scope arguments or host-widening tool.
 Existing control-plane action restrictions, credential vault egress, card-fill
 recognition and sealing, and the purchase's single human approval are unchanged.
 
@@ -415,9 +420,7 @@ recognition and sealing, and the purchase's single human approval are unchanged.
 
 `result` requires `summary` or `data`. To store credentials, call
 `operate_extract({session_id, store})` and inspect its storage result before
-calling `operate_finish`. The deprecated `outcome:"credentials"` spelling
-returns a migration error without closing the session; it will be removed in
-the next minor release.
+calling `operate_finish`. The accepted outcomes are `none` and `result`; store credentials before finishing.
 Agent-supplied data is reported data, not proof that login, provisioning, or a
 mutation completed. Preserve booleans as booleans in result data.
 
@@ -477,14 +480,10 @@ redact those surfaces.
 `api_hosts` names API hosts this credential may be sent to. It is unioned with
 the same session-observed hosts and service defaults as before. `store_credential`
 also accepts `api_hosts`; `login_hosts` remains the separate browser sign-in
-allowlist. The former public names `observed_hosts` on `store_credential` and
-`egress_hosts` in extraction and capture stores remain accepted as deprecated
-aliases for one release and are removed next minor. When both spellings are
-supplied, their host lists are merged and deduplicated.
+allowlist. `api_hosts` is the public spelling for these API host hints.
 
-`operate_type`, `operate_select`, and `operate_press` reject deprecated `capture`
-with an error directing the caller to perform the action, then call
-`operate_extract({capture})`. Their `capture` aliases are removed next minor.
+Perform typing, selection, or keyboard actions first, then use
+`operate_extract({capture})` for a DOM credential capture.
 
 The source role is `textbox` or `code`. For a plain-text copy field without
 those roles, use `source: {"selector": "<observed CSS selector>"}` instead of

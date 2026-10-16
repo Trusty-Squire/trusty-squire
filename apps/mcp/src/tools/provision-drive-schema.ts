@@ -4,6 +4,8 @@ import { z } from "zod";
 
 import type { Tool } from "./index.js";
 
+import { flatVariants, rejectRemovedFields } from "./flat-variants.js";
+
 import { captureSourceSchema } from "../bot/credential-capture.js";
 
 import { UPLOAD_PHASES, UPLOAD_CAUSES } from "../bot/upload-error.js";
@@ -67,16 +69,20 @@ const proxySchema = z
     "Optional per-session HTTP/HTTPS proxy URL with or without credentials, or unauthenticated SOCKS5 URL. HTTP/HTTPS passwords require a non-empty username; authenticated SOCKS5 is unsupported by the browser engine. Sensitive and launch-only; never returned or saved.",
   );
 
-const startSchema = z.object({
-  service_url: z.string().url(),
-  format: z.enum(["compact", "full"]).optional(),
-  // Sensitive: may include proxy credentials. It is launch-only and is never
-  // retained in the session state, action trail, or status.
-  proxy: proxySchema.optional(),
-  // Operate tasks that act AS the user (drive a gated app on an existing
-  // account) set this so start fails closed to a connect hand-back if no live
-  // Google session exists — rather than driving into a mid-task login wall.
-});
+const startSchema = rejectRemovedFields(
+  z.object({
+    service_url: z.string().url(),
+    format: z.enum(["compact", "full"]).optional(),
+    // Sensitive: may include proxy credentials. It is launch-only and is never
+    // retained in the session state, action trail, or status.
+    proxy: proxySchema.optional(),
+    // Operate tasks that act AS the user (drive a gated app on an existing
+    // account) set this so start fails closed to a connect hand-back if no live
+    // Google session exists — rather than driving into a mid-task login wall.
+  }),
+  ["allowed_hosts", "extra_allowed_hosts"],
+  "Browser egress is unrestricted; omit removed host-scope arguments",
+);
 
 const DOM_OBSERVATION_CONTRACT =
   'With `format:"full"`, `browser-use-dom` returns a tab-indented `dom` tree with text and `[@e:...]` controls. ' +
@@ -139,27 +145,29 @@ const networkSchema = z.object({
   request_id: z.string().min(1).max(256).optional(),
 });
 
-const storeShape = z.object({
-  service: z.string().min(1).max(120),
-  label: z.string().min(1).max(60).optional(),
-  env_var_suggestion: z.string().min(1).max(120).optional(),
-  type: z.string().min(1).max(60).optional(),
-  // Explicit API hosts: where this key may LATER be sent by the proxy.
-  // Read them off the API base URL the page/SDK snippet shows — a grounded
-  // read, not a guess. Unioned with the service-default + start/auto_widen
-  // scope (never mid_session task scope). Omit for a single-service key.
-  api_hosts: z.array(z.string().min(1).max(253)).max(10).optional(),
-  egress_hosts: z
-    .array(z.string().min(1).max(253))
-    .max(10)
-    .optional()
-    .describe("Deprecated alias for api_hosts; removed next minor"),
-  auth_shape: z
-    .string()
-    .max(120)
-    .regex(/^(bearer|header:.+|query:.+)$/, "auth_shape must be bearer|header:<name>|query:<param>")
-    .optional(),
-});
+const storeShape = rejectRemovedFields(
+  z.object({
+    service: z.string().min(1).max(120),
+    label: z.string().min(1).max(60).optional(),
+    env_var_suggestion: z.string().min(1).max(120).optional(),
+    type: z.string().min(1).max(60).optional(),
+    // Explicit API hosts: where this key may LATER be sent by the proxy.
+    // Read them off the API base URL the page/SDK snippet shows — a grounded
+    // read, not a guess. Unioned with the service-default + start/auto_widen
+    // scope (never mid_session task scope). Omit for a single-service key.
+    api_hosts: z.array(z.string().min(1).max(253)).max(10).optional(),
+    auth_shape: z
+      .string()
+      .max(120)
+      .regex(
+        /^(bearer|header:.+|query:.+)$/,
+        "auth_shape must be bearer|header:<name>|query:<param>",
+      )
+      .optional(),
+  }),
+  ["egress_hosts"],
+  "Use api_hosts",
+);
 
 const captureSchema = z
   .object({
@@ -192,7 +200,7 @@ const captureExtractSchema = captureSchema.extend({
 
 const CAPTURE_NOTE =
   " Optional capture:{store,source:{role,name?,container?}|{selector,container?}} stores one revealed value after the action and returns metadata, not the value; resolved_source names the element. " +
-  "Use store.api_hosts for API hosts this credential may be sent to; store.egress_hosts is a deprecated alias removed next minor. " +
+  "Use store.api_hosts for API hosts this credential may be sent to. " +
   "Role and value-free CSS selector sources can cross open shadow roots; a unique secret-shaped textbox can match without an id. " +
   "capture_unresolved returns candidate_count 0 and found roles/names; capture_ambiguous means several matches. " +
   "An unresolved capture does not block unrelated actions. Never paste a secret into a page field to read it.";
@@ -270,17 +278,20 @@ const loginLoadSavedSchema = sealVaultCredentialBaseSchema
 
 const loginOAuthSchema = z.object({
   session_id: z.string().min(1),
-  action: z.literal("oauth").optional(),
+  action: z.literal("oauth"),
   provider: z.enum(["google", "github"]),
   ref: z.string().min(1).max(200),
 });
 
-const loginSchema = z.union([
-  loginOAuthSchema,
-  loginPrepareSignupSchema,
-  loginStoreSignupSchema,
-  loginLoadSavedSchema,
-]);
+const loginSchema = flatVariants(
+  {
+    oauth: loginOAuthSchema,
+    prepare_signup: loginPrepareSignupSchema,
+    store_signup: loginStoreSignupSchema,
+    load_saved: loginLoadSavedSchema,
+  },
+  true,
+);
 
 const sessionShape = { session_id: z.string().min(1) };
 
@@ -309,54 +320,50 @@ const clickSchema = z
   })
   .describe("Provide exactly one of ref or screenshot.");
 
-const typeSchema = z
-  .object({
-    ...sessionShape,
-    ref: refSchema,
-    text: z.string().max(4096).optional(),
-    slot: z.string().min(1).max(60).optional(),
-    submit: z.boolean().optional(),
-    capture: z
-      .unknown()
-      .optional()
-      .describe(
-        "Deprecated and rejected; perform the action, then call operate_extract({capture}). Removed next minor.",
-      ),
-    format: actionFormatSchema.optional(),
-  })
-  .refine((args) => (args.text !== undefined) !== (args.slot !== undefined), {
-    message: "Provide exactly one of text or slot",
-  })
-  .describe("Provide exactly one of text or slot.");
+const typeSchema = rejectRemovedFields(
+  z
+    .object({
+      ...sessionShape,
+      ref: refSchema,
+      text: z.string().max(4096).optional(),
+      slot: z.string().min(1).max(60).optional(),
+      submit: z.boolean().optional(),
+      format: actionFormatSchema.optional(),
+    })
+    .refine((args) => (args.text !== undefined) !== (args.slot !== undefined), {
+      message: "Provide exactly one of text or slot",
+    })
+    .describe("Provide exactly one of text or slot."),
+  ["capture"],
+  "Perform the action, then call operate_extract({capture})",
+);
 
-const selectSchema = z
-  .object({
-    ...sessionShape,
-    ref: refSchema.optional(),
-    values: z.array(z.string().min(1).max(4096)).length(1).optional(),
-    selections: formSelectionsSchema.optional(),
-    capture: z
-      .unknown()
-      .optional()
-      .describe(
-        "Deprecated and rejected; perform the action, then call operate_extract({capture}). Removed next minor.",
-      ),
-    country: z.string().min(1).max(60).optional(),
-    format: actionFormatSchema.optional(),
-  })
-  .superRefine((args, ctx) => {
-    const modes =
-      Number(args.ref !== undefined || args.values !== undefined) +
-      Number(args.selections !== undefined) +
-      Number(args.country !== undefined);
-    if (modes !== 1 || (args.ref !== undefined) !== (args.values !== undefined)) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "Provide ref + values, selections, or country",
-      });
-    }
-  })
-  .describe("Provide ref with one value, a selections map, or a country.");
+const selectSchema = rejectRemovedFields(
+  z
+    .object({
+      ...sessionShape,
+      ref: refSchema.optional(),
+      values: z.array(z.string().min(1).max(4096)).length(1).optional(),
+      selections: formSelectionsSchema.optional(),
+      country: z.string().min(1).max(60).optional(),
+      format: actionFormatSchema.optional(),
+    })
+    .superRefine((args, ctx) => {
+      const modes =
+        Number(args.ref !== undefined || args.values !== undefined) +
+        Number(args.selections !== undefined) +
+        Number(args.country !== undefined);
+      if (modes !== 1 || (args.ref !== undefined) !== (args.values !== undefined)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "Provide ref + values, selections, or country",
+        });
+      }
+    })
+    .describe("Provide ref with one value, a selections map, or a country."),
+  ["capture"],
+  "Perform the action, then call operate_extract({capture})",
+);
 
 const uploadSchema = z
   .object({
@@ -379,17 +386,15 @@ const downloadSchema = z.object({
   timeout_ms: z.number().int().min(0).max(600_000).default(120_000),
 });
 
-const pressSchema = z.object({
-  ...sessionShape,
-  key: z.string().min(1).max(40),
-  capture: z
-    .unknown()
-    .optional()
-    .describe(
-      "Deprecated and rejected; perform the action, then call operate_extract({capture}). Removed next minor.",
-    ),
-  format: actionFormatSchema.optional(),
-});
+const pressSchema = rejectRemovedFields(
+  z.object({
+    ...sessionShape,
+    key: z.string().min(1).max(40),
+    format: actionFormatSchema.optional(),
+  }),
+  ["capture"],
+  "Perform the action, then call operate_extract({capture})",
+);
 
 const solveCaptchaSchema = z.object({ ...sessionShape });
 
@@ -415,30 +420,30 @@ const readInboxSchema = z.object({
   grant_inbox_consent: z.boolean().optional(),
 });
 
-const publicFinishSchema = z
-  .object({
-    ...sessionShape,
-    outcome: z
-      .enum(["none", "credentials", "result"])
-      .default("none")
-      .describe(
-        "credentials is deprecated and rejected; use operate_extract({store}) then operate_finish. result requires summary or data.",
-      ),
-    store: z
-      .unknown()
-      .optional()
-      .describe("Deprecated with outcome=credentials; removed next minor"),
-    summary: z.string().max(4000).optional(),
-    data: finishDataSchema.optional(),
-  })
-  .superRefine((args, ctx) => {
-    if (args.outcome === "result" && args.summary === undefined && args.data === undefined)
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "result outcome requires summary or data",
-      });
-  })
-  .describe("For outcome=result, include summary or data.");
+const publicFinishSchema = rejectRemovedFields(
+  z
+    .object({
+      ...sessionShape,
+      outcome: z
+        .enum(["none", "result"])
+        .default("none")
+        .describe(
+          "result requires summary or data; store credentials with operate_extract before finishing.",
+        ),
+      summary: z.string().max(4000).optional(),
+      data: finishDataSchema.optional(),
+    })
+    .superRefine((args, ctx) => {
+      if (args.outcome === "result" && args.summary === undefined && args.data === undefined)
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "result outcome requires summary or data",
+        });
+    })
+    .describe("For outcome=result, include summary or data."),
+  ["store"],
+  "Use operate_extract({store}) before operate_finish",
+);
 
 const driveSchema = z
   .object({
@@ -569,7 +574,7 @@ export const provisionExtractTool: Tool = {
 export const operateLoginTool: Tool = {
   name: "operate_login",
   description:
-    "Log in with provider + ref using the atomic OAuth flow; awaiting-human state is returned in this call. After a dispatched timeout or error, completion may be unknown: retain session_id and call operate_observe before another action; do not repeat OAuth blindly. " +
+    "Choose an explicit action. action=oauth logs in with provider + ref using the atomic OAuth flow; awaiting-human state is returned in this call. After a dispatched timeout or error, completion may be unknown: retain session_id and call operate_observe before another action; do not repeat OAuth blindly. " +
     "Drive the sealed username/password login lifecycle without exposing raw values. " +
     "action='prepare_signup' seals the user's captured email and a generated password; " +
     "'store_signup' vaults those prepared slots with the same login-host safeguards; " +
@@ -741,7 +746,7 @@ export const operateFinishTool: Tool = {
     additionalProperties: true,
   },
   description:
-    "Finish the task and close its session. outcome='none' closes without a reported outcome; 'result' reports summary or data — the reported outcome is recorded as-is. Extract and store credentials with operate_extract({store}) before calling operate_finish. Deprecated outcome='credentials' returns an error and will be removed next minor. Successful completion saves eligible login state through the existing teardown.",
+    "Finish the task and close its session. outcome='none' closes without a reported outcome; 'result' reports summary or data — the reported outcome is recorded as-is. Extract and store credentials with operate_extract({store}) before calling operate_finish. Successful completion saves eligible login state through the existing teardown.",
   inputSchema: publicFinishSchema,
   async handler(args, api, context) {
     return await (
@@ -837,23 +842,10 @@ const captureOutputSchema = {
 };
 
 for (const tool of OPERATE_TOOLS) {
-  if (
-    ![
-      "operate_click",
-      "operate_type",
-      "operate_select",
-      "operate_press",
-      "operate_extract",
-    ].includes(tool.name)
-  )
-    continue;
-  const supportsCapture = tool.name === "operate_click" || tool.name === "operate_extract";
-  tool.description += supportsCapture
-    ? CAPTURE_NOTE +
-      (tool.name === "operate_click" ? CLICK_CAPTURE_NOTE : "") +
-      (tool.name === "operate_extract" ? EXTRACT_CAPTURE_NOTE : "")
-    : " Deprecated capture is rejected; perform the action, then call operate_extract({capture}). Removed next minor.";
-  if (supportsCapture) tool.jsonOutputSchema = captureOutputSchema;
+  if (!["operate_click", "operate_extract"].includes(tool.name)) continue;
+  tool.description +=
+    CAPTURE_NOTE + (tool.name === "operate_click" ? CLICK_CAPTURE_NOTE : EXTRACT_CAPTURE_NOTE);
+  tool.jsonOutputSchema = captureOutputSchema;
 }
 
 // Keep the additive click receipt discoverable alongside the shared capture result.

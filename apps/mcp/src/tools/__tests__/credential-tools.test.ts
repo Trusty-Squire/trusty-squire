@@ -1,7 +1,10 @@
+import { findTool } from "../index.js";
+import { flatVariants } from "../flat-variants.js";
+import { z } from "zod";
 // Credential tools (write-only-sink surface): store, vouch-gated non-secret
 // metadata edit/delete, and proxy use. Secret rotation remains re-store only.
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { ApiClient } from "../../api-client.js";
 import { storeCredentialTool } from "../store-credential.js";
 import { useCredentialTool } from "../use-credential.js";
@@ -117,50 +120,17 @@ describe("store_credential (upsert)", () => {
     expect(JSON.stringify(result)).not.toContain("shared-test-value");
   });
 
-  it("maps api_hosts and deprecated observed_hosts to the same vault allowlist input", async () => {
-    let seen: unknown;
-    const api = mockApi({
-      storeCredential: async (input) => {
-        seen = input;
-        return {
-          reference: "vault://a/b/resend",
-          service: "Resend",
-          label: "default",
-          field_names: ["value"],
-          auth_strategy: null,
-          signin_url: null,
-          login_hosts: [],
-          allowed_hosts: ["api.resend.com"],
-          created_at: "x",
-          updated: true,
-        };
-      },
-    });
-    for (const hosts of [
-      { api_hosts: ["resend.com", "api.resend.com"] },
-      { observed_hosts: ["resend.com", "api.resend.com"] },
-    ]) {
-      const args = storeCredentialTool.inputSchema.parse({
-        service: "Resend",
-        value: "re_x",
-        ...hosts,
-      });
-      await storeCredentialTool.handler(args, api);
-      expect(seen).toMatchObject({
-        service: "Resend",
-        observed_hosts: ["resend.com", "api.resend.com"],
-      });
-    }
-    const combined = storeCredentialTool.inputSchema.parse({
+  it("passes canonical api_hosts to the vault allowlist input", async () => {
+    const storeCredential = vi.fn().mockResolvedValue({ reference: "vault://fixture" });
+    const args = storeCredentialTool.inputSchema.parse({
       service: "Resend",
-      value: "re_x",
-      api_hosts: ["api.resend.com", "shared.test"],
-      observed_hosts: ["shared.test", "other.test"],
+      value: "synthetic",
+      api_hosts: ["api.resend.com", "api.resend.com"],
     });
-    await storeCredentialTool.handler(combined, api);
-    expect(seen).toMatchObject({
-      observed_hosts: ["api.resend.com", "shared.test", "other.test"],
-    });
+    await storeCredentialTool.handler(args, mockApi({ storeCredential }));
+    expect(storeCredential).toHaveBeenCalledWith(
+      expect.objectContaining({ observed_hosts: ["api.resend.com"] }),
+    );
   });
 
   it("schema requires value or fields", () => {
@@ -174,6 +144,7 @@ describe("store_credential (upsert)", () => {
       value: sk("x"),
     });
     const edited = editCredentialTool.inputSchema.safeParse({
+      action: "start",
       reference: "vault://a/b/c",
       changes: { label: "  production  " },
     });
@@ -185,6 +156,7 @@ describe("store_credential (upsert)", () => {
     ).toBe(false);
     expect(
       editCredentialTool.inputSchema.safeParse({
+        action: "start",
         reference: "vault://a/b/c",
         changes: { label: "   " },
       }).success,
@@ -283,6 +255,7 @@ describe("edit_credential", () => {
     });
     const pending = await editCredentialTool.handler(
       {
+        action: "start",
         service: "OpenAI",
         name: "default",
         changes: { allowed_hosts: { mode: "add", hosts: ["uploads.openai.com"] } },
@@ -303,7 +276,7 @@ describe("edit_credential", () => {
     expect(JSON.stringify(pending)).not.toContain(sk("secret"));
 
     await expect(
-      editCredentialTool.handler({ approval_id: "mutation_1" }, api),
+      editCredentialTool.handler({ action: "resume", approval_id: "mutation_1" }, api),
     ).resolves.toMatchObject({
       status: "credential_updated",
       approval_id: "mutation_1",
@@ -313,12 +286,14 @@ describe("edit_credential", () => {
   it("rejects secret/immutable edit fields in the schema", () => {
     expect(
       editCredentialTool.inputSchema.safeParse({
+        action: "start",
         reference: "vault://a/b/c",
         changes: { value: sk("secret") },
       }).success,
     ).toBe(false);
     expect(
       editCredentialTool.inputSchema.safeParse({
+        action: "start",
         reference: "vault://a/b/c",
         changes: {
           allowed_hosts: {
@@ -357,13 +332,13 @@ describe("delete_credential", () => {
       }),
     });
     await expect(
-      deleteCredentialTool.handler({ reference: "vault://a/b/c" }, api),
+      deleteCredentialTool.handler({ action: "start", reference: "vault://a/b/c" }, api),
     ).resolves.toMatchObject({
       status: "approval_pending",
       operation: "delete",
     });
     await expect(
-      deleteCredentialTool.handler({ approval_id: "mutation_1" }, api),
+      deleteCredentialTool.handler({ action: "resume", approval_id: "mutation_1" }, api),
     ).resolves.toMatchObject({
       status: "credential_deleted",
       approval_id: "mutation_1",
@@ -372,13 +347,87 @@ describe("delete_credential", () => {
 
   it("does not accept an edit approval as delete authority", async () => {
     const api = mockApi({ getCredentialMutationApproval: async () => BASE_MUTATION });
-    await expect(deleteCredentialTool.handler({ approval_id: "mutation_1" }, api)).resolves.toEqual(
-      {
-        status: "approval_intent_mismatch",
-        error: "approval_operation_mismatch",
-        expected_operation: "delete",
-        actual_operation: "edit",
-      },
+    await expect(
+      deleteCredentialTool.handler({ action: "resume", approval_id: "mutation_1" }, api),
+    ).resolves.toEqual({
+      status: "approval_intent_mismatch",
+      error: "approval_operation_mismatch",
+      expected_operation: "delete",
+      actual_operation: "edit",
+    });
+  });
+});
+
+const schema = (name: string) => findTool(name)!.inputSchema;
+const reference = "vault://fixture/amazon";
+
+describe("flat operation grammar", () => {
+  it.each(["fetch_credential", "edit_credential", "delete_credential", "edit_payment_card"])(
+    "%s keeps start/resume exclusive and strict",
+    (name) => {
+      const input = schema(name);
+      const start =
+        name === "edit_payment_card"
+          ? { card_id: "card" }
+          : { reference, ...(name === "edit_credential" ? { changes: { label: "renamed" } } : {}) };
+      expect(input.safeParse({ action: "start", ...start }).success).toBe(true);
+      const resume = input.parse({ action: "resume", approval_id: "approval" });
+      // Both stdio and broker parse the same input: action must survive parsing.
+      expect(input.parse(resume)).toEqual(resume);
+      for (const bad of [
+        {},
+        start,
+        { action: "resume" },
+        { action: "resume", approval_id: "approval", ...start },
+        { action: "start", ...start, approval_id: "approval" },
+        { action: "start", ...start, value: "immutable" },
+      ])
+        expect(input.safeParse(bad).success).toBe(false);
+    },
+  );
+
+  it("requires each login action's own fields and keeps defaults and unknown-field stripping", () => {
+    const input = schema("operate_login");
+    for (const args of [
+      { action: "oauth", provider: "google", ref: "e1" },
+      { action: "prepare_signup" },
+      { action: "store_signup", service: "amazon", login_hosts: ["amazon.com"] },
+      { action: "load_saved", reference },
+      { action: "load_saved", service: "amazon" },
+    ]) {
+      const parsed = input.parse({ session_id: "fixture", ...args });
+      expect(input.parse(parsed)).toEqual(parsed);
+    }
+    expect(
+      input.parse({
+        session_id: "fixture",
+        action: "prepare_signup",
+        provider: 123,
+        unknown: true,
+      }),
+    ).toEqual({ session_id: "fixture", action: "prepare_signup" });
+    for (const args of [
+      {},
+      { provider: "google", ref: "e1" },
+      { action: "oauth", provider: "google" },
+      { action: "store_signup", service: "amazon" },
+      { action: "store_signup", service: "amazon", login_hosts: [] },
+      { action: "prepare_signup", password_length: 10 },
+    ])
+      expect(input.safeParse({ session_id: "fixture", ...args }).success).toBe(false);
+    expect(input.parse({ session_id: "fixture", action: "load_saved", reference })).toMatchObject({
+      fields: ["login", "password"],
+      slot_prefix: "vault",
+    });
+  });
+
+  it("preserves strict unknown behavior even across variant fields", () => {
+    const input = flatVariants({
+      start: z.object({ reference: z.string() }).strict(),
+      resume: z.object({ approval_id: z.string() }).strict(),
+    });
+    expect(input.safeParse({ action: "start", reference, approval_id: "other" }).success).toBe(
+      false,
     );
   });
 });

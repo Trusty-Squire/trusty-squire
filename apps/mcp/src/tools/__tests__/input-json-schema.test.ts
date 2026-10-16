@@ -12,6 +12,16 @@ function advertised(name: string) {
 }
 
 describe("generated tool input schemas", () => {
+  it("advertises only object roots with explicit properties", () => {
+    for (const tool of tools) {
+      const schema = inputJsonSchema(tool.inputSchema);
+      expect(schema, tool.name).toMatchObject({ type: "object" });
+      expect(schema.properties, tool.name).toBeTypeOf("object");
+      expect(schema.anyOf, tool.name).toBeUndefined();
+      expect(schema.oneOf, tool.name).toBeUndefined();
+    }
+  });
+
   it("advertises Zod's inbox index and upload path bounds", () => {
     const validator = new AjvJsonSchemaValidator();
     const inbox = validator.getValidator(advertised("operate_read_inbox") as JsonSchemaType);
@@ -22,7 +32,7 @@ describe("generated tool input schemas", () => {
     expect(upload({ session_id: "s", target: "e1", path: "relative/file" }).valid).toBe(false);
   });
 
-  it("preserves capture source variants and deprecation guidance", () => {
+  it("preserves the supported capture source variants", () => {
     const sourceVariants = (name: string) => {
       const properties = advertised(name).properties as Record<string, unknown>;
       const capture = properties.capture as { properties: { source: { anyOf: unknown[] } } };
@@ -30,14 +40,5 @@ describe("generated tool input schemas", () => {
     };
     expect(sourceVariants("operate_click")).toHaveLength(3);
     expect(sourceVariants("operate_extract")).toHaveLength(2);
-    expect(
-      (advertised("operate_type").properties as Record<string, unknown>).capture,
-    ).toMatchObject({
-      deprecated: true,
-      description: expect.stringContaining("Deprecated"),
-    });
-    expect(
-      (advertised("store_credential").properties as Record<string, unknown>).observed_hosts,
-    ).toMatchObject({ deprecated: true, description: expect.stringContaining("Deprecated") });
   });
 });

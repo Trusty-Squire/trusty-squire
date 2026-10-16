@@ -33,10 +33,7 @@ describe("edit_payment_card", () => {
       }),
     });
 
-    const pending = await editPaymentCardTool.handler(
-      { card_id: "card_1" },
-      api,
-    );
+    const pending = await editPaymentCardTool.handler({ action: "start", card_id: "card_1" }, api);
     expect(createdInput).toEqual({ operation: "edit_card", card_id: "card_1" });
     expect(pending).toMatchObject({
       status: "approval_pending",
@@ -44,10 +41,16 @@ describe("edit_payment_card", () => {
       next: { tool: "edit_payment_card", approval_id: "card_mutation_1" },
     });
 
-    const byLabel = await editPaymentCardTool.handler({ label: "Personal card" }, api);
+    const byLabel = await editPaymentCardTool.handler(
+      { action: "start", label: "Personal card" },
+      api,
+    );
     expect(byLabel).toMatchObject({ status: "approval_pending" });
 
-    const done = await editPaymentCardTool.handler({ approval_id: "card_mutation_1" }, api);
+    const done = await editPaymentCardTool.handler(
+      { action: "resume", approval_id: "card_mutation_1" },
+      api,
+    );
     expect(done).toMatchObject({
       status: "card_updated",
       approval_id: "card_mutation_1",
@@ -59,7 +62,7 @@ describe("edit_payment_card", () => {
     const api = mockApi({
       createCardMutationApproval: async () => BASE_APPROVAL,
     });
-    const pending = await editPaymentCardTool.handler({ card_id: "card_1" }, api);
+    const pending = await editPaymentCardTool.handler({ action: "start", card_id: "card_1" }, api);
     const serialized = JSON.stringify(pending);
     // Only ever the display metadata, never a sealed blob or PAN.
     expect(serialized).not.toContain("blob");
@@ -76,7 +79,7 @@ describe("edit_payment_card", () => {
       }),
     });
     await expect(
-      editPaymentCardTool.handler({ approval_id: "card_mutation_1" }, api),
+      editPaymentCardTool.handler({ action: "resume", approval_id: "card_mutation_1" }, api),
     ).resolves.toMatchObject({
       status: "card_mutation_refused",
       reason: "card_changed",
@@ -84,10 +87,11 @@ describe("edit_payment_card", () => {
   });
 
   it("rejects a selector-less start and is destructive, idempotent, and always loaded", () => {
-    expect(editPaymentCardTool.inputSchema.safeParse({}).success).toBe(false);
-    expect(editPaymentCardTool.inputSchema.safeParse({ operation: "edit_card" }).success).toBe(
-      false,
-    );
+    expect(editPaymentCardTool.inputSchema.safeParse({ action: "start" }).success).toBe(false);
+    expect(
+      editPaymentCardTool.inputSchema.safeParse({ action: "start", operation: "edit_card" })
+        .success,
+    ).toBe(false);
     expect(editPaymentCardTool.annotations).toMatchObject({
       destructiveHint: true,
       idempotentHint: true,

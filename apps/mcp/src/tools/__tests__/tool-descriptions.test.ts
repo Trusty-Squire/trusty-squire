@@ -126,13 +126,6 @@ describe("capture schemas match their handlers", () => {
       expect(capture.properties.source.anyOf).toHaveLength(name === "operate_click" ? 3 : 2);
       expect(capture.properties.store).toBeDefined();
     }
-    for (const name of ["operate_type", "operate_select", "operate_press"]) {
-      const tool = OPERATE_TOOLS.find((entry) => entry.name === name)!;
-      const capture = (inputJsonSchema(tool.inputSchema).properties as Record<string, unknown>)
-        .capture;
-      expect(capture).toMatchObject({ deprecated: true });
-      expect(capture).not.toHaveProperty("properties");
-    }
   });
 
   it("rejects unusable capture inputs before dispatch", () => {
@@ -145,7 +138,7 @@ describe("capture schemas match their handlers", () => {
       operate_press: { session_id: "session", key: "Enter" },
       operate_extract: { session_id: "session" },
     };
-    for (const name of ["operate_click", "operate_type", "operate_select", "operate_press"]) {
+    for (const name of ["operate_click"]) {
       const tool = OPERATE_TOOLS.find((entry) => entry.name === name)!;
       expect(
         tool.inputSchema.safeParse({ ...inputs[name], capture: { store, source: element } })
@@ -180,22 +173,6 @@ describe("capture schemas match their handlers", () => {
         capture: { store, source: element, write_id: "old" },
       }).success,
     ).toBe(true);
-  });
-
-  it("rejects deprecated mutation capture before dispatch with the replacement call", async () => {
-    const inputs: Record<string, Record<string, unknown>> = {
-      operate_type: { session_id: "session", ref: "e1", text: "value" },
-      operate_select: { session_id: "session", ref: "e1", values: ["one"] },
-      operate_press: { session_id: "session", key: "Enter" },
-    };
-    for (const name of Object.keys(inputs)) {
-      const tool = OPERATE_TOOLS.find((entry) => entry.name === name)!;
-      const args = tool.inputSchema.parse({
-        ...inputs[name],
-        capture: { store: { service: "x" } },
-      });
-      await expect(tool.handler(args, null)).rejects.toThrow(/operate_extract\(\{capture\}\)/);
-    }
   });
 
   it("navigation does not promise a control-plane restriction", () => {
