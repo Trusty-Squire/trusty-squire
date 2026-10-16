@@ -11,14 +11,16 @@ describe.skipIf(!databaseUrl)("proxy daily backfill against PostgreSQL", () => {
   const scopedUrl = new URL(databaseUrl ?? "postgresql://skipped.invalid/postgres");
   scopedUrl.searchParams.set("schema", schema);
   type Client = ApiPrismaClient & { $disconnect(): Promise<void> };
-  const require = createRequire(import.meta.url);
-  const { PrismaClient } = require("../../../node_modules/.prisma/api-client/index.js") as {
-    PrismaClient: new (options: { datasourceUrl: string }) => Client;
-  };
   let admin: Client;
   let db: Client;
 
   beforeAll(async () => {
+    // Vitest evaluates skipped suite definitions, so resolve the generated
+    // client only when this database-backed suite actually runs.
+    const require = createRequire(import.meta.url);
+    const { PrismaClient } = require("../../../node_modules/.prisma/api-client/index.js") as {
+      PrismaClient: new (options: { datasourceUrl: string }) => Client;
+    };
     admin = new PrismaClient({ datasourceUrl: databaseUrl! });
     await admin.$executeRawUnsafe(`CREATE SCHEMA "${schema}"`);
     db = new PrismaClient({ datasourceUrl: scopedUrl.toString() });
