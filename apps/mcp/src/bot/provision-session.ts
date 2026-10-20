@@ -53,6 +53,7 @@ import type { OAuthProviderId } from "./oauth-providers.js";
 import type { PageNotReadyReason } from "./page-ready.js";
 
 export interface Observation {
+  native_dialog_notices?: string[];
   session_id: string;
   /** No DOM snapshot was taken while the page was still rendering. */
   page_readiness?: { ready: false; reason: PageNotReadyReason; elapsed_ms: number };
@@ -259,6 +260,7 @@ import {
   invalidateCompactV2Snapshot,
   oauthCompletionSourcePage,
   observeSession,
+  nativeDialogObservation,
   observedOAuthChallenge,
   observedThreeDsChallenge,
   type ObserveDetail,
@@ -386,6 +388,7 @@ export async function observe(
   format?: "compact" | "full",
 ): Promise<Observation> {
   const result = await observeOwned(sessionId, format);
+  if (sessionForCall(sessionId)?.browser.nativeDialogs?.blocked) return result;
   const oauth = await observedOAuthChallenge(sessionId);
   const threeDs = await observedThreeDsChallenge(sessionId);
   return {
@@ -591,6 +594,8 @@ export async function observeSubtree(
 ): Promise<Record<string, unknown>> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
+  const native = nativeDialogObservation(session);
+  if (native !== undefined) return { ...native };
   const page = operationPageForSession(session);
   const authorization = session.compactV2Active
     ? compactV2AuthorizationForTarget(session, target)

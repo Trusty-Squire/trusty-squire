@@ -85,3 +85,17 @@ An outbound WebSocket queue of 1,000,000 bytes or more causes new frames to be
 dropped for that viewer; navigation and other metadata are still
 sent to every open viewer. These URL/origin fields use the session's narrow
 released-card value mask; the frame pixels remain raw as described above.
+
+## Native browser dialogs
+
+The stream sends `{type:"native_dialogs",dialogs:[...],notices:[...]}` on attach
+and whenever session-owned native dialog state changes. Each dialog carries its
+opaque `id`, browser `type`, `text`, `default_value`, `options` and `expires_at`.
+The viewer renders this metadata over the page stream; native browser chrome
+is not part of the page screenshot. Replies use
+`{type:"native_dialog",id,action:"accept"|"dismiss",text?}`. Prompt text is valid
+only on accept. A reply takes human control and consumes that dialog id once;
+expired ids cannot answer later dialogs. Replies bypass the ordinary pointer
+input queue because the click opening a native dialog can remain blocked until
+that very reply. The usual session call lease and human/agent control rules
+still apply. Timeout dismissal is shown in `notices`.

@@ -1,5 +1,6 @@
 import type { BrowserContext, Frame, Page } from "playwright";
 import { SessionDownloads } from "./downloads.js";
+import { NativeDialogs } from "./native-dialogs.js";
 import { OwnedPages } from "./owned-pages.js";
 import { waitForPageReady } from "./page-ready.js";
 
@@ -23,6 +24,7 @@ export class PageDriver {
 
   // Every page this session owns reports the downloads it starts here.
   readonly downloads = new SessionDownloads();
+  readonly nativeDialogs = new NativeDialogs();
 
   readonly ownedPages = new OwnedPages(
     (page) => {
@@ -30,7 +32,10 @@ export class PageDriver {
       this.openedTabs.push(page);
       if (this.openedTabs.length > 8) this.openedTabs.splice(0, this.openedTabs.length - 8);
     },
-    (page) => this.downloads.watch(page),
+    (page) => {
+      this.nativeDialogs.watch(page);
+      this.downloads.watch(page);
+    },
   );
 
   private readonly documentSubscriptions = new Map<Page, () => void>();
@@ -176,7 +181,7 @@ export class PageDriver {
     this.page = candidate;
     this.trackMainDocument(candidate);
     await candidate.bringToFront().catch(() => undefined);
-    await waitForPageReady(candidate, { kind: "adopted-tab" });
+    if (!this.nativeDialogs.blocked) await waitForPageReady(candidate, { kind: "adopted-tab" });
     return candidate.isClosed() ? null : candidate.url();
   }
 
@@ -264,6 +269,7 @@ export class PageDriver {
         return false;
       }
     };
+    const dialogRevision = this.nativeDialogs.revision;
     for (let attempt = 1; ; attempt++) {
       try {
         await page.goto(url, {
@@ -292,6 +298,8 @@ export class PageDriver {
         }
         break;
       } catch (err) {
+        // A dismissed beforeunload is a decision to stay, never a transient network retry.
+        if (this.nativeDialogs.revision !== dialogRevision) throw err;
         const msg = err instanceof Error ? err.message : String(err);
         // Some client-routed apps commit the address bar to the requested SPA
         // route but never fire the lifecycle event Playwright is waiting for.
@@ -339,6 +347,7 @@ export class PageDriver {
     }
   }
   disposeRegistrations(): void {
+    void this.nativeDialogs.dispose();
     this.ownedPages.dispose();
     for (const dispose of this.documentSubscriptions.values()) dispose();
     this.openedTabs.length = 0;

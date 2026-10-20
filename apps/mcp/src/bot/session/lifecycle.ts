@@ -568,6 +568,7 @@ async function dismissStartConsentBanner(
 ): Promise<void> {
   // The widget may render just after navigation, so make one bounded retry.
   for (let attempt = 0; attempt < 2; attempt++) {
+    if (browser.nativeDialogs?.blocked) return;
     const cta = await browser.dismissConsentBanner().catch(() => null);
     if (cta !== null) {
       audit(sessionId, "consent_dismissed", { cta });
@@ -628,7 +629,7 @@ export async function startProvisionSession(
     // Provider detection is intentionally lazy: ordinary starts pay no Google
     // identity probe and receive provider-neutral login guidance.
     const loginHint = loginSessionGuidance();
-    if (opts.initialObservation === "drive") {
+    if (opts.initialObservation === "drive" && !browser.nativeDialogs?.blocked) {
       session.initializing = false;
       session.lastActivityAt = Date.now();
       return {
@@ -692,7 +693,7 @@ export async function startHarnessProvisionSession(
       allowed_hosts: hostStrings(session),
     });
     await opts.browser.goto(opts.serviceUrl, undefined, "document-ready");
-    if (opts.initialObservation === "drive") {
+    if (opts.initialObservation === "drive" && !opts.browser.nativeDialogs?.blocked) {
       await dismissStartConsentBanner(opts.browser, id);
       session.initializing = false;
       session.lastActivityAt = Date.now();

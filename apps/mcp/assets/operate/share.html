@@ -54,6 +54,19 @@
     <div id="bar">
       <span id="state">Connecting…</span><button id="focus" type="button">Show keyboard</button>
     </div>
+    <section
+      id="native-dialog"
+      role="alertdialog"
+      aria-modal="true"
+      aria-labelledby="dialog-message"
+      hidden
+      style="padding: 20px; background: #292929"
+    >
+      <p id="dialog-message" style="white-space: pre-wrap"></p>
+      <input id="dialog-text" aria-label="Prompt response" maxlength="4096" />
+      <button id="dialog-accept" type="button">OK</button>
+      <button id="dialog-dismiss" type="button">Cancel</button>
+    </section>
     <div id="screen">
       <canvas id="canvas" tabindex="0" aria-label="Interactive browser view"></canvas>
     </div>
@@ -66,6 +79,24 @@
       const endpoint = new URL("stream", location.href);
       endpoint.protocol = location.protocol === "https:" ? "wss:" : "ws:";
       const socket = new WebSocket(endpoint);
+      const dialogPanel = document.getElementById("native-dialog");
+      const dialogText = document.getElementById("dialog-text");
+      let nativeDialog = null;
+      for (const action of ["accept", "dismiss"]) {
+        document.getElementById(`dialog-${action}`).onclick = () => {
+          if (!nativeDialog) return;
+          send({
+            type: "native_dialog",
+            id: nativeDialog.id,
+            action,
+            ...(nativeDialog.type === "prompt" &&
+            action === "accept" &&
+            dialogText.value !== nativeDialog.default_value
+              ? { text: dialogText.value }
+              : {}),
+          });
+        };
+      }
       let drawing = false;
       let nextFrame = null;
       let frameEpoch = 0;
@@ -105,6 +136,20 @@
       }
       socket.onmessage = (event) => {
         const message = JSON.parse(event.data);
+        if (message.type === "native_dialogs") {
+          const previous = nativeDialog?.id;
+          nativeDialog = message.dialogs[0] ?? null;
+          dialogPanel.hidden = nativeDialog === null;
+          document.getElementById("screen").inert = nativeDialog !== null;
+          if (nativeDialog) {
+            document.getElementById("dialog-message").textContent = nativeDialog.text;
+            dialogText.hidden = nativeDialog.type !== "prompt";
+            if (previous !== nativeDialog.id) {
+              dialogText.value = nativeDialog.default_value;
+              document.getElementById("dialog-accept").focus();
+            }
+          } else if (message.notices?.length) state.textContent = message.notices.at(-1);
+        }
         if (message.type === "frame") paint(message.data);
         if (message.type === "blank") {
           frameEpoch++;

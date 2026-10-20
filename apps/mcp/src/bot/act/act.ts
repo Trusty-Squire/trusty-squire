@@ -51,6 +51,7 @@ import {
   invalidateCompactV2Snapshot,
   oauthCompletionSourcePage,
   observeSession,
+  nativeDialogObservation,
   observedThreeDsChallenge,
   type ObserveDetail,
   operationPageForSession,
@@ -655,6 +656,8 @@ export async function act(
         ? await withOAuthActionBoundary(session, oauthProvider, execute, outputFormat)
         : await execute(undefined);
     timing.enter("reply");
+    if (session !== undefined && nativeDialogObservation(session) !== undefined)
+      return result.observation;
     const threeDs = await observedThreeDsChallenge(sessionId);
     return threeDs === undefined
       ? result.observation
@@ -915,6 +918,8 @@ async function executeAct(
 ): Promise<InternalActResult> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
+  if (session.browser.nativeDialogs?.blocked)
+    throw new Error("native_dialog_pending: use operate_dialog");
   let browser = session.browser;
   const compactV2ActionPage = operationPage ?? operationPageForSession(session);
   const driveSettle =
@@ -922,7 +927,7 @@ async function executeAct(
   const skipToolSettle = options?.drive === true;
   let settleMs = 0;
   const settle = async (combobox = false) => {
-    if (skipToolSettle) return;
+    if (skipToolSettle || browser.nativeDialogs?.blocked) return;
     const started = Date.now();
     timing?.enter("settle");
     try {
@@ -1522,6 +1527,8 @@ async function executeAct(
       if (!stillObservedDocument) invalidateCompactV2Snapshot(session);
     }
   }
+  const native = nativeDialogObservation(session);
+  if (native !== undefined) return { observation: native, outcome: {} };
   if (action.kind === "click" || action.kind === "js_click") {
     actionPageAfter = returnFromClosedPicker(session, actionPageAfter);
   }
