@@ -70,7 +70,8 @@ describe("direct-import selection", () => {
 
   it("treats vi.mock as a direct import and ignores missing ghost tier paths", () => {
     expect(realBrowserFiles).not.toContain("src/bot/__tests__/autocomplete-commit-confirm.test.ts");
-    expect(realBrowserFiles.every((file) => file.endsWith(".test.ts"))).toBe(true);
+    expect(realBrowserFiles.every((file) => /\.test\.(ts|mjs)$/.test(file))).toBe(true);
+    expect(realBrowserFiles).toContain("scripts/native-dialog-built-demo.test.mjs");
     const specs = extractImportSpecs('vi.mock("../provision-session.js", async (importOriginal) => ({}));');
     expect(specs).toEqual(["../provision-session.js"]);
   });

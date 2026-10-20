@@ -917,6 +917,19 @@ export class BrowserController implements BrowserDriver {
     controller.processOwner.launchedMode = "headless";
     return controller;
   }
+  get nativeDialogs() {
+    return this.pageDriver.nativeDialogs;
+  }
+
+  nativeDialogEvidence() {
+    return this.maskOperatorOutput(
+      this.nativeDialogs.evidence().map((dialog) => ({
+        ...dialog,
+        default_value: this.cardValueOutputMask.maskText(dialog.default_value, dialog.text),
+      })),
+    );
+  }
+
   trackOpenedTabs(page: Page): void {
     this.pageDriver.trackOpenedTabs(page);
     void this.operatorEvidence.attach(page).catch(() => undefined);
@@ -958,7 +971,7 @@ export class BrowserController implements BrowserDriver {
     const target = page === undefined ? this.page : page;
     if (!target) return;
     await markOperatorMutationDispatchAttempted();
-    await target.keyboard.press(key).catch(() => {});
+    await this.nativeDialogs.interrupt(() => target.keyboard.press(key).catch(() => {}));
   }
 
   async scroll(direction: "up" | "down" | "top" | "bottom", page?: Page | null): Promise<void> {
@@ -1268,7 +1281,7 @@ export class BrowserController implements BrowserDriver {
     readiness: "domcontentloaded" | "document-ready" = "domcontentloaded",
   ): Promise<void> {
     await markOperatorMutationDispatchAttempted();
-    return await this.pageDriver.goto(url, page, readiness);
+    return await this.nativeDialogs.interrupt(() => this.pageDriver.goto(url, page, readiness));
   }
 
   // Contract C `type` verb: the driver owns the handle/frame/page dispatch.
@@ -1799,6 +1812,13 @@ export class BrowserController implements BrowserDriver {
   // through dispatch tracking; js_click never does; an action page that is
   // not the active page is dispatched untracked (pre-existing semantics).
   async click(target: DriverTarget & { method: ClickMethod }, page?: Page | null): Promise<void> {
+    await this.nativeDialogs.interrupt(() => this.clickDispatch(target, page));
+  }
+
+  private async clickDispatch(
+    target: DriverTarget & { method: ClickMethod },
+    page?: Page | null,
+  ): Promise<void> {
     const p = page ?? undefined;
     const tracked = target.method === "click" && (p === undefined || this.isActivePage(p));
     if (target.kind === "handle") {

@@ -25,6 +25,7 @@ import { editPaymentCardTool } from "./card-mutations.js";
 import { fetchCredentialTool } from "./fetch-credential.js";
 import { operateFetchTextTool } from "./operate-fetch-text.js";
 import { operateCeremonyWindowTool } from "./operate-ceremony-window.js";
+import { operateDialogTool } from "./operate-dialog.js";
 import { operateShareTool } from "./operate-share.js";
 
 export interface Tool<TArgs extends Record<string, unknown> = Record<string, unknown>> {
@@ -105,6 +106,7 @@ export function buildToolRegistry(env: NodeJS.ProcessEnv = process.env): Tool[] 
     // plus the unchanged recipe save/run tools.
     ...OPERATE_TOOLS,
     operateShareTool,
+    operateDialogTool,
   ] as Tool[];
 }
 

@@ -209,7 +209,11 @@ export interface SafePageSemanticsV2 {
 }
 
 export interface SafeBlockerV2 {
-  kind: "challenge" | "validation" | "dialog" | "error_page";
+  kind: "challenge" | "validation" | "dialog" | "error_page" | "native_dialog";
+  id?: string;
+  type?: "alert" | "confirm" | "prompt" | "beforeunload";
+  default_value?: string;
+  expires_at?: string;
   text: string;
   ref?: string;
   target?: "unavailable";

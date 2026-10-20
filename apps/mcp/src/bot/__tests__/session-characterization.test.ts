@@ -301,6 +301,7 @@ describe("characterization: registered operator tool surface", () => {
       "operate_login",
       "operate_extract",
       "operate_share",
+      "operate_dialog",
     ]);
   });
 

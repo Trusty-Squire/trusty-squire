@@ -619,6 +619,13 @@ export function compactV2PublicObservation(
         ? ("browser-use-control-query" as const)
         : ("browser-use-dom" as const),
     session_id: session.id,
+    ...(session.browser.nativeDialogs?.timeoutNotices().length
+      ? {
+          native_dialog_notices: session.browser.maskOperatorOutput(
+            session.browser.nativeDialogs.timeoutNotices(),
+          ),
+        }
+      : {}),
     url: fields.url ?? session.browser.currentUrl(),
     stage: fields.stage,
     ...(outputFormat === "compact" ? { safe_table: [] } : {}),
@@ -950,7 +957,15 @@ export async function observeQuery(
   role?: SafeControlV2["role"],
   cursor?: string,
 ): Promise<Record<string, unknown>> {
-  const result = await observeQueryOwned(sessionId, query, role, cursor);
+  const session = sessionForCall(sessionId);
+  const read = async () => await observeQueryOwned(sessionId, query, role, cursor);
+  const result =
+    session?.browser.nativeDialogs === undefined
+      ? await read()
+      : await session.browser.nativeDialogs.read(read, () => ({
+          ...nativeDialogObservation(session)!,
+        }));
+  if (session?.browser.nativeDialogs?.blocked) return result;
   const oauth = await observedOAuthChallenge(sessionId);
   const threeDs = await observedThreeDsChallenge(sessionId);
   return {
@@ -969,6 +984,8 @@ async function observeQueryOwned(
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
   const sourcePage = operationPageForSession(session);
+  const native = nativeDialogObservation(session);
+  if (native !== undefined) return { ...native };
   const needle = norm(query);
   // A role filter is stated in wire form — the letters (and literal roles) the
   // compact map actually emits (C5): filtering `role:"s"` against the internal
@@ -1257,7 +1274,34 @@ export function terminalOAuthCompletionObservation(session: Session, url: string
   });
 }
 
+export function nativeDialogObservation(session: Session): Observation | undefined {
+  const dialogs = session.browser.nativeDialogEvidence?.() ?? [];
+  if (dialogs.length === 0) return undefined;
+  return session.browser.maskOperatorOutput({
+    ...compactV2PublicObservation(
+      session,
+      {
+        stage: "form",
+        guidance:
+          "Answer the native browser dialog with operate_dialog using its id. The dialog is awaiting an explicit answer.",
+      },
+      "compact",
+    ),
+    semantic: { blocked: true, blockers: dialogs },
+  });
+}
+
 export async function observeSession(
+  ...args: Parameters<typeof observeSessionOwned>
+): Promise<Observation> {
+  const session = args[0];
+  const read = async () => await observeSessionOwned(...args);
+  return session.browser.nativeDialogs === undefined
+    ? await read()
+    : await session.browser.nativeDialogs.read(read, () => nativeDialogObservation(session)!);
+}
+
+async function observeSessionOwned(
   session: Session,
   _detail: "compact" | "full" = "compact",
   startMetadata?: CompactV2StartMetadata,
@@ -1270,6 +1314,8 @@ export async function observeSession(
   actedRef?: string,
   onActPhase?: (phase: "captcha_probe" | "observation") => void,
 ): Promise<Observation> {
+  const native = nativeDialogObservation(session);
+  if (native !== undefined) return native;
   if (sourcePage === undefined) {
     const hadOAuthCompletionSource =
       oauthCompletionSourcePage(session) !== undefined ||
@@ -1395,7 +1441,10 @@ export async function observeSession(
       ...(observation.safe_table === undefined ? {} : { safe_table: observation.safe_table }),
       ...(observation.semantic === undefined ? {} : { semantic: observation.semantic }),
     };
-    return observation;
+    const notices = session.browser.nativeDialogs?.timeoutNotices() ?? [];
+    return notices.length === 0
+      ? observation
+      : { ...observation, native_dialog_notices: session.browser.maskOperatorOutput(notices) };
   } catch (err) {
     const oauth = session.browser ? oauthTransitionStatus(session.browser) : undefined;
     if (oauth?.providerPageClosed === true && oauth.productPageViable && oauth.browserConnected) {

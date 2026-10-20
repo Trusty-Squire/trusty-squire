@@ -17,6 +17,7 @@ still require another observation or an explicit wait.
 | Goal-shaped drive | `operate_drive` |
 | Start and finish | `operate_start`, `operate_finish` |
 | Read the page | `operate_observe`, `operate_screenshot`, `operate_network` |
+| Native browser dialogs | `operate_dialog` |
 | Human live handoff | `operate_share` |
 | Drive ordinary UI | `operate_navigate`, `operate_click`, `operate_type`, `operate_select`, `operate_upload`, `operate_press`, `operate_scroll`, `operate_wait` |
 | Browser downloads | `operate_download` |
@@ -28,6 +29,18 @@ still require another observation or an explicit wait.
 `operate_share({session_id})` gives a trusted server-side proxy an interactive
 view of that session's tab. Lifetime, human control, navigation notifications,
 and Beeline proxy mapping are specified in [Operate live share](operate-live-share.md).
+
+Native alert, confirm, prompt and beforeunload dialogs stay open for an explicit
+answer. Observations report `semantic.blockers` entries with `kind:"native_dialog"`,
+`id`, `type`, `text`, `default_value`, `options` and `expires_at`. While one is open,
+observations read that browser evidence without evaluating the blocked document.
+Use `operate_dialog({session_id,dialog_id,action:"accept"|"dismiss",text?})`;
+`text` is only valid when accepting a prompt. An expired or already answered id
+is refused. Unanswered dialogs are dismissed after two minutes, and subsequent
+observations include `native_dialog_notices`. No dialog is automatically accepted.
+`operate_drive` makes an explicit decision against the user's goal for native
+confirmations, and hands uncertainty or prompt text back to the host. The human
+live viewer displays the same question with OK, Cancel and a prompt input.
 
 `operate_upload` takes `session_id`, exactly one of a current `target` ref or
 `@label` for an upload button/file input or `screenshot:{screenshot_id,x,y}`
@@ -669,3 +682,14 @@ job without exposing plaintext to the agent.
 Legacy union verbs and aliases are not part of this contract. Use the flat names
 shown above, and use the installed server’s `tools/list` schema for optional
 arguments and output details.
+
+To repeat the built-service dialog demonstration against the local GitHub-style
+fixture (agent answer and actual live-view OK button):
+
+```sh
+pnpm --filter '@trusty-squire/mcp...' build
+NATIVE_DIALOG_BUILT_DEMO=1 pnpm --filter @trusty-squire/mcp exec vitest run scripts/native-dialog-built-demo.test.mjs
+```
+
+The demonstration uses Vitest's isolated home and a local viewer endpoint; it
+prints the question and the resulting `/submitted?` navigation for both paths.

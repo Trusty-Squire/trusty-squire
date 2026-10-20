@@ -11,6 +11,7 @@ import { startQuickViewTunnel } from "./remote-login-display.js";
 
 const SHARE_LIFETIME_MS = 10 * 60_000;
 const MAX_INPUT_BYTES = 4_096;
+const MAX_DIALOG_INPUT_BYTES = 20_000;
 const viewerHtml = readFileSync(
   new URL("../../assets/operate/share.html", import.meta.url),
   "utf8",
@@ -196,6 +197,7 @@ export class LiveShare {
   private gateway: ShareGateway | null = null;
   private readonly pagePoll: NodeJS.Timeout;
   private pageUnavailable = false;
+  private dialogCleanup: (() => void) | null = null;
 
   constructor(
     readonly session: Session,
@@ -228,6 +230,8 @@ export class LiveShare {
         void this.attach(viewer);
       });
     });
+    this.dialogCleanup =
+      this.session.browser.nativeDialogs?.subscribe(() => this.broadcastDialogs()) ?? null;
     this.renew();
     this.pagePoll = setInterval(() => this.refreshPage(), 250);
     this.pagePoll.unref();
@@ -401,10 +405,33 @@ export class LiveShare {
     }
   }
 
+  private broadcastDialogs(): void {
+    this.broadcast(
+      this.session.browser.maskOperatorOutput({
+        type: "native_dialogs",
+        dialogs: this.session.browser.nativeDialogEvidence?.() ?? [],
+        notices: this.session.browser.nativeDialogs?.timeoutNotices() ?? [],
+      }),
+    );
+  }
+
   private async attach(viewer: WebSocket): Promise<void> {
+    this.broadcastDialogs();
     viewer.on("close", () => this.release(viewer));
     viewer.on("error", () => this.release(viewer));
     viewer.on("message", (data) => {
+      const raw = data.toString();
+      if (raw.length <= MAX_DIALOG_INPUT_BYTES) {
+        try {
+          const message: unknown = JSON.parse(raw);
+          if (isInput(message) && message.type === "native_dialog") {
+            void this.answerDialog(viewer, message).catch(() => this.broadcastDialogs());
+            return;
+          }
+        } catch {
+          return;
+        }
+      }
       this.inputTail = this.inputTail
         .then(() => this.handleInput(viewer, data.toString()))
         .catch(() => viewer.close(1011));
@@ -512,6 +539,27 @@ export class LiveShare {
     } finally {
       this.streamStartup = null;
     }
+  }
+
+  private async answerDialog(viewer: WebSocket, message: Record<string, unknown>): Promise<void> {
+    if (
+      !this.viewers.has(viewer) ||
+      this.expired ||
+      this.session.closing ||
+      typeof message.id !== "string" ||
+      (message.action !== "accept" && message.action !== "dismiss") ||
+      (message.text !== undefined &&
+        (typeof message.text !== "string" || message.text.length > 4096))
+    )
+      return;
+    // A pointer up can itself be waiting for this dialog; it must not own the reply queue.
+    if (!(await this.takeControl(viewer))) return;
+    const { withProvisionSessionCall } = await import("./session/lifecycle.js");
+    const { id, action, text } = message;
+    await withProvisionSessionCall(this.session.id, async () => {
+      if (!this.viewers.has(viewer) || this.expired) return;
+      await this.session.browser.nativeDialogs.answer(id, action, text);
+    });
   }
 
   private async handleInput(viewer: WebSocket, raw: string): Promise<void> {
@@ -641,6 +689,8 @@ export class LiveShare {
     if (this.timer !== null) clearTimeout(this.timer);
     this.timer = null;
     clearInterval(this.pagePoll);
+    this.dialogCleanup?.();
+    this.dialogCleanup = null;
     this.navigationCleanup?.();
     this.navigationCleanup = null;
     if (this.viewers.size === 0) this.stopStream();
