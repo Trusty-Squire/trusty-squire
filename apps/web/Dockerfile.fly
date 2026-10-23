@@ -23,8 +23,10 @@ RUN pnpm --filter @trusty-squire/vault build
 # publishable key + environment must be present as build args during the web build.
 ARG NEXT_PUBLIC_VOUCHFLOW_API_KEY
 ARG NEXT_PUBLIC_VOUCHFLOW_ENVIRONMENT=production
+ARG NEXT_PUBLIC_VOUCHFLOW_RP_ID=trustysquire.ai
 ENV NEXT_PUBLIC_VOUCHFLOW_API_KEY=$NEXT_PUBLIC_VOUCHFLOW_API_KEY
 ENV NEXT_PUBLIC_VOUCHFLOW_ENVIRONMENT=$NEXT_PUBLIC_VOUCHFLOW_ENVIRONMENT
+ENV NEXT_PUBLIC_VOUCHFLOW_RP_ID=$NEXT_PUBLIC_VOUCHFLOW_RP_ID
 RUN pnpm --filter @trusty-squire/web build
 
 # Next standalone output. With outputFileTracingRoot at the repo root,

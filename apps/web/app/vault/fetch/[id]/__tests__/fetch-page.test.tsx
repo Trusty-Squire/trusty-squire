@@ -311,17 +311,33 @@ describe("credential fetch approval page", () => {
   // means that session is a different account. Another trip to login would just
   // return to the same 403, so the page has to stop and say so.
   it("stops redirecting once the device is claimed and the refusal persists", async () => {
+    const originalGet = api.apiGet.getMockImplementation()!;
+    api.apiGet.mockImplementation((path: string) =>
+      path === "/v1/auth/whoami"
+        ? Promise.resolve({ signed_in: true, email: "other@example.com" })
+        : originalGet(path),
+    );
     pairing.registerEnrolledDevice.mockResolvedValue(true);
-    api.apiPost.mockRejectedValue(new api.ApiError("mandate_signer_not_authorized", 403));
+    api.apiPost.mockImplementation((path: string) =>
+      path === "/v1/auth/logout"
+        ? Promise.resolve({ ok: true })
+        : Promise.reject(new api.ApiError("mandate_signer_not_authorized", 403)),
+    );
     render(<CredentialFetchApprovalPage />);
     const user = userEvent.setup();
     await user.click(await screen.findByRole("button", { name: "Approve reveal" }));
 
     await waitFor(() =>
-      expect(screen.getByText(/linked to a different Trusty Squire account/i)).toBeTruthy(),
+      expect(screen.getByText(/request belongs to another Trusty Squire account/i)).toBeTruthy(),
     );
     expect(router.replace).not.toHaveBeenCalled();
     expect(screen.queryByText(/mandate_signer_not_authorized/)).toBeNull();
+    expect(await screen.findByText(/signed in as other@example.com/)).toBeTruthy();
+    await userEvent.setup().click(screen.getByRole("button", { name: "Switch account" }));
+    await waitFor(() => expect(api.apiPost).toHaveBeenCalledWith("/v1/auth/logout"));
+    expect(router.replace).toHaveBeenCalledWith(
+      `/login?next=${encodeURIComponent("/vault/fetch/fetch_1")}`,
+    );
   });
 
   it("surfaces any other approval failure in place", async () => {
@@ -331,7 +347,9 @@ describe("credential fetch approval page", () => {
     await user.click(await screen.findByRole("button", { name: "Approve reveal" }));
 
     await waitFor(() =>
-      expect(screen.getByText("This approval has expired. Ask the agent to request a new one.")).toBeTruthy(),
+      expect(
+        screen.getByText("This approval has expired. Ask the agent to request a new one."),
+      ).toBeTruthy(),
     );
     expect(router.replace).not.toHaveBeenCalled();
   });
@@ -384,7 +402,7 @@ describe("credential fetch approval page", () => {
     await user.click(await screen.findByRole("button", { name: "Approve reveal" }));
 
     await waitFor(() =>
-      expect(screen.getByText(/linked to a different Trusty Squire account/i)).toBeTruthy(),
+      expect(screen.getByText(/request belongs to another Trusty Squire account/i)).toBeTruthy(),
     );
     expect(router.replace).not.toHaveBeenCalled();
   });

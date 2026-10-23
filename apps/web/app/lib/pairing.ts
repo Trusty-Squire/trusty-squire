@@ -74,9 +74,7 @@ export function isUnlinkedSigningDevice(caught: unknown): boolean {
  * that owns this approval, and another trip through login changes nothing.
  */
 export const WRONG_ACCOUNT_DEVICE_MESSAGE =
-  "This browser's passkey is linked to a different Trusty Squire account than the one " +
-  "that owns this approval. Sign in as the owning account, then reopen this approval " +
-  "link — opening it is what links this browser.";
+  "This request belongs to another Trusty Squire account.";
 
 // The assertion named no signing device at all, so there is nothing for a
 // signed-in visit to claim — unlike an unlinked device, signing in cannot help.
