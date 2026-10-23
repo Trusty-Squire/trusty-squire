@@ -40,14 +40,14 @@ export const registerAuthRoute: FastifyPluginAsync<{
     if (auth?.kind !== "web") {
       return reply.code(200).send({ signed_in: false, identities: [] });
     }
-    const identities = await opts.deps.oauthIdentityStore.listByAccount(
-      auth.account_id,
-    );
+    const identities = await opts.deps.oauthIdentityStore.listByAccount(auth.account_id);
+    const account = await opts.deps.accountStore.findAccountById(auth.account_id);
     return reply.code(200).send({
       signed_in: true,
+      email: account?.email ?? null,
+      display_name: account?.display_name ?? null,
       account_id: auth.account_id,
       identities: identities.map((i) => i.provider).sort(),
     });
   });
-
 };

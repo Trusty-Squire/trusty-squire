@@ -43,7 +43,10 @@ vi.mock("../../../../lib/vouchflow", () => ({
   getVouchflow: () => vouchflow,
 }));
 
-vi.mock("../../../../lib/pairing", () => pairing);
+vi.mock("../../../../lib/pairing", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../../../lib/pairing")>()),
+  ...pairing,
+}));
 
 vi.mock("@trusty-squire/vault/e2e", () => ({
   decryptCard: vault.decryptCard,
@@ -220,6 +223,29 @@ beforeEach(() => {
 afterEach(() => cleanup());
 
 describe("pay page — JIT add-card ceremony", () => {
+  it("names the signed-in account and switches back to this payment", async () => {
+    bound = true;
+    const originalGet = api.apiGet.getMockImplementation()!;
+    api.apiGet.mockImplementation((path: string) =>
+      path === "/v1/auth/whoami"
+        ? Promise.resolve({ signed_in: true, email: "other@example.com" })
+        : originalGet(path),
+    );
+    api.apiPost.mockImplementation((path: string) =>
+      path === "/v1/auth/logout"
+        ? Promise.resolve({ ok: true })
+        : Promise.reject(new api.ApiError("mandate_signer_not_authorized", 403)),
+    );
+    render(<PaymentApprovalPage />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: /Approve payment/ }));
+    expect(await screen.findByText(/signed in as other@example.com/)).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Switch account" }));
+    await waitFor(() =>
+      expect(router.replace).toHaveBeenCalledWith("/login?next=%2Fvault%2Fpay%2Fappr_1"),
+    );
+  });
+
   it("starts in add-card mode for a card-less approval (no Approve yet)", async () => {
     approvalAmountCents = 6600;
     approvalCurrency = "JPY";

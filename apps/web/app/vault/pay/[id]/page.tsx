@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { decryptCard, type E2EBlob } from "@trusty-squire/vault/e2e";
 import { sealToRecipient } from "@trusty-squire/vault/hpke";
+import { WrongAccountNotice } from "../../../components/WrongAccountNotice";
 import { AppShell } from "../../../components/AppShell";
 import { CardEntry } from "../../../components/CardEntry";
 import { PasskeySetup } from "../../../components/PasskeySetup";
@@ -16,6 +17,7 @@ import {
   pairDevice,
   registerEnrolledDevice,
 } from "../../../lib/pairing";
+import { isUnlinkedSigningDevice, WRONG_ACCOUNT_DEVICE_MESSAGE } from "../../../lib/pairing";
 import { getVouchflow } from "../../../lib/vouchflow";
 
 interface CeremonyCard {
@@ -156,9 +158,7 @@ export default function PaymentApprovalPage() {
     try {
       applyCeremony(await fetchCeremony());
     } catch (err) {
-      setCardMetadataError(
-        errorText(err, "Failed to load the saved card details."),
-      );
+      setCardMetadataError(errorText(err, "Failed to load the saved card details."));
     }
   }, [applyCeremony, fetchCeremony]);
 
@@ -285,7 +285,9 @@ export default function PaymentApprovalPage() {
         setNeedsPasskeySetup(true);
         return;
       }
-      setError(errorText(err, failure));
+      setError(
+        isUnlinkedSigningDevice(err) ? WRONG_ACCOUNT_DEVICE_MESSAGE : errorText(err, failure),
+      );
     } finally {
       key?.fill(0);
       cardBytes?.fill(0);
@@ -378,7 +380,11 @@ export default function PaymentApprovalPage() {
         </div>
       </div>
 
-      {error !== null && <div className="app-banner err">{error}</div>}
+      {error === WRONG_ACCOUNT_DEVICE_MESSAGE ? (
+        <WrongAccountNotice approvalPath={`/vault/pay/${encodeURIComponent(id)}`} />
+      ) : error !== null ? (
+        <div className="app-banner err">{error}</div>
+      ) : null}
       {ceremony === null && error === null && <p className="app-sub">Loading…</p>}
       {submitted && <div className="app-banner ok">Approval sent — operator verifying.</div>}
       {ceremony !== null && currentStatus !== "pending" && (

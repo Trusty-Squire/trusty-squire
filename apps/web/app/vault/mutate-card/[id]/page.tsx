@@ -3,12 +3,14 @@
 import { useCallback, useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { decryptCard, encryptCard, type E2EBlob } from "@trusty-squire/vault/e2e";
+import { WrongAccountNotice } from "../../../components/WrongAccountNotice";
 import { AppShell } from "../../../components/AppShell";
 import { PasskeySetup } from "../../../components/PasskeySetup";
 import { ApiError, apiGet, apiPost } from "../../../lib/api";
 import { cardUnlockError, errorText } from "../../../lib/error-text";
 import { getPairingState, pairDevice, registerEnrolledDevice } from "../../../lib/pairing";
 import { evaluatePrf } from "../../../lib/passkey";
+import { isUnlinkedSigningDevice, WRONG_ACCOUNT_DEVICE_MESSAGE } from "../../../lib/pairing";
 import { getVouchflow } from "../../../lib/vouchflow";
 import { CARD_TRUST_COPY, cardLast4, detectCardBrand } from "../../../lib/wallet";
 
@@ -308,7 +310,11 @@ export default function CardMutationApprovalPage() {
           redirectToLogin();
           return;
         }
-        setError(errorText(caught, "Approval failed."));
+        setError(
+          isUnlinkedSigningDevice(caught)
+            ? WRONG_ACCOUNT_DEVICE_MESSAGE
+            : errorText(caught, "Approval failed."),
+        );
       } finally {
         setBusy(false);
       }
@@ -340,7 +346,11 @@ export default function CardMutationApprovalPage() {
         </div>
       </div>
 
-      {error !== null && <div className="app-banner err">{error}</div>}
+      {error === WRONG_ACCOUNT_DEVICE_MESSAGE ? (
+        <WrongAccountNotice approvalPath={`/vault/mutate-card/${encodeURIComponent(id)}`} />
+      ) : error !== null ? (
+        <div className="app-banner err">{error}</div>
+      ) : null}
       {ceremony === null && error === null && <p className="app-sub">Loading…</p>}
       {terminal !== null && (
         <div className={`app-banner ${ceremony?.status === "approved" ? "ok" : ""}`}>

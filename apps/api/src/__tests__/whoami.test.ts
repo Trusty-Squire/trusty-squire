@@ -41,10 +41,7 @@ describe("/v1/auth/whoami", () => {
     // whoami with the session cookie. We can't easily run the full
     // OAuth callback in-process; instead we exercise the same plumbing
     // by seeding the stores directly.
-    const account = await deps.accountStore.createAccount(
-      "user@example.com",
-      "Test User",
-    );
+    const account = await deps.accountStore.createAccount("user@example.com", "Test User");
     await deps.oauthIdentityStore.create({
       account_id: account.id,
       provider: "github",
@@ -57,6 +54,8 @@ describe("/v1/auth/whoami", () => {
       provider_user_id: "g-456",
       email: "user@example.com",
     });
+
+    await deps.accountStore.createAccount("unrelated@example.com", "Other Account");
 
     const { issueSession, signSessionJwt } = await import("../auth/session.js");
     const { record, jwt } = issueSession({
@@ -77,6 +76,8 @@ describe("/v1/auth/whoami", () => {
     expect(res.json()).toEqual({
       signed_in: true,
       account_id: account.id,
+      email: "user@example.com",
+      display_name: "Test User",
       // Sorted alphabetically — pins render order in the wizard.
       identities: ["github", "google"],
     });

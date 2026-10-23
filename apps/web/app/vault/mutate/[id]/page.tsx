@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
+import { WrongAccountNotice } from "../../../components/WrongAccountNotice";
 import { AppShell } from "../../../components/AppShell";
 import { PasskeySetup } from "../../../components/PasskeySetup";
 import { ApiError, apiGet, apiPost } from "../../../lib/api";
@@ -190,7 +191,11 @@ export default function CredentialMutationApprovalPage() {
         </div>
       </div>
 
-      {error !== null && <div className="app-banner err">{error}</div>}
+      {error === WRONG_ACCOUNT_DEVICE_MESSAGE ? (
+        <WrongAccountNotice approvalPath={`/vault/mutate/${encodeURIComponent(id)}`} />
+      ) : error !== null ? (
+        <div className="app-banner err">{error}</div>
+      ) : null}
       {ceremony === null && error === null && <p className="app-sub">Loading…</p>}
       {terminal !== null && (
         <div className={`app-banner ${ceremony?.status === "approved" ? "ok" : ""}`}>

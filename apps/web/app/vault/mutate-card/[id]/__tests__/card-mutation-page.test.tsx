@@ -42,7 +42,10 @@ vi.mock("../../../../lib/api", () => ({
   apiPost: api.apiPost,
 }));
 vi.mock("../../../../lib/vouchflow", () => ({ getVouchflow: () => vouchflow }));
-vi.mock("../../../../lib/pairing", () => pairing);
+vi.mock("../../../../lib/pairing", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../../../lib/pairing")>()),
+  ...pairing,
+}));
 vi.mock("../../../../lib/passkey", () => passkey);
 vi.mock("@trusty-squire/vault/e2e", () => e2e);
 
@@ -128,6 +131,32 @@ async function openEditor() {
 }
 
 describe("card mutation approval page", () => {
+  it("names the signed-in account and switches back to this card approval", async () => {
+    const originalGet = api.apiGet.getMockImplementation()!;
+    api.apiGet.mockImplementation((path: string) =>
+      path === "/v1/auth/whoami"
+        ? Promise.resolve({ signed_in: true, email: "other@example.com" })
+        : originalGet(path),
+    );
+    api.apiPost.mockImplementation((path: string) =>
+      path === "/v1/auth/logout"
+        ? Promise.resolve({ ok: true })
+        : Promise.reject(new api.ApiError("mandate_signer_not_authorized", 403)),
+    );
+    const user = await openEditor();
+    const expiry = screen.getByLabelText("Expiration");
+    await user.clear(expiry);
+    await user.type(expiry, "1230");
+    await user.click(screen.getByRole("button", { name: "Save and confirm" }));
+    expect(await screen.findByText(/signed in as other@example.com/)).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Switch account" }));
+    await waitFor(() =>
+      expect(router.replace).toHaveBeenCalledWith(
+        "/login?next=%2Fvault%2Fmutate-card%2Fcard_mutation_1",
+      ),
+    );
+  });
+
   it("sends a signed-out visitor to login with the approval link", async () => {
     api.apiGet.mockImplementation((path: string) => {
       if (path === "/v1/vault/card-mutation-approvals/card_mutation_1/ceremony") {
@@ -160,7 +189,9 @@ describe("card mutation approval page", () => {
 
     expect(passkey.evaluatePrf).toHaveBeenCalledTimes(1);
     expect(e2e.decryptCard).toHaveBeenCalledTimes(1);
-    expect((screen.getByLabelText("Card number") as HTMLInputElement).value).toBe("4242424242424242");
+    expect((screen.getByLabelText("Card number") as HTMLInputElement).value).toBe(
+      "4242424242424242",
+    );
     expect((screen.getByLabelText("Expiration") as HTMLInputElement).value).toBe("13/99");
     expect((screen.getByLabelText("Label") as HTMLInputElement).value).toBe("Personal");
     expect((screen.getByLabelText("Name on card") as HTMLInputElement).value).toBe("Ada Lovelace");
@@ -203,7 +234,9 @@ describe("card mutation approval page", () => {
     // from the PAN in this browser.
     const signedCall = vouchflow.signPayload.mock.calls[0]![0] as {
       context: string;
-      payload: { mutation: { after: { label: string; blob: string; brand: string; last4: string } } };
+      payload: {
+        mutation: { after: { label: string; blob: string; brand: string; last4: string } };
+      };
       minConfidence: string;
     };
     expect(signedCall.context).toBe("vault_credential_mutation");
@@ -220,13 +253,16 @@ describe("card mutation approval page", () => {
 
     // The POST submits the new opaque blob + display metadata + JWS — and
     // no card value beyond the metadata the wallet already shows.
-    expect(api.apiPost).toHaveBeenCalledWith("/v1/vault/card-mutation-approvals/card_mutation_1/approve", {
-      jws: "signed-card-mutation-jws",
-      blob: signedCall.payload.mutation.after.blob,
-      label: "Personal",
-      brand: "Visa",
-      last4: "4242",
-    });
+    expect(api.apiPost).toHaveBeenCalledWith(
+      "/v1/vault/card-mutation-approvals/card_mutation_1/approve",
+      {
+        jws: "signed-card-mutation-jws",
+        blob: signedCall.payload.mutation.after.blob,
+        label: "Personal",
+        brand: "Visa",
+        last4: "4242",
+      },
+    );
 
     expect(await screen.findByText(/card is updated/i)).toBeTruthy();
   });

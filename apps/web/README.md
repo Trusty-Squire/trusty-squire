@@ -34,3 +34,13 @@ You can check out [the Next.js GitHub repository](https://github.com/vercel/next
 The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
 
 Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+
+## Passkey address
+
+Set `NEXT_PUBLIC_VOUCHFLOW_RP_ID` at build time alongside the Vouchflow public API
+key. Production uses `trustysquire.ai`, the host used by existing approval links
+and passkeys. The Fly build config and Docker build argument pin that value.
+A page on that host or one of its subdomains uses the same passkey address.
+An unrelated preview host displays an error; it cannot use production passkeys.
+There is no fallback to the page hostname. For local development, explicitly set
+this variable to `localhost` and use separate development passkeys.
