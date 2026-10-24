@@ -84,3 +84,47 @@ fixture proof and the passing focused regressions. Real Google chooser click,
 selection, popup return and completed X sign-in remain an owner check after
 release. This is not a claim of real-viewer acceptance or a release dispatch.
 The full local MCP suite is still running and is not counted as passing.
+
+### Observation 8 — patched local build, direct viewer, real Google
+Source: `apps/mcp/scripts/google-viewer-live-proof.mjs`, importing this branch's
+compiled dist BrowserController, provision-session and live-share modules.
+The script uses its own isolated Chrome context and local share HTTP endpoint;
+no installed broker, Beeline proxy, owner cookies or credentials are involved.
+The first headless run failed X navigation with ERR_HTTP_RESPONSE_CODE_FAILURE.
+A headed Chrome run under Xvfb reached X and Google's real sign-in page.
+An initial diagnostic selector expected input[type=email], while Google's
+rendered identifier input needed #identifierId; the corrected diagnostic passes.
+Result: local viewer canvas opens Google's real X sign-in popup. The source
+controller follows it, observe reports accounts.google.com, and clicking the
+email box through the canvas and typing through the viewer results in
+`viewer-proof@example.com` in Google's live input. No Next or submit action is
+performed. Closing the popup automatically restores the viewer to X's login.
+The proof script exits 0; output is in [real-proof.txt](real-proof.txt).
+Screenshots: [X before](real-x-before.png), [Google sign-in](real-google-signin.png),
+[Google typed input](real-google-typed.png), [X restored](real-x-returned.png).
+Conclusion: this proves the patched build's real Google popup visibility,
+click/typing and return. It supersedes the proxy-only proof limitation above.
+Full Google account authentication remains the owner's check after release,
+as Ruby explicitly instructed; no release was dispatched.
+
+### Observation 9 — baseline check for full-suite sandbox failure
+Source: full observation-prose.test.ts file run from an archive of unchanged
+base commit 50eeb0d66, using the same installed Chrome and isolated test setup.
+Result: the same sandboxed synthesized-control assertion fails at line 1815:
+expected IDs same/cross/opaque, received same/cross. Baseline file counts:
+1 failed, 54 passed (55 total). The branch's full run reports the same failure.
+Conclusion: that observed failure also exists on the unchanged base under this
+Chrome environment. It is not evidence that the popup-follow patch caused it.
+The full branch run is still pending its final summary.
+
+### Observation 10 — remaining failure baseline comparisons
+Source: whole-file google-login.test.ts and screenshot-click.test.ts runs from
+the same unchanged base archive with the same Chrome and isolated test setup.
+Result: google-login has 1 failed / 62 passed (replacement-profile-holder
+cancellation expects unknown but gets closed); screenshot-click has the same
+9 failed / 37 passed cases as the branch full run. No test was weakened.
+Conclusion: the currently observed 11 failing cases across these files and
+observation-prose also reproduce on the unchanged base in this environment.
+The branch full run passes operate-live-share.test.ts (8 passed, 1 skipped),
+including both viewer/agent popup variants. Final full-suite counts are reported
+in the PR validation summary.
