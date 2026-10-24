@@ -31,8 +31,8 @@ not use the released-card mask applied to `operate_screenshot`. Anyone able to
 open the bearer URL can see those pixels, including visible card fields. A
 fresh 256-bit token appears as `/s/<token>/` in the upstream URL. Beeline must
 keep this upstream URL and token on its server. Its card and "Open in browser"
-action should both link to Beeline's own `https://computer.usebeeline.app/s/<id>/`
-URL; neither the browser HTML nor any user-visible redirect should reveal the
+action should both link to Beeline's own `https://server.usebeeline.app/s/<id>/`
+URL by default (`BEELINE_COMPUTER_ORIGIN` overrides the origin); neither the browser HTML nor any user-visible redirect should reveal the
 upstream host or token. Treat the upstream URL like a password: do not log it,
 include it in analytics, or send it to another client. The tunnel and token
 provide access without a separate security prompt.
@@ -76,6 +76,13 @@ dispatches only through the operate session's Playwright page CDP session.
 Chromium can withhold screencast frames from a background tab, so the broker
 captures fallback frames from that same CDP target without activating it;
 other tabs and the host display never enter this transport.
+
+While a viewer controls the session, a popup opened by the streamed page becomes
+its active page and is streamed in the same viewer. Adoption requires the
+session's creation-time opener ownership; context-wide new tabs never qualify.
+When that popup closes, the viewer returns to its nearest live owned opener.
+Agent actions keep their existing popup adoption and OAuth lifecycle. No cookie
+copy, browser replacement, or extra Google login driver is involved.
 
 Navigation messages report the current page when a viewer joins an active stream,
 when streaming starts or switches pages, and every main-frame navigation,

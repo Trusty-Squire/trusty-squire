@@ -185,6 +185,22 @@ export class PageDriver {
     return candidate.isClosed() ? null : candidate.url();
   }
 
+  /** Follow a live-viewer popup only while its proven opener is still active. */
+  followOpenedPopup(opener: Page, popup: Page): boolean {
+    if (
+      this.page !== opener ||
+      !this.ownedPages.has(opener) ||
+      !this.ownedPages.has(popup) ||
+      this.ownedPages.liveOpener(popup) !== opener ||
+      popup === this.oauthProductPage ||
+      popup === this.oauthProviderPage
+    )
+      return false;
+    this.page = popup;
+    this.trackMainDocument(popup);
+    return true;
+  }
+
   // Newest owned popup the operator may follow. Explicit primary/recovery
   // pages never enter the queue; the active page and OAuth transports retain
   // their existing lifecycle handling.

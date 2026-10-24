@@ -1,0 +1,3 @@
+Patched dist session opened: https://x.com/i/flow/login
+Viewer canvas opened real Google; email click and typing reached its input; observe reports accounts.google.com. No form submitted.
+Closing real Google popup returned patched viewer to X: https://x.com/i/jf/onboarding/web?mode=login

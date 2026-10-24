@@ -938,6 +938,13 @@ in `apps/mcp/src/session.ts`.
 The public operator contract and capability migration are owned by
 [`docs/operator-tool-surface.md`](docs/operator-tool-surface.md).
 
+Live-viewer CDP input bypasses the agent action's popup-adoption step. Follow
+only creation-attributed, session-owned popups of the streamed page while the
+human controls it, and restore their live opener on close. Do not use global
+context page events to follow Google account choosers. Contract:
+[`docs/operate-live-share.md`](docs/operate-live-share.md); regression:
+`apps/mcp/src/bot/__tests__/operate-live-share.test.ts`.
+
 ## Cross-process browser broker
 
 The default broker custody and recovery

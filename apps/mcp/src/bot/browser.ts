@@ -6501,6 +6501,9 @@ export class BrowserController implements BrowserDriver {
   async adoptOpenedTab(graceMs = 0): Promise<string | null> {
     return await this.pageDriver.adoptOpenedTab(graceMs);
   }
+  followOpenedPopup(opener: Page, popup: Page): boolean {
+    return this.pageDriver.followOpenedPopup(opener, popup);
+  }
   adoptLivePage(): boolean {
     return this.pageDriver.adoptLivePage();
   }
