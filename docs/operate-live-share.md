@@ -77,6 +77,13 @@ Chromium can withhold screencast frames from a background tab, so the broker
 captures fallback frames from that same CDP target without activating it;
 other tabs and the host display never enter this transport.
 
+While a viewer controls the session, a popup opened by the streamed page becomes
+its active page and is streamed in the same viewer. Adoption requires the
+session's creation-time opener ownership; context-wide new tabs never qualify.
+When that popup closes, the viewer returns to its nearest live owned opener.
+Agent actions keep their existing popup adoption and OAuth lifecycle. No cookie
+copy, browser replacement, or extra Google login driver is involved.
+
 Navigation messages report the current page when a viewer joins an active stream,
 when streaming starts or switches pages, and every main-frame navigation,
 including same-document history/hash changes. Subframe navigations and the

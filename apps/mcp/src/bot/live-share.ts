@@ -384,6 +384,8 @@ export class LiveShare {
 
   private refreshPage(): void {
     if (this.expired) return;
+    if (this.page.isClosed() && this.session.browser.page === this.page)
+      this.session.browser.returnFromClosedPopup?.(this.page);
     const current = this.session.browser.page;
     if (current === null || current.isClosed()) {
       if (!this.pageUnavailable) this.broadcast({ type: "blank" });
@@ -493,8 +495,25 @@ export class LiveShare {
       const onNavigation = (frame: Frame): void => {
         if (frame === page.mainFrame()) reportNavigation();
       };
+      const onPopup = (popup: Page): void => {
+        // OwnedPages records creation-time lineage before this listener runs.
+        // Human input bypasses agent action adoption, so follow its popup here.
+        if (
+          this.expired ||
+          this.session.closing ||
+          !this.humanDriving ||
+          this.activeAgentActions > 0 ||
+          this.cdp !== cdp
+        )
+          return;
+        if (this.session.browser.followOpenedPopup(page, popup)) this.refreshPage();
+      };
       page.on("framenavigated", onNavigation);
-      this.navigationCleanup = () => page.off("framenavigated", onNavigation);
+      page.on("popup", onPopup);
+      this.navigationCleanup = () => {
+        page.off("framenavigated", onNavigation);
+        page.off("popup", onPopup);
+      };
       reportNavigation();
       cdp.on("Page.screencastFrame", (frame) => {
         if (this.cdp !== cdp) return;

@@ -1,8 +1,10 @@
 import { createServer, type Server } from "node:http";
+import { existsSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { chromium, type Browser, type Page } from "playwright";
 import { WebSocket } from "ws";
 import sharp from "sharp";
+import { z } from "zod";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { BrowserController } from "../browser.js";
 import {
@@ -15,6 +17,8 @@ import {
   yieldOperateDriveToHuman,
 } from "../live-share.js";
 import {
+  act,
+  observe,
   finishProvisionSession,
   forceFinishProvisionSession,
   paymentSession,
@@ -55,6 +59,128 @@ function waitForMessage(socket: WebSocket, match: (message: Record<string, unkno
 }
 
 describe("operate live share", () => {
+  it.each(["viewer", "agent"] as const)(
+    "Reproduction google-viewer-popup: %s follows an iframe popup and returns to its opener",
+    async (driver) => {
+      browser = await chromium.launch({
+        headless: true,
+        args: ["--site-per-process"],
+        ...(existsSync(chromium.executablePath()) ? {} : { channel: "chrome" }),
+      });
+      const context = await browser.newContext({ viewport: { width: 800, height: 600 } });
+      const productUrl = "https://product.test/login";
+      const providerUrl = "https://identity.test/chooser";
+      await context.route("https://product.test/**", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: `<!doctype html><style>body{background:#eee}</style><h1>Sign in</h1>
+        <iframe src="https://identity.test/button" style="width:400px;height:100px"></iframe>
+        <h2 id="state">Signed out</h2><input id="answer">`,
+        }),
+      );
+      await context.route("https://identity.test/**", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: route.request().url().endsWith("/button")
+            ? `<!doctype html><button style="width:300px;height:60px" onclick="window.open('${providerUrl}')">Continue with Google</button>`
+            : `<!doctype html><style>body{background:#dfd}</style><h1>Choose an account (fixture)</h1>
+          <button style="width:300px;height:60px" onclick="window.opener.parent.postMessage('signed-in','https://product.test');window.close()">Choose fixture account</button>`,
+        }),
+      );
+      await context.addInitScript(() => {
+        window.addEventListener("message", (event) => {
+          const state = document.querySelector("#state");
+          if (state && event.origin === "https://identity.test") state.textContent = "Signed in";
+        });
+      });
+      const product = await context.newPage();
+      const controller = BrowserController.fromHarnessPage(product);
+      const started = await startHarnessProvisionSession({
+        serviceUrl: productUrl,
+        browser: controller,
+        initialObservation: "drive",
+      });
+      sessionId = started.session_id;
+      const shared = await shareOperateSession(paymentSession(sessionId), async (port) => ({
+        url: `http://127.0.0.1:${port}`,
+        close: async () => undefined,
+      }));
+      const viewer = await browser.newPage({ viewport: { width: 1000, height: 800 } });
+      await viewer.goto(shared.url);
+      await viewer.waitForFunction(() => document.querySelector("canvas")?.width === 800);
+      const clickInViewer = async (box: {
+        x: number;
+        y: number;
+        width: number;
+        height: number;
+      }) => {
+        const canvas = await viewer.locator("canvas").boundingBox();
+        if (!canvas) throw new Error("viewer canvas unavailable");
+        await viewer.mouse.click(
+          canvas.x + ((box.x + box.width / 2) / 800) * canvas.width,
+          canvas.y + ((box.y + box.height / 2) / 600) * canvas.height,
+        );
+      };
+      const button = product.frameLocator("iframe").locator("button");
+      const buttonBox = await button.boundingBox();
+      if (!buttonBox) throw new Error("iframe button unavailable");
+      const opened = product.waitForEvent("popup");
+      if (driver === "viewer") await clickInViewer(buttonBox);
+      else {
+        const initial = z
+          .object({ safe_table: z.array(z.tuple([z.string(), z.string(), z.string().optional()])) })
+          .parse(await observe(sessionId, "compact"));
+        const row = initial.safe_table.find((row) => row[2]?.includes("continue-with-google"));
+        if (!row) throw new Error("Google button ref unavailable");
+        const result = await act(sessionId, { kind: "click", target: row[0] }, "compact");
+        expect(result.url).toBe(providerUrl);
+      }
+      const popup = await opened;
+      await popup.waitForURL(providerUrl);
+      expect(popup.isClosed()).toBe(false);
+      // If this fails, the real viewer click reached the cross-origin frame and
+      // opened a surviving popup, but the viewer still streams the product tab.
+      await expect.poll(() => controller.page === popup, { timeout: 3000 }).toBe(true);
+      await viewer.waitForFunction(() => {
+        const canvas = document.querySelector("canvas");
+        const pixel = canvas?.getContext("2d")?.getImageData(790, 590, 1, 1).data;
+        return pixel && pixel[1]! > pixel[0]! + 20;
+      });
+      expect((await observe(sessionId, "compact")).url).toBe(providerUrl);
+      // A later popup from another session in the same context must never win.
+      const other = await context.newPage();
+      BrowserController.fromHarnessPage(other);
+      await other.goto(productUrl);
+      const foreignOpened = other.waitForEvent("popup");
+      await other.evaluate((url) => window.open(url), providerUrl);
+      const foreign = await foreignOpened;
+      await foreign.waitForURL(providerUrl);
+      expect(controller.followOpenedPopup(other, foreign)).toBe(false);
+      expect(controller.page).toBe(popup);
+      await foreign.close();
+      await other.close();
+      if (driver === "viewer" && process.env.OPERATE_SHARE_POPUP_EVIDENCE)
+        await viewer.screenshot({ path: process.env.OPERATE_SHARE_POPUP_EVIDENCE });
+      const choice = await popup.locator("button").boundingBox();
+      if (!choice) throw new Error("account choice unavailable");
+      await clickInViewer(choice);
+      await expect.poll(() => popup.isClosed()).toBe(true);
+      await expect.poll(() => controller.page === product).toBe(true);
+      await expect.poll(() => product.locator("#state").textContent()).toBe("Signed in");
+      await viewer.waitForFunction(() => {
+        const pixel = document
+          .querySelector("canvas")
+          ?.getContext("2d")
+          ?.getImageData(790, 590, 1, 1).data;
+        return pixel && Math.abs(pixel[1]! - pixel[0]!) < 10 && pixel[0]! > 200;
+      });
+      if (driver === "viewer" && process.env.OPERATE_SHARE_RETURN_EVIDENCE)
+        await viewer.screenshot({ path: process.env.OPERATE_SHARE_RETURN_EVIDENCE });
+      await viewer.close();
+    },
+    30_000,
+  );
+
   it.skipIf(process.env.OPERATE_SHARE_BENCH !== "1")(
     "benchmarks ten fresh public shares on one real browser session",
     async () => {
