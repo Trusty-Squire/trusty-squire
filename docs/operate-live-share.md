@@ -31,8 +31,8 @@ not use the released-card mask applied to `operate_screenshot`. Anyone able to
 open the bearer URL can see those pixels, including visible card fields. A
 fresh 256-bit token appears as `/s/<token>/` in the upstream URL. Beeline must
 keep this upstream URL and token on its server. Its card and "Open in browser"
-action should both link to Beeline's own `https://computer.usebeeline.app/s/<id>/`
-URL; neither the browser HTML nor any user-visible redirect should reveal the
+action should both link to Beeline's own `https://server.usebeeline.app/s/<id>/`
+URL by default (`BEELINE_COMPUTER_ORIGIN` overrides the origin); neither the browser HTML nor any user-visible redirect should reveal the
 upstream host or token. Treat the upstream URL like a password: do not log it,
 include it in analytics, or send it to another client. The tunnel and token
 provide access without a separate security prompt.

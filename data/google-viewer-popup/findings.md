@@ -69,3 +69,18 @@ Chrome 148.0.7778.178 via temporary executable links under
 HOME, config and browser profiles isolated; no cookies were copied from the
 operator profile. The new test also supports the existing Chrome-channel
 fallback when the bundled executable is absent.
+
+### Observation 7 — corrected viewer route and authorized fallback
+Source: Ruby's follow-up identifies computerSessionUrl() in Beeline's
+apps/server/src/computer-session.ts and the active default origin
+https://server.usebeeline.app. A fresh Squire session opened X's login route,
+and browser_share started a fresh share in this corner.
+Result: isolated Chrome gets HTTP 200 from the corrected viewer URL and reads
+`Open Beeline and sign in to view this shared browser.` The page has no canvas;
+the share's /status endpoint returns HTTP 403.
+Conclusion: the obsolete hostname is no longer a blocker. The isolated viewer
+requires Beeline sign-in. Per Ruby's explicit follow-up, deliver the PR with
+fixture proof and the passing focused regressions. Real Google chooser click,
+selection, popup return and completed X sign-in remain an owner check after
+release. This is not a claim of real-viewer acceptance or a release dispatch.
+The full local MCP suite is still running and is not counted as passing.
