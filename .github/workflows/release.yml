@@ -56,7 +56,7 @@ jobs:
   # We don't trust an out-of-band ci.yml result — explicit gate, explicit failure.
   # ---------------------------------------------------------------------------
   verify:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.read.outputs.version }}
       is_prerelease: ${{ steps.read.outputs.is_prerelease }}
