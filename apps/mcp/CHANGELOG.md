@@ -1,5 +1,15 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.37-rc.2 (2026-10-25)
+
+- Fix approval account recovery and pin the passkey relying party ([PR](https://github.com/Trusty-Squire/trusty-squire/pull/1106)).
+- Follow owned Google login popups in the shared viewer ([PR](https://github.com/Trusty-Squire/trusty-squire/pull/1107)).
+- ci: pin Chromium install jobs to Ubuntu 24.04 ([PR](https://github.com/Trusty-Squire/trusty-squire/pull/1108)).
+
+## 1.1.37-rc.1 (2026-10-20)
+
+- Surface native browser dialogs for agents and live viewers ([PR](https://github.com/Trusty-Squire/trusty-squire/pull/1105)).
+
 ## 1.1.36-rc.1 (2026-10-16)
 
 - Flatten tool inputs and reject retired aliases. Login and approval calls now
