@@ -11,6 +11,21 @@ export class ApiCallError extends Error {
   }
 }
 
+/** A sealed reveal or payment could not be delivered or opened. Nothing was read. */
+export class SealedDeliveryError extends Error {
+  constructor(
+    public readonly code:
+      | "approval_pending"
+      | "no_sealed_value"
+      | "binding_mismatch"
+      | "open_failed",
+    message: string,
+  ) {
+    super(message);
+    this.name = "SealedDeliveryError";
+  }
+}
+
 /** An API method was called on a client built without a session token. */
 export class MissingTokenError extends Error {
   constructor() {

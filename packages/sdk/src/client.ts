@@ -4,10 +4,12 @@
 // client: the Squire MCP server builds on it, and apps use it through the
 // `Squire` class.
 //
-// No method here returns a secret value or card data. Keys are spent
-// server-side (`useCredential`), app access is a revocable grant
+// No method here returns a secret value or card data in the clear. Keys are
+// spent server-side (`useCredential`), app access is a revocable grant
 // (`grantAppAccess`), and risky actions come back as a pending approval that
-// only the user's passkey can settle.
+// only the user's passkey can settle. The one delivery is the sealed claim of
+// an approved reveal or payment: HPKE-sealed to the requesting app's own key,
+// for the session that asked, once.
 
 import { ApiCallError } from "./errors.js";
 import type { ApprovalWire } from "./approval.js";
@@ -140,6 +142,50 @@ export interface CredentialFetchApproval {
   error?: string;
   approval?: ApprovalWire;
 }
+
+/** The SDK's sealed reveal claim. `sealed` opens only with the app's private key. */
+export interface SealedRevealClaim {
+  approval_id: string;
+  status: "pending" | "approved" | "consumed" | "denied" | "expired" | "failed";
+  credential: { reference: string; service: string | null; name: string };
+  field: string | null;
+  field_names: string[];
+  expires_at: string;
+  sealed?: string;
+  fetched_at?: string;
+  error?: string;
+}
+
+export interface SealedPaymentRequest {
+  id: string;
+  nonce: string;
+  agent: string;
+  account_binding: string;
+  expires_at: string;
+  approval?: ApprovalWire;
+}
+
+/** The SDK's sealed payment claim. `sealed_card` opens only with the app's private key. */
+export type SealedPaymentClaim =
+  | { status: "pending"; approval: ApprovalWire }
+  | {
+      status: "approved";
+      id: string;
+      merchant: string;
+      checkout_origin: string;
+      amount_cents: number;
+      currency: string;
+      nonce: string;
+      card_ref: string;
+      account_binding: string;
+      item: string;
+      reason: string;
+      agent: string;
+      jws: string;
+      sealed_card: string;
+      expires_at: string;
+      approval: ApprovalWire;
+    };
 
 export interface PaymentCardSummary {
   id: string;
@@ -335,6 +381,63 @@ export class ApiClient {
   ): Promise<CredentialFetchApproval> {
     const wait = waitMs === undefined ? "" : `?wait_for_decision=1&wait_ms=${waitMs}`;
     return this.get(`/v1/vault/fetch-approvals/${encodeURIComponent(id)}/ceremony${wait}`, signal);
+  }
+
+  // ── Sealed delivery to this app: reveal and payment ────────
+
+  /** A reveal sealed to `recipient_public_key`, claimable only by this session. */
+  async createSealedReveal(
+    input: CredentialSelector & { field?: string; reason?: string; recipient_public_key: string },
+  ): Promise<CredentialFetchApproval> {
+    return this.post("/v1/vault/fetch-approvals", input);
+  }
+
+  /** Single use. Before approval, and once denied or expired, there is no `sealed`. */
+  async claimSealedReveal(id: string): Promise<SealedRevealClaim> {
+    return this.post(`/v1/vault/fetch-approvals/${encodeURIComponent(id)}/claim`, {});
+  }
+
+  /** A payment whose card is sealed to `operator_pubkey`, claimable only by this session. */
+  async createSealedPayment(input: {
+    merchant: string;
+    checkout_origin: string;
+    amount_cents: number;
+    currency: string;
+    card_ref?: string;
+    operator_pubkey: string;
+    item: string;
+    reason: string;
+  }): Promise<SealedPaymentRequest> {
+    return this.post("/v1/pay/approvals", { ...input, seal_to_app: true });
+  }
+
+  /** Single use. `waitMs` (max 15s) holds for the user's signature. */
+  async claimSealedPayment(
+    id: string,
+    waitMs = 0,
+    signal?: AbortSignal,
+  ): Promise<SealedPaymentClaim> {
+    return this.post(
+      `/v1/pay/approvals/${encodeURIComponent(id)}/claim?wait_ms=${Math.floor(waitMs)}`,
+      {},
+      signal,
+    );
+  }
+
+  /** Tell Squire the sealed card opened. The approval moves to processing. */
+  async confirmSealedPayment(
+    id: string,
+    submission: { jws: string; sealed_card: string },
+  ): Promise<{ status: string }> {
+    return this.post(`/v1/pay/approvals/${encodeURIComponent(id)}/confirm`, submission);
+  }
+
+  /** The merchant's answer. The approval moves to completed or failed. */
+  async reportPaymentOutcome(
+    id: string,
+    input: { outcome: "completed" | "failed"; last4?: string },
+  ): Promise<{ approval: ApprovalWire }> {
+    return this.post(`/v1/pay/approvals/${encodeURIComponent(id)}/outcome`, input);
   }
 
   // ── Approvals of every kind ────────────────────────────────

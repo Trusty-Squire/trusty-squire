@@ -143,6 +143,16 @@ interface PaymentAuditEventRow {
   created_at: Date;
 }
 
+export interface SealedApprovalClaimRow {
+  approval_id: string;
+  kind: string;
+  account_id: string;
+  agent_session_id: string;
+  recipient_public_key: string;
+  claimed_at: Date | null;
+  created_at: Date;
+}
+
 export interface ApprovalWebhookEndpointRow {
   id: string;
   account_id: string;
@@ -553,6 +563,17 @@ export interface ApiPrismaClient {
       update: Record<string, unknown>;
     }): Promise<VouchflowDeviceRow>;
     findMany(args: { where: Record<string, unknown> }): Promise<VouchflowDeviceRow[]>;
+  };
+  sealedApprovalClaim: {
+    createMany(args: {
+      data: Array<Record<string, unknown>>;
+      skipDuplicates?: boolean;
+    }): Promise<{ count: number }>;
+    findUnique(args: { where: { approval_id: string } }): Promise<SealedApprovalClaimRow | null>;
+    updateMany(args: {
+      where: Record<string, unknown>;
+      data: Record<string, unknown>;
+    }): Promise<{ count: number }>;
   };
   approvalWebhookEndpoint: {
     upsert(args: {

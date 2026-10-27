@@ -8,7 +8,11 @@ import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import type { ApiDeps } from "../services/deps.js";
 import { approvalAmountLabel } from "../services/money.js";
-import { paymentApprovalCard } from "../services/approval-card.js";
+import {
+  PAYMENT_OUTCOME_STATUSES,
+  paymentApprovalCard,
+  readApprovalCard,
+} from "../services/approval-card.js";
 import { sendTelegramMessage } from "../services/telegram.js";
 import {
   PAYMENT_VOUCH_CONTEXT,
@@ -21,6 +25,8 @@ import { authenticatedRequester } from "../services/requesting-agent.js";
 import { VAULT_AUDIT_TYPES } from "@trusty-squire/vault";
 import { waitForApprovalStatus } from "./approval-status-wait.js";
 import { recordPaymentApprovalExpiry } from "../services/payment-approval-expiry-audit.js";
+import { isRecipientPublicKey } from "../services/sealed-claims.js";
+import { recordPaymentExecution } from "../services/payment-execution-audit.js";
 
 // Web base for the approval link sent to Telegram. Reuses PWA_BASE_URL
 // (the same override server.ts's defaultPwaBaseUrl() reads) if set, else
@@ -51,6 +57,9 @@ const createBody = z.object({
   operator_pubkey: z.string().min(1).max(512),
   item: z.string().trim().min(1).max(500),
   reason: z.string().trim().min(1).max(500),
+  // SDK only: `operator_pubkey` is the requesting app's key, and only this
+  // agent session may claim the sealed card (POST /:id/claim), once.
+  seal_to_app: z.literal(true).optional(),
 });
 
 const approveBody = z
@@ -202,6 +211,17 @@ const bindCardBody = z.object({
   card_ref: z.string().min(1).max(64),
 });
 
+const outcomeBody = z
+  .object({
+    outcome: z.enum(["completed", "failed"]),
+    // Only for a legacy card stored without last-four metadata.
+    last4: z
+      .string()
+      .regex(/^\d{4}$/)
+      .optional(),
+  })
+  .strict();
+
 const notifyThreeDsBody = z.object({
   mode: z.enum(["detected_challenge", "possible_out_of_band"]).default("detected_challenge"),
 });
@@ -224,6 +244,15 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
     await new Promise((resolve) => setTimeout(resolve, ms));
   const verifyVouch = opts.vouchVerifier ?? createVouchMandateVerifier();
   const vouchflowAudience = process.env.VOUCHFLOW_CUSTOMER_ID?.trim() ?? "";
+
+  const approvalCardFor = async (record: ApprovalRecord, now: Date) =>
+    (await readApprovalCard(opts.deps, record.accountId, record.id, now, "payment")) ??
+    paymentApprovalCard(
+      record,
+      await approvalCardDisplay(record.cardRef, opts.deps, record.accountId),
+      null,
+      now,
+    );
 
   const submissionFingerprint = (submission: Submission): string =>
     createHash("sha256")
@@ -337,6 +366,11 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
       return;
     }
 
+    if (parsed.data.seal_to_app === true && !isRecipientPublicKey(parsed.data.operator_pubkey)) {
+      reply.code(400).send({ error: "invalid_recipient_public_key" });
+      return;
+    }
+
     const now = opts.deps.now?.() ?? new Date();
     // Card-less (JIT add-card) approvals need a longer window: the user
     // fills a first-time card form + passkey ceremony, not a one-tap
@@ -359,6 +393,15 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
       agent,
       expiresAt,
     });
+    if (parsed.data.seal_to_app === true) {
+      await opts.deps.sealedClaimStore.create({
+        approvalId: id,
+        kind: "payment",
+        accountId: auth.account_id,
+        agentSessionId: auth.agent_session_id,
+        recipientPublicKey: parsed.data.operator_pubkey,
+      });
+    }
 
     // Await the ledger write before surfacing the approval. This is a request,
     // not a payment outcome; the existing push below sends its actionable URL.
@@ -497,6 +540,9 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
     }
     const peekSubmission = req.query.peek_submission === "1";
     let submission: Submission | null = null;
+    // An SDK approval's sealed card goes only to its own session's claim.
+    const sealed = (await opts.deps.sealedClaimStore.get(record.id)) !== null;
+    const relays = req.auth!.kind === "agent" && !sealed;
     if (req.auth!.kind === "agent" && req.query.wait_for_decision === "1") {
       const { id, accountId } = record;
       const waited = await waitForApprovalStatus(
@@ -511,10 +557,10 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
       }
       record = waited;
       const now = opts.deps.now?.() ?? new Date();
-      if (peekSubmission && record.status === "pending" && record.expiresAt > now) {
+      if (relays && peekSubmission && record.status === "pending" && record.expiresAt > now) {
         submission = await readSubmission(record.id, record.accountId, true);
       }
-    } else if (req.auth!.kind === "agent" && req.query.wait_for_submission === "1") {
+    } else if (relays && req.query.wait_for_submission === "1") {
       const requestedWaitMs = Number(req.query.wait_ms);
       const waitMs = Number.isFinite(requestedWaitMs)
         ? Math.min(Math.max(Math.floor(requestedWaitMs), 0), submissionWaitMs)
@@ -529,7 +575,7 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
     } else {
       const now = opts.deps.now?.() ?? new Date();
       if (
-        req.auth!.kind === "agent" &&
+        relays &&
         record.status === "pending" &&
         record.expiresAt > now &&
         (req.query.read_submission === "1" || peekSubmission)
@@ -557,11 +603,178 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
       item: record.item,
       reason: record.reason,
       agent: record.agent,
-      jws: submission?.jws ?? record.jws,
-      sealed_card: submission?.sealed_card ?? record.sealedCard,
+      jws: sealed ? null : (submission?.jws ?? record.jws),
+      sealed_card: sealed ? null : (submission?.sealed_card ?? record.sealedCard),
       expires_at: record.expiresAt.toISOString(),
     });
   });
+
+  // The SDK's claim: the signed approval and the card sealed to the app's key,
+  // for the agent session that requested it, once. The app opens the card
+  // locally, then confirms through POST /:id/confirm exactly like the broker.
+  // Before the passkey signs, and for a denied or expired approval, it carries
+  // no card. `wait_ms` (max 15s) holds for the signed submission.
+  fastify.post<{ Params: { id: string }; Querystring: { wait_ms?: string } }>(
+    "/v1/pay/approvals/:id/claim",
+    { preHandler: opts.requireAgent },
+    async (req, reply) => {
+      const auth = req.auth!;
+      if (auth.kind !== "agent") return;
+      reply.header("cache-control", "no-store, private");
+      const found = await opts.deps.pendingPaymentApprovalStore.getByIdForAccount(
+        req.params.id,
+        auth.account_id,
+      );
+      if (found === null) {
+        reply.code(404).send({ error: "payment_approval_not_found" });
+        return;
+      }
+      const sealed = await opts.deps.sealedClaimStore.get(found.id);
+      if (sealed === null) {
+        reply.code(409).send({ error: "approval_not_sealed" });
+        return;
+      }
+      if (sealed.kind !== "payment" || sealed.agentSessionId !== auth.agent_session_id) {
+        reply.code(403).send({ error: "sealed_claim_forbidden" });
+        return;
+      }
+      if (sealed.claimedAt !== null) {
+        reply.code(409).send({ error: "payment_approval_already_claimed" });
+        return;
+      }
+      const requestedWaitMs = Number(req.query.wait_ms ?? 0);
+      const waitMs = Number.isFinite(requestedWaitMs)
+        ? Math.min(Math.max(Math.floor(requestedWaitMs), 0), submissionWaitMs)
+        : 0;
+      // Peek first: a waiting claim must not mark anything delivered.
+      const waited = await waitForSubmission(found.id, auth.account_id, true, waitMs);
+      const record = waited.record ?? found;
+      const now = opts.deps.now?.() ?? new Date();
+      const card = await approvalCardFor(record, now);
+      if (record.status === "denied") {
+        reply.code(409).send({ error: "payment_approval_denied", approval: card });
+        return;
+      }
+      if (record.status !== "pending" || record.expiresAt <= now) {
+        await recordExpiredApproval(record, now);
+        reply.code(409).send({
+          error:
+            record.expiresAt <= now ? "payment_approval_expired" : "payment_approval_not_pending",
+          approval: card,
+        });
+        return;
+      }
+      if (waited.submission === null) {
+        return reply.code(200).send({ status: "pending", approval: card });
+      }
+      if (!(await opts.deps.sealedClaimStore.markClaimed(found.id, auth.agent_session_id, now))) {
+        reply.code(409).send({ error: "payment_approval_already_claimed" });
+        return;
+      }
+      const candidate = await opts.deps.pendingPaymentApprovalStore.getRelayCandidateForAccount(
+        record.id,
+        auth.account_id,
+        now,
+      );
+      if (candidate === null || candidate.binding !== "approval") {
+        reply.code(409).send({ error: "payment_approval_candidate_changed" });
+        return;
+      }
+      event("candidate_delivered", record, candidate.fingerprint, "ok");
+      return reply.code(200).send({
+        status: "approved",
+        id: record.id,
+        merchant: record.merchant,
+        checkout_origin: record.checkoutOrigin,
+        amount_cents: record.amountCents,
+        currency: record.currency,
+        nonce: record.nonce,
+        card_ref: record.cardRef,
+        account_binding: accountBinding(record.accountId),
+        item: record.item,
+        reason: record.reason,
+        agent: record.agent,
+        jws: candidate.jws,
+        sealed_card: candidate.sealedCard,
+        expires_at: record.expiresAt.toISOString(),
+        approval: await approvalCardFor(record, now),
+      });
+    },
+  );
+
+  // The SDK's merchant confirmation: moves the approval card from processing
+  // to completed or failed. Only the session that claimed the card, once the
+  // card was confirmed, and once. The ledger row is the same one the broker
+  // writes through POST /v1/vault/payments/audit.
+  fastify.post<{ Params: { id: string } }>(
+    "/v1/pay/approvals/:id/outcome",
+    { preHandler: opts.requireAgent },
+    async (req, reply) => {
+      const auth = req.auth!;
+      if (auth.kind !== "agent") return;
+      const parsed = outcomeBody.safeParse(req.body);
+      if (!parsed.success) {
+        reply.code(400).send({ error: "invalid_request", issues: parsed.error.issues });
+        return;
+      }
+      const record = await opts.deps.pendingPaymentApprovalStore.getByIdForAccount(
+        req.params.id,
+        auth.account_id,
+      );
+      if (record === null) {
+        reply.code(404).send({ error: "payment_approval_not_found" });
+        return;
+      }
+      const sealed = await opts.deps.sealedClaimStore.get(record.id);
+      if (sealed === null) {
+        reply.code(409).send({ error: "approval_not_sealed" });
+        return;
+      }
+      if (sealed.agentSessionId !== auth.agent_session_id) {
+        reply.code(403).send({ error: "sealed_claim_forbidden" });
+        return;
+      }
+      if (record.status !== "approved" || sealed.claimedAt === null) {
+        reply.code(409).send({ error: "payment_not_processing" });
+        return;
+      }
+      const latest = await opts.deps.paymentAuditStore.findLatestForApproval(
+        auth.account_id,
+        record.id,
+      );
+      if (latest !== null && PAYMENT_OUTCOME_STATUSES.has(latest.status)) {
+        reply.code(409).send({ error: "payment_outcome_already_reported" });
+        return;
+      }
+      const display = await approvalCardDisplay(record.cardRef, opts.deps, auth.account_id);
+      const last4 = display?.last4 ?? parsed.data.last4 ?? null;
+      if (last4 === null) {
+        reply.code(400).send({ error: "last4_required" });
+        return;
+      }
+      await recordPaymentExecution(
+        opts.deps,
+        auth.account_id,
+        {
+          merchant: record.merchant,
+          amountCents: record.amountCents,
+          currency: record.currency,
+          last4,
+          status:
+            parsed.data.outcome === "completed"
+              ? "merchant_order_confirmed"
+              : "merchant_order_failed",
+          ...(record.cardRef !== null ? { cardRef: record.cardRef } : {}),
+          approvalId: record.id,
+          item: record.item,
+        },
+        req.log,
+      );
+      opts.deps.approvalWebhooks.notify(record.id);
+      const now = opts.deps.now?.() ?? new Date();
+      return reply.code(200).send({ approval: await approvalCardFor(record, now) });
+    },
+  );
 
   // Telegram-link review is sessionless. Approval still requires a verified
   // Vouchflow mandate over the stored account/card/payment binding; the card

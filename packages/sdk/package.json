@@ -49,6 +49,9 @@
     "test:browser": "pnpm run build && node test/browser/popup.browser.mjs",
     "prepublishOnly": "rm -rf dist && npm run build"
   },
+  "dependencies": {
+    "@hpke/core": "^1.9.0"
+  },
   "devDependencies": {
     "@types/node": "^20.10.0",
     "happy-dom": "^20.11.1",

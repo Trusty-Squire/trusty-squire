@@ -623,3 +623,21 @@ model ApprovalWebhookDelivery {
   @@index([created_at])
   @@map("approval_webhook_deliveries")
 }
+
+// An SDK reveal or payment approval bound to the app that asked: its agent
+// session and its HPKE public key. Only that session can claim the sealed
+// delivery, and only once (`claimed_at`). Broker approvals have no row here.
+// Its own table, like the webhook tables: no scope field lands on AgentSession.
+model SealedApprovalClaim {
+  approval_id          String    @id @db.VarChar(26)
+  kind                 String
+  account_id           String    @db.VarChar(26)
+  agent_session_id     String    @db.VarChar(26)
+  recipient_public_key String
+  claimed_at           DateTime?
+  created_at           DateTime  @default(now())
+
+  @@index([account_id])
+  @@index([created_at])
+  @@map("sealed_approval_claims")
+}

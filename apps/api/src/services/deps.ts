@@ -101,6 +101,11 @@ import {
   type ApprovalWebhookStore,
 } from "./approval-webhooks.js";
 import { PrismaApprovalWebhookStore } from "./prisma-approval-webhook-store.js";
+import {
+  InMemorySealedClaimStore,
+  PrismaSealedClaimStore,
+  type SealedClaimStore,
+} from "./sealed-claims.js";
 import { readApprovalCard } from "./approval-card.js";
 import {
   InMemoryVouchflowDeviceStore,
@@ -145,6 +150,8 @@ export interface ApiDeps {
   // approvals, and the outbound queue the service drains.
   approvalWebhookStore: ApprovalWebhookStore;
   approvalWebhooks: ApprovalWebhookService;
+  // SDK reveal and payment approvals bound to the requesting session and key.
+  sealedClaimStore: SealedClaimStore;
   machineTokenStore: MachineTokenStore;
   captchaEventStore: CaptchaEventStore;
   decisionEventStore: DecisionEventStore;
@@ -467,6 +474,10 @@ export function buildInMemoryDeps(opts: BuildInMemoryDepsOpts): ApiDeps {
       ? new PrismaApprovalWebhookStore(authPrisma)
       : new InMemoryApprovalWebhookStore(opts.now);
   const clock = opts.now ?? (() => new Date());
+  const sealedClaimStore: SealedClaimStore =
+    authPrisma !== null
+      ? new PrismaSealedClaimStore(authPrisma)
+      : new InMemorySealedClaimStore(clock);
   const cardDeps = {
     pendingPaymentApprovalStore,
     credentialFetchApprovalStore,
@@ -488,6 +499,7 @@ export function buildInMemoryDeps(opts: BuildInMemoryDepsOpts): ApiDeps {
   return {
     approvalWebhookStore,
     approvalWebhooks,
+    sealedClaimStore,
     accountStore,
     sessionStore,
     agentSessionStore,

@@ -1,4 +1,13 @@
-export { Squire, type SquireOptions, type RequestedApproval } from "./squire.js";
+export {
+  Squire,
+  type PaymentCardData,
+  type PaymentRequestInput,
+  type ReleasedCard,
+  type RequestedApproval,
+  type RevealedCredential,
+  type SquireOptions,
+} from "./squire.js";
+export { generateSealingKey, openSealed, type SealingKey } from "./sealing.js";
 export {
   ApiClient,
   DEFAULT_API_BASE_URL,
@@ -18,6 +27,9 @@ export {
   type PaymentCardSummary,
   type ProvisionInput,
   type RunSummary,
+  type SealedPaymentClaim,
+  type SealedPaymentRequest,
+  type SealedRevealClaim,
   type UseCredentialInput,
   type UseCredentialResult,
   type VaultCredentialSummary,
@@ -36,6 +48,7 @@ export {
   ApiCallError,
   ApprovalOpenError,
   MissingTokenError,
+  SealedDeliveryError,
   WebhookVerificationError,
   type ApprovalOpenCode,
   type WebhookVerificationCode,

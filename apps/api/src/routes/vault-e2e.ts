@@ -2,6 +2,7 @@ import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { VAULT_AUDIT_TYPES } from "@trusty-squire/vault";
 import type { ApiDeps } from "../services/deps.js";
+import { recordPaymentExecution } from "../services/payment-execution-audit.js";
 import {
   notifyVaultAuditAfterCommit,
   recordVaultAuditAfterPersist,
@@ -231,38 +232,7 @@ export const registerVaultE2ERoute: FastifyPluginAsync<{
         reply.code(400).send({ error: "invalid_request", issues: parsed.error.issues });
         return;
       }
-      const eventForId = (id: string) =>
-        ({
-          account_id: auth.account_id,
-          type: VAULT_AUDIT_TYPES.paymentExecuted,
-          payload: {
-            reference: `pay://${id}`,
-            requester: "agent",
-            merchant: parsed.data.merchant,
-            amount_cents: parsed.data.amountCents,
-            currency: parsed.data.currency,
-            last4: parsed.data.last4,
-            payment_status: parsed.data.status,
-            ...(parsed.data.mandateId !== undefined ? { mandate_id: parsed.data.mandateId } : {}),
-            ...(parsed.data.cardRef !== undefined ? { card_ref: parsed.data.cardRef } : {}),
-            ...(parsed.data.approvalId !== undefined
-              ? { approval_id: parsed.data.approvalId }
-              : {}),
-            ...(parsed.data.item !== undefined ? { item: parsed.data.item } : {}),
-          },
-        }) as const;
-      let id: string;
-      if (opts.deps.paymentAuditStore.createWithVaultAudit !== undefined) {
-        id = await opts.deps.paymentAuditStore.createWithVaultAudit(
-          auth.account_id,
-          parsed.data,
-          eventForId,
-        );
-        notifyVaultAuditAfterCommit(opts.deps.vaultAuditStore, eventForId(id));
-      } else {
-        id = await opts.deps.paymentAuditStore.create(auth.account_id, parsed.data);
-        await recordVaultAuditAfterPersist(opts.deps.vaultAuditStore, eventForId(id), req.log);
-      }
+      const id = await recordPaymentExecution(opts.deps, auth.account_id, parsed.data, req.log);
       // A merchant confirmation moves the approval card from processing to completed.
       if (parsed.data.approvalId !== undefined) {
         opts.deps.approvalWebhooks.notify(parsed.data.approvalId);

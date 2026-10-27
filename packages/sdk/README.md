@@ -2,8 +2,9 @@
 
 Typed client for [Trusty Squire](https://trustysquire.ai). Your app can connect a
 user, call APIs with their vaulted keys, mint revocable app access, read the audit
-log, and show passkey approvals inside your own conversation UI. Your app never
-holds the user's keys or card.
+log, and show passkey approvals inside your own conversation UI. Your app gets a
+key or a card only after the user approves with their passkey, once, sealed to
+your app's own key.
 
 ```sh
 npm i @trusty-squire/sdk
@@ -13,8 +14,9 @@ npm i @trusty-squire/sdk
 
 | Your app can                                         | Your app cannot                          |
 | ---------------------------------------------------- | ---------------------------------------- |
-| List key metadata and call APIs with a key (`use`)   | Read a key's value                       |
-| Mint and revoke app access grants                    | Read card numbers or any card data       |
+| List key metadata and call APIs with a key (`use`)   | Read a key without the user's passkey YES |
+| Ask to reveal a key or pay, and claim it once after approval | Claim another session's reveal or payment, or claim twice |
+| Mint and revoke app access grants                    | Read card data from a card, status or webhook payload |
 | Ask the user to edit or delete a key, or edit a card | Approve anything: approval needs the user's passkey |
 | Show, deny and track approvals; receive signed webhooks | Skip an approval with a token alone   |
 
@@ -22,9 +24,9 @@ Calls through a saved key (`credentials.use`, app access grants) need no approva
 Only Squire's risky actions do: paying, revealing a key, editing or deleting a key,
 and editing a card.
 
-Revealing a key and paying are started by the Squire broker (the MCP server), which
-is where the value or the card is used. Your app still sees those approvals through
-the webhook and `approvals.get()`, can draw them, and can deny them.
+The Squire broker (the MCP server) keeps its own reveal and payment flows. Your app
+sees those approvals too, through the webhook and `approvals.get()`, and can deny
+them.
 
 ## The three steps
 
@@ -78,7 +80,7 @@ Statuses:
 | ------------ | -------------------------------------------------------------------- |
 | `pending`    | Waiting for the user.                                                |
 | `approved`   | The user signed. The action has **not** run yet.                     |
-| `processing` | A payment's card went to the Squire broker; checkout is under way.   |
+| `processing` | A payment's card went to the Squire broker or your app; checkout is under way. |
 | `completed`  | The action ran: key edited or deleted, card edited, key revealed, order confirmed. |
 | `failed`     | The action could not run after approval.                             |
 | `denied`     | The user said no. Nothing changed.                                   |
@@ -90,6 +92,49 @@ to `completed`.
 
 Each approval covers only the exact operation it shows. A different amount,
 merchant, key or change needs a new approval.
+
+## Reveal a key or pay
+
+Your app can ask for a key's value, or for a card to pay with. The approval card
+names your app (`agentName`) as "Requested by". After the user's passkey YES, your
+app claims the value once. It arrives sealed (HPKE: X25519, HKDF-SHA256,
+AES-256-GCM) to your app's own key, and the SDK opens it locally. Only the session
+that asked can claim it. Card, status and webhook payloads never carry it.
+
+```ts
+import { Squire, generateSealingKey } from "@trusty-squire/sdk";
+
+// Once, then keep it with your server's secrets. Without it the client makes one
+// in memory, and a claim must happen before the process restarts.
+const sealingKey = await generateSealingKey();
+const squire = new Squire({ token: userSquireToken, agentName: "Beeline", sealingKey });
+
+// Reveal a key.
+const { approval } = await squire.credentials.requestReveal({ service: "openai", reason: "set up CI" });
+// …the user approves (approvals.open, the webhook, or approvals.wait)…
+const { value, fields } = await squire.credentials.claimReveal(approval.id);
+
+// Pay. `amount` is in minor units: 3800 is USD 38.00.
+const { approval: pay } = await squire.payments.request({
+  merchant: "whitejade.xyz",
+  amount: 3800,
+  currency: "USD",
+  cardRef,                 // optional: a card id from cards.list()
+  reason: "Glow Serum x1",
+});
+const { card, last4 } = await squire.payments.claim(pay.id, { timeoutMs: 10 * 60_000 });
+// card → { pan, exp_month, exp_year, name, cvv, billing }. Use it once; do not store it.
+await squire.payments.report(pay.id, { outcome: "completed" }); // or "failed"
+```
+
+- `claimReveal` and `payments.claim` throw `SealedDeliveryError` with code
+  `approval_pending` before the user signs. Pass `timeoutMs` to wait first.
+- A denied, expired or already claimed approval throws `ApiCallError` and delivers
+  nothing.
+- A payment is `processing` after the claim, and `completed` or `failed` after
+  `payments.report()`.
+- When `merchant` is a name, not a domain, pass `checkoutOrigin`
+  (`https://shop.example`). `item` defaults to `reason`.
 
 ## The passkey sheet
 
@@ -162,7 +207,8 @@ await squire.audit.list({ limit: 50 });
 ```
 
 Errors: `ApiCallError` (`status`, `code`), `MissingTokenError`,
-`WebhookVerificationError` (`code`), `ApprovalOpenError` (`code`).
+`SealedDeliveryError` (`code`), `WebhookVerificationError` (`code`),
+`ApprovalOpenError` (`code`).
 
 `squire.client` is the lower-level `ApiClient` the Squire MCP server also uses. Its
 methods return the API's JSON as is.

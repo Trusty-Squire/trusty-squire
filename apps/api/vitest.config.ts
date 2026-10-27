@@ -12,6 +12,10 @@ export default defineConfig({
       // dist artifact. Otherwise package-surface changes in @trusty-squire/vault
       // require a manual `pnpm -F @trusty-squire/vault build` before API tests,
       // which hides integration regressions behind stale generated JS.
+      // Listed first: the bare-package alias below would otherwise claim it.
+      "@trusty-squire/vault/hpke": fileURLToPath(
+        new URL("../../packages/vault/src/hpke.ts", import.meta.url),
+      ),
       "@trusty-squire/vault": fileURLToPath(
         new URL("../../packages/vault/src/index.ts", import.meta.url),
       ),

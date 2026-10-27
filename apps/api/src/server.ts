@@ -319,6 +319,7 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<FastifyIn
   await fastify.register(registerCredentialFetchRoutes, {
     deps,
     requireAny: auth.requireAny,
+    requireAgent: auth.requireAgent,
     // approve/deny/ceremony are the human half — sessionless, like payments;
     // the passkey assertion over the account-bound payload, signed by a device
     // the owning account has claimed, is the authentication.

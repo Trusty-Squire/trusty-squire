@@ -75,7 +75,13 @@ export interface PaymentCardDisplay {
 }
 
 /** What the payment ledger says about the checkout the approval released. */
-export type PaymentOutcome = "completed" | null;
+export type PaymentOutcome = "completed" | "failed" | null;
+
+/** Ledger statuses that settle a released payment: the merchant confirmed or refused it. */
+export const PAYMENT_OUTCOME_STATUSES: ReadonlySet<string> = new Set([
+  "merchant_order_confirmed",
+  "merchant_order_failed",
+]);
 
 function cardName(card: PaymentCardDisplay): string {
   return card.last4 !== null ? `${card.label} ··${card.last4}` : card.label;
@@ -103,9 +109,9 @@ export function paymentApprovalStatus(
   now: Date,
 ): ApprovalStatus {
   if (record.status === "denied") return "denied";
-  // The broker confirmed the released card: the checkout is under way until
-  // the ledger records the merchant's order confirmation.
-  if (record.status === "approved") return outcome === "completed" ? "completed" : "processing";
+  // The broker or app confirmed the released card: the checkout is under way
+  // until the ledger records the merchant's confirmation or failure.
+  if (record.status === "approved") return outcome ?? "processing";
   const signed = record.submissionPhase !== null;
   if (record.status === "expired" || record.expiresAt <= now) {
     // A signed approval whose checkout never confirmed in time did not pay.
@@ -306,7 +312,8 @@ async function paymentOutcome(
 ): Promise<PaymentOutcome> {
   if (record.status !== "approved") return null;
   const audit = await deps.paymentAuditStore.findLatestForApproval(record.accountId, record.id);
-  return audit?.status === "merchant_order_confirmed" ? "completed" : null;
+  if (audit?.status === "merchant_order_confirmed") return "completed";
+  return audit?.status === "merchant_order_failed" ? "failed" : null;
 }
 
 /**

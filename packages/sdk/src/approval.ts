@@ -9,7 +9,7 @@ export type ApprovalAction = "pay" | "reveal" | "edit" | "delete" | "edit_card";
 /**
  * - `pending`: waiting for the user.
  * - `approved`: the user signed with their passkey; the action has not run yet.
- * - `processing`: a payment's card went to the Squire broker; checkout is under way.
+ * - `processing`: a payment's card went to the Squire broker or your app; checkout is under way.
  * - `completed`: the action ran (key edited or deleted, card edited, key revealed, order confirmed).
  * - `failed`: the action could not run after approval; nothing more will happen.
  * - `denied`: the user said no. Nothing changed.
