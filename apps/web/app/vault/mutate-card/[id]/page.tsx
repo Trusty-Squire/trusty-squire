@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { decryptCard, encryptCard, type E2EBlob } from "@trusty-squire/vault/e2e";
 import { WrongAccountNotice } from "../../../components/WrongAccountNotice";
-import { AppShell } from "../../../components/AppShell";
+import { ApprovalFrame, useApprovalEmbed } from "../../../components/ApprovalFrame";
 import { PasskeySetup } from "../../../components/PasskeySetup";
 import { ApiError, apiGet, apiPost } from "../../../lib/api";
 import { cardUnlockError, errorText } from "../../../lib/error-text";
@@ -12,6 +12,7 @@ import { getPairingState, pairDevice, registerEnrolledDevice } from "../../../li
 import { evaluatePrf } from "../../../lib/passkey";
 import { isUnlinkedSigningDevice, WRONG_ACCOUNT_DEVICE_MESSAGE } from "../../../lib/pairing";
 import { getVouchflow } from "../../../lib/vouchflow";
+import { hostStatus, passkeysAllowedHere } from "../../../lib/approval-embed";
 import { CARD_TRUST_COPY, cardLast4, detectCardBrand } from "../../../lib/wallet";
 
 // edit_payment_card's human half. The ceremony endpoint hands this page the
@@ -34,7 +35,7 @@ interface CardMetadata {
 
 interface CardMutationCeremony {
   approval_id: string;
-  status: "pending" | "approved" | "failed" | "expired";
+  status: "pending" | "approved" | "failed" | "denied" | "expired";
   operation: "edit_card";
   card: { id: string; label: string; brand: string | null; last4: string | null };
   before: CardMetadata;
@@ -100,10 +101,6 @@ export default function CardMutationApprovalPage() {
   const [postalCode, setPostalCode] = useState("");
   const [country, setCountry] = useState("");
 
-  const redirectToLogin = useCallback(() => {
-    router.replace(`/login?next=/vault/mutate-card/${encodeURIComponent(id)}`);
-  }, [id, router]);
-
   const fetchCeremony = useCallback(
     () =>
       apiGet<CardMutationCeremony>(
@@ -111,6 +108,22 @@ export default function CardMutationApprovalPage() {
       ),
     [id],
   );
+  const embedState = useApprovalEmbed(
+    id,
+    useCallback(async () => setCeremony(await fetchCeremony()), [fetchCeremony]),
+  );
+  const { embed, requireWindow, loginUrl, leave } = embedState;
+  const inSheet = embed?.mode === "sheet";
+
+  // Card edits need a signed-in session, which another app's sheet cannot
+  // carry; a window of our own can.
+  const redirectToLogin = useCallback(() => {
+    if (inSheet) {
+      requireWindow();
+      return;
+    }
+    router.replace(loginUrl(`/vault/mutate-card/${encodeURIComponent(id)}`));
+  }, [id, inSheet, loginUrl, requireWindow, router]);
 
   useEffect(() => {
     let cancelled = false;
@@ -138,9 +151,14 @@ export default function CardMutationApprovalPage() {
     setBusy(true);
     setError(null);
     try {
+      if (inSheet && !passkeysAllowedHere()) {
+        requireWindow();
+        return;
+      }
       const pairing = await getPairingState();
       if (!pairing.enrolled) {
-        setNeedsPasskeySetup(true);
+        if (inSheet) requireWindow();
+        else setNeedsPasskeySetup(true);
         return;
       }
       const stored = JSON.parse(ceremony.blob) as StoredCard;
@@ -198,7 +216,7 @@ export default function CardMutationApprovalPage() {
     } finally {
       setBusy(false);
     }
-  }, [ceremony, redirectToLogin]);
+  }, [ceremony, inSheet, redirectToLogin, requireWindow]);
 
   const setUpPasskey = useCallback(async (forceNew: boolean) => {
     setBusy(true);
@@ -328,14 +346,20 @@ export default function CardMutationApprovalPage() {
   const terminal =
     ceremony?.status === "approved"
       ? "Approved — the card is updated. You can return to your agent session."
-      : ceremony?.status === "expired"
+      : ceremony?.status === "denied"
+        ? "Denied — no change was made."
+        : ceremony?.status === "expired"
         ? "This card edit approval has expired."
         : ceremony?.status === "failed"
           ? `The vault refused this edit${ceremony.error ? `: ${ceremony.error}` : "."}`
           : null;
 
   return (
-    <AppShell anonymous>
+    <ApprovalFrame
+      state={embedState}
+      approvalId={id}
+      status={ceremony === null ? null : hostStatus("card_mutation", ceremony.status)}
+    >
       <div className="app-head">
         <div>
           <h1 className="app-title">Edit saved card</h1>
@@ -385,7 +409,9 @@ export default function CardMutationApprovalPage() {
               <button
                 className="btn-secondary"
                 type="button"
-                onClick={() => router.push("/")}
+                onClick={() => {
+                  if (!leave("pending")) router.push("/");
+                }}
                 disabled={busy}
               >
                 Cancel
@@ -513,7 +539,9 @@ export default function CardMutationApprovalPage() {
                 <button
                   className="btn-secondary"
                   type="button"
-                  onClick={() => router.push("/")}
+                  onClick={() => {
+                    if (!leave("pending")) router.push("/");
+                  }}
                   disabled={busy}
                 >
                   Cancel
@@ -526,6 +554,6 @@ export default function CardMutationApprovalPage() {
           )}
         </section>
       )}
-    </AppShell>
+    </ApprovalFrame>
   );
 }

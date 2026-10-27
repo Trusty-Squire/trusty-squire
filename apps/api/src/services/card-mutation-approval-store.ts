@@ -1,6 +1,7 @@
 import { ulid } from "ulid";
 import { VAULT_AUDIT_TYPES, type VaultAuditEventInput, type VaultAuditStore } from "@trusty-squire/vault";
 import type { E2ECredentialCardUpdate, E2ECredentialStore } from "./in-memory-e2e-credential-store.js";
+import type { MutationDenyResult } from "./credential-mutation-approval-store.js";
 
 // edit_payment_card's approval records — the passkey-gated saved-card edit.
 //
@@ -16,7 +17,7 @@ import type { E2ECredentialCardUpdate, E2ECredentialStore } from "./in-memory-e2
 // payment) mandate has nowhere to land here, and vice versa.
 
 export type CardMutationOperation = "edit_card";
-export type CardMutationApprovalStatus = "pending" | "approved" | "failed";
+export type CardMutationApprovalStatus = "pending" | "approved" | "failed" | "denied";
 export type CardMutationRequesterKind = "web" | "agent";
 
 // Display metadata only — never a card value. brand/last4 are the nullable
@@ -75,6 +76,8 @@ export interface CardMutationApprovalStore {
     mandateId: string | null,
     applied: CardMutationApplied,
   ): Promise<CardMutationCommitResult>;
+  /** Refuse a still-live pending approval for its owning account. Changes no card. */
+  deny(id: string, accountId: string, now: Date): Promise<MutationDenyResult>;
 }
 
 export class InMemoryCardMutationApprovalStore implements CardMutationApprovalStore {
@@ -179,6 +182,18 @@ export class InMemoryCardMutationApprovalStore implements CardMutationApprovalSt
     } finally {
       this.committing.delete(id);
     }
+  }
+
+  async deny(id: string, accountId: string, now: Date): Promise<MutationDenyResult> {
+    const record = this.records.get(id);
+    if (record === undefined || record.accountId !== accountId) return "not_pending";
+    if (record.status === "denied") return "already_denied";
+    if (record.status !== "pending" || this.committing.has(id)) return "not_pending";
+    if (record.expiresAt <= now) return "expired";
+    record.status = "denied";
+    record.failureCode = "denied_by_user";
+    record.executedAt = now;
+    return "denied";
   }
 }
 

@@ -347,11 +347,15 @@ model PaymentAuditEvent {
   last4        String
   status       String
   mandate_id   String?
+  // The payment approval this outcome settles (nullable: older rows and
+  // outcomes recorded without an approval carry none).
+  approval_id  String?
   created_at   DateTime @default(now())
 
   account Account @relation(fields: [account_id], references: [id], onDelete: Cascade)
 
   @@index([account_id])
+  @@index([account_id, approval_id])
 }
 
 // Ephemeral relay for opaque payment approval payloads.
@@ -564,4 +568,76 @@ model EgressGrant {
 
   @@index([account_id])
   @@index([token_hash])
+}
+
+// A decision-webhook URL one agent session registered. Approvals that session
+// requests are delivered here, signed with a secret derived from the server
+// signing key and `secret_salt` — the secret itself is never stored, so a
+// database read alone cannot forge a delivery. Re-registering rotates the salt.
+// Deliberately its own table: no scope or consent field lands on AgentSession.
+model ApprovalWebhookEndpoint {
+  id               String   @id @db.VarChar(26)
+  account_id       String   @db.VarChar(26)
+  agent_session_id String   @unique @db.VarChar(26)
+  url              String
+  secret_salt      String
+  created_at       DateTime @default(now())
+
+  @@index([account_id])
+  @@map("approval_webhook_endpoints")
+}
+
+// One approval being watched for a registered endpoint. `last_status` is the
+// status already announced; `open` turns false once a terminal status went out.
+model ApprovalWebhookSubscription {
+  approval_id String   @id @db.VarChar(26)
+  kind        String
+  account_id  String   @db.VarChar(26)
+  endpoint_id String   @db.VarChar(26)
+  last_status String?
+  open        Boolean  @default(true)
+  expires_at  DateTime
+  created_at  DateTime @default(now())
+
+  @@index([open, created_at])
+  @@index([expires_at])
+  @@map("approval_webhook_subscriptions")
+}
+
+// The outbound queue. `payload` is the exact JSON body that is signed and sent
+// on every attempt, so a retry carries the same event id and bytes. Display
+// data only: the approval card never holds a secret value or card data.
+model ApprovalWebhookDelivery {
+  id              String    @id
+  endpoint_id     String    @db.VarChar(26)
+  approval_id     String    @db.VarChar(26)
+  payload         String
+  attempts        Int       @default(0)
+  next_attempt_at DateTime
+  delivered_at    DateTime?
+  abandoned_at    DateTime?
+  last_error      String?
+  created_at      DateTime  @default(now())
+
+  @@index([delivered_at, abandoned_at, next_attempt_at])
+  @@index([created_at])
+  @@map("approval_webhook_deliveries")
+}
+
+// An SDK reveal or payment approval bound to the app that asked: its agent
+// session and its HPKE public key. Only that session can claim the sealed
+// delivery, and only once (`claimed_at`). Broker approvals have no row here.
+// Its own table, like the webhook tables: no scope field lands on AgentSession.
+model SealedApprovalClaim {
+  approval_id          String    @id @db.VarChar(26)
+  kind                 String
+  account_id           String    @db.VarChar(26)
+  agent_session_id     String    @db.VarChar(26)
+  recipient_public_key String
+  claimed_at           DateTime?
+  created_at           DateTime  @default(now())
+
+  @@index([account_id])
+  @@index([created_at])
+  @@map("sealed_approval_claims")
 }

@@ -28,6 +28,7 @@ import { registerDecideRoute } from "./routes/decide.js";
 import { registerCredentialMutationRoutes } from "./routes/credential-mutations.js";
 import { registerCardMutationRoutes } from "./routes/card-mutations.js";
 import { registerCredentialFetchRoutes } from "./routes/credential-fetch.js";
+import { registerApprovalRoutes } from "./routes/approvals.js";
 import { registerVouchflowDeviceRoutes } from "./routes/vouchflow-devices.js";
 import { registerEgressRoutes } from "./routes/egress.js";
 import type { EgressGrantStore } from "./services/egress-grant.js";
@@ -318,10 +319,19 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<FastifyIn
   await fastify.register(registerCredentialFetchRoutes, {
     deps,
     requireAny: auth.requireAny,
+    requireAgent: auth.requireAgent,
     // approve/deny/ceremony are the human half — sessionless, like payments;
     // the passkey assertion over the account-bound payload, signed by a device
     // the owning account has claimed, is the authentication.
     ...(opts.vouchVerifier !== undefined ? { vouchVerifier: opts.vouchVerifier } : {}),
+  });
+  // The kind-agnostic approval surface for apps that draw approvals in their
+  // own UI: read a card, deny, and register a signed decision webhook.
+  // Approving stays on the passkey ceremonies above.
+  await fastify.register(registerApprovalRoutes, {
+    deps,
+    requireAny: auth.requireAny,
+    requireAgent: auth.requireAgent,
   });
   await fastify.register(registerTelegramRoute, {
     deps,
@@ -448,6 +458,9 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   // .start() is idempotent and uses unref'd timers so it doesn't block
   // process exit.
   deps.retentionCron?.start();
+  // Announces approval changes no route reported (expiry is lazy) and retries
+  // failed webhook deliveries. Unref'd like the retention cron.
+  deps.approvalWebhooks.start();
 
   await server.listen({ port, host: "0.0.0.0" });
 

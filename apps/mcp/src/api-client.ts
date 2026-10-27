@@ -1,8 +1,30 @@
-// HTTP client wrapping calls to apps/api + apps/registry.
+// The MCP server's HTTP client for apps/api + apps/registry.
 //
-// All methods return parsed JSON or throw a typed error. The client
-// is the only thing the MCP tools touch — tests inject a mock to
-// keep their behaviour deterministic without spinning up HTTP.
+// The shared, public surface lives in @trusty-squire/sdk (one client for the
+// MCP and for apps). This subclass adds what only the local Squire broker may
+// call: the payment-card relay, the single-use reveal delivery, browser fill,
+// and registry/diagnostic endpoints. Tests inject a mock of this module.
+
+import {
+  ApiCallError,
+  ApiClient as SdkApiClient,
+  type ApiClientConfig as SdkApiClientConfig,
+  type CredentialFetchApproval as SdkCredentialFetchApproval,
+} from "@trusty-squire/sdk";
+
+export {
+  ApiCallError,
+  installInitiate,
+  installPoll,
+  type CardMutationApproval,
+  type CreateRunResponse,
+  type CredentialMutationApproval,
+  type InstallInitiateResponse,
+  type InstallStatusResponse,
+  type ProvisionInput,
+  type RunSummary,
+  type VaultCredentialSummary,
+} from "@trusty-squire/sdk";
 
 export class MissingSessionError extends Error {
   constructor() {
@@ -13,29 +35,12 @@ export class MissingSessionError extends Error {
   }
 }
 
-export class ApiCallError extends Error {
-  constructor(
-    public readonly status: number,
-    public readonly code: string,
-    message: string,
-    public readonly body?: unknown,
-  ) {
-    super(message);
-    this.name = "ApiCallError";
-  }
-}
-
 export function isPaymentApprovalTransportTimeout(error: unknown): boolean {
   return error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError");
 }
 
-export interface ApiClientConfig {
-  apiBaseUrl: string;
+export interface ApiClientConfig extends SdkApiClientConfig {
   registryBaseUrl: string;
-  agentSessionToken: string;
-  fetch?: typeof fetch;
-  // Self-reported in headers so the API ledger can attribute actions.
-  agentIdentity?: string;
   // Account identifier — sent as `x-account-id` to the registry,
   // which uses it for scoping (extract-failure snapshots, skill
   // uploads, etc.). Optional because dev/test MCPs may not yet have
@@ -44,109 +49,12 @@ export interface ApiClientConfig {
   accountId?: string;
 }
 
-export interface ProvisionInput {
-  service: string;
-  plan: string;
-  project_name: string;
-  category: string;
-  cost_cents: number;
-  recurrence: "one_time" | "monthly" | "yearly" | "none";
-  idempotency_key?: string;
-}
-
-export interface RunSummary {
-  id: string;
-  state: string;
-  service: string;
-  plan: string;
-  project_name: string;
-  subscription_id: string | null;
-  failure_reason: string | null;
-  created_at: string;
-  completed_at: string | null;
-}
-
-export interface CreateRunResponse {
-  run: { id: string; state: string };
-  decision: "silent" | "needs_approval" | "reject";
-  approval_url?: string;
-  reasons?: string[];
-  required_confidence?: "low" | "medium" | "high";
-}
-
-// Metadata for one vault credential — no secret value. The agent lists
-// these to discover what keys exist; the raw value is never returned —
-// the agent spends a key via use_credential (server-side write-only sink).
-export interface VaultCredentialSummary {
-  id: string;
-  reference: string;
-  service: string | null;
-  label: string;
-  field_names: string[];
-  key_name: string | null;
-  type: string | null;
-  allowed_hosts: string[];
-  auth_strategy: string | null;
-  signin_url: string | null;
-  login_hosts: string[];
-  created_at: string;
-  last_retrieved_at: string | null;
-  retrieval_count: number;
-  // Rotation-age nudge from the API (true when past the rotation-stale age).
-  stale?: boolean;
-}
-
-export interface CredentialMutationApproval {
-  approval_id: string;
-  approval_url: string;
-  status: "pending" | "approved" | "failed" | "expired";
-  operation: "edit" | "delete";
-  credential: { reference: string; service: string | null; name: string };
-  before: {
-    label: string;
-    allowed_hosts: string[];
-    login_hosts: string[];
-    auth_strategy: string | null;
-  };
-  after: {
-    label: string;
-    allowed_hosts: string[];
-    login_hosts: string[];
-    auth_strategy: string | null;
-  } | null;
-  expires_at: string;
-  error?: string;
-}
-
-// edit_payment_card's approval record. The agent never sees card values:
-// `card`/`before`/`after` carry display metadata only (label/brand/last4),
-// and the sealed blob stays behind the browser ceremony.
-export interface CardMutationApproval {
-  approval_id: string;
-  approval_url: string;
-  status: "pending" | "approved" | "failed" | "expired";
-  operation: "edit_card";
-  card: { id: string; label: string; brand: string | null; last4: string | null };
-  before: { label: string; brand: string | null; last4: string | null };
-  after: { label: string; brand: string | null; last4: string | null } | null;
-  expires_at: string;
-  error?: string;
-}
-
 // fetch_credential's approval record. `fields` is present ONLY on the single
 // delivery that follows a passkey-signed approval; every other status carries
 // no value at all.
-export interface CredentialFetchApproval {
-  approval_id: string;
-  approval_url: string;
-  status: "pending" | "approved" | "consumed" | "denied" | "expired" | "failed";
-  credential: { reference: string; service: string | null; name: string };
-  field: string | null;
-  field_names: string[];
-  expires_at: string;
+export interface CredentialFetchApproval extends SdkCredentialFetchApproval {
   fields?: Record<string, string>;
   fetched_at?: string;
-  error?: string;
 }
 
 export interface DirectoryEntry {
@@ -204,28 +112,12 @@ export interface HeightenedAuthNotificationResult {
   };
 }
 
-export class ApiClient {
-  private readonly fetchImpl: typeof fetch;
-  private requestingAgent: string | undefined;
-
-  constructor(private readonly config: ApiClientConfig) {
-    this.fetchImpl = config.fetch ?? fetch;
+export class ApiClient extends SdkApiClient {
+  constructor(private readonly mcpConfig: ApiClientConfig) {
+    super(mcpConfig);
   }
 
-  setRequestingAgent(name: string): void {
-    const normalized = name.trim();
-    this.requestingAgent = normalized.length > 0 ? normalized : "unknown-agent";
-  }
-
-  // ── Runs / provision / approvals ───────────────────────────
-
-  async createRun(input: ProvisionInput): Promise<CreateRunResponse> {
-    return this.post<CreateRunResponse>("/v1/runs", input);
-  }
-
-  async getRun(runId: string): Promise<RunSummary> {
-    return this.get<RunSummary>(`/v1/runs/${encodeURIComponent(runId)}`);
-  }
+  // ── Payments: the broker's card relay (never part of the SDK) ──
 
   async createPaymentApproval(input: {
     merchant: string;
@@ -300,21 +192,6 @@ export class ApiClient {
     return this.get("/v1/pay/config");
   }
 
-  async listPaymentCards(): Promise<
-    Array<{ id: string; label: string; last4: string | null; brand?: string }>
-  > {
-    const records =
-      await this.get<
-        Array<{ id: string; label: string; last4: string | null; brand?: string | null }>
-      >("/v1/vault/e2e");
-    return records.map(({ id, label, last4, brand }) => ({
-      id,
-      label,
-      last4: last4 ?? null,
-      ...(brand != null ? { brand } : {}),
-    }));
-  }
-
   async notifyThreeDs(
     approvalId: string,
     mode: "detected_challenge" | "possible_out_of_band",
@@ -354,127 +231,10 @@ export class ApiClient {
     });
   }
 
-  // Metadata list of every credential in the account's vault — no
-  // secret values. The discovery half of the credential loop.
-  async listCredentials(): Promise<{ credentials: VaultCredentialSummary[] }> {
-    return this.get<{ credentials: VaultCredentialSummary[] }>("/v1/vault/credentials");
-  }
-
-  // ── store: upsert (create or overwrite by service+label) ──
-
-  async storeCredential(input: {
-    write_id?: string;
-    service: string;
-    label?: string;
-    value?: string;
-    fields?: Record<string, string>;
-    env_var_suggestion?: string;
-    type?: string;
-    auth_shape?: string;
-    auth_strategy?: "api_key" | "username_password";
-    signin_url?: string;
-    login_hosts?: string[];
-    observed_hosts?: string[];
-  }): Promise<{
-    reference: string;
-    service: string;
-    label: string;
-    field_names: string[];
-    auth_strategy: string | null;
-    signin_url: string | null;
-    login_hosts: string[];
-    allowed_hosts: string[];
-    created_at: string;
-    updated: boolean;
-    duplicate_of?: Array<{ service: string; label: string; reference: string }>;
-    hint?: string;
-  }> {
-    return this.post("/v1/vault/credentials", input);
-  }
-
-  async createCredentialMutationApproval(input: {
-    operation: "edit" | "delete";
-    reference?: string;
-    service?: string;
-    name?: string;
-    changes?: {
-      label?: string;
-      allowed_hosts?: { mode: "add" | "remove" | "replace"; hosts: string[] };
-      login_hosts?: { mode: "add" | "remove" | "replace"; hosts: string[] };
-    };
-  }): Promise<CredentialMutationApproval> {
-    return this.post("/v1/vault/mutation-approvals", input);
-  }
-
-  async getCredentialMutationApproval(
-    id: string,
-    signal?: AbortSignal,
-    waitMs?: number,
-  ): Promise<CredentialMutationApproval> {
-    const wait = waitMs === undefined ? "" : `?wait_for_decision=1&wait_ms=${waitMs}`;
-    return this.get(`/v1/vault/mutation-approvals/${encodeURIComponent(id)}${wait}`, signal);
-  }
-
-  // edit_payment_card — start (card selector) or resume (approval_id).
-  async createCardMutationApproval(input: {
-    operation: "edit_card";
-    card_id?: string;
-    label?: string;
-  }): Promise<CardMutationApproval> {
-    return this.post("/v1/vault/card-mutation-approvals", input);
-  }
-
-  async getCardMutationApproval(
-    id: string,
-    signal?: AbortSignal,
-    waitMs?: number,
-  ): Promise<CardMutationApproval> {
-    const wait = waitMs === undefined ? "" : `?wait_for_decision=1&wait_ms=${waitMs}`;
-    return this.get(`/v1/vault/card-mutation-approvals/${encodeURIComponent(id)}${wait}`, signal);
-  }
-
-  async createCredentialFetchApproval(input: {
-    reference?: string;
-    service?: string;
-    name?: string;
-    field?: string;
-    reason?: string;
-  }): Promise<CredentialFetchApproval> {
-    return this.post("/v1/vault/fetch-approvals", input);
-  }
+  // ── fetch_credential delivery: the single-use reveal (never part of the SDK) ──
 
   async getCredentialFetchApproval(id: string): Promise<CredentialFetchApproval> {
     return this.get(`/v1/vault/fetch-approvals/${encodeURIComponent(id)}`);
-  }
-
-  // The resume GET above consumes an approved fetch. The ceremony read is a
-  // non-consuming status lookup, so a decision watch cannot reveal the value.
-  async getCredentialFetchApprovalStatus(
-    id: string,
-    signal?: AbortSignal,
-    waitMs?: number,
-  ): Promise<CredentialFetchApproval> {
-    const wait = waitMs === undefined ? "" : `?wait_for_decision=1&wait_ms=${waitMs}`;
-    return this.get(`/v1/vault/fetch-approvals/${encodeURIComponent(id)}/ceremony${wait}`, signal);
-  }
-
-  // ── use_credential: write-only-sink proxy ─────────────────
-
-  async useCredential(input: {
-    reference?: string;
-    service?: string;
-    name?: string;
-    http: {
-      method: string;
-      url: string;
-      headers?: Record<string, string>;
-      body?: string;
-      query?: Record<string, string>;
-    };
-  }): Promise<{
-    response: { status: number; headers: Record<string, string>; body: string; truncated: boolean };
-  }> {
-    return this.post("/v1/vault/use", input);
   }
 
   // Platform Jev — POST /v1/decide. Returns the upstream HTTP status and body
@@ -500,90 +260,6 @@ export class ApiClient {
     encrypted_response_public_key: string;
   }): Promise<{ reference: string; encrypted_fields: Record<string, string> }> {
     return this.post("/v1/vault/browser-fill", input);
-  }
-
-  // ── Egress grants: a deployed app uses a vaulted credential via the proxy ──
-
-  async grantAppAccess(input: {
-    reference?: string;
-    service?: string;
-    rate_limit_per_hour?: number;
-    spend_cap_usd?: number;
-  }): Promise<{
-    grant_id: string;
-    base_url: string;
-    token: string;
-    rate_limit_per_hour: number | null;
-    spend_cap_usd: number | null;
-    hint: string;
-  }> {
-    return this.post("/v1/egress/grants", input);
-  }
-
-  async listEgressGrants(): Promise<{
-    grants: Array<{
-      grant_id: string;
-      credential_ref: string;
-      rate_limit_per_hour: number | null;
-      spend_cap_usd: number | null;
-      created_at: string;
-      revoked_at: string | null;
-    }>;
-  }> {
-    return this.get("/v1/egress/grants");
-  }
-
-  async revokeEgressGrant(grantId: string): Promise<{ revoked: boolean; grant_id: string }> {
-    const res = await this.fetchImpl(
-      `${this.config.apiBaseUrl}/v1/egress/grants/${encodeURIComponent(grantId)}`,
-      { method: "DELETE", headers: this.headers() },
-    );
-    return this.handleResponse(res, "DELETE", `/v1/egress/grants/${grantId}`) as Promise<{
-      revoked: boolean;
-      grant_id: string;
-    }>;
-  }
-
-  // ── Audit ledger: who-touched-my-keys (no secret values) ──────────
-
-  async listAudit(input: {
-    limit?: number;
-    before?: string;
-    type?: string;
-    reference?: string;
-  }): Promise<{
-    events: Array<{ id: string; type: string; emitted_at: string } & Record<string, unknown>>;
-    next_before: string | null;
-  }> {
-    const q = new URLSearchParams();
-    if (input.limit !== undefined) q.set("limit", String(input.limit));
-    if (input.before !== undefined) q.set("before", input.before);
-    if (input.type !== undefined) q.set("type", input.type);
-    if (input.reference !== undefined) q.set("reference", input.reference);
-    const qs = q.toString();
-    return this.get(`/v1/vault/audit${qs.length > 0 ? `?${qs}` : ""}`);
-  }
-
-  async listAuditDaily(input: { limit?: number; before?: string; reference?: string }): Promise<{
-    totals: Array<{
-      day: string;
-      reference: string;
-      target_host: string;
-      requester: string;
-      grant_id: string;
-      calls: number;
-      status_breakdown: Record<string, number>;
-      total_bytes: number;
-      first_at: string;
-      last_at: string;
-    }>;
-    next_before: string | null;
-  }> {
-    const q = new URLSearchParams();
-    if (input.limit !== undefined) q.set("limit", String(input.limit));
-    if (input.before !== undefined) q.set("before", input.before);
-    if (input.reference !== undefined) q.set("reference", input.reference);
-    return this.get(`/v1/vault/audit/daily?${q}`);
   }
 
   // ── Subscriptions ─────────────────────────────────────────
@@ -624,7 +300,7 @@ export class ApiClient {
     html: string;
     screenshot_jpeg_base64?: string;
   }): Promise<{ id: string }> {
-    const url = `${this.config.registryBaseUrl}/v1/extract-failures`;
+    const url = `${this.mcpConfig.registryBaseUrl}/v1/extract-failures`;
     const res = await this.fetchImpl(url, {
       method: "POST",
       headers: this.headers(),
@@ -651,7 +327,7 @@ export class ApiClient {
       screenshot_bytes: number;
     }>;
   }> {
-    const url = `${this.config.registryBaseUrl}/v1/extract-failures?limit=${encodeURIComponent(String(limit))}`;
+    const url = `${this.mcpConfig.registryBaseUrl}/v1/extract-failures?limit=${encodeURIComponent(String(limit))}`;
     const res = await this.fetchImpl(url, {
       method: "GET",
       headers: this.headers(),
@@ -693,7 +369,7 @@ export class ApiClient {
     screenshot_jpeg_base64: string | null;
     screenshot_bytes: number;
   }> {
-    const url = `${this.config.registryBaseUrl}/v1/extract-failures/${encodeURIComponent(id)}`;
+    const url = `${this.mcpConfig.registryBaseUrl}/v1/extract-failures/${encodeURIComponent(id)}`;
     const res = await this.fetchImpl(url, {
       method: "GET",
       headers: this.headers(),
@@ -721,131 +397,23 @@ export class ApiClient {
   async listServices(category?: string): Promise<{ adapters: DirectoryEntry[] }> {
     const url =
       category !== undefined
-        ? `${this.config.registryBaseUrl}/adapters?category=${encodeURIComponent(category)}`
-        : `${this.config.registryBaseUrl}/adapters`;
+        ? `${this.mcpConfig.registryBaseUrl}/adapters?category=${encodeURIComponent(category)}`
+        : `${this.mcpConfig.registryBaseUrl}/adapters`;
     const res = await this.fetchImpl(url, { method: "GET" });
     return (await this.handleResponse(res, "GET", url)) as { adapters: DirectoryEntry[] };
   }
 
   // ── Internal HTTP helpers ─────────────────────────────────
 
-  private headers(): Record<string, string> {
-    const h: Record<string, string> = {
-      Authorization: `Bearer ${this.config.agentSessionToken}`,
-      Accept: "application/json",
-      "Content-Type": "application/json",
-    };
-    const agentIdentity = this.requestingAgent ?? this.config.agentIdentity;
-    if (agentIdentity !== undefined) {
-      h["X-Squire-Agent-Identity"] = agentIdentity;
-    }
+  protected override headers(): Record<string, string> {
+    const h = super.headers();
     // The registry scopes its reads to `x-account-id`. Main API
     // ignores unknown headers, so it's safe to always send.
-    if (this.config.accountId !== undefined) {
-      h["x-account-id"] = this.config.accountId;
+    if (this.mcpConfig.accountId !== undefined) {
+      h["x-account-id"] = this.mcpConfig.accountId;
     }
     return h;
   }
-
-  private async get<T>(path: string, signal?: AbortSignal): Promise<T> {
-    const res = await this.fetchImpl(`${this.config.apiBaseUrl}${path}`, {
-      method: "GET",
-      headers: this.headers(),
-      ...(signal !== undefined ? { signal } : {}),
-    });
-    return (await this.handleResponse(res, "GET", path)) as T;
-  }
-
-  private async post<T>(path: string, body: unknown, signal?: AbortSignal): Promise<T> {
-    const res = await this.fetchImpl(`${this.config.apiBaseUrl}${path}`, {
-      method: "POST",
-      headers: this.headers(),
-      body: JSON.stringify(body),
-      ...(signal !== undefined ? { signal } : {}),
-    });
-    return (await this.handleResponse(res, "POST", path)) as T;
-  }
-
-  private async handleResponse(res: Response, method: string, path: string): Promise<unknown> {
-    const body = await safeJson(res);
-    if (!res.ok) {
-      const code = isErrorBody(body) ? body.error : `http_${res.status}`;
-      throw new ApiCallError(res.status, code, `${method} ${path} → ${res.status} ${code}`, body);
-    }
-    return body;
-  }
-}
-
-async function safeJson(res: Response): Promise<unknown> {
-  try {
-    return await res.json();
-  } catch {
-    return null;
-  }
-}
-
-function isErrorBody(b: unknown): b is { error: string } {
-  return (
-    b !== null &&
-    typeof b === "object" &&
-    "error" in b &&
-    typeof (b as { error: unknown }).error === "string"
-  );
-}
-
-// Stand-alone install-claim helpers — used by the install CLI to run
-// the browser confirm step. Initiate + poll are unauthenticated by
-// design: the CLI has no credentials yet, only the one-time setup_code.
-
-export interface InstallInitiateResponse {
-  setup_code: string;
-  confirm_url: string;
-  expires_at: string;
-}
-
-export async function installInitiate(
-  apiBaseUrl: string,
-  agentIdentity: string,
-  // The machine token issued seconds earlier via /v1/install — bound
-  // to the account at claim time so quota tracks against the account.
-  machineToken: string | null = null,
-  fetchImpl: typeof fetch = fetch,
-): Promise<InstallInitiateResponse> {
-  const res = await fetchImpl(`${apiBaseUrl}/v1/mcp/install/initiate`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      agent_identity: agentIdentity,
-      ...(machineToken !== null ? { machine_token: machineToken } : {}),
-    }),
-  });
-  if (!res.ok)
-    throw new ApiCallError(res.status, "install_initiate_failed", "install handshake failed");
-  return (await res.json()) as InstallInitiateResponse;
-}
-
-export interface InstallStatusResponse {
-  status: "pending" | "claimed" | "expired";
-  agent_session_token?: string;
-  account_id?: string;
-  install_preferences?: {
-    registry_enabled?: boolean;
-    consent_operator_inbox_otp?: boolean;
-  };
-}
-
-export async function installPoll(
-  apiBaseUrl: string,
-  setupCode: string,
-  fetchImpl: typeof fetch = fetch,
-): Promise<InstallStatusResponse> {
-  const res = await fetchImpl(
-    `${apiBaseUrl}/v1/mcp/install/${encodeURIComponent(setupCode)}/status`,
-  );
-  // 200 + status === 'pending' | 'claimed'; 410 → expired (return shape rather than throw).
-  if (res.status === 410) return { status: "expired" };
-  if (!res.ok) throw new ApiCallError(res.status, "install_poll_failed", "install poll failed");
-  return (await res.json()) as InstallStatusResponse;
 }
 
 // ── Machine-token issuance ─────────────────────────────────

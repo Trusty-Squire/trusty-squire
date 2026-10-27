@@ -36,7 +36,7 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm --filter @trusty-squire/skill-schema build
+      - run: pnpm --filter @trusty-squire/skill-schema --filter @trusty-squire/sdk build
       - run: pnpm --filter @trusty-squire/mcp build
       - name: Fresh systemd install, upgrade, reconnect, and stopped-service acceptance
         if: runner.os == 'Linux'

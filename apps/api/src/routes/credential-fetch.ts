@@ -5,6 +5,8 @@
 //   GET  /v1/vault/fetch-approvals/:id/ceremony → the exact payload to sign
 //   POST /v1/vault/fetch-approvals/:id/approve  → passkey mandate lands here
 //   POST /v1/vault/fetch-approvals/:id/deny     → the human refuses
+//   POST /v1/vault/fetch-approvals/:id/claim    → SDK: the value, sealed to the
+//                                                 requesting app's key, once
 //
 // The three human-facing endpoints are SESSIONLESS, exactly like the payment
 // approval path: the Vouchflow passkey assertion is the authentication, not a
@@ -66,6 +68,14 @@ import {
   verifyApprovalMandate,
 } from "../services/approval-ceremony.js";
 import { sendTelegramMessage } from "../services/telegram.js";
+import { sealToRecipient } from "@trusty-squire/vault/hpke";
+import {
+  isRecipientPublicKey,
+  recipientPublicKeyHash,
+  revealSealAad,
+  type SealedClaimBinding,
+} from "../services/sealed-claims.js";
+import { credentialFetchApprovalCard } from "../services/approval-card.js";
 import { authenticatedRequester } from "../services/requesting-agent.js";
 import {
   CREDENTIAL_FETCH_VOUCH_CONTEXT,
@@ -84,6 +94,9 @@ const createBody = z
     name: z.string().min(1).max(60).optional(),
     field: z.string().min(1).max(120).optional(),
     reason: z.string().max(REASON_MAX_CHARS).optional(),
+    // SDK only: seal the value to this app key and let only the requesting
+    // agent session claim it (POST /:id/claim). Absent, nothing changes.
+    recipient_public_key: z.string().min(1).max(512).optional(),
   })
   .strict()
   .refine(
@@ -116,7 +129,12 @@ function accountBinding(accountId: string): string {
 
 // What the passkey signs. `purpose` is inside the signed bytes as well as in
 // the context, so the human's device attests to a REVEAL specifically.
-export function credentialFetchPayload(record: CredentialFetchApprovalRecord): unknown {
+// A sealed (SDK) approval also signs the app key's hash, so the human approves
+// delivery to that key. Broker approvals carry no such field and hash as before.
+export function credentialFetchPayload(
+  record: CredentialFetchApprovalRecord,
+  sealed: SealedClaimBinding | null = null,
+): unknown {
   return {
     account_binding: accountBinding(record.accountId),
     agent: record.agent,
@@ -132,6 +150,9 @@ export function credentialFetchPayload(record: CredentialFetchApprovalRecord): u
       purpose: "credential.reveal",
     },
     nonce: record.nonce,
+    ...(sealed !== null
+      ? { recipient_pubkey_hash: recipientPublicKeyHash(sealed.recipientPublicKey) }
+      : {}),
     requester_kind: record.requesterKind,
   };
 }
@@ -221,6 +242,7 @@ function noStore(reply: FastifyReply): FastifyReply {
 export const registerCredentialFetchRoutes: FastifyPluginAsync<{
   deps: ApiDeps;
   requireAny: (req: FastifyRequest, reply: FastifyReply) => Promise<void>;
+  requireAgent: (req: FastifyRequest, reply: FastifyReply) => Promise<void>;
   vouchVerifier?: VouchMandateVerifier;
 }> = async (fastify, opts) => {
   const verifyVouch = opts.vouchVerifier ?? createVouchMandateVerifier();
@@ -242,6 +264,17 @@ export const registerCredentialFetchRoutes: FastifyPluginAsync<{
         ...(parsed.data.name !== undefined ? { name: parsed.data.name } : {}),
       },
     );
+    const recipientPublicKey = parsed.data.recipient_public_key ?? null;
+    if (recipientPublicKey !== null) {
+      if (auth.kind !== "agent") {
+        reply.code(403).send({ error: "sealed_reveal_requires_agent_session" });
+        return;
+      }
+      if (!isRecipientPublicKey(recipientPublicKey)) {
+        reply.code(400).send({ error: "invalid_recipient_public_key" });
+        return;
+      }
+    }
     if (sendResolutionFailure(resolution, reply)) return;
     if (resolution.kind !== "found") return;
 
@@ -262,6 +295,13 @@ export const registerCredentialFetchRoutes: FastifyPluginAsync<{
       field,
       purpose: "credential.reveal",
       requester_kind: requesterKind,
+      // A sealed request never rides a broker approval, or another session's.
+      ...(recipientPublicKey !== null && auth.kind === "agent"
+        ? {
+            agent_session_id: auth.agent_session_id,
+            recipient_pubkey_hash: recipientPublicKeyHash(recipientPublicKey),
+          }
+        : {}),
     }).toString("base64url");
     const now = opts.deps.now?.() ?? new Date();
     const reusable = await opts.deps.credentialFetchApprovalStore.findReusablePending(
@@ -280,7 +320,10 @@ export const registerCredentialFetchRoutes: FastifyPluginAsync<{
           : await opts.deps.credentialFetchApprovalStore.restateReason(reusable.id, reason);
       const current = restated ?? reusable;
       await sendFetchTelegram(opts.deps, current);
-      return reply.code(200).send(approvalResponse(current, now));
+      return reply.code(200).send({
+        ...approvalResponse(current, now),
+        approval: credentialFetchApprovalCard(current, now),
+      });
     }
 
     const id = await opts.deps.credentialFetchApprovalStore.create(auth.account_id, {
@@ -297,15 +340,146 @@ export const registerCredentialFetchRoutes: FastifyPluginAsync<{
       intentHash,
       expiresAt: new Date(now.getTime() + APPROVAL_TTL_MS),
     });
+    // Bound before anyone can see the approval, so the page never signs a
+    // payload without the key hash.
+    if (recipientPublicKey !== null && auth.kind === "agent") {
+      await opts.deps.sealedClaimStore.create({
+        approvalId: id,
+        kind: "credential_fetch",
+        accountId: auth.account_id,
+        agentSessionId: auth.agent_session_id,
+        recipientPublicKey,
+      });
+    }
     const record = await opts.deps.credentialFetchApprovalStore.getById(id);
     if (record === null) throw new Error("credential fetch approval disappeared after create");
     await sendFetchTelegram(opts.deps, record);
-    return reply.code(201).send(approvalResponse(record, now));
+    await opts.deps.approvalWebhooks.track({
+      kind: "credential_fetch",
+      approvalId: record.id,
+      accountId: auth.account_id,
+      agentSessionId: auth.kind === "agent" ? auth.agent_session_id : null,
+      expiresAt: record.expiresAt,
+    });
+    return reply.code(201).send({
+      ...approvalResponse(record, now),
+      approval: credentialFetchApprovalCard(record, now),
+    });
   });
 
+  // The single-use approved → consumed claim and the decrypt behind it, shared
+  // by the broker's plaintext resume and the SDK's sealed claim. Returns null
+  // once it has answered the request itself (no value, or a failure).
+  const claimAndReveal = async (
+    id: string,
+    accountId: string,
+    reply: FastifyReply,
+    now: Date,
+  ): Promise<{ record: CredentialFetchApprovalRecord; fields: Record<string, string> } | null> => {
+    const claim = await opts.deps.credentialFetchApprovalStore.claim(id, accountId);
+    if (claim.kind === "not_found") {
+      reply.code(404).send({ error: "credential_fetch_approval_not_found" });
+      return null;
+    }
+    if (claim.kind === "expired") {
+      await settleExpired(opts.deps, claim.record, now);
+      reply.code(409).send({
+        ...approvalResponse(claim.record, now),
+        status: "expired",
+        error: "credential_fetch_approval_expired",
+      });
+      return null;
+    }
+    if (claim.kind === "already_consumed") {
+      reply.code(409).send({
+        ...approvalResponse(claim.record, now),
+        error: "credential_fetch_already_delivered",
+      });
+      return null;
+    }
+    if (claim.kind === "not_approved") {
+      const status = publicStatus(claim.record, now);
+      // Still waiting on the human — not an error, just no value yet.
+      if (status === "pending") {
+        reply.code(200).send(approvalResponse(claim.record, now));
+        return null;
+      }
+      // An unsigned approval that ran out the clock is an expiry, not a
+      // "wrong state": the store only reports the stored status, so the
+      // derived expiry has to be resolved here for both halves alike.
+      if (status === "expired") {
+        await settleExpired(opts.deps, claim.record, now);
+        reply.code(409).send({
+          ...approvalResponse(claim.record, now),
+          error: "credential_fetch_approval_expired",
+        });
+        return null;
+      }
+      reply.code(409).send({
+        ...approvalResponse(claim.record, now),
+        error:
+          status === "denied" ? "credential_fetch_denied" : "credential_fetch_approval_not_pending",
+      });
+      return null;
+    }
+
+    const record = claim.record;
+    // Disclose EXACTLY what the human approved, never what the credential
+    // happens to hold now. A field added (web "add a field") or renamed
+    // (rotation) between the ceremony and the claim would otherwise widen or
+    // hollow out a disclosure that was signed over a different field set. The
+    // vault applies the filter and audits the result of THAT, so the ledger
+    // cannot say `success` for a disclosure that turned out empty.
+    const approvedNames = record.field === null ? record.fieldNames : [record.field];
+    let fields: Record<string, string>;
+    try {
+      fields = await opts.deps.vault.revealForApprovedFetch(
+        record.credentialReference,
+        record.accountId,
+        record.id,
+        approvedNames,
+        // Who released the secret. The approve endpoint accepts only an
+        // assertion signed over this approval's account-bound payload by a
+        // device registered to the record's account, so the approving
+        // account is the record's own — the same value the `approved` row
+        // carries. If approval on someone else's behalf is ever allowed, the
+        // approver has to be persisted on the record and read from there.
+        record.accountId,
+        unattributedVaultAuditAttribution("reveal"),
+      );
+    } catch (error) {
+      // Everything below this point has already BURNED the single-use
+      // approval, so every branch has to leave a terminal row behind. The
+      // vault writes its own (`missing_credential`, `field_set_changed`,
+      // `rate_limited`); an unexpected decrypt/KMS/store failure has nobody
+      // else to write it, and must not vanish into a bare 500.
+      if (error instanceof CredentialNotFoundError) {
+        reply.code(404).send({ error: "credential_not_found" });
+        return null;
+      }
+      if (error instanceof CredentialFieldsChangedError) {
+        reply.code(409).send({
+          ...approvalResponse(record, now),
+          error: "credential_fields_changed",
+          field_names: error.fieldNames,
+        });
+        return null;
+      }
+      if (error instanceof VaultRateLimitError) {
+        reply.code(429).send({ error: "rate_limited", scope: "vault_retrieval" });
+        return null;
+      }
+      await recordOutcome(opts.deps, record, "internal_error");
+      throw error;
+    }
+    opts.deps.approvalWebhooks.notify(record.id);
+    return { record, fields };
+  };
+
   // The resume. This is the only place a raw value leaves the vault for an
-  // agent, and it does so only on the store's single-use approved → consumed
-  // claim.
+  // agent in plaintext, and it does so only on the store's single-use
+  // approved → consumed claim. An SDK approval is sealed to its app's key and
+  // never comes out here.
   fastify.get<{ Params: { id: string } }>(
     "/v1/vault/fetch-approvals/:id",
     { preHandler: opts.requireAny },
@@ -313,108 +487,68 @@ export const registerCredentialFetchRoutes: FastifyPluginAsync<{
       const auth = req.auth!;
       const now = opts.deps.now?.() ?? new Date();
       noStore(reply);
-      const claim = await opts.deps.credentialFetchApprovalStore.claim(
-        req.params.id,
-        auth.account_id,
-      );
-      if (claim.kind === "not_found") {
-        reply.code(404).send({ error: "credential_fetch_approval_not_found" });
-        return;
-      }
-      if (claim.kind === "expired") {
-        await settleExpired(opts.deps, claim.record, now);
-        reply.code(409).send({
-          ...approvalResponse(claim.record, now),
-          status: "expired",
-          error: "credential_fetch_approval_expired",
-        });
-        return;
-      }
-      if (claim.kind === "already_consumed") {
-        reply.code(409).send({
-          ...approvalResponse(claim.record, now),
-          error: "credential_fetch_already_delivered",
-        });
-        return;
-      }
-      if (claim.kind === "not_approved") {
-        const status = publicStatus(claim.record, now);
-        // Still waiting on the human — not an error, just no value yet.
-        if (status === "pending") return reply.code(200).send(approvalResponse(claim.record, now));
-        // An unsigned approval that ran out the clock is an expiry, not a
-        // "wrong state": the store only reports the stored status, so the
-        // derived expiry has to be resolved here for both halves alike.
-        if (status === "expired") {
-          await settleExpired(opts.deps, claim.record, now);
-          reply.code(409).send({
-            ...approvalResponse(claim.record, now),
-            error: "credential_fetch_approval_expired",
-          });
-          return;
-        }
-        reply.code(409).send({
-          ...approvalResponse(claim.record, now),
-          error:
-            status === "denied"
-              ? "credential_fetch_denied"
-              : "credential_fetch_approval_not_pending",
-        });
-        return;
-      }
-
-      const record = claim.record;
-      // Disclose EXACTLY what the human approved, never what the credential
-      // happens to hold now. A field added (web "add a field") or renamed
-      // (rotation) between the ceremony and the claim would otherwise widen or
-      // hollow out a disclosure that was signed over a different field set. The
-      // vault applies the filter and audits the result of THAT, so the ledger
-      // cannot say `success` for a disclosure that turned out empty.
-      const approvedNames = record.field === null ? record.fieldNames : [record.field];
-      let fields: Record<string, string>;
-      try {
-        fields = await opts.deps.vault.revealForApprovedFetch(
-          record.credentialReference,
-          record.accountId,
-          record.id,
-          approvedNames,
-          // Who released the secret. The approve endpoint accepts only an
-          // assertion signed over this approval's account-bound payload by a
-          // device registered to the record's account, so the approving
-          // account is the record's own — the same value the `approved` row
-          // carries. If approval on someone else's behalf is ever allowed, the
-          // approver has to be persisted on the record and read from there.
-          record.accountId,
-          unattributedVaultAuditAttribution("reveal"),
+      const sealed = await opts.deps.sealedClaimStore.get(req.params.id);
+      if (sealed !== null && sealed.accountId === auth.account_id) {
+        const record = await opts.deps.credentialFetchApprovalStore.getByIdForAccount(
+          req.params.id,
+          auth.account_id,
         );
-      } catch (error) {
-        // Everything below this point has already BURNED the single-use
-        // approval, so every branch has to leave a terminal row behind. The
-        // vault writes its own (`missing_credential`, `field_set_changed`,
-        // `rate_limited`); an unexpected decrypt/KMS/store failure has nobody
-        // else to write it, and must not vanish into a bare 500.
-        if (error instanceof CredentialNotFoundError) {
-          reply.code(404).send({ error: "credential_not_found" });
+        if (record !== null) {
+          reply
+            .code(409)
+            .send({ ...approvalResponse(record, now), error: "sealed_claim_required" });
           return;
         }
-        if (error instanceof CredentialFieldsChangedError) {
-          reply.code(409).send({
-            ...approvalResponse(record, now),
-            error: "credential_fields_changed",
-            field_names: error.fieldNames,
-          });
-          return;
-        }
-        if (error instanceof VaultRateLimitError) {
-          reply.code(429).send({ error: "rate_limited", scope: "vault_retrieval" });
-          return;
-        }
-        await recordOutcome(opts.deps, record, "internal_error");
-        throw error;
       }
+      const revealed = await claimAndReveal(req.params.id, auth.account_id, reply, now);
+      if (revealed === null) return;
       return reply.code(200).send({
-        ...approvalResponse(record, now),
+        ...approvalResponse(revealed.record, now),
         status: "consumed",
-        fields,
+        fields: revealed.fields,
+        fetched_at: now.toISOString(),
+      });
+    },
+  );
+
+  // The SDK's claim: only the agent session that requested the reveal, only
+  // once, and the value travels sealed to the app key the passkey signed over.
+  // Before approval, and for a denied or expired approval, it carries no value.
+  fastify.post<{ Params: { id: string } }>(
+    "/v1/vault/fetch-approvals/:id/claim",
+    { preHandler: opts.requireAgent },
+    async (req, reply) => {
+      const auth = req.auth!;
+      if (auth.kind !== "agent") return;
+      const now = opts.deps.now?.() ?? new Date();
+      noStore(reply);
+      const sealed = await opts.deps.sealedClaimStore.get(req.params.id);
+      if (sealed === null || sealed.accountId !== auth.account_id) {
+        const record = await opts.deps.credentialFetchApprovalStore.getByIdForAccount(
+          req.params.id,
+          auth.account_id,
+        );
+        reply.code(record === null ? 404 : 409).send({
+          error: record === null ? "credential_fetch_approval_not_found" : "approval_not_sealed",
+        });
+        return;
+      }
+      if (sealed.kind !== "credential_fetch" || sealed.agentSessionId !== auth.agent_session_id) {
+        reply.code(403).send({ error: "sealed_claim_forbidden" });
+        return;
+      }
+      const revealed = await claimAndReveal(req.params.id, auth.account_id, reply, now);
+      if (revealed === null) return;
+      await opts.deps.sealedClaimStore.markClaimed(sealed.approvalId, auth.agent_session_id, now);
+      const sealedValue = await sealToRecipient(
+        sealed.recipientPublicKey,
+        new TextEncoder().encode(JSON.stringify(revealed.fields)),
+        revealSealAad(sealed.approvalId),
+      );
+      return reply.code(200).send({
+        ...approvalResponse(revealed.record, now),
+        status: "consumed",
+        sealed: sealedValue,
         fetched_at: now.toISOString(),
       });
     },
@@ -439,10 +573,11 @@ export const registerCredentialFetchRoutes: FastifyPluginAsync<{
       return;
     }
     const now = opts.deps.now?.() ?? new Date();
+    const payload = credentialFetchPayload(record, await opts.deps.sealedClaimStore.get(record.id));
     return reply.code(200).send({
       ...approvalResponse(record, now),
-      payload: credentialFetchPayload(record),
-      payload_sha256: hashVouchPayload(credentialFetchPayload(record)).toString("base64url"),
+      payload,
+      payload_sha256: hashVouchPayload(payload).toString("base64url"),
     });
   });
 
@@ -482,7 +617,9 @@ export const registerCredentialFetchRoutes: FastifyPluginAsync<{
         verifyVouch,
         {
           jws: parsed.data.jws,
-          expectedPayloadHash: hashVouchPayload(credentialFetchPayload(record)),
+          expectedPayloadHash: hashVouchPayload(
+            credentialFetchPayload(record, await opts.deps.sealedClaimStore.get(record.id)),
+          ),
           expectedContext: CREDENTIAL_FETCH_VOUCH_CONTEXT,
           expectedAudience: vouchflowAudience,
         },
@@ -519,6 +656,7 @@ export const registerCredentialFetchRoutes: FastifyPluginAsync<{
           accountId: record.accountId,
           signingDeviceId: signer.signingDeviceId,
         });
+        opts.deps.approvalWebhooks.notify(record.id);
       }
       return reply.code(200).send({ status: "approved" });
     },
@@ -541,6 +679,7 @@ export const registerCredentialFetchRoutes: FastifyPluginAsync<{
       const result = await opts.deps.credentialFetchApprovalStore.deny(record.id, now);
       if (result === "denied") {
         await recordOutcome(opts.deps, record, "denied");
+        opts.deps.approvalWebhooks.notify(record.id);
         return reply.code(200).send({ status: "denied" });
       }
       if (result === "already_denied") return reply.code(200).send({ status: "denied" });

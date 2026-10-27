@@ -309,6 +309,9 @@ trusty-squire/
 │   │                since the native-provision sunset (0.8).
 │   └── tooling/     Internal scripts
 ├── packages/
+│   ├── sdk/         @trusty-squire/sdk — the one API client (the MCP's
+│   │                ApiClient extends it) plus in-app approvals: approval
+│   │                cards, the passkey sheet, signed decision webhooks.
 │   ├── vault/       Encrypted credential store.
 │   └── ...          Other shared libs (auth, http-clients, etc.)
 └── CLAUDE.md        This file.
@@ -356,6 +359,12 @@ been removed — only the `*.fly` Dockerfiles remain.
 (`src/bot/`). The current version is the `version` field in
 `apps/mcp/package.json`; npm's `latest` / `next` dist-tags and
 `apps/mcp/CHANGELOG.md` record what has shipped.
+
+**`@trusty-squire/sdk` (`packages/sdk`)** is the shared API client. `apps/mcp`
+depends on it at runtime, so an mcp release needs the exact sdk version on npm
+first; `release.yml` preflights that and fails the mcp publish otherwise.
+Publishing the sdk is a separate human-approved step (it freezes a public
+surface). It must never gain a method that returns a secret value or card data.
 
 The bot used to be a separate `@trusty-squire/universal-bot` package.
 That split caused a recurring bug: a bot fix shipped to git, `mcp` was

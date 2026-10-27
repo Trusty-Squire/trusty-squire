@@ -28,7 +28,7 @@ export function approvalWebBaseUrl(): string {
 
 /** `/vault/<kind>/<id>` on the web app — the link the human opens to sign. */
 export function approvalPageUrl(
-  kind: "fetch" | "mutate" | "mutate-card",
+  kind: "pay" | "fetch" | "mutate" | "mutate-card",
   id: string,
 ): string {
   return `${approvalWebBaseUrl().replace(/\/+$/, "")}/vault/${kind}/${encodeURIComponent(id)}`;

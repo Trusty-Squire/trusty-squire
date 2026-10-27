@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { WrongAccountNotice } from "../../../components/WrongAccountNotice";
-import { AppShell } from "../../../components/AppShell";
+import { ApprovalFrame, useApprovalEmbed } from "../../../components/ApprovalFrame";
 import { PasskeySetup } from "../../../components/PasskeySetup";
 import { ApiError, apiGet, apiPost } from "../../../lib/api";
 import { errorText } from "../../../lib/error-text";
@@ -16,6 +16,11 @@ import {
   WRONG_ACCOUNT_DEVICE_MESSAGE,
 } from "../../../lib/pairing";
 import { getVouchflow } from "../../../lib/vouchflow";
+import {
+  hostStatus,
+  isFramePasskeyFailure,
+  passkeysAllowedHere,
+} from "../../../lib/approval-embed";
 
 interface EditableMetadata {
   label: string;
@@ -26,7 +31,7 @@ interface EditableMetadata {
 
 interface MutationCeremony {
   approval_id: string;
-  status: "pending" | "approved" | "failed" | "expired";
+  status: "pending" | "approved" | "failed" | "denied" | "expired";
   operation: "edit" | "delete";
   credential: { reference: string; service: string | null; name: string };
   before: EditableMetadata;
@@ -73,15 +78,26 @@ export default function CredentialMutationApprovalPage() {
   const [needsPasskeySetup, setNeedsPasskeySetup] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const redirectToLogin = useCallback(() => {
-    router.replace(`/login?next=/vault/mutate/${encodeURIComponent(id)}`);
-  }, [id, router]);
-
   const fetchCeremony = useCallback(
     () =>
       apiGet<MutationCeremony>(`/v1/vault/mutation-approvals/${encodeURIComponent(id)}/ceremony`),
     [id],
   );
+  const embedState = useApprovalEmbed(
+    id,
+    useCallback(async () => setCeremony(await fetchCeremony()), [fetchCeremony]),
+  );
+  const { embed, requireWindow, loginUrl, leave } = embedState;
+  const inSheet = embed?.mode === "sheet";
+
+  // Sign-in cannot complete inside another app's sheet; a window of our own can.
+  const redirectToLogin = useCallback(() => {
+    if (inSheet) {
+      requireWindow();
+      return;
+    }
+    router.replace(loginUrl(`/vault/mutate/${encodeURIComponent(id)}`));
+  }, [id, inSheet, loginUrl, requireWindow, router]);
 
   // A signed-in browser opening this link claims its passkey here, so an
   // already-enrolled owner never has to detour through the vault to answer an
@@ -111,9 +127,14 @@ export default function CredentialMutationApprovalPage() {
     setBusy(true);
     setError(null);
     try {
+      if (inSheet && !passkeysAllowedHere()) {
+        requireWindow();
+        return;
+      }
       const pairing = await getPairingState();
       if (!pairing.enrolled) {
-        setNeedsPasskeySetup(true);
+        if (inSheet) requireWindow();
+        else setNeedsPasskeySetup(true);
         return;
       }
       const signed = await getVouchflow().signPayload({
@@ -140,11 +161,15 @@ export default function CredentialMutationApprovalPage() {
         redirectToLogin();
         return;
       }
+      if (inSheet && isFramePasskeyFailure(caught)) {
+        requireWindow();
+        return;
+      }
       setError(approvalErrorMessage(caught, "Approval failed."));
     } finally {
       setBusy(false);
     }
-  }, [ceremony, deviceClaimed, fetchCeremony, redirectToLogin]);
+  }, [ceremony, deviceClaimed, fetchCeremony, inSheet, redirectToLogin, requireWindow]);
 
   const setUpPasskey = useCallback(async (forceNew: boolean) => {
     setBusy(true);
@@ -174,14 +199,20 @@ export default function CredentialMutationApprovalPage() {
   const terminal =
     ceremony?.status === "approved"
       ? "Approved — the vault mutation is complete. You can return to your agent session."
-      : ceremony?.status === "expired"
+      : ceremony?.status === "denied"
+        ? "Denied — no change was made."
+        : ceremony?.status === "expired"
         ? "This credential mutation approval has expired."
         : ceremony?.status === "failed"
           ? `The vault refused this mutation${ceremony.error ? `: ${ceremony.error}` : "."}`
           : null;
 
   return (
-    <AppShell anonymous>
+    <ApprovalFrame
+      state={embedState}
+      approvalId={id}
+      status={ceremony === null ? null : hostStatus("credential_mutation", ceremony.status)}
+    >
       <div className="app-head">
         <div>
           <h1 className="app-title">{title}</h1>
@@ -250,7 +281,9 @@ export default function CredentialMutationApprovalPage() {
                 <button
                   className="btn-secondary"
                   type="button"
-                  onClick={() => router.push("/")}
+                  onClick={() => {
+                    if (!leave("pending")) router.push("/");
+                  }}
                   disabled={busy}
                 >
                   Cancel
@@ -261,6 +294,6 @@ export default function CredentialMutationApprovalPage() {
           )}
         </section>
       )}
-    </AppShell>
+    </ApprovalFrame>
   );
 }
