@@ -166,7 +166,7 @@ jobs:
         # Vitest follows the `main` of these packages to their dist/ — that
         # must exist before mcp tests can import them.
         # Explicitly list mcp's workspace deps (keep in sync with apps/mcp/package.json).
-        run: pnpm --filter '@trusty-squire/skill-schema' --filter '@trusty-squire/recipe-schema' build
+        run: pnpm --filter '@trusty-squire/skill-schema' --filter '@trusty-squire/recipe-schema' --filter '@trusty-squire/sdk' build
 
       # The stable (`latest`) release gate includes the real-browser tier —
       # tests that launch Chromium/Chrome (see vitest.tiers.ts
@@ -252,6 +252,38 @@ jobs:
           node tools/verify-package-runtime-exports.mjs \
             '@trusty-squire/skill-schema' \
             "$VERIFY_DIR/node_modules/@trusty-squire/skill-schema/dist/index.js" \
+            apps/mcp/src
+
+      # Preflight: mcp's ApiClient is built on @trusty-squire/sdk, so the exact
+      # sdk version its tarball will name must already be on npm. Publishing
+      # the sdk is a separate, human-approved step (it is a public surface);
+      # until it is published, this blocks the mcp release instead of shipping
+      # a package whose install fails.
+      - name: Preflight — sdk runtime exports available on npm
+        if: steps.fast_path.outputs.already_released != 'true'
+        run: |
+          set -euo pipefail
+          DEP_SPEC=$(node -p "require('./apps/mcp/package.json').dependencies['@trusty-squire/sdk'] || ''")
+          echo "mcp depends on sdk: $DEP_SPEC"
+          if [[ -z "$DEP_SPEC" ]]; then
+            echo "mcp does not depend on the sdk — skipping preflight."
+            exit 0
+          fi
+          if [[ "$DEP_SPEC" == workspace:* ]]; then
+            DEP_SPEC=$(node -p "require('./packages/sdk/package.json').version")
+          fi
+          MATCH=$(npm view "@trusty-squire/sdk@$DEP_SPEC" version 2>/dev/null | tail -1 || true)
+          if [[ -z "$MATCH" ]]; then
+            echo "::error::@trusty-squire/sdk@$DEP_SPEC is not on npm. Publish the sdk first (needs a human go), then re-run."
+            exit 1
+          fi
+          VERIFY_DIR=$(mktemp -d)
+          trap 'rm -rf "$VERIFY_DIR"' EXIT
+          npm install --prefix "$VERIFY_DIR" --ignore-scripts --no-audit --no-fund \
+            "@trusty-squire/sdk@$MATCH"
+          node tools/verify-package-runtime-exports.mjs \
+            '@trusty-squire/sdk' \
+            "$VERIFY_DIR/node_modules/@trusty-squire/sdk/dist/index.js" \
             apps/mcp/src
 
       - name: Read package version + decide
@@ -360,7 +392,7 @@ jobs:
         # Build ONLY what mcp depends on. A full `pnpm -r build` pulls in
         # apps/web (Next.js) which rebuilds @prisma/client in parallel.
         # Keep in sync with apps/mcp/package.json workspace deps.
-        run: pnpm --filter '@trusty-squire/skill-schema' --filter '@trusty-squire/recipe-schema' build
+        run: pnpm --filter '@trusty-squire/skill-schema' --filter '@trusty-squire/recipe-schema' --filter '@trusty-squire/sdk' build
 
       # A stable promotion publishes the CURRENT main tree (an rc line) under
       # the operator-supplied stable version. Rewrite it in the runner only —

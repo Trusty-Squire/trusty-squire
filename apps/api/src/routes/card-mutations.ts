@@ -14,6 +14,7 @@ import {
   verifyApprovalMandate,
 } from "../services/approval-ceremony.js";
 import { sendTelegramMessage } from "../services/telegram.js";
+import { cardMutationApprovalCard } from "../services/approval-card.js";
 import { notifyVaultAuditAfterCommit } from "../services/vault-notify.js";
 import { authenticatedRequester } from "../services/requesting-agent.js";
 import {
@@ -235,7 +236,10 @@ export const registerCardMutationRoutes: FastifyPluginAsync<{
       );
       if (reusable !== null) {
         await sendCardMutationTelegram(opts.deps, reusable);
-        return reply.code(200).send(approvalResponse(reusable, now));
+        return reply.code(200).send({
+          ...approvalResponse(reusable, now),
+          approval: cardMutationApprovalCard(reusable, now),
+        });
       }
 
       const id = await opts.deps.cardMutationApprovalStore.create(auth.account_id, {
@@ -253,7 +257,17 @@ export const registerCardMutationRoutes: FastifyPluginAsync<{
       const record = await opts.deps.cardMutationApprovalStore.getById(id);
       if (record === null) throw new Error("card mutation approval disappeared after create");
       await sendCardMutationTelegram(opts.deps, record);
-      return reply.code(201).send(approvalResponse(record, now));
+      await opts.deps.approvalWebhooks.track({
+        kind: "card_mutation",
+        approvalId: record.id,
+        accountId: auth.account_id,
+        agentSessionId: auth.kind === "agent" ? auth.agent_session_id : null,
+        expiresAt: record.expiresAt,
+      });
+      return reply.code(201).send({
+        ...approvalResponse(record, now),
+        approval: cardMutationApprovalCard(record, now),
+      });
     },
   );
 
@@ -387,6 +401,7 @@ export const registerCardMutationRoutes: FastifyPluginAsync<{
         return;
       }
       notifyVaultAuditAfterCommit(opts.deps.vaultAuditStore, cardMutationAuditEvent(record, after));
+      opts.deps.approvalWebhooks.notify(record.id);
       return reply.code(200).send({ status: "approved", operation: record.operation });
     },
   );

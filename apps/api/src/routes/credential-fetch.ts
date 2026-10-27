@@ -66,6 +66,7 @@ import {
   verifyApprovalMandate,
 } from "../services/approval-ceremony.js";
 import { sendTelegramMessage } from "../services/telegram.js";
+import { credentialFetchApprovalCard } from "../services/approval-card.js";
 import { authenticatedRequester } from "../services/requesting-agent.js";
 import {
   CREDENTIAL_FETCH_VOUCH_CONTEXT,
@@ -280,7 +281,10 @@ export const registerCredentialFetchRoutes: FastifyPluginAsync<{
           : await opts.deps.credentialFetchApprovalStore.restateReason(reusable.id, reason);
       const current = restated ?? reusable;
       await sendFetchTelegram(opts.deps, current);
-      return reply.code(200).send(approvalResponse(current, now));
+      return reply.code(200).send({
+        ...approvalResponse(current, now),
+        approval: credentialFetchApprovalCard(current, now),
+      });
     }
 
     const id = await opts.deps.credentialFetchApprovalStore.create(auth.account_id, {
@@ -300,7 +304,17 @@ export const registerCredentialFetchRoutes: FastifyPluginAsync<{
     const record = await opts.deps.credentialFetchApprovalStore.getById(id);
     if (record === null) throw new Error("credential fetch approval disappeared after create");
     await sendFetchTelegram(opts.deps, record);
-    return reply.code(201).send(approvalResponse(record, now));
+    await opts.deps.approvalWebhooks.track({
+      kind: "credential_fetch",
+      approvalId: record.id,
+      accountId: auth.account_id,
+      agentSessionId: auth.kind === "agent" ? auth.agent_session_id : null,
+      expiresAt: record.expiresAt,
+    });
+    return reply.code(201).send({
+      ...approvalResponse(record, now),
+      approval: credentialFetchApprovalCard(record, now),
+    });
   });
 
   // The resume. This is the only place a raw value leaves the vault for an
@@ -411,6 +425,7 @@ export const registerCredentialFetchRoutes: FastifyPluginAsync<{
         await recordOutcome(opts.deps, record, "internal_error");
         throw error;
       }
+      opts.deps.approvalWebhooks.notify(record.id);
       return reply.code(200).send({
         ...approvalResponse(record, now),
         status: "consumed",
@@ -519,6 +534,7 @@ export const registerCredentialFetchRoutes: FastifyPluginAsync<{
           accountId: record.accountId,
           signingDeviceId: signer.signingDeviceId,
         });
+        opts.deps.approvalWebhooks.notify(record.id);
       }
       return reply.code(200).send({ status: "approved" });
     },
@@ -541,6 +557,7 @@ export const registerCredentialFetchRoutes: FastifyPluginAsync<{
       const result = await opts.deps.credentialFetchApprovalStore.deny(record.id, now);
       if (result === "denied") {
         await recordOutcome(opts.deps, record, "denied");
+        opts.deps.approvalWebhooks.notify(record.id);
         return reply.code(200).send({ status: "denied" });
       }
       if (result === "already_denied") return reply.code(200).send({ status: "denied" });

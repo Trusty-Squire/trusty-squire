@@ -5,7 +5,7 @@ import { useParams, useRouter } from "next/navigation";
 import { decryptCard, type E2EBlob } from "@trusty-squire/vault/e2e";
 import { sealToRecipient } from "@trusty-squire/vault/hpke";
 import { WrongAccountNotice } from "../../../components/WrongAccountNotice";
-import { AppShell } from "../../../components/AppShell";
+import { ApprovalFrame, useApprovalEmbed } from "../../../components/ApprovalFrame";
 import { CardEntry } from "../../../components/CardEntry";
 import { PasskeySetup } from "../../../components/PasskeySetup";
 import { ApiError, apiGet, apiPost } from "../../../lib/api";
@@ -19,6 +19,11 @@ import {
 } from "../../../lib/pairing";
 import { isUnlinkedSigningDevice, WRONG_ACCOUNT_DEVICE_MESSAGE } from "../../../lib/pairing";
 import { getVouchflow } from "../../../lib/vouchflow";
+import {
+  hostStatus,
+  isFramePasskeyFailure,
+  passkeysAllowedHere,
+} from "../../../lib/approval-embed";
 
 interface CeremonyCard {
   blob: string;
@@ -121,10 +126,6 @@ export default function PaymentApprovalPage() {
   const [error, setError] = useState<string | null>(null);
   const [jitOrigin, setJitOrigin] = useState<boolean | null>(null);
 
-  const redirectToLogin = useCallback(() => {
-    router.replace(`/login?next=/vault/pay/${encodeURIComponent(id)}`);
-  }, [id, router]);
-
   const fetchCeremony = useCallback(
     () => apiGet<CeremonyApproval>(`/v1/pay/approvals/${encodeURIComponent(id)}/ceremony`),
     [id],
@@ -136,6 +137,23 @@ export default function PaymentApprovalPage() {
     setApproval({ ...current, card: { brand: null, last4: null } });
     setCardMetadataError(null);
   }, []);
+
+  const embedState = useApprovalEmbed(
+    id,
+    useCallback(async () => applyCeremony(await fetchCeremony()), [applyCeremony, fetchCeremony]),
+  );
+  const { embed, requireWindow, loginUrl } = embedState;
+  const inSheet = embed?.mode === "sheet";
+
+  // Adding a card or denying here needs a signed-in session, which another
+  // app's sheet cannot carry; a window of our own can.
+  const redirectToLogin = useCallback(() => {
+    if (inSheet) {
+      requireWindow();
+      return;
+    }
+    router.replace(loginUrl(`/vault/pay/${encodeURIComponent(id)}`));
+  }, [id, inSheet, loginUrl, requireWindow, router]);
 
   useEffect(() => {
     let cancelled = false;
@@ -224,9 +242,14 @@ export default function PaymentApprovalPage() {
     let cardBytes: Uint8Array | undefined;
     let failure = "Failed to check this device's passkey.";
     try {
+      if (inSheet && !passkeysAllowedHere()) {
+        requireWindow();
+        return;
+      }
       const pairing = await getPairingState();
       if (!pairing.enrolled) {
-        setNeedsPasskeySetup(true);
+        if (inSheet) requireWindow();
+        else setNeedsPasskeySetup(true);
         return;
       }
       const publicKeyHash = await crypto.subtle.digest(
@@ -281,6 +304,10 @@ export default function PaymentApprovalPage() {
       setSubmitted(true);
       setNeedsPasskeySetup(false);
     } catch (err) {
+      if (inSheet && (isFramePasskeyFailure(err) || isPaymentPasskeyUnavailable(err))) {
+        requireWindow();
+        return;
+      }
       if (isPaymentPasskeyUnavailable(err)) {
         setNeedsPasskeySetup(true);
         return;
@@ -294,7 +321,7 @@ export default function PaymentApprovalPage() {
       card = undefined;
       setBusy(false);
     }
-  }, [ceremony, id]);
+  }, [ceremony, id, inSheet, requireWindow]);
 
   const denyApproval = useCallback(async () => {
     setBusy(true);
@@ -367,8 +394,14 @@ export default function PaymentApprovalPage() {
       : (ceremony.card ?? (ceremony.card_ref === savedCardId ? savedCardMeta : null));
   const cardLine = boundCard === null ? "this payment's card" : formatCardIdentity(boundCard);
 
+  const pageStatus = submitted ? "submitted" : currentStatus;
+
   return (
-    <AppShell anonymous>
+    <ApprovalFrame
+      state={embedState}
+      approvalId={id}
+      status={pageStatus === undefined ? null : hostStatus("payment", pageStatus)}
+    >
       <div className="app-head">
         <div>
           <h1 className="app-title">{needsCard ? "Add a card to pay" : "Approve payment"}</h1>
@@ -491,6 +524,6 @@ export default function PaymentApprovalPage() {
           </div>
         </section>
       )}
-    </AppShell>
+    </ApprovalFrame>
   );
 }

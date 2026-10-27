@@ -11,6 +11,7 @@ import type {
   CardMutationApprovalStatus,
 } from "./card-mutation-approval-store.js";
 import { cardMutationAuditEvent } from "./card-mutation-approval-store.js";
+import type { MutationDenyResult } from "./credential-mutation-approval-store.js";
 
 export class PrismaCardMutationApprovalStore implements CardMutationApprovalStore {
   constructor(private readonly prisma: ApiPrismaClient) {}
@@ -159,6 +160,19 @@ export class PrismaCardMutationApprovalStore implements CardMutationApprovalStor
       return "approved";
     });
   }
+
+  async deny(id: string, accountId: string, now: Date): Promise<MutationDenyResult> {
+    const denied = await this.prisma.cardMutationApproval.updateMany({
+      where: { id, account_id: accountId, status: "pending", expires_at: { gt: now } },
+      data: { status: "denied", failure_code: "denied_by_user", executed_at: now },
+    });
+    if (denied.count === 1) return "denied";
+    const record = await this.getByIdForAccount(id, accountId);
+    if (record === null) return "not_pending";
+    if (record.status === "denied") return "already_denied";
+    if (record.status === "pending" && record.expiresAt <= now) return "expired";
+    return "not_pending";
+  }
 }
 
 interface CardMutationApprovalRow {
@@ -237,7 +251,12 @@ function toRecord(row: CardMutationApprovalRow): CardMutationApprovalRecord {
   if (row.operation !== "edit_card") {
     throw new Error("invalid card mutation operation");
   }
-  if (row.status !== "pending" && row.status !== "approved" && row.status !== "failed") {
+  if (
+    row.status !== "pending" &&
+    row.status !== "approved" &&
+    row.status !== "failed" &&
+    row.status !== "denied"
+  ) {
     throw new Error("invalid card mutation approval status");
   }
   if (row.requester_kind !== "web" && row.requester_kind !== "agent") {

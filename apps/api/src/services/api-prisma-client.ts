@@ -139,6 +139,40 @@ interface PaymentAuditEventRow {
   last4: string;
   status: string;
   mandate_id: string | null;
+  approval_id: string | null;
+  created_at: Date;
+}
+
+export interface ApprovalWebhookEndpointRow {
+  id: string;
+  account_id: string;
+  agent_session_id: string;
+  url: string;
+  secret_salt: string;
+  created_at: Date;
+}
+
+export interface ApprovalWebhookSubscriptionRow {
+  approval_id: string;
+  kind: string;
+  account_id: string;
+  endpoint_id: string;
+  last_status: string | null;
+  open: boolean;
+  expires_at: Date;
+  created_at: Date;
+}
+
+export interface ApprovalWebhookDeliveryRow {
+  id: string;
+  endpoint_id: string;
+  approval_id: string;
+  payload: string;
+  attempts: number;
+  next_attempt_at: Date;
+  delivered_at: Date | null;
+  abandoned_at: Date | null;
+  last_error: string | null;
   created_at: Date;
 }
 
@@ -443,6 +477,10 @@ export interface ApiPrismaClient {
       orderBy: Record<string, unknown> | Array<Record<string, unknown>>;
       take?: number;
     }): Promise<PaymentAuditEventRow[]>;
+    findFirst(args: {
+      where: Record<string, unknown>;
+      orderBy?: Record<string, unknown> | Array<Record<string, unknown>>;
+    }): Promise<PaymentAuditEventRow | null>;
     deleteMany(args: { where: Record<string, unknown> }): Promise<{ count: number }>;
   };
   pendingPaymentApproval: {
@@ -515,6 +553,49 @@ export interface ApiPrismaClient {
       update: Record<string, unknown>;
     }): Promise<VouchflowDeviceRow>;
     findMany(args: { where: Record<string, unknown> }): Promise<VouchflowDeviceRow[]>;
+  };
+  approvalWebhookEndpoint: {
+    upsert(args: {
+      where: { agent_session_id: string };
+      create: Record<string, unknown>;
+      update: Record<string, unknown>;
+    }): Promise<ApprovalWebhookEndpointRow>;
+    findUnique(args: {
+      where: { id: string } | { agent_session_id: string };
+    }): Promise<ApprovalWebhookEndpointRow | null>;
+    deleteMany(args: { where: Record<string, unknown> }): Promise<{ count: number }>;
+  };
+  approvalWebhookSubscription: {
+    createMany(args: {
+      data: Array<Record<string, unknown>>;
+      skipDuplicates?: boolean;
+    }): Promise<{ count: number }>;
+    findUnique(args: {
+      where: { approval_id: string };
+    }): Promise<ApprovalWebhookSubscriptionRow | null>;
+    findMany(args: {
+      where: Record<string, unknown>;
+      orderBy?: Record<string, unknown> | Array<Record<string, unknown>>;
+      take?: number;
+    }): Promise<ApprovalWebhookSubscriptionRow[]>;
+    updateMany(args: {
+      where: Record<string, unknown>;
+      data: Record<string, unknown>;
+    }): Promise<{ count: number }>;
+    deleteMany(args: { where: Record<string, unknown> }): Promise<{ count: number }>;
+  };
+  approvalWebhookDelivery: {
+    create(args: { data: Record<string, unknown> }): Promise<ApprovalWebhookDeliveryRow>;
+    findMany(args: {
+      where: Record<string, unknown>;
+      orderBy?: Record<string, unknown> | Array<Record<string, unknown>>;
+      take?: number;
+    }): Promise<ApprovalWebhookDeliveryRow[]>;
+    updateMany(args: {
+      where: Record<string, unknown>;
+      data: Record<string, unknown>;
+    }): Promise<{ count: number }>;
+    deleteMany(args: { where: Record<string, unknown> }): Promise<{ count: number }>;
   };
   egressGrant: {
     create(args: { data: Record<string, unknown> }): Promise<EgressGrantRow>;

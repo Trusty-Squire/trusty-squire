@@ -1,0 +1,59 @@
+{
+  "name": "@trusty-squire/sdk",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Typed client for Trusty Squire: connect a user, use vaulted keys without seeing them, mint app access, and draw passkey approvals inside your own app.",
+  "license": "MIT",
+  "author": "Trusty Squire",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Trusty-Squire/trusty-squire.git",
+    "directory": "packages/sdk"
+  },
+  "homepage": "https://trustysquire.ai",
+  "bugs": {
+    "url": "https://github.com/Trusty-Squire/trusty-squire/issues"
+  },
+  "keywords": [
+    "trusty-squire",
+    "vault",
+    "api-keys",
+    "approvals",
+    "passkey",
+    "webhooks",
+    "ai-agent"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "sideEffects": false,
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p test/tsconfig.json",
+    "test": "vitest run",
+    "test:browser": "pnpm run build && node test/browser/popup.browser.mjs",
+    "prepublishOnly": "rm -rf dist && npm run build"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "happy-dom": "^20.11.1",
+    "playwright": "^1.59.0",
+    "typescript": "^5.3.3",
+    "vitest": "^1.2.0"
+  }
+}

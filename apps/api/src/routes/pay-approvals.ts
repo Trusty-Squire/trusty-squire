@@ -8,6 +8,7 @@ import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import type { ApiDeps } from "../services/deps.js";
 import { approvalAmountLabel } from "../services/money.js";
+import { paymentApprovalCard } from "../services/approval-card.js";
 import { sendTelegramMessage } from "../services/telegram.js";
 import {
   PAYMENT_VOUCH_CONTEXT,
@@ -158,6 +159,21 @@ function submissionBinding(
     approvalPayloadHash: candidateHash(payloadHash),
     reviewPayloadHash: candidateHash(reviewHash),
   });
+}
+
+// The same display metadata as approvalCardName, shaped for the approval card.
+async function approvalCardDisplay(
+  cardRef: string | null,
+  deps: Pick<ApiDeps, "e2eCredentialStore">,
+  accountId: string,
+): Promise<{ label: string; brand: string | null; last4: string | null } | null> {
+  if (cardRef === null) return null;
+  try {
+    const card = await deps.e2eCredentialStore.getByIdForAccount(cardRef, accountId);
+    return card === null ? null : { label: card.label, brand: card.brand, last4: card.last4 };
+  } catch {
+    return null;
+  }
 }
 
 // Display-only identity for the card an approval releases: "Label •••• 1234"
@@ -401,12 +417,30 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
       }
     }
 
+    const created = await opts.deps.pendingPaymentApprovalStore.getById(id);
+    await opts.deps.approvalWebhooks.track({
+      kind: "payment",
+      approvalId: id,
+      accountId: auth.account_id,
+      agentSessionId: auth.agent_session_id,
+      expiresAt,
+    });
     return reply.code(201).send({
       id,
       nonce,
       agent,
       account_binding: accountBinding(auth.account_id),
       expires_at: expiresAt.toISOString(),
+      ...(created !== null
+        ? {
+            approval: paymentApprovalCard(
+              created,
+              await approvalCardDisplay(created.cardRef, opts.deps, auth.account_id),
+              null,
+              now,
+            ),
+          }
+        : {}),
     });
   });
 
@@ -726,6 +760,7 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
         return;
       }
       candidateLifecycle(record, "approval", "submission_relayed");
+      opts.deps.approvalWebhooks.notify(record.id);
       return reply.code(202).send({ status: "pending" });
     },
   );
@@ -751,6 +786,7 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
         });
         return;
       }
+      opts.deps.approvalWebhooks.notify(record.id);
       return reply.code(200).send({ status: "denied" });
     },
   );
@@ -868,6 +904,7 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
         return;
       }
       candidateLifecycle(record, "approval", "approved");
+      opts.deps.approvalWebhooks.notify(record.id);
       return reply.code(200).send({ status: "approved" });
     },
   );

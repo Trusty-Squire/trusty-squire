@@ -1,6 +1,7 @@
 import type { ApiPrismaClient } from "./api-prisma-client.js";
 import type { CredentialMutationMetadata } from "./credential-metadata.js";
 import {
+  type MutationDenyResult,
   type CredentialMutationCommitResult,
   type CredentialMutationApprovalInput,
   type CredentialMutationApprovalRecord,
@@ -175,6 +176,19 @@ export class PrismaCredentialMutationApprovalStore implements CredentialMutation
       throw error;
     }
   }
+
+  async deny(id: string, accountId: string, now: Date): Promise<MutationDenyResult> {
+    const denied = await this.prisma.credentialMutationApproval.updateMany({
+      where: { id, account_id: accountId, status: "pending", expires_at: { gt: now } },
+      data: { status: "denied", failure_code: "denied_by_user", executed_at: now },
+    });
+    if (denied.count === 1) return "denied";
+    const record = await this.getByIdForAccount(id, accountId);
+    if (record === null) return "not_pending";
+    if (record.status === "denied") return "already_denied";
+    if (record.status === "pending" && record.expiresAt <= now) return "expired";
+    return "not_pending";
+  }
 }
 
 interface CredentialMutationApprovalRow {
@@ -326,7 +340,12 @@ function toRecord(row: {
   if (row.operation !== "edit" && row.operation !== "delete") {
     throw new Error("invalid credential mutation operation");
   }
-  if (row.status !== "pending" && row.status !== "approved" && row.status !== "failed") {
+  if (
+    row.status !== "pending" &&
+    row.status !== "approved" &&
+    row.status !== "failed" &&
+    row.status !== "denied"
+  ) {
     throw new Error("invalid credential mutation approval status");
   }
   if (row.requester_kind !== "web" && row.requester_kind !== "agent") {

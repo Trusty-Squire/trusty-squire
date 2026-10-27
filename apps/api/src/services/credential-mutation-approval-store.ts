@@ -8,7 +8,7 @@ import {
 import type { CredentialMutationMetadata } from "./credential-metadata.js";
 
 export type CredentialMutationOperation = "edit" | "delete";
-export type CredentialMutationApprovalStatus = "pending" | "approved" | "failed";
+export type CredentialMutationApprovalStatus = "pending" | "approved" | "failed" | "denied";
 export type CredentialMutationRequesterKind = "web" | "agent";
 
 export interface CredentialMutationApprovalInput {
@@ -44,6 +44,9 @@ export type CredentialMutationCommitResult =
   | "metadata_changed"
   | "name_conflict";
 
+/** `expired` means the approval lapsed before the human answered; nothing is recorded as a refusal. */
+export type MutationDenyResult = "denied" | "already_denied" | "expired" | "not_pending";
+
 export interface CredentialMutationApprovalStore {
   create(accountId: string, input: CredentialMutationApprovalInput): Promise<string>;
   findReusablePending(
@@ -64,6 +67,8 @@ export interface CredentialMutationApprovalStore {
     mandateId: string | null,
     signingDeviceId: string | null,
   ): Promise<CredentialMutationCommitResult>;
+  /** Refuse a still-live pending approval for its owning account. Changes no credential. */
+  deny(id: string, accountId: string, now: Date): Promise<MutationDenyResult>;
 }
 
 export class InMemoryCredentialMutationApprovalStore implements CredentialMutationApprovalStore {
@@ -206,6 +211,18 @@ export class InMemoryCredentialMutationApprovalStore implements CredentialMutati
     } finally {
       this.committing.delete(id);
     }
+  }
+
+  async deny(id: string, accountId: string, now: Date): Promise<MutationDenyResult> {
+    const record = this.records.get(id);
+    if (record === undefined || record.accountId !== accountId) return "not_pending";
+    if (record.status === "denied") return "already_denied";
+    if (record.status !== "pending" || this.committing.has(id)) return "not_pending";
+    if (record.expiresAt <= now) return "expired";
+    record.status = "denied";
+    record.failureCode = "denied_by_user";
+    record.executedAt = now;
+    return "denied";
   }
 }
 

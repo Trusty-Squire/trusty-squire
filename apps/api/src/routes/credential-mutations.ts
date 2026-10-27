@@ -21,6 +21,7 @@ import {
   type CredentialMutationApprovalRecord,
 } from "../services/credential-mutation-approval-store.js";
 import { sendTelegramMessage } from "../services/telegram.js";
+import { credentialMutationApprovalCard } from "../services/approval-card.js";
 import { notifyVaultAuditAfterCommit } from "../services/vault-notify.js";
 import { authenticatedRequester } from "../services/requesting-agent.js";
 import {
@@ -267,7 +268,10 @@ export const registerCredentialMutationRoutes: FastifyPluginAsync<{
       );
       if (reusable !== null) {
         await sendMutationTelegram(opts.deps, reusable);
-        return reply.code(200).send(approvalResponse(reusable, now));
+        return reply.code(200).send({
+          ...approvalResponse(reusable, now),
+          approval: credentialMutationApprovalCard(reusable, now),
+        });
       }
 
       const id = await opts.deps.credentialMutationApprovalStore.create(auth.account_id, {
@@ -287,7 +291,17 @@ export const registerCredentialMutationRoutes: FastifyPluginAsync<{
       const record = await opts.deps.credentialMutationApprovalStore.getById(id);
       if (record === null) throw new Error("credential mutation approval disappeared after create");
       await sendMutationTelegram(opts.deps, record);
-      return reply.code(201).send(approvalResponse(record, now));
+      await opts.deps.approvalWebhooks.track({
+        kind: "credential_mutation",
+        approvalId: record.id,
+        accountId: auth.account_id,
+        agentSessionId: auth.kind === "agent" ? auth.agent_session_id : null,
+        expiresAt: record.expiresAt,
+      });
+      return reply.code(201).send({
+        ...approvalResponse(record, now),
+        approval: credentialMutationApprovalCard(record, now),
+      });
     },
   );
 
@@ -422,6 +436,7 @@ export const registerCredentialMutationRoutes: FastifyPluginAsync<{
         opts.deps.vaultAuditStore,
         mutationAuditEvent(record, signer.signingDeviceId),
       );
+      opts.deps.approvalWebhooks.notify(record.id);
       return reply.code(200).send({ status: "approved", operation: record.operation });
     },
   );

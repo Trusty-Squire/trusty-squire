@@ -40,6 +40,7 @@ jobs:
       mcp: ${{ steps.scope.outputs.mcp }}
       registry: ${{ steps.scope.outputs.registry }}
       schema: ${{ steps.scope.outputs.schema }}
+      sdk: ${{ steps.scope.outputs.sdk }}
       shell_tests: ${{ steps.scope.outputs.shell_tests }}
       test_any: ${{ steps.scope.outputs.test_any }}
       typecheck_any: ${{ steps.scope.outputs.typecheck_any }}
@@ -67,6 +68,7 @@ jobs:
           mcp=false
           registry=false
           schema=false
+          sdk=false
           shell_tests=false
           vault=false
           web=false
@@ -76,6 +78,7 @@ jobs:
             mcp=true
             registry=true
             schema=true
+            sdk=true
             shell_tests=true
             vault=true
             web=true
@@ -103,6 +106,9 @@ jobs:
                 ;;
               packages/vault/*)
                 vault=true
+                ;;
+              packages/sdk/*)
+                sdk=true
                 ;;
               scripts/*|tools/*)
                 mark_all
@@ -132,9 +138,15 @@ jobs:
             api=true
             web=true
           fi
+          # mcp's client is built on the sdk; api and web test against it.
+          if [[ "$sdk" == "true" ]]; then
+            api=true
+            mcp=true
+            web=true
+          fi
 
           typecheck_any=false
-          if [[ "$mcp" == "true" || "$schema" == "true" || "$web" == "true" ]]; then
+          if [[ "$mcp" == "true" || "$schema" == "true" || "$web" == "true" || "$sdk" == "true" ]]; then
             typecheck_any=true
           fi
 
@@ -146,7 +158,7 @@ jobs:
           test_any=false
           if [[ "$api" == "true" || "$mcp" == "true" || "$registry" == "true" \
             || "$schema" == "true" || "$shell_tests" == "true" \
-            || "$vault" == "true" || "$web" == "true" ]]; then
+            || "$vault" == "true" || "$web" == "true" || "$sdk" == "true" ]]; then
             test_any=true
           fi
 
@@ -156,6 +168,7 @@ jobs:
             echo "mcp=$mcp"
             echo "registry=$registry"
             echo "schema=$schema"
+            echo "sdk=$sdk"
             echo "shell_tests=$shell_tests"
             echo "test_any=$test_any"
             echo "typecheck_any=$typecheck_any"
@@ -193,12 +206,16 @@ jobs:
         env:
           RUN_MCP: ${{ needs.secret-scan.outputs.mcp }}
           RUN_SCHEMA: ${{ needs.secret-scan.outputs.schema }}
+          RUN_SDK: ${{ needs.secret-scan.outputs.sdk }}
           RUN_WEB: ${{ needs.secret-scan.outputs.web }}
         run: |
           set -euo pipefail
           PKGS=()
           if [[ "$RUN_MCP" == "true" ]]; then
             PKGS+=("@trusty-squire/mcp")
+          fi
+          if [[ "$RUN_SDK" == "true" ]]; then
+            PKGS+=("@trusty-squire/sdk")
           fi
           if [[ "$RUN_WEB" == "true" ]]; then
             PKGS+=("@trusty-squire/web")
@@ -357,6 +374,7 @@ jobs:
           RUN_MCP: ${{ needs.secret-scan.outputs.mcp }}
           RUN_REGISTRY: ${{ needs.secret-scan.outputs.registry }}
           RUN_SCHEMA: ${{ needs.secret-scan.outputs.schema }}
+          RUN_SDK: ${{ needs.secret-scan.outputs.sdk }}
           RUN_VAULT: ${{ needs.secret-scan.outputs.vault }}
           RUN_WEB: ${{ needs.secret-scan.outputs.web }}
         run: |
@@ -376,6 +394,9 @@ jobs:
           fi
           if [[ "$RUN_VAULT" == "true" ]]; then
             PKGS+=("@trusty-squire/vault")
+          fi
+          if [[ "$RUN_SDK" == "true" ]]; then
+            PKGS+=("@trusty-squire/sdk")
           fi
           if [[ "$RUN_WEB" == "true" ]]; then
             PKGS+=("@trusty-squire/web")

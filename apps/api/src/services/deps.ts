@@ -94,6 +94,15 @@ import {
 } from "./in-memory-telegram-link-token-store.js";
 import { PrismaTelegramLinkTokenStore } from "./prisma-telegram-link-token-store.js";
 import {
+  ApprovalWebhookService,
+  createApprovalWebhookPoster,
+  InMemoryApprovalWebhookStore,
+  loopbackWebhooksAllowed,
+  type ApprovalWebhookStore,
+} from "./approval-webhooks.js";
+import { PrismaApprovalWebhookStore } from "./prisma-approval-webhook-store.js";
+import { readApprovalCard } from "./approval-card.js";
+import {
   InMemoryVouchflowDeviceStore,
   PrismaVouchflowDeviceStore,
   type VouchflowDeviceStore,
@@ -132,6 +141,10 @@ export interface ApiDeps {
   // sessionless approval ceremonies check the assertion's signer against.
   vouchflowDeviceStore: VouchflowDeviceStore;
   egressGrantStore: EgressGrantStore;
+  // Signed decision webhooks: endpoints per agent session, the watched
+  // approvals, and the outbound queue the service drains.
+  approvalWebhookStore: ApprovalWebhookStore;
+  approvalWebhooks: ApprovalWebhookService;
   machineTokenStore: MachineTokenStore;
   captchaEventStore: CaptchaEventStore;
   decisionEventStore: DecisionEventStore;
@@ -449,7 +462,32 @@ export function buildInMemoryDeps(opts: BuildInMemoryDepsOpts): ApiDeps {
         )
       : undefined;
 
+  const approvalWebhookStore: ApprovalWebhookStore =
+    authPrisma !== null
+      ? new PrismaApprovalWebhookStore(authPrisma)
+      : new InMemoryApprovalWebhookStore(opts.now);
+  const clock = opts.now ?? (() => new Date());
+  const cardDeps = {
+    pendingPaymentApprovalStore,
+    credentialFetchApprovalStore,
+    credentialMutationApprovalStore,
+    cardMutationApprovalStore,
+    e2eCredentialStore,
+    paymentAuditStore,
+  };
+  const approvalWebhooks = new ApprovalWebhookService({
+    store: approvalWebhookStore,
+    readCard: (accountId, id, kind) => readApprovalCard(cardDeps, accountId, id, clock(), kind),
+    // Endpoint secrets are derived from this key and a per-endpoint salt.
+    signingKey: process.env.APPROVAL_WEBHOOK_SIGNING_KEY ?? opts.sessionSecret,
+    now: clock,
+    post: createApprovalWebhookPoster({ allowPrivate: loopbackWebhooksAllowed() }),
+    log: (event, detail) => console.log(JSON.stringify({ event, ...detail })),
+  });
+
   return {
+    approvalWebhookStore,
+    approvalWebhooks,
     accountStore,
     sessionStore,
     agentSessionStore,

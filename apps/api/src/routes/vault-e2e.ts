@@ -263,6 +263,10 @@ export const registerVaultE2ERoute: FastifyPluginAsync<{
         id = await opts.deps.paymentAuditStore.create(auth.account_id, parsed.data);
         await recordVaultAuditAfterPersist(opts.deps.vaultAuditStore, eventForId(id), req.log);
       }
+      // A merchant confirmation moves the approval card from processing to completed.
+      if (parsed.data.approvalId !== undefined) {
+        opts.deps.approvalWebhooks.notify(parsed.data.approvalId);
+      }
       return reply.code(201).send({ id });
     },
   );

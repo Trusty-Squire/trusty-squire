@@ -37,6 +37,7 @@
     "zod": "^3.23.8"
   },
   "devDependencies": {
+    "@trusty-squire/sdk": "workspace:*",
     "@types/nodemailer": "^8.0.0",
     "@vitest/coverage-v8": "^1.6.1",
     "prisma": "^5.22.0",

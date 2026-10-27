@@ -23,6 +23,7 @@ export class PrismaPaymentAuditStore implements PaymentAuditStore {
         last4: input.last4,
         status: input.status,
         mandate_id: input.mandateId ?? null,
+        approval_id: input.approvalId ?? null,
       },
       select: { id: true },
     });
@@ -46,6 +47,7 @@ export class PrismaPaymentAuditStore implements PaymentAuditStore {
           last4: input.last4,
           status: input.status,
           mandate_id: input.mandateId ?? null,
+          approval_id: input.approvalId ?? null,
         },
         select: { id: true },
       });
@@ -83,6 +85,7 @@ export class PrismaPaymentAuditStore implements PaymentAuditStore {
       last4: row.last4,
       status: row.status,
       mandateId: row.mandate_id,
+      approvalId: row.approval_id,
       createdAt: row.created_at,
     }));
   }
@@ -101,7 +104,32 @@ export class PrismaPaymentAuditStore implements PaymentAuditStore {
       last4: row.last4,
       status: row.status,
       mandateId: row.mandate_id,
+      approvalId: row.approval_id,
       createdAt: row.created_at,
     }));
+  }
+
+  async findLatestForApproval(
+    accountId: string,
+    approvalId: string,
+  ): Promise<PaymentAuditRecord | null> {
+    const row = await this.prisma.paymentAuditEvent.findFirst({
+      where: { account_id: accountId, approval_id: approvalId },
+      orderBy: [{ created_at: "desc" }, { id: "desc" }],
+    });
+    return row === null
+      ? null
+      : {
+          id: row.id,
+          accountId: row.account_id,
+          merchant: row.merchant,
+          amountCents: row.amount_cents,
+          currency: row.currency,
+          last4: row.last4,
+          status: row.status,
+          mandateId: row.mandate_id,
+          approvalId: row.approval_id,
+          createdAt: row.created_at,
+        };
   }
 }
