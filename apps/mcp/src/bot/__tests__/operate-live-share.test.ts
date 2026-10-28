@@ -74,7 +74,7 @@ describe("operate live share", () => {
     const context = page.context();
     const originalSession = context.newCDPSession.bind(context);
     let rejectNextKey = false;
-    const inputCalls: Array<{ method: string; params?: object }> = [];
+    const inputCalls: Array<{ method: string; params: object | undefined }> = [];
     context.newCDPSession = async (target) => {
       const cdp = await originalSession(target);
       const send = cdp.send.bind(cdp);
