@@ -5,6 +5,9 @@ import { fileURLToPath } from "node:url";
 import { type ChildProcess } from "node:child_process";
 import {
   closeProfileWithProof,
+  ProfileBusyError,
+  PROFILE_BUSY_MESSAGE,
+  readLockHolder,
   currentProfileHolderPid,
   profileProcessIdentity,
   profileProcessIdentityState,
@@ -62,6 +65,7 @@ import {
 import type { RemoteLoginRig } from "./remote-login-display.js";
 import type { PageDriver } from "./page-driver.js";
 import { hostDisplayAcceptsConnections } from "./display-env.js";
+import { prepareBrowserProtocolPolicy } from "./browser-protocol-policy.js";
 import {
   stopBrowserScope,
   browserScopeIsEmpty,
@@ -521,6 +525,11 @@ export class BrowserProcessOwner {
     // (hCaptcha Enterprise) scores; only real hardware fixes the pixel
     // fingerprint, which is the whole point of this path.
     const remoteMode = (process.env.BOT_CDP_ENDPOINT ?? "").trim().length > 0;
+    if (!remoteMode) {
+      const holder = readLockHolder(this.profileDir);
+      if (holder !== null && !holder.stale) throw new ProfileBusyError(PROFILE_BUSY_MESSAGE);
+      await prepareBrowserProtocolPolicy(this.profileDir);
+    }
     if (remoteMode) {
       console.error(
         `[operator] REMOTE-CDP mode — attaching to ${(process.env.BOT_CDP_ENDPOINT ?? "").trim()} ` +
