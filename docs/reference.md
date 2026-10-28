@@ -140,6 +140,20 @@ Connect never waits longer than the sign-in link lives — the wait is the link'
 
 Supported targets: `claude-code`, `cursor`, `codex`, `opencode`, `goose`, `cline`, `continue`, and `hermes`.
 
+On Linux, connect registers and starts a systemd user service; on macOS, a launchd user agent. A working user service manager is required. MCP clients connect to that broker and report "broker not running" after bounded retries if it is stopped. Installer-written client entries use `@trusty-squire/mcp@latest`. The interactive setup also offers an optional 2Captcha key, stored in your vault.
+
+| Command or option | Purpose |
+| --- | --- |
+| `connect` | Set up this machine; the default when no command is given. |
+| `settings` | Edit registry and email verification choices. |
+| `logout [--account=<id>]` | Clear one local account session. |
+| `help`, `--help`, `-h` | Show CLI help. |
+| `--target <agent>` | Choose a coding agent for `connect` or `settings` instead of detecting one. |
+| `--account <id>` | Select the local account session to clear with `logout`. |
+| `--force-relogin[=google\|github]` | Reopen sign-in for the account or one provider. |
+| `--skip-browser` | Hand off the sign-in URL to a separate browser for scripted setup. |
+| `--json` | Stream machine-readable connect reports and skip setup prompts. |
+
 The isolated `operate_*` browser runtime currently requires Linux and a local Chrome connection;
 remote CDP, macOS, and Windows operator sessions are not supported in this migration stage.
 
@@ -409,7 +423,7 @@ For login and approval call shapes, follow the
 
 ## One README for GitHub and npm
 
-This root file is the canonical README. The npm pack lifecycle copies it into `@trusty-squire/mcp` byte-for-byte, then removes the generated package-local copy after packing. GitHub and npm therefore publish the same product explanation.
+The root `README.md` is the canonical short README. The npm pack lifecycle copies it into `@trusty-squire/mcp` byte-for-byte, then removes the generated package-local copy after packing. GitHub and npm therefore publish the same short README, and this file holds the full reference.
 
 ## Development
 
