@@ -27,6 +27,7 @@ export const SLOW_POST_MERGE_FILES = [
 // `chromium.launch|patchrightChromium.launch|connectOverCDP|launchPersistentContext`
 // plus broker tests driving real Chrome via UNIVERSAL_BOT_CHROME_BINARY).
 export const REAL_BROWSER_FILES = [
+  "src/bot/__tests__/browser-external-protocol.test.ts",
   "scripts/native-dialog-built-demo.test.mjs",
   "src/bot/__tests__/native-dialogs-browser.test.ts",
   "src/__tests__/broker-default-start.test.ts",

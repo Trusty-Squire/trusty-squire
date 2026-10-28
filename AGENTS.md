@@ -818,6 +818,12 @@ Read this file. Follow the rules. Run the verify script. Paste the output. Then 
 
 ## Browser launch posture
 
+- External-application prompts are not JavaScript dialogs. They can silently
+  swallow trusted CDP input while DOM clicks still work. Owned local launches
+  prepare the profile navigation policy before Chrome starts; never rewrite
+  live profile preferences or replace trusted clicks with DOM activation to
+  conceal this failure. See [external protocol input](docs/external-protocol-input.md).
+
 - **`connect` is the only sign-in command.** Never reintroduce `login`.
   The shared-browser ceremony and fallback contracts are owned by
   [`docs/browser-broker.md`](docs/browser-broker.md); user-facing setup is in
