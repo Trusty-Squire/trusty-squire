@@ -7,7 +7,9 @@ name: Release sdk
 #   - main: must be a stable semver. Publishes `latest` tag.
 #
 # Tag scheme: `sdk@<version>` (avoids collision with mcp's `v<version>` tags).
-# If the tag already exists OR npm already has that version, the job is a no-op.
+# If the tag already exists OR npm already has that version, publish is skipped.
+# If npm has the version but the tag is missing (a run that published and then
+# failed), the `release` job creates only the GitHub release.
 #
 # Publishing is version-driven. README edits also trigger a run, which skips
 # when the version is already released.
@@ -44,6 +46,7 @@ jobs:
       npm_dist_tag: ${{ steps.read.outputs.npm_dist_tag }}
       gh_prerelease: ${{ steps.read.outputs.gh_prerelease }}
       should_publish: ${{ steps.read.outputs.should_publish }}
+      should_release: ${{ steps.read.outputs.should_release }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -135,6 +138,14 @@ jobs:
             echo "::notice::Skipping publish: version $VERSION already released (tag_exists=$TAG_EXISTS, npm_has=$NPM_HAS)"
           else
             echo "should_publish=true" >> "$GITHUB_OUTPUT"
+          fi
+
+          # Release-only path: npm has the version but the GitHub release is missing.
+          if [[ "$TAG_EXISTS" == "false" && "$NPM_HAS" == "true" ]]; then
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::npm has $VERSION but tag $TAG is missing; creating the GitHub release only."
+          else
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
           fi
 
   publish:
@@ -259,8 +270,7 @@ jobs:
           TAG="${{ needs.verify.outputs.npm_dist_tag }}"
           echo "Asserting dist-tag '$TAG' → $V"
           for i in $(seq 1 18); do
-            CURRENT=$(npm view "@trusty-squire/sdk" dist-tags --json 2>/dev/null \
-              | python3 -c "import json,sys; print(json.load(sys.stdin).get('$TAG',''))")
+            CURRENT=$(npm view "@trusty-squire/sdk@$TAG" version 2>/dev/null || echo "")
             echo "  attempt $i — npm view says $TAG = '$CURRENT'"
             if [[ "$CURRENT" == "$V" ]]; then
               echo "✓ dist-tag $TAG correctly points at $V."
@@ -296,3 +306,42 @@ jobs:
             echo "- npm dist-tag: \`${{ needs.verify.outputs.npm_dist_tag }}\`"
             echo "- Tarball: https://registry.npmjs.org/@trusty-squire/sdk/-/sdk-${{ needs.verify.outputs.version }}.tgz"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # Backfill the GitHub release for a version that is already on npm.
+  # Never publishes to npm.
+  release:
+    needs: verify
+    if: needs.verify.outputs.should_publish != 'true' && needs.verify.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          V="${{ needs.verify.outputs.version }}"
+          TAG="sdk@$V"
+          # Target the commit npm recorded for this version. Fall back to the
+          # last commit that changed the package version.
+          TARGET=$(npm view "@trusty-squire/sdk@$V" gitHead 2>/dev/null || echo "")
+          if [[ -z "$TARGET" ]] || ! git cat-file -e "$TARGET^{commit}" 2>/dev/null; then
+            TARGET=$(git log -1 --format=%H -- packages/sdk/package.json)
+          fi
+          echo "Creating release $TAG at $TARGET"
+          PRERELEASE_FLAG=""
+          if [[ "${{ needs.verify.outputs.gh_prerelease }}" == "true" ]]; then
+            PRERELEASE_FLAG="--prerelease"
+          fi
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --generate-notes \
+            $PRERELEASE_FLAG \
+            --target "$TARGET"
+
+      - name: Summary
+        run: |
+          echo "## Created GitHub release sdk@${{ needs.verify.outputs.version }} (npm already had it)" >> "$GITHUB_STEP_SUMMARY"
