@@ -325,22 +325,24 @@ jobs:
           set -euo pipefail
           V="${{ needs.verify.outputs.version }}"
           TAG="sdk@$V"
-          # Target the commit npm recorded for this version. Fall back to the
-          # last commit that changed the package version.
-          TARGET=$(npm view "@trusty-squire/sdk@$V" gitHead 2>/dev/null || echo "")
-          if [[ -z "$TARGET" ]] || ! git cat-file -e "$TARGET^{commit}" 2>/dev/null; then
-            TARGET=$(git log -1 --format=%H -- packages/sdk/package.json)
+          # Tag this run's own commit. GITHUB_TOKEN got HTTP 403 tagging an
+          # older commit whose workflow file differs from main (run 40616662124).
+          # Name the commit npm built from in the notes.
+          BUILT=$(npm view "@trusty-squire/sdk@$V" gitHead 2>/dev/null || echo "")
+          if [[ -z "$BUILT" ]]; then
+            BUILT=$(git log -1 --format=%H -- packages/sdk/package.json)
           fi
-          echo "Creating release $TAG at $TARGET"
+          echo "Creating release $TAG at $GITHUB_SHA (npm build: $BUILT)"
           PRERELEASE_FLAG=""
           if [[ "${{ needs.verify.outputs.gh_prerelease }}" == "true" ]]; then
             PRERELEASE_FLAG="--prerelease"
           fi
           gh release create "$TAG" \
             --title "$TAG" \
+            --notes "npm @trusty-squire/sdk@$V was built from $BUILT. This tag marks main when the release was backfilled." \
             --generate-notes \
             $PRERELEASE_FLAG \
-            --target "$TARGET"
+            --target "$GITHUB_SHA"
 
       - name: Summary
         run: |
