@@ -525,11 +525,6 @@ export class BrowserProcessOwner {
     // (hCaptcha Enterprise) scores; only real hardware fixes the pixel
     // fingerprint, which is the whole point of this path.
     const remoteMode = (process.env.BOT_CDP_ENDPOINT ?? "").trim().length > 0;
-    if (!remoteMode) {
-      const holder = readLockHolder(this.profileDir);
-      if (holder !== null && !holder.stale) throw new ProfileBusyError(PROFILE_BUSY_MESSAGE);
-      await prepareBrowserProtocolPolicy(this.profileDir);
-    }
     if (remoteMode) {
       console.error(
         `[operator] REMOTE-CDP mode — attaching to ${(process.env.BOT_CDP_ENDPOINT ?? "").trim()} ` +
@@ -613,6 +608,11 @@ export class BrowserProcessOwner {
       selfLaunchBinary !== null && existsSync(selfLaunchBinary) && canSelfLaunchWithProxy(proxy);
     let context: BrowserContext;
     this.throwIfStartCancelled();
+    if (!remoteMode) {
+      const holder = readLockHolder(this.profileDir);
+      if (holder !== null && !holder.stale) throw new ProfileBusyError(PROFILE_BUSY_MESSAGE);
+      await prepareBrowserProtocolPolicy(this.profileDir);
+    }
     if (useSelfLaunch && selfLaunchBinary !== null) {
       console.error(
         `[operator] self-launch + connectOverCDP (Turnstile-safe launch) binary=${selfLaunchBinary}`,
