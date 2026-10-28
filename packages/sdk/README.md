@@ -1,6 +1,6 @@
 <p align="center">
   <a href="https://trustysquire.ai" target="_blank" rel="noopener noreferrer">
-    <img width="84" height="84" src="https://trustysquire.ai/logo.svg" alt="Trusty Squire shield" />
+    <img width="84" height="84" src="https://raw.githubusercontent.com/Trusty-Squire/trusty-squire/main/apps/web/public/logo-400.png" alt="Trusty Squire shield" />
   </a>
 </p>
 

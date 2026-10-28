@@ -110,6 +110,25 @@ describe("canonical README discovery order", () => {
     expect(readme).toContain("**Get an API key.**");
     expect(readme).toContain("**Buy things.**");
     expect(readme).toContain("npx -y @trusty-squire/mcp@latest connect\n");
-    expect(readme).toContain("npx -y @trusty-squire/mcp@latest connect --target=codex\n");
+    expect(readme).toContain("`--target=codex`");
+  });
+
+  it("stays short and links out to the full reference", async () => {
+    const readme = await fs.readFile(canonicalReadme, "utf8");
+    expect(readme.trimEnd().split("\n").length).toBeLessThanOrEqual(40);
+    expect(readme).toContain(
+      "https://github.com/Trusty-Squire/trusty-squire/blob/main/docs/reference.md",
+    );
+  });
+
+  it("serves the logo from a cached host instead of the scale-to-zero website", async () => {
+    // npm and GitHub fetch README images through GitHub's camo proxy. The
+    // website sends max-age=0 and can scale to zero, so camo times out on a
+    // cold start and shows a broken image.
+    const readme = await fs.readFile(canonicalReadme, "utf8");
+    expect(readme).toContain(
+      'src="https://raw.githubusercontent.com/Trusty-Squire/trusty-squire/main/apps/web/public/logo-400.png"',
+    );
+    expect(readme).not.toContain("https://trustysquire.ai/logo");
   });
 });

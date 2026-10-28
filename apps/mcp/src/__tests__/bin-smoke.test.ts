@@ -145,6 +145,7 @@ describe.skipIf(skipPack)("packed tarball", () => {
       "packed README matches the root README byte-for-byte",
     ).toBe(true);
     expect(packedReadme.toString("utf8")).toContain(readmeTagline);
+    expect(packedReadme.toString("utf8").trimEnd().split("\n").length).toBeLessThanOrEqual(40);
   }, 60_000);
 });
 
