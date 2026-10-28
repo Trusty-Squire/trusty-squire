@@ -655,7 +655,28 @@ export class LiveShare {
       if (!(await this.takeControl(viewer))) return;
       const cdp = this.currentInputTarget();
       if (cdp === null) return;
-      await cdp.send("Input.insertText", { text: message.text });
+      // Canvas clients such as noVNC consume key events rather than DOM edits.
+      // Iterate code points so a non-BMP character stays a single key.
+      for (const character of message.text.replace(/\r\n/g, "\n")) {
+        const enter = character === "\n" || character === "\r";
+        const key = enter ? "Enter" : character;
+        const text = enter ? "\r" : character;
+        const keyCode = enter ? { windowsVirtualKeyCode: 13 } : {};
+        try {
+          await cdp.send("Input.dispatchKeyEvent", {
+            type: "keyDown",
+            key,
+            text,
+            unmodifiedText: text,
+            ...keyCode,
+          });
+        } catch {
+          // A rejected key must not discard the remainder of a paste.
+          await cdp.send("Input.insertText", { text: character });
+          continue;
+        }
+        await cdp.send("Input.dispatchKeyEvent", { type: "keyUp", key, ...keyCode });
+      }
     } else if (message.type === "key" && typeof message.key === "string") {
       const key = message.key;
       const codes: Record<string, number> = {
