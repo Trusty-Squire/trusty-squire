@@ -59,6 +59,82 @@ function waitForMessage(socket: WebSocket, match: (message: Record<string, unkno
 }
 
 describe("operate live share", () => {
+  it("Reproduction SB-TYPE-1: text reaches key listeners and ordinary fields once", async () => {
+    fixture = createServer((_request, response) => {
+      response.setHeader("Content-Type", "text/html");
+      response.end(`<!doctype html><canvas tabindex="0"></canvas><output></output><textarea></textarea>
+        <script>document.querySelector('canvas').addEventListener('keydown', event => {
+          if (event.key === 'Enter') document.querySelector('output').textContent += '\\n';
+          else if (Array.from(event.key).length === 1) document.querySelector('output').textContent += event.key;
+        });</script>`);
+    });
+    await new Promise<void>((resolve) => fixture!.listen(0, "127.0.0.1", resolve));
+    browser = await chromium.launch({ headless: true });
+    const page = await browser.newPage();
+    const context = page.context();
+    const originalSession = context.newCDPSession.bind(context);
+    let rejectNextKey = false;
+    const inputCalls: Array<{ method: string; params?: object }> = [];
+    context.newCDPSession = async (target) => {
+      const cdp = await originalSession(target);
+      const send = cdp.send.bind(cdp);
+      cdp.send = (async (method: string, params?: object) => {
+        if (method.startsWith("Input.")) inputCalls.push({ method, params });
+        if (method === "Input.dispatchKeyEvent" && rejectNextKey) {
+          rejectNextKey = false;
+          throw new Error("Unsupported key");
+        }
+        return await Reflect.apply(send, cdp, [method, params]);
+      }) as typeof cdp.send;
+      return cdp;
+    };
+    const started = await startHarnessProvisionSession({
+      serviceUrl: `http://127.0.0.1:${(fixture.address() as AddressInfo).port}/`,
+      browser: BrowserController.fromHarnessPage(page),
+      initialObservation: "drive",
+    });
+    sessionId = started.session_id;
+    const shared = await shareOperateSession(paymentSession(sessionId), async (port) => ({
+      url: `http://127.0.0.1:${port}`,
+      close: async () => undefined,
+    }));
+    const socket = new WebSocket(new URL("stream", shared.url));
+    try {
+      await waitForMessage(socket, (message) => message.type === "frame");
+      await page.locator("canvas").focus();
+      socket.send(JSON.stringify({ type: "text", text: "ab" }));
+      await expect.poll(() => page.locator("output").textContent()).toBe("ab");
+      await expect.poll(() => inputCalls.length).toBe(4);
+      expect(inputCalls).toEqual(
+        ["a", "b"].flatMap((key) => [
+          {
+            method: "Input.dispatchKeyEvent",
+            params: { type: "keyDown", key, text: key, unmodifiedText: key },
+          },
+          { method: "Input.dispatchKeyEvent", params: { type: "keyUp", key } },
+        ]),
+      );
+      const pasted = "pasted.user@example.com";
+      socket.send(JSON.stringify({ type: "text", text: pasted + "\n" }));
+      await expect.poll(() => page.locator("output").textContent()).toBe("ab" + pasted + "\n");
+      await page.locator("textarea").focus();
+      const unicode = "Ab é日本😀";
+      for (const text of unicode) socket.send(JSON.stringify({ type: "text", text }));
+      socket.send(JSON.stringify({ type: "text", text: "\n" + pasted }));
+      await expect.poll(() => page.locator("textarea").inputValue()).toBe(unicode + "\n" + pasted);
+      rejectNextKey = true;
+      socket.send(JSON.stringify({ type: "text", text: "éz" }));
+      await expect
+        .poll(() => page.locator("textarea").inputValue())
+        .toBe(unicode + "\n" + pasted + "éz");
+      expect(inputCalls.filter((call) => call.method === "Input.insertText")).toEqual([
+        { method: "Input.insertText", params: { text: "é" } },
+      ]);
+    } finally {
+      socket.close();
+    }
+  }, 30_000);
+
   it.each(["viewer", "agent"] as const)(
     "Reproduction google-viewer-popup: %s follows an iframe popup and returns to its opener",
     async (driver) => {
@@ -441,7 +517,7 @@ describe("operate live share", () => {
       const cdp = await originalSession(target);
       const send = cdp.send.bind(cdp);
       cdp.send = (async (method: string, params?: object) => {
-        if (method === "Input.insertText") {
+        if (method === "Input.dispatchKeyEvent") {
           inputStarted();
           await inputGate;
         }
