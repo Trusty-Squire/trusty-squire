@@ -1,0 +1,287 @@
+[
+  {
+    "event": "attached",
+    "session": "A62255627E1CC4E799E3BF6BD568BA2E",
+    "type": "page",
+    "url": "about:blank",
+    "waiting": false
+  },
+  {
+    "event": "resume",
+    "session": "A62255627E1CC4E799E3BF6BD568BA2E"
+  },
+  {
+    "event": "attached",
+    "session": "2A7EF3871A0202D960EDE20FED002BCF",
+    "type": "service_worker",
+    "url": "chrome-extension://nkeimhogjdpnpccoofpliimaahmaaome/thunk.js",
+    "waiting": false
+  },
+  {
+    "event": "resume",
+    "session": "2A7EF3871A0202D960EDE20FED002BCF"
+  },
+  {
+    "event": "resume",
+    "session": "A62255627E1CC4E799E3BF6BD568BA2E"
+  },
+  {
+    "event": "resume",
+    "session": "A62255627E1CC4E799E3BF6BD568BA2E"
+  },
+  {
+    "event": "resume",
+    "session": "A62255627E1CC4E799E3BF6BD568BA2E"
+  },
+  {
+    "event": "resume",
+    "session": "A62255627E1CC4E799E3BF6BD568BA2E"
+  },
+  {
+    "event": "resume",
+    "session": "A62255627E1CC4E799E3BF6BD568BA2E"
+  },
+  {
+    "event": "resume",
+    "session": "A62255627E1CC4E799E3BF6BD568BA2E"
+  },
+  {
+    "event": "attached",
+    "session": "E6DFC06FB5339599C23968FCF371450B",
+    "type": "page",
+    "url": "about:blank",
+    "waiting": true
+  },
+  {
+    "event": "resume",
+    "session": "E6DFC06FB5339599C23968FCF371450B"
+  },
+  {
+    "event": "resume",
+    "session": "E6DFC06FB5339599C23968FCF371450B"
+  },
+  {
+    "event": "resume",
+    "session": "E6DFC06FB5339599C23968FCF371450B"
+  },
+  {
+    "event": "resume",
+    "session": "E6DFC06FB5339599C23968FCF371450B"
+  },
+  {
+    "event": "resume",
+    "session": "E6DFC06FB5339599C23968FCF371450B"
+  },
+  {
+    "event": "resume",
+    "session": "E6DFC06FB5339599C23968FCF371450B"
+  },
+  {
+    "event": "resume",
+    "session": "E6DFC06FB5339599C23968FCF371450B"
+  },
+  {
+    "event": "resume",
+    "session": "A62255627E1CC4E799E3BF6BD568BA2E"
+  },
+  {
+    "event": "resume",
+    "session": "E6DFC06FB5339599C23968FCF371450B"
+  },
+  {
+    "event": "resume",
+    "session": "E6DFC06FB5339599C23968FCF371450B"
+  },
+  {
+    "event": "resume",
+    "session": "E6DFC06FB5339599C23968FCF371450B"
+  },
+  {
+    "event": "resume",
+    "session": "E6DFC06FB5339599C23968FCF371450B"
+  },
+  {
+    "event": "attached",
+    "session": "EA621A9B35C4C9AD40B7DA073D2B7830",
+    "type": "iframe",
+    "url": "",
+    "waiting": true
+  },
+  {
+    "event": "resume",
+    "session": "EA621A9B35C4C9AD40B7DA073D2B7830"
+  },
+  {
+    "event": "resume",
+    "session": "EA621A9B35C4C9AD40B7DA073D2B7830"
+  },
+  {
+    "event": "resume",
+    "session": "EA621A9B35C4C9AD40B7DA073D2B7830"
+  },
+  {
+    "event": "resume",
+    "session": "EA621A9B35C4C9AD40B7DA073D2B7830"
+  },
+  {
+    "event": "resume",
+    "session": "EA621A9B35C4C9AD40B7DA073D2B7830"
+  },
+  {
+    "event": "resume",
+    "session": "EA621A9B35C4C9AD40B7DA073D2B7830"
+  },
+  {
+    "event": "resume",
+    "session": "EA621A9B35C4C9AD40B7DA073D2B7830"
+  },
+  {
+    "event": "resume",
+    "session": "EA621A9B35C4C9AD40B7DA073D2B7830"
+  },
+  {
+    "event": "resume",
+    "session": "EA621A9B35C4C9AD40B7DA073D2B7830"
+  },
+  {
+    "event": "resume",
+    "session": "E6DFC06FB5339599C23968FCF371450B"
+  },
+  {
+    "event": "resume",
+    "session": "E6DFC06FB5339599C23968FCF371450B"
+  },
+  {
+    "event": "resume",
+    "session": "E6DFC06FB5339599C23968FCF371450B"
+  },
+  {
+    "event": "resume",
+    "session": "EA621A9B35C4C9AD40B7DA073D2B7830"
+  },
+  {
+    "event": "resume",
+    "session": "EA621A9B35C4C9AD40B7DA073D2B7830"
+  },
+  {
+    "event": "resume",
+    "session": "EA621A9B35C4C9AD40B7DA073D2B7830"
+  },
+  {
+    "event": "attached",
+    "session": "9E106B7CF46AB5D066B67CD0090DA230",
+    "type": "browser",
+    "url": "",
+    "waiting": false
+  },
+  {
+    "event": "attached",
+    "session": "171BF28ED27E49E335F07FF975E3D59B",
+    "type": "page",
+    "url": "http://127.0.0.1:46397/",
+    "waiting": false
+  },
+  {
+    "event": "attached",
+    "session": "3CD55D244D46CDCD20A23D1E7B8778A6",
+    "type": "page",
+    "url": "http://127.0.0.1:46397/",
+    "waiting": false
+  },
+  {
+    "event": "attached",
+    "session": "1B96E74969B2852E8A3DB15A3C609F81",
+    "type": "iframe",
+    "url": "http://localhost:46397/frame",
+    "waiting": false
+  },
+  {
+    "event": "resume",
+    "session": "1B96E74969B2852E8A3DB15A3C609F81"
+  },
+  {
+    "event": "attached",
+    "session": "50B3756398ED26FE519D65CAE34DDCA0",
+    "type": "iframe",
+    "url": "http://localhost:46397/frame",
+    "waiting": false
+  },
+  {
+    "event": "resume",
+    "session": "3CD55D244D46CDCD20A23D1E7B8778A6"
+  },
+  {
+    "event": "resume",
+    "session": "50B3756398ED26FE519D65CAE34DDCA0"
+  },
+  {
+    "event": "attached",
+    "session": "A62BF17925C66D8232C78652C7319260",
+    "type": "page",
+    "url": "http://127.0.0.1:46397/",
+    "waiting": false
+  },
+  {
+    "event": "attached",
+    "session": "54C291C14D7A970CC8AC61992A6AD186",
+    "type": "page",
+    "url": "",
+    "waiting": true
+  },
+  {
+    "event": "resume",
+    "session": "54C291C14D7A970CC8AC61992A6AD186"
+  },
+  {
+    "event": "resume",
+    "session": "54C291C14D7A970CC8AC61992A6AD186"
+  },
+  {
+    "event": "resume",
+    "session": "54C291C14D7A970CC8AC61992A6AD186"
+  },
+  {
+    "event": "resume",
+    "session": "54C291C14D7A970CC8AC61992A6AD186"
+  },
+  {
+    "event": "resume",
+    "session": "54C291C14D7A970CC8AC61992A6AD186"
+  },
+  {
+    "event": "resume",
+    "session": "54C291C14D7A970CC8AC61992A6AD186"
+  },
+  {
+    "event": "resume",
+    "session": "54C291C14D7A970CC8AC61992A6AD186"
+  },
+  {
+    "event": "attached",
+    "session": "C84F60D86737167BE0533BA25CCB0308",
+    "type": "page",
+    "url": "http://localhost:46397/popup",
+    "waiting": false
+  },
+  {
+    "event": "resume",
+    "session": "54C291C14D7A970CC8AC61992A6AD186"
+  },
+  {
+    "event": "resume",
+    "session": "54C291C14D7A970CC8AC61992A6AD186"
+  },
+  {
+    "event": "resume",
+    "session": "54C291C14D7A970CC8AC61992A6AD186"
+  },
+  {
+    "event": "resume",
+    "session": "C84F60D86737167BE0533BA25CCB0308"
+  },
+  {
+    "debuggerEnableCommands": 0,
+    "debuggerPausedEvents": 0,
+    "result": "IFRAME_POPUP_PASS"
+  }
+]
