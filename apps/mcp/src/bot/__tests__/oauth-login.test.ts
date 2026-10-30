@@ -2077,6 +2077,84 @@ describe("BrowserController OAuth popup lifecycle", () => {
     }
   }, 15_000); // Three sessions include bounded start/post-action settling and a queued login.
 
+  it.each(["ref", "label", "changed-intent"])(
+    "R1 preserves Google target binding through a transient actionability delay (%s)",
+    async (targetKind) => {
+      const context = await signedInGoogleContext();
+      const product = await context.newPage();
+      const productUrl = "https://canonical-oauth.test/signup";
+      const returnUrl = "https://canonical-oauth.test/dashboard";
+      const providerUrl = `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(returnUrl)}`;
+      let sessionId: string | undefined;
+      await routeSignedInGoogleFixture(context, (route) => {
+        const url = route.request().url();
+        return route.fulfill({
+          contentType: "text/html",
+          body:
+            url === productUrl
+              ? `<button id="oauth" onclick='window.open(${JSON.stringify(providerUrl)})'>Continue with Google</button>`
+              : url.startsWith("https://accounts.google.com/")
+                ? `<script>location.href=${JSON.stringify(returnUrl)}</script>`
+                : "<main>Dashboard</main>",
+        });
+      });
+      await product.goto(productUrl);
+      const controller = BrowserController.fromHarnessPage(product);
+      try {
+        const started = await startHarnessProvisionSession({
+          browser: controller,
+          serviceUrl: productUrl,
+          format: "compact",
+        });
+        sessionId = started.session_id;
+        const ref = refByLabel(started, "Continue with Google");
+        expect(ref).toBeDefined();
+        const target = targetKind === "label" ? "@continue-with-google" : ref!;
+        const matchesTarget = controller.matchesOAuthClickTarget.bind(controller);
+        let delayed = false;
+        vi.spyOn(controller, "matchesOAuthClickTarget").mockImplementation(
+          async (handle, selector) => {
+            const matches = await matchesTarget(handle, selector);
+            if (!delayed) {
+              delayed = true;
+              // Model the live signup's render/busy delay between the trial and
+              // native click. State changes do not retire the observed node.
+              await handle.evaluate((element, changeIntent) => {
+                element.setAttribute("disabled", "");
+                setTimeout(() => {
+                  if (changeIntent) element.textContent = "Delete account";
+                  element.removeAttribute("disabled");
+                }, 1500);
+              }, targetKind === "changed-intent");
+            }
+            return matches;
+          },
+        );
+        const prepared = preparePublicOAuthLoginTarget(sessionId, target);
+        expect(prepared).toBeDefined();
+        const popup = vi.fn();
+        product.on("popup", popup);
+        const login = withPreparedOAuthLoginTarget(prepared!, () =>
+          operateLoginTool.handler(
+            { action: "oauth", session_id: sessionId!, ref: target, provider: "google" },
+            {} as ApiClient,
+          ),
+        );
+        if (targetKind === "changed-intent") {
+          await expect(login).rejects.toBeInstanceOf(ProvenPreDispatchMutationError);
+          expect(popup).not.toHaveBeenCalled();
+        } else {
+          await expect(login).resolves.toMatchObject({ url: returnUrl });
+          expect(popup).toHaveBeenCalledTimes(1);
+        }
+      } finally {
+        if (sessionId !== undefined) await finishProvisionSession(sessionId);
+        await context.close();
+      }
+    },
+    15_000,
+  );
+
   it("rejects a compact OAuth target replaced during recovery-page setup", async () => {
     const context = await signedInGoogleContext();
     const product = await context.newPage();
