@@ -5653,12 +5653,9 @@ describe("operate_drive feedback loop", () => {
         undefined,
         dependencies,
       );
-      const row = handoff.observation?.safe_table?.find((row) =>
-        /continue-with-google/.test(row[2] ?? ""),
-      );
-      expect(row).toBeDefined();
-      expect(row![2]).toContain("x=x");
-      await act(started.session_id, { kind: "click", target: row![0] });
+      const target = refFor(handoff.observation ?? {}, "continue-with-google");
+      expect(JSON.stringify(handoff.observation?.safe_table)).toMatch(/continue-with-google.*x=x/);
+      await act(started.session_id, { kind: "click", target });
       expect(await page.frameLocator("#google").locator("body").getAttribute("data-clicked")).toBe(
         "yes",
       );
