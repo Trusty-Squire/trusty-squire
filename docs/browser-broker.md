@@ -13,22 +13,6 @@ There is no direct-server
 browser launch and no fallback anywhere in the product: the broker performs the
 Turnstile-safe self-launch itself, once, and hands every tab out from it.
 
-## Popup debugger recovery guard
-
-The broker's CDP attachment installs `popup-pause-guard.ts` before handing out
-sessions. It ignores targets that already existed at attachment and ordinary
-new tabs; newly created page targets with an opener get a separate recovery
-session. That session resumes `waitingForDebugger` targets and observes the
-Debugger domain on popup pages and their child frames. A `Debugger.paused` event
-logs the target id and pause reason, then sends `Debugger.resume`. Child
-auto-attachment never requests a debugger wait. The guard disconnects with the
-broker's browser connection.
-
-This is recovery protection, not an attribution of the historical Google popup
-freeze. It deliberately resumes debugger stops in new popups, including stops
-requested by another debugging client. It does not change popup ownership,
-adoption, OAuth identity admission, or account selection.
-
 ## Shared MCP socket and relay
 
 The installer registers one resident broker user service per browser profile. The canonical default

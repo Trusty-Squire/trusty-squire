@@ -65,3 +65,16 @@ Reproduction GSI-4 (deliberate failure stand-in): the cross-site iframe opens a 
 Commander explicitly requested this guard if no live cause was proved. The production attachment now installs it for new popup targets and their frames. No claim of a root-cause fix is made. The remaining live proof needs a signed-out Kling test session that does not log out or modify Candy's shared profile.
 
 Guard validation, 16:15 UTC: whole popup-pause-guard, iframe-popup-cdp, oauth-login, google-login, new-tab-adoption and picker-window files completed with 176 passed and the same one baseline Google cancellation failure (expected unknown, received closed). Both new guard files pass. Build, ESLint, Prettier and diff whitespace checks pass.
+
+## Corrected live result: Pinterest uses FedCM (2026-10-30)
+
+A new owned broker session (7c82ab14-0d98-43e7-a15d-642b153be350, target D97BA0AF9BB4FEFE825EAB46BBE95A30) rendered Pinterest's real GSI button. `operate_click` on its cross-origin ref @e:Cmk7fuAKukuKRetfeGTCU7 returned w=acted. The next raw CDP client sent FedCm.enable. Before it dispatched any pointer input, Chrome emitted:
+`FedCm.dialogShown: dialogType=AccountChooser, title="Continue to pinterest.com with google.com", accounts=2`.
+
+This corrects the earlier no-chooser conclusion: the normal Squire ref click opened a browser-native FedCM account chooser, not a page popup. The DOM URL and target list staying unchanged were insufficient evidence. A subsequent direct trusted Input.dispatchMouseEvent at the iframe's screen coordinates produced no new page target, as expected for FedCM. No account was selected. A host desktop screenshot captured the chooser and was posted privately as Beeline artifact 05c0c374-7da4-4c8e-b225-7c775f366d07, rather than committing account-identifying pixels. Raw structural evidence is in pinterest-fedcm-evidence.jsonl.
+
+The fresh Kling session (b90b3170-f4d3-4fab-8301-c99838a54cbb) again reached the signed-in app; query Sign In returned safe_table:[]. No Kling Google click was made. Both owned sessions were closed with cleanup=closed. The per-site limit was respected: Pinterest used one ref click and one direct pointer dispatch, Kling used one fresh-session attempt. Logged-out Kling chooser trials remain unavailable without affecting the shared login or supplying a separate authorized test context.
+
+The latest commander decision rejects speculative debugger changes. The guard, its production wiring, and its guard-only tests have therefore been withdrawn. The retained cross-site popup test proves ordinary adoption and control, without claiming a historical freeze fix. The Google lifecycle baseline failure remains out of scope. PR remains draft pending actual Kling proof.
+
+Final scoped validation (16:33 UTC): operate-drive-fixture, oauth-login, new-tab-adoption, picker-window and iframe-popup-cdp all pass: 237 passed, 1 skipped across five whole files. Build, ESLint, Prettier and git diff --check pass. No debugger guard remains.

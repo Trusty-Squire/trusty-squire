@@ -151,7 +151,6 @@ export const REQUIRED_BEHAVIOR_FILES = [
   "src/bot/__tests__/modal-overlay-inert.test.ts",
   "src/bot/__tests__/broker-tab-family.test.ts",
   "src/bot/__tests__/new-tab-adoption.test.ts",
-  "src/bot/__tests__/popup-pause-guard.test.ts",
   "src/bot/__tests__/iframe-popup-cdp.test.ts",
   "src/bot/__tests__/oauth-login.test.ts",
   "src/bot/__tests__/observation-dom-correctness.test.ts",

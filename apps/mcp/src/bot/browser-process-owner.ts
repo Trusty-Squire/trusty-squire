@@ -1,5 +1,4 @@
 import type { Browser, BrowserContext } from "playwright";
-import { startPopupPauseGuard } from "./popup-pause-guard.js";
 import { existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -309,7 +308,6 @@ export class BrowserProcessOwner {
       const launcher = getChromium();
       const browser = await launcher.connectOverCDP(remoteEndpoint);
       this.cdpBrowser = browser;
-      browser.on("disconnected", await startPopupPauseGuard(remoteEndpoint));
       this.launchedMode = "remote";
       const ctx = browser.contexts()[0];
       if (ctx === undefined) {
@@ -431,7 +429,6 @@ export class BrowserProcessOwner {
     const launcher = getChromium();
     const browser = await launcher.connectOverCDP(endpoint);
     this.cdpBrowser = browser;
-    browser.on("disconnected", await startPopupPauseGuard(endpoint));
     const ctx = browser.contexts()[0];
     if (ctx === undefined) {
       throw new Error("self-launched Chrome exposed no default browser context");
