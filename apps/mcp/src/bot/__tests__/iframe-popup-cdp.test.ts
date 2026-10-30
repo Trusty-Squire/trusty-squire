@@ -8,6 +8,7 @@ import { chromium as patchright } from "patchright";
 import { chromium, type Page } from "playwright";
 import { expect, it } from "vitest";
 import { BrowserController } from "../browser.js";
+import { startPopupPauseGuard } from "../popup-pause-guard.js";
 
 it("adopts a cross-site iframe popup with debugger statements through CDP", async () => {
   const profile = await mkdtemp(join(tmpdir(), "iframe-popup-cdp-"));
@@ -39,6 +40,7 @@ it("adopts a cross-site iframe popup with debugger statements through CDP", asyn
     { stdio: "ignore" },
   );
   let browser: Awaited<ReturnType<typeof patchright.connectOverCDP>> | undefined;
+  let stopGuard: (() => void) | undefined;
   try {
     let endpoint = "";
     for (let attempt = 0; attempt < 100; attempt++) {
@@ -54,6 +56,7 @@ it("adopts a cross-site iframe popup with debugger statements through CDP", asyn
     }
     expect(endpoint).not.toBe("");
     browser = await patchright.connectOverCDP(endpoint);
+    stopGuard = await startPopupPauseGuard(endpoint);
     const context = browser.contexts()[0]!;
     const page = await context.newPage();
     await page.goto(`http://127.0.0.1:${port}/`, { waitUntil: "load" });
@@ -75,12 +78,17 @@ it("adopts a cross-site iframe popup with debugger statements through CDP", asyn
     expect(await controller.adoptOpenedTab()).toBe(`http://localhost:${port}/popup`);
     const after = await controller.extractBrowserUseObservation();
     expect(after.elements.some((e) => JSON.stringify(e).includes("Chooser responds"))).toBe(true);
+    const pauseClient = await context.newCDPSession(popup);
+    await pauseClient.send("Debugger.enable");
+    await pauseClient.send("Debugger.pause");
     await popup.getByRole("button").click({ timeout: 5000 });
+    await pauseClient.detach();
     expect(await popup.locator("body").getAttribute("data-clicked")).toBe("yes");
     console.warn(
       "IFRAME_POPUP_PASS: cross-site control captured; popup adopted; debugger statements completed; chooser responds",
     );
   } finally {
+    stopGuard?.();
     await browser?.close();
     child.kill("SIGINT");
     await new Promise((resolve) =>
