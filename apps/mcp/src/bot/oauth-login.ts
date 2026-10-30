@@ -867,9 +867,9 @@ export async function loginWithOAuth(
               };
               let expectedSignature: string;
               try {
-                // Complete Playwright's actionability wait before the final
-                // authorization check. The second click is intentionally
-                // short: a new wait would reopen the intent-change window.
+                // Check the observed target after the initial actionability
+                // wait. The capture guard below also checks its material
+                // signature when the real click reaches this exact node.
                 await handle.click({ trial: true, timeout: 8000 });
                 expectedSignature = await handle.evaluate(materialSignature);
                 await confirmTarget();
@@ -924,7 +924,10 @@ export async function loginWithOAuth(
                   { kind: "handle", handle, method: "click" },
                   undefined,
                   async () => {
-                    await handle.click({ timeout: 1000, noWaitAfter: true });
+                    await handle.click({
+                      timeout: Math.min(8000, remainingBudgetMs()),
+                      noWaitAfter: true,
+                    });
                     const blocked = await handle.evaluate((element, key) => {
                       const target = element as HTMLElement &
                         Record<string, { blocked?: boolean } | undefined>;

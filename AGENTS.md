@@ -496,6 +496,11 @@ Every OAuth action routed through `operate_login` stays in the single real
 authorized target and delegates to `loginWithOAuth`; never copy cookies, restore
 storage state, swap browsers, or add a parallel OAuth driver.
 
+A successful OAuth trial click does not eliminate the final native click's
+actionability wait. Keep its exact handle and click-time intent guard, and use
+the ordinary bounded click allowance capped by the remaining OAuth deadline;
+a shorter final timeout can misreport a still-valid ref as `stale_ref`.
+
 `operate_start` never requires or probes a Google session. Operations that
 actually depend on Google identity (Google OAuth, Google-backed signup
 preparation, and Gmail verification) call `detectSessionProviders()` on the
