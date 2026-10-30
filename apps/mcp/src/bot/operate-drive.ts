@@ -5031,15 +5031,27 @@ async function captureDriveSession(
     (element) => element.occludedBy === "overlay" || element.occludedBy === "dialog",
   );
   const frames = page.frames();
-  // Captcha controls can live in a cross-origin frame even without a card or
-  // covering layer. Keep the normal frame walk narrow for other pages.
-  if (needFrames || coveredByLayer || frames.some((frame) => isCaptchaFrameUrl(frame.url()))) {
+  // Google renders its sign-in button in a third-party frame even when the
+  // parent has ordinary login fields and no covering layer.
+  const googleButtonFrame = (frame: Frame): boolean => {
+    try {
+      const url = new URL(frame.url());
+      return url.origin === "https://accounts.google.com" && url.pathname === "/gsi/button";
+    } catch {
+      return false;
+    }
+  };
+  if (
+    needFrames ||
+    coveredByLayer ||
+    frames.some((frame) => isCaptchaFrameUrl(frame.url()) || googleButtonFrame(frame))
+  ) {
     const cache = driveFrameCache.get(session) ?? new Map();
     for (let index = 1; index < frames.length; index += 1) {
       const frame = frames[index]!;
       if (!(await isFrameRendered(frame))) continue;
       const captchaFrame = isCaptchaFrameUrl(frame.url());
-      if (!needFrames && !coveredByLayer && !captchaFrame) continue;
+      if (!needFrames && !coveredByLayer && !captchaFrame && !googleButtonFrame(frame)) continue;
       const signature = captchaFrame ? "" : await frameDynamicsSignature(frame);
       const key = `${index}:${frame.url()}:${keepOffscreenButtons}`;
       const cached = cache.get(key);

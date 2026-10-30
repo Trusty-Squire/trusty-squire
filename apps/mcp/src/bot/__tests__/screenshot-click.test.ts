@@ -432,6 +432,12 @@ describe("screenshot-bound native pointer dispatch", () => {
       const frameSession = await f.page.context().newCDPSession(f.frame);
       const tree = await frameSession.send("Page.getFrameTree");
       expect(tree.frameTree.frame.url).toBe("http://child.test/frame");
+      const targets = await frameSession.send("Target.getTargets");
+      expect(
+        targets.targetInfos.some(
+          (target) => target.type === "iframe" && target.url === "http://child.test/frame",
+        ),
+      ).toBe(true);
       const shot = await f.controller.captureOperatorScreenshot();
       await clickScreenshot(f.page, point(shot, 174, 244), () => {});
       expect(await f.frame.evaluate("window.events")).toEqual([{ trusted: true, checked: true }]);

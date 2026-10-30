@@ -601,8 +601,14 @@ describe("operate_drive real-browser fixture", () => {
       expect(texts[0]).toContain("Total $76.00 USD");
       const args = paymentArgs(
         { id: started.session_id, activePayment: null, releasedPaymentCard: null },
-        { card_ref: "card-1" }, "buy serum", page.url(),
-        [["@e:pan", "t", "Card number|f=payment"], ["@e:cvv", "t", "Security code"]], texts,
+        { card_ref: "card-1" },
+        "buy serum",
+        page.url(),
+        [
+          ["@e:pan", "t", "Card number|f=payment"],
+          ["@e:cvv", "t", "Security code"],
+        ],
+        texts,
       );
       expect(args?.amount_cents).toBe(7600);
     } finally {
@@ -5612,6 +5618,47 @@ describe("operate_drive feedback loop", () => {
       const changed = await runOperateDrive(input, api(), undefined, dependencies);
       expect(changed.status).toBe("low_confidence");
       expect(changed.options).not.toEqual(first.options);
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
+  it("includes a Google GSI button frame without payment or an overlay", async () => {
+    const { context, page, started } = await openFixture(
+      '<main><label>Email<input></label><button>Log in</button><iframe id="google" width="300" height="80"></iframe></main>',
+      "google-button-parent.test",
+    );
+    try {
+      const url = "https://accounts.google.com/gsi/button?client_id=fixture";
+      await page.route(url, (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: "<button onclick=\"document.body.dataset.clicked='yes'\">Continue with Google</button>",
+        }),
+      );
+      await page.locator("#google").evaluate((frame, url) => {
+        (frame as HTMLIFrameElement).src = url;
+      }, url);
+      await page.frameLocator("#google").getByRole("button").waitFor();
+      const dependencies = deps(async (_api, _state, questions) => {
+        const result = jevFromQuestions(questions);
+        setChoice(questions, "operation", "CLICK", result);
+        result.result.answers.operation!.confidence = 0.41;
+        return result;
+      });
+      const handoff = await runOperateDrive(
+        { session_id: started.session_id, goal: "Continue with Google", max_steps: 1 },
+        api(),
+        undefined,
+        dependencies,
+      );
+      const target = refFor(handoff.observation ?? {}, "continue-with-google");
+      expect(JSON.stringify(handoff.observation?.safe_table)).toMatch(/continue-with-google.*x=x/);
+      await act(started.session_id, { kind: "click", target });
+      expect(await page.frameLocator("#google").locator("body").getAttribute("data-clicked")).toBe(
+        "yes",
+      );
     } finally {
       await finishProvisionSession(started.session_id);
       await context.close();
