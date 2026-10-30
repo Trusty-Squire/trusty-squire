@@ -1,0 +1,461 @@
+
+ RUN  v2.1.9 /home/lunchbox/.local/state/beeline/corners/53aaf04a-05ff-47f1-bf99-8c0a5da47b1f/apps/mcp
+
+{"marker":"provision-audit","surface":"operate","session_id":"019afc9c-ca09-4d30-87f4-5117272fec4b","event":"start_harness","service_url":"http://parent.test","allowed_hosts":["parent.test"]}
+{"marker":"provision-audit","surface":"operate","session_id":"019afc9c-ca09-4d30-87f4-5117272fec4b","event":"captcha_autosolve","outcome":"<sealed>","card_released":false}
+{"marker":"provision-audit","surface":"operate","session_id":"019afc9c-ca09-4d30-87f4-5117272fec4b","event":"captcha_autosolve","outcome":"<sealed>"}
+{"marker":"provision-audit","surface":"operate","session_id":"019afc9c-ca09-4d30-87f4-5117272fec4b","event":"captcha_autosolve","variant":"<sealed>","outcome":"<sealed>","challenge_rendered":false}
+stderr | src/bot/__tests__/screenshot-click.test.ts > native screenshot/click tool contract on an isolated session > preserves DOM visibility, literal roles and blocker evidence after an uncertain screenshot click
+[captcha-autosolve-diag] session=019afc9c-ca09-4d30-87f4-5117272fec4b variant=unknown outcome=detect challenge_rendered=false anchor_type=none anchor_size=none api_render=none challenge_frame=hidden sitekey=none
+
+{"marker":"provision-audit","surface":"operate","session_id":"019afc9c-ca09-4d30-87f4-5117272fec4b","event":"act","operation_id":"670670e1-ef22-4207-8e16-d22a95e70e5b","kind":"<sealed>"}
+{"marker":"provision-audit","surface":"operate","session_id":"019afc9c-ca09-4d30-87f4-5117272fec4b","event":"act_timing","operation_id":"670670e1-ef22-4207-8e16-d22a95e70e5b","received_at_ms":1793374951257,"action_start_ms":1,"action_end_ms":346,"reply_at_ms":347,"action_ms":346,"preparation_ms":1,"target_resolution_ms":0,"browser_action_ms":346,"settle_ms":0,"captcha_probe_ms":0,"observation_ms":0,"reply_ms":0,"total_ms":347}
+{"marker":"provision-audit","surface":"operate","session_id":"019afc9c-ca09-4d30-87f4-5117272fec4b","event":"captcha_autosolve","outcome":"<sealed>","card_released":false}
+{"marker":"provision-audit","surface":"operate","session_id":"019afc9c-ca09-4d30-87f4-5117272fec4b","event":"captcha_autosolve","outcome":"<sealed>"}
+{"marker":"provision-audit","surface":"operate","session_id":"019afc9c-ca09-4d30-87f4-5117272fec4b","event":"captcha_autosolve","variant":"<sealed>","outcome":"<sealed>","challenge_rendered":false}
+stderr | src/bot/__tests__/screenshot-click.test.ts > native screenshot/click tool contract on an isolated session > preserves DOM visibility, literal roles and blocker evidence after an uncertain screenshot click
+[captcha-autosolve-diag] session=019afc9c-ca09-4d30-87f4-5117272fec4b variant=unknown outcome=detect challenge_rendered=false anchor_type=none anchor_size=none api_render=none challenge_frame=hidden sitekey=none
+
+{"marker":"provision-audit","surface":"operate","session_id":"019afc9c-ca09-4d30-87f4-5117272fec4b","event":"finish","url":"http://parent.test"}
+{"marker":"provision-audit","surface":"operate","session_id":"6b62ac88-21e5-45b4-93bb-9ff3ec563d4b","event":"start_harness","service_url":"http://parent.test","allowed_hosts":["parent.test"]}
+{"marker":"provision-audit","surface":"operate","session_id":"6b62ac88-21e5-45b4-93bb-9ff3ec563d4b","event":"captcha_autosolve","outcome":"<sealed>","card_released":false}
+{"marker":"provision-audit","surface":"operate","session_id":"6b62ac88-21e5-45b4-93bb-9ff3ec563d4b","event":"captcha_autosolve","outcome":"<sealed>"}
+{"marker":"provision-audit","surface":"operate","session_id":"6b62ac88-21e5-45b4-93bb-9ff3ec563d4b","event":"captcha_autosolve","variant":"<sealed>","outcome":"<sealed>","challenge_rendered":false}
+stderr | src/bot/__tests__/screenshot-click.test.ts > native screenshot/click tool contract on an isolated session > dispatches into a sandboxed cross-origin frame (inherited=false)
+[captcha-autosolve-diag] session=6b62ac88-21e5-45b4-93bb-9ff3ec563d4b variant=unknown outcome=detect challenge_rendered=false anchor_type=none anchor_size=none api_render=none challenge_frame=hidden sitekey=none
+
+{"marker":"provision-audit","surface":"operate","session_id":"6b62ac88-21e5-45b4-93bb-9ff3ec563d4b","event":"act","operation_id":"f96712ea-2551-4371-a8be-563068b2a074","kind":"<sealed>"}
+{"marker":"provision-audit","surface":"operate","session_id":"6b62ac88-21e5-45b4-93bb-9ff3ec563d4b","event":"captcha_autosolve","outcome":"<sealed>","card_released":false}
+{"marker":"provision-audit","surface":"operate","session_id":"6b62ac88-21e5-45b4-93bb-9ff3ec563d4b","event":"captcha_autosolve","outcome":"<sealed>"}
+{"marker":"provision-audit","surface":"operate","session_id":"6b62ac88-21e5-45b4-93bb-9ff3ec563d4b","event":"captcha_autosolve","variant":"<sealed>","outcome":"<sealed>","challenge_rendered":false}
+stderr | src/bot/__tests__/screenshot-click.test.ts > native screenshot/click tool contract on an isolated session > dispatches into a sandboxed cross-origin frame (inherited=false)
+[captcha-autosolve-diag] session=6b62ac88-21e5-45b4-93bb-9ff3ec563d4b variant=unknown outcome=detect challenge_rendered=false anchor_type=none anchor_size=none api_render=none challenge_frame=hidden sitekey=none
+
+{"marker":"provision-audit","surface":"operate","session_id":"6b62ac88-21e5-45b4-93bb-9ff3ec563d4b","event":"act_timing","operation_id":"f96712ea-2551-4371-a8be-563068b2a074","received_at_ms":1793374954367,"action_start_ms":0,"action_end_ms":2328,"reply_at_ms":2912,"action_ms":2328,"preparation_ms":0,"target_resolution_ms":0,"browser_action_ms":320,"settle_ms":2008,"captcha_probe_ms":2,"observation_ms":582,"reply_ms":0,"total_ms":2912}
+{"marker":"provision-audit","surface":"operate","session_id":"6b62ac88-21e5-45b4-93bb-9ff3ec563d4b","event":"finish","url":"http://parent.test"}
+{"marker":"provision-audit","surface":"operate","session_id":"e0e6226c-a48f-4fe5-9e22-1cd4928aef5c","event":"start_harness","service_url":"http://parent.test","allowed_hosts":["parent.test"]}
+{"marker":"provision-audit","surface":"operate","session_id":"e0e6226c-a48f-4fe5-9e22-1cd4928aef5c","event":"captcha_autosolve","outcome":"<sealed>","card_released":false}
+{"marker":"provision-audit","surface":"operate","session_id":"e0e6226c-a48f-4fe5-9e22-1cd4928aef5c","event":"captcha_autosolve","outcome":"<sealed>"}
+{"marker":"provision-audit","surface":"operate","session_id":"e0e6226c-a48f-4fe5-9e22-1cd4928aef5c","event":"captcha_autosolve","variant":"<sealed>","outcome":"<sealed>","challenge_rendered":false}
+stderr | src/bot/__tests__/screenshot-click.test.ts > native screenshot/click tool contract on an isolated session > dispatches into a sandboxed cross-origin frame (inherited=true)
+[captcha-autosolve-diag] session=e0e6226c-a48f-4fe5-9e22-1cd4928aef5c variant=unknown outcome=detect challenge_rendered=false anchor_type=none anchor_size=none api_render=none challenge_frame=hidden sitekey=none
+
+{"marker":"provision-audit","surface":"operate","session_id":"e0e6226c-a48f-4fe5-9e22-1cd4928aef5c","event":"act","operation_id":"66330641-1678-4cca-a983-4871bbe7ac72","kind":"<sealed>"}
+{"marker":"provision-audit","surface":"operate","session_id":"e0e6226c-a48f-4fe5-9e22-1cd4928aef5c","event":"captcha_autosolve","outcome":"<sealed>","card_released":false}
+{"marker":"provision-audit","surface":"operate","session_id":"e0e6226c-a48f-4fe5-9e22-1cd4928aef5c","event":"captcha_autosolve","outcome":"<sealed>"}
+{"marker":"provision-audit","surface":"operate","session_id":"e0e6226c-a48f-4fe5-9e22-1cd4928aef5c","event":"captcha_autosolve","variant":"<sealed>","outcome":"<sealed>","challenge_rendered":false}
+stderr | src/bot/__tests__/screenshot-click.test.ts > native screenshot/click tool contract on an isolated session > dispatches into a sandboxed cross-origin frame (inherited=true)
+[captcha-autosolve-diag] session=e0e6226c-a48f-4fe5-9e22-1cd4928aef5c variant=unknown outcome=detect challenge_rendered=false anchor_type=none anchor_size=none api_render=none challenge_frame=hidden sitekey=none
+
+{"marker":"provision-audit","surface":"operate","session_id":"e0e6226c-a48f-4fe5-9e22-1cd4928aef5c","event":"act_timing","operation_id":"66330641-1678-4cca-a983-4871bbe7ac72","received_at_ms":1793374958740,"action_start_ms":0,"action_end_ms":2339,"reply_at_ms":2962,"action_ms":2339,"preparation_ms":0,"target_resolution_ms":0,"browser_action_ms":325,"settle_ms":2014,"captcha_probe_ms":2,"observation_ms":621,"reply_ms":0,"total_ms":2962}
+{"marker":"provision-audit","surface":"operate","session_id":"e0e6226c-a48f-4fe5-9e22-1cd4928aef5c","event":"finish","url":"http://parent.test"}
+{"marker":"provision-audit","surface":"operate","session_id":"5dfe12ab-af49-4797-96df-7c0616b9bb0f","event":"start_harness","service_url":"http://parent.test","allowed_hosts":["parent.test"]}
+{"marker":"provision-audit","surface":"operate","session_id":"5dfe12ab-af49-4797-96df-7c0616b9bb0f","event":"captcha_autosolve","outcome":"<sealed>","card_released":false}
+{"marker":"provision-audit","surface":"operate","session_id":"5dfe12ab-af49-4797-96df-7c0616b9bb0f","event":"captcha_autosolve","outcome":"<sealed>"}
+{"marker":"provision-audit","surface":"operate","session_id":"5dfe12ab-af49-4797-96df-7c0616b9bb0f","event":"captcha_autosolve","variant":"<sealed>","outcome":"<sealed>","challenge_rendered":false}
+stderr | src/bot/__tests__/screenshot-click.test.ts > native screenshot/click tool contract on an isolated session > handles a closed-shadow popup link with success dispatch
+[captcha-autosolve-diag] session=5dfe12ab-af49-4797-96df-7c0616b9bb0f variant=unknown outcome=detect challenge_rendered=false anchor_type=none anchor_size=none api_render=none challenge_frame=hidden sitekey=none
+
+{"marker":"provision-audit","surface":"operate","session_id":"5dfe12ab-af49-4797-96df-7c0616b9bb0f","event":"act","operation_id":"43655c3e-bb59-40f3-9284-0385f45f0a23","kind":"<sealed>"}
+{"marker":"provision-audit","surface":"operate","session_id":"5dfe12ab-af49-4797-96df-7c0616b9bb0f","event":"new_tab_adopted","host":"parent.test"}
+{"marker":"provision-audit","surface":"operate","session_id":"5dfe12ab-af49-4797-96df-7c0616b9bb0f","event":"captcha_autosolve","outcome":"<sealed>","card_released":false}
+{"marker":"provision-audit","surface":"operate","session_id":"5dfe12ab-af49-4797-96df-7c0616b9bb0f","event":"captcha_autosolve","outcome":"<sealed>"}
+{"marker":"provision-audit","surface":"operate","session_id":"5dfe12ab-af49-4797-96df-7c0616b9bb0f","event":"captcha_autosolve","variant":"<sealed>","outcome":"<sealed>","challenge_rendered":false}
+stderr | src/bot/__tests__/screenshot-click.test.ts > native screenshot/click tool contract on an isolated session > handles a closed-shadow popup link with success dispatch
+[captcha-autosolve-diag] session=5dfe12ab-af49-4797-96df-7c0616b9bb0f variant=unknown outcome=detect challenge_rendered=false anchor_type=none anchor_size=none api_render=none challenge_frame=hidden sitekey=none
+
+{"marker":"provision-audit","surface":"operate","session_id":"5dfe12ab-af49-4797-96df-7c0616b9bb0f","event":"act_timing","operation_id":"43655c3e-bb59-40f3-9284-0385f45f0a23","received_at_ms":1793374963022,"action_start_ms":0,"action_end_ms":2111,"reply_at_ms":2661,"action_ms":2111,"preparation_ms":0,"target_resolution_ms":0,"browser_action_ms":108,"settle_ms":2002,"captcha_probe_ms":2,"observation_ms":548,"reply_ms":0,"total_ms":2661}
+{"marker":"provision-audit","surface":"operate","session_id":"5dfe12ab-af49-4797-96df-7c0616b9bb0f","event":"captcha_autosolve","outcome":"<sealed>","card_released":false}
+{"marker":"provision-audit","surface":"operate","session_id":"5dfe12ab-af49-4797-96df-7c0616b9bb0f","event":"captcha_autosolve","outcome":"<sealed>"}
+{"marker":"provision-audit","surface":"operate","session_id":"5dfe12ab-af49-4797-96df-7c0616b9bb0f","event":"captcha_autosolve","variant":"<sealed>","outcome":"<sealed>","challenge_rendered":false}
+stderr | src/bot/__tests__/screenshot-click.test.ts > native screenshot/click tool contract on an isolated session > handles a closed-shadow popup link with success dispatch
+[captcha-autosolve-diag] session=5dfe12ab-af49-4797-96df-7c0616b9bb0f variant=unknown outcome=detect challenge_rendered=false anchor_type=none anchor_size=none api_render=none challenge_frame=hidden sitekey=none
+
+{"marker":"provision-audit","surface":"operate","session_id":"5dfe12ab-af49-4797-96df-7c0616b9bb0f","event":"finish","url":"http://parent.test"}
+{"marker":"provision-audit","surface":"operate","session_id":"d431fb4c-f103-486c-b656-ba672b5f6427","event":"start_harness","service_url":"http://parent.test","allowed_hosts":["parent.test"]}
+{"marker":"provision-audit","surface":"operate","session_id":"d431fb4c-f103-486c-b656-ba672b5f6427","event":"captcha_autosolve","outcome":"<sealed>","card_released":false}
+{"marker":"provision-audit","surface":"operate","session_id":"d431fb4c-f103-486c-b656-ba672b5f6427","event":"captcha_autosolve","outcome":"<sealed>"}
+{"marker":"provision-audit","surface":"operate","session_id":"d431fb4c-f103-486c-b656-ba672b5f6427","event":"captcha_autosolve","variant":"<sealed>","outcome":"<sealed>","challenge_rendered":false}
+stderr | src/bot/__tests__/screenshot-click.test.ts > native screenshot/click tool contract on an isolated session > handles a closed-shadow popup link with uncertain dispatch
+[captcha-autosolve-diag] session=d431fb4c-f103-486c-b656-ba672b5f6427 variant=unknown outcome=detect challenge_rendered=false anchor_type=none anchor_size=none api_render=none challenge_frame=hidden sitekey=none
+
+{"marker":"provision-audit","surface":"operate","session_id":"d431fb4c-f103-486c-b656-ba672b5f6427","event":"act","operation_id":"a9c403be-6002-4e41-86a1-3e081457f887","kind":"<sealed>"}
+{"marker":"provision-audit","surface":"operate","session_id":"d431fb4c-f103-486c-b656-ba672b5f6427","event":"new_tab_adopted","host":"parent.test"}
+{"marker":"provision-audit","surface":"operate","session_id":"d431fb4c-f103-486c-b656-ba672b5f6427","event":"act_timing","operation_id":"a9c403be-6002-4e41-86a1-3e081457f887","received_at_ms":1793374967604,"action_start_ms":0,"action_end_ms":89,"reply_at_ms":89,"action_ms":89,"preparation_ms":0,"target_resolution_ms":0,"browser_action_ms":89,"settle_ms":0,"captcha_probe_ms":0,"observation_ms":0,"reply_ms":0,"total_ms":89}
+{"marker":"provision-audit","surface":"operate","session_id":"d431fb4c-f103-486c-b656-ba672b5f6427","event":"captcha_autosolve","outcome":"<sealed>","card_released":false}
+{"marker":"provision-audit","surface":"operate","session_id":"d431fb4c-f103-486c-b656-ba672b5f6427","event":"captcha_autosolve","outcome":"<sealed>"}
+{"marker":"provision-audit","surface":"operate","session_id":"d431fb4c-f103-486c-b656-ba672b5f6427","event":"captcha_autosolve","variant":"<sealed>","outcome":"<sealed>","challenge_rendered":false}
+stderr | src/bot/__tests__/screenshot-click.test.ts > native screenshot/click tool contract on an isolated session > handles a closed-shadow popup link with uncertain dispatch
+[captcha-autosolve-diag] session=d431fb4c-f103-486c-b656-ba672b5f6427 variant=unknown outcome=detect challenge_rendered=false anchor_type=none anchor_size=none api_render=none challenge_frame=hidden sitekey=none
+
+{"marker":"provision-audit","surface":"operate","session_id":"d431fb4c-f103-486c-b656-ba672b5f6427","event":"finish","url":"http://parent.test"}
+{"marker":"provision-audit","surface":"operate","session_id":"d76203cb-f5fc-4171-92bd-5436c025cca5","event":"start_harness","service_url":"http://parent.test","allowed_hosts":["parent.test"]}
+{"marker":"provision-audit","surface":"operate","session_id":"d76203cb-f5fc-4171-92bd-5436c025cca5","event":"captcha_autosolve","outcome":"<sealed>","card_released":false}
+{"marker":"provision-audit","surface":"operate","session_id":"d76203cb-f5fc-4171-92bd-5436c025cca5","event":"captcha_autosolve","outcome":"<sealed>"}
+{"marker":"provision-audit","surface":"operate","session_id":"d76203cb-f5fc-4171-92bd-5436c025cca5","event":"captcha_autosolve","variant":"<sealed>","outcome":"<sealed>","challenge_rendered":false}
+stderr | src/bot/__tests__/screenshot-click.test.ts > native screenshot/click tool contract on an isolated session > reports success accurately and does not replay the screenshot
+[captcha-autosolve-diag] session=d76203cb-f5fc-4171-92bd-5436c025cca5 variant=unknown outcome=detect challenge_rendered=false anchor_type=none anchor_size=none api_render=none challenge_frame=hidden sitekey=none
+
+{"marker":"provision-audit","surface":"operate","session_id":"d76203cb-f5fc-4171-92bd-5436c025cca5","event":"act","operation_id":"2b593987-b274-4446-9dd7-d4304fcef350","kind":"<sealed>"}
+{"marker":"provision-audit","surface":"operate","session_id":"d76203cb-f5fc-4171-92bd-5436c025cca5","event":"captcha_autosolve","outcome":"<sealed>","card_released":false}
+{"marker":"provision-audit","surface":"operate","session_id":"d76203cb-f5fc-4171-92bd-5436c025cca5","event":"captcha_autosolve","outcome":"<sealed>"}
+{"marker":"provision-audit","surface":"operate","session_id":"d76203cb-f5fc-4171-92bd-5436c025cca5","event":"captcha_autosolve","variant":"<sealed>","outcome":"<sealed>","challenge_rendered":false}
+stderr | src/bot/__tests__/screenshot-click.test.ts > native screenshot/click tool contract on an isolated session > reports success accurately and does not replay the screenshot
+[captcha-autosolve-diag] session=d76203cb-f5fc-4171-92bd-5436c025cca5 variant=unknown outcome=detect challenge_rendered=false anchor_type=none anchor_size=none api_render=none challenge_frame=hidden sitekey=none
+
+{"marker":"provision-audit","surface":"operate","session_id":"d76203cb-f5fc-4171-92bd-5436c025cca5","event":"act_timing","operation_id":"2b593987-b274-4446-9dd7-d4304fcef350","received_at_ms":1793374970052,"action_start_ms":0,"action_end_ms":2336,"reply_at_ms":2964,"action_ms":2336,"preparation_ms":0,"target_resolution_ms":0,"browser_action_ms":319,"settle_ms":2017,"captcha_probe_ms":3,"observation_ms":626,"reply_ms":0,"total_ms":2964}
+{"marker":"provision-audit","surface":"operate","session_id":"d76203cb-f5fc-4171-92bd-5436c025cca5","event":"act","operation_id":"41732ef8-1e7c-4baa-ad32-c32e180eccc2","kind":"<sealed>"}
+{"marker":"provision-audit","surface":"operate","session_id":"d76203cb-f5fc-4171-92bd-5436c025cca5","event":"act_timing","operation_id":"41732ef8-1e7c-4baa-ad32-c32e180eccc2","received_at_ms":1793374973016,"action_start_ms":0,"action_end_ms":302,"reply_at_ms":302,"action_ms":302,"preparation_ms":0,"target_resolution_ms":0,"browser_action_ms":302,"settle_ms":0,"captcha_probe_ms":0,"observation_ms":0,"reply_ms":0,"total_ms":302}
+{"marker":"provision-audit","surface":"operate","session_id":"d76203cb-f5fc-4171-92bd-5436c025cca5","event":"finish","url":"http://parent.test"}
+{"marker":"provision-audit","surface":"operate","session_id":"b976f1b1-3e4b-4632-a7af-9f38e5f44ab7","event":"start_harness","service_url":"http://parent.test","allowed_hosts":["parent.test"]}
+{"marker":"provision-audit","surface":"operate","session_id":"b976f1b1-3e4b-4632-a7af-9f38e5f44ab7","event":"captcha_autosolve","outcome":"<sealed>","card_released":false}
+{"marker":"provision-audit","surface":"operate","session_id":"b976f1b1-3e4b-4632-a7af-9f38e5f44ab7","event":"captcha_autosolve","outcome":"<sealed>"}
+{"marker":"provision-audit","surface":"operate","session_id":"b976f1b1-3e4b-4632-a7af-9f38e5f44ab7","event":"captcha_autosolve","variant":"<sealed>","outcome":"<sealed>","challenge_rendered":false}
+stderr | src/bot/__tests__/screenshot-click.test.ts > native screenshot/click tool contract on an isolated session > reports transport accurately and does not replay the screenshot
+[captcha-autosolve-diag] session=b976f1b1-3e4b-4632-a7af-9f38e5f44ab7 variant=unknown outcome=detect challenge_rendered=false anchor_type=none anchor_size=none api_render=none challenge_frame=hidden sitekey=none
+
+{"marker":"provision-audit","surface":"operate","session_id":"b976f1b1-3e4b-4632-a7af-9f38e5f44ab7","event":"act","operation_id":"d6b0589a-c549-42b7-a88c-8622ece126a0","kind":"<sealed>"}
+{"marker":"provision-audit","surface":"operate","session_id":"b976f1b1-3e4b-4632-a7af-9f38e5f44ab7","event":"act_timing","operation_id":"d6b0589a-c549-42b7-a88c-8622ece126a0","received_at_ms":1793374974759,"action_start_ms":0,"action_end_ms":330,"reply_at_ms":330,"action_ms":330,"preparation_ms":0,"target_resolution_ms":0,"browser_action_ms":330,"settle_ms":0,"captcha_probe_ms":0,"observation_ms":0,"reply_ms":0,"total_ms":330}
+{"marker":"provision-audit","surface":"operate","session_id":"b976f1b1-3e4b-4632-a7af-9f38e5f44ab7","event":"act","operation_id":"bb38340b-da5c-459b-bd9d-67cab7a9c4b5","kind":"<sealed>"}
+{"marker":"provision-audit","surface":"operate","session_id":"b976f1b1-3e4b-4632-a7af-9f38e5f44ab7","event":"act_timing","operation_id":"bb38340b-da5c-459b-bd9d-67cab7a9c4b5","received_at_ms":1793374975089,"action_start_ms":0,"action_end_ms":301,"reply_at_ms":301,"action_ms":301,"preparation_ms":0,"target_resolution_ms":0,"browser_action_ms":301,"settle_ms":0,"captcha_probe_ms":0,"observation_ms":0,"reply_ms":0,"total_ms":301}
+{"marker":"provision-audit","surface":"operate","session_id":"b976f1b1-3e4b-4632-a7af-9f38e5f44ab7","event":"finish","url":"http://parent.test"}
+{"marker":"provision-audit","surface":"operate","session_id":"bdaaee88-465c-488a-9999-5faa005f6d5c","event":"start_harness","service_url":"http://parent.test","allowed_hosts":["parent.test"]}
+{"marker":"provision-audit","surface":"operate","session_id":"bdaaee88-465c-488a-9999-5faa005f6d5c","event":"captcha_autosolve","outcome":"<sealed>","card_released":false}
+{"marker":"provision-audit","surface":"operate","session_id":"bdaaee88-465c-488a-9999-5faa005f6d5c","event":"captcha_autosolve","outcome":"<sealed>"}
+{"marker":"provision-audit","surface":"operate","session_id":"bdaaee88-465c-488a-9999-5faa005f6d5c","event":"captcha_autosolve","variant":"<sealed>","outcome":"<sealed>","challenge_rendered":false}
+stderr | src/bot/__tests__/screenshot-click.test.ts > native screenshot/click tool contract on an isolated session > reports observation accurately and does not replay the screenshot
+[captcha-autosolve-diag] session=bdaaee88-465c-488a-9999-5faa005f6d5c variant=unknown outcome=detect challenge_rendered=false anchor_type=none anchor_size=none api_render=none challenge_frame=hidden sitekey=none
+
+{"marker":"provision-audit","surface":"operate","session_id":"bdaaee88-465c-488a-9999-5faa005f6d5c","event":"act","operation_id":"e0535c16-6214-47b8-9292-74b30edc58d2","kind":"<sealed>"}
+{"marker":"provision-audit","surface":"operate","session_id":"bdaaee88-465c-488a-9999-5faa005f6d5c","event":"captcha_autosolve","outcome":"<sealed>","card_released":false}
+{"marker":"provision-audit","surface":"operate","session_id":"bdaaee88-465c-488a-9999-5faa005f6d5c","event":"captcha_autosolve","outcome":"<sealed>"}
+{"marker":"provision-audit","surface":"operate","session_id":"bdaaee88-465c-488a-9999-5faa005f6d5c","event":"captcha_autosolve","variant":"<sealed>","outcome":"<sealed>","challenge_rendered":false}
+{"marker":"provision-audit","surface":"operate","session_id":"bdaaee88-465c-488a-9999-5faa005f6d5c","event":"act_timing","operation_id":"e0535c16-6214-47b8-9292-74b30edc58d2","received_at_ms":1793374976719,"action_start_ms":0,"action_end_ms":2347,"reply_at_ms":2864,"action_ms":2347,"preparation_ms":0,"target_resolution_ms":0,"browser_action_ms":337,"settle_ms":2010,"captcha_probe_ms":2,"observation_ms":515,"reply_ms":0,"total_ms":2864}
+{"marker":"provision-audit","surface":"operate","session_id":"bdaaee88-465c-488a-9999-5faa005f6d5c","event":"act","operation_id":"999567b0-0b83-4079-9bb3-cfcf91787c3a","kind":"<sealed>"}
+stderr | src/bot/__tests__/screenshot-click.test.ts > native screenshot/click tool contract on an isolated session > reports observation accurately and does not replay the screenshot
+[captcha-autosolve-diag] session=bdaaee88-465c-488a-9999-5faa005f6d5c variant=unknown outcome=detect challenge_rendered=false anchor_type=none anchor_size=none api_render=none challenge_frame=hidden sitekey=none
+
+{"marker":"provision-audit","surface":"operate","session_id":"bdaaee88-465c-488a-9999-5faa005f6d5c","event":"act_timing","operation_id":"999567b0-0b83-4079-9bb3-cfcf91787c3a","received_at_ms":1793374979583,"action_start_ms":0,"action_end_ms":301,"reply_at_ms":301,"action_ms":301,"preparation_ms":0,"target_resolution_ms":0,"browser_action_ms":301,"settle_ms":0,"captcha_probe_ms":0,"observation_ms":0,"reply_ms":0,"total_ms":301}
+{"marker":"provision-audit","surface":"operate","session_id":"bdaaee88-465c-488a-9999-5faa005f6d5c","event":"finish","url":"http://parent.test"}
+{"marker":"provision-audit","surface":"operate","session_id":"2d428312-3a6e-4856-bd99-bc7f0f64c449","event":"start_harness","service_url":"http://parent.test","allowed_hosts":["parent.test"]}
+{"marker":"provision-audit","surface":"operate","session_id":"2d428312-3a6e-4856-bd99-bc7f0f64c449","event":"captcha_autosolve","outcome":"<sealed>","card_released":false}
+{"marker":"provision-audit","surface":"operate","session_id":"2d428312-3a6e-4856-bd99-bc7f0f64c449","event":"captcha_autosolve","outcome":"<sealed>"}
+{"marker":"provision-audit","surface":"operate","session_id":"2d428312-3a6e-4856-bd99-bc7f0f64c449","event":"captcha_autosolve","variant":"<sealed>","outcome":"<sealed>","challenge_rendered":false}
+stderr | src/bot/__tests__/screenshot-click.test.ts > native screenshot/click tool contract on an isolated session > navigates to an undeclared host through a screenshot-bound coordinate click
+[captcha-autosolve-diag] session=2d428312-3a6e-4856-bd99-bc7f0f64c449 variant=unknown outcome=detect challenge_rendered=false anchor_type=none anchor_size=none api_render=none challenge_frame=hidden sitekey=none
+
+{"marker":"provision-audit","surface":"operate","session_id":"2d428312-3a6e-4856-bd99-bc7f0f64c449","event":"act","operation_id":"8fb26c4a-52c9-4788-b465-fc037a50e6a3","kind":"<sealed>"}
+{"marker":"provision-audit","surface":"operate","session_id":"2d428312-3a6e-4856-bd99-bc7f0f64c449","event":"captcha_autosolve","outcome":"<sealed>","card_released":false}
+{"marker":"provision-audit","surface":"operate","session_id":"2d428312-3a6e-4856-bd99-bc7f0f64c449","event":"captcha_autosolve","outcome":"<sealed>"}
+{"marker":"provision-audit","surface":"operate","session_id":"2d428312-3a6e-4856-bd99-bc7f0f64c449","event":"captcha_autosolve","variant":"<sealed>","outcome":"<sealed>","challenge_rendered":false}
+stderr | src/bot/__tests__/screenshot-click.test.ts > native screenshot/click tool contract on an isolated session > navigates to an undeclared host through a screenshot-bound coordinate click
+[captcha-autosolve-diag] session=2d428312-3a6e-4856-bd99-bc7f0f64c449 variant=unknown outcome=detect challenge_rendered=false anchor_type=none anchor_size=none api_render=none challenge_frame=hidden sitekey=none
+
+{"marker":"provision-audit","surface":"operate","session_id":"2d428312-3a6e-4856-bd99-bc7f0f64c449","event":"act_timing","operation_id":"8fb26c4a-52c9-4788-b465-fc037a50e6a3","received_at_ms":1793374981283,"action_start_ms":0,"action_end_ms":2383,"reply_at_ms":3033,"action_ms":2383,"preparation_ms":0,"target_resolution_ms":0,"browser_action_ms":342,"settle_ms":2041,"captcha_probe_ms":3,"observation_ms":647,"reply_ms":0,"total_ms":3033}
+{"marker":"provision-audit","surface":"operate","session_id":"2d428312-3a6e-4856-bd99-bc7f0f64c449","event":"act","operation_id":"024e8b5b-13d6-456a-a7cc-fda34e74c4d6","kind":"<sealed>"}
+{"marker":"provision-audit","surface":"operate","session_id":"2d428312-3a6e-4856-bd99-bc7f0f64c449","event":"act_timing","operation_id":"024e8b5b-13d6-456a-a7cc-fda34e74c4d6","received_at_ms":1793374984335,"action_start_ms":0,"action_end_ms":303,"reply_at_ms":304,"action_ms":303,"preparation_ms":0,"target_resolution_ms":0,"browser_action_ms":303,"settle_ms":0,"captcha_probe_ms":0,"observation_ms":0,"reply_ms":0,"total_ms":304}
+{"marker":"provision-audit","surface":"operate","session_id":"2d428312-3a6e-4856-bd99-bc7f0f64c449","event":"finish","url":"http://undeclared.test"}
+{"marker":"provision-audit","surface":"operate","session_id":"ea85332e-eac4-468b-ac82-f9c154b28bda","event":"start_harness","service_url":"http://parent.test","allowed_hosts":["parent.test"]}
+{"marker":"provision-audit","surface":"operate","session_id":"ea85332e-eac4-468b-ac82-f9c154b28bda","event":"captcha_autosolve","outcome":"<sealed>","card_released":false}
+{"marker":"provision-audit","surface":"operate","session_id":"ea85332e-eac4-468b-ac82-f9c154b28bda","event":"captcha_autosolve","outcome":"<sealed>"}
+{"marker":"provision-audit","surface":"operate","session_id":"ea85332e-eac4-468b-ac82-f9c154b28bda","event":"captcha_autosolve","variant":"<sealed>","outcome":"<sealed>","challenge_rendered":false}
+stderr | src/bot/__tests__/screenshot-click.test.ts > native screenshot/click tool contract on an isolated session > distinguishes an unresolved screenshot-derived label from an expired physical ref
+[captcha-autosolve-diag] session=ea85332e-eac4-468b-ac82-f9c154b28bda variant=unknown outcome=detect challenge_rendered=false anchor_type=none anchor_size=none api_render=none challenge_frame=hidden sitekey=none
+
+{"marker":"provision-audit","surface":"operate","session_id":"ea85332e-eac4-468b-ac82-f9c154b28bda","event":"act","kind":"<sealed>","target":"<sealed>"}
+{"marker":"provision-audit","surface":"operate","session_id":"ea85332e-eac4-468b-ac82-f9c154b28bda","event":"act_timing","operation_id":"9448458f-e1c7-4731-a46c-7f04f0769533","received_at_ms":1793374986035,"action_start_ms":2,"action_end_ms":2,"reply_at_ms":2,"action_ms":0,"preparation_ms":2,"target_resolution_ms":0,"browser_action_ms":0,"settle_ms":0,"captcha_probe_ms":0,"observation_ms":0,"reply_ms":0,"total_ms":2}
+{"marker":"provision-audit","surface":"operate","session_id":"ea85332e-eac4-468b-ac82-f9c154b28bda","event":"act","kind":"<sealed>","target":"<sealed>"}
+{"marker":"provision-audit","surface":"operate","session_id":"ea85332e-eac4-468b-ac82-f9c154b28bda","event":"act_timing","operation_id":"44f9651f-d919-4b72-a338-4c6564db4a36","received_at_ms":1793374986038,"action_start_ms":0,"action_end_ms":0,"reply_at_ms":0,"action_ms":0,"preparation_ms":0,"target_resolution_ms":0,"browser_action_ms":0,"settle_ms":0,"captcha_probe_ms":0,"observation_ms":0,"reply_ms":0,"total_ms":0}
+{"marker":"provision-audit","surface":"operate","session_id":"ea85332e-eac4-468b-ac82-f9c154b28bda","event":"finish","url":"http://parent.test"}
+ ❯ src/bot/__tests__/screenshot-click.test.ts (46 tests | 9 failed) 44830ms
+   × screenshot-bound native pointer dispatch > awaits chooser readiness and rechecks stale before dispatch 360ms
+     → expected 'dispatched' to match object { code: 'stale_screenshot', …(1) }
+   ✓ screenshot-bound native pointer dispatch > awaits chooser readiness and rechecks expired before dispatch 336ms
+   × screenshot-bound native pointer dispatch > rechecks stale authority after chooser preparation 218ms
+     → promise resolved "'dispatched'" instead of rejecting
+   × screenshot-bound native pointer dispatch > clicks a closed-shadow cross-origin framed checkbox at DPR 1 224ms
+     → expected "spy" to be called with arguments: [ ObjectContaining{…} ]
+
+Received: 
+
+  1st spy call:
+
+  Array [
+-   ObjectContaining {
+-     "frameOrigin": "http://child.test",
+-     "mainFrame": false,
++   Object {
++     "frameOrigin": "http://parent.test",
++     "frameUrl": "http://parent.test/",
++     "labels": Array [
++       "",
++       "",
++     ],
++     "mainFrame": true,
++     "nodeKey": "A7E668963BEE7471E1203645D7218D25:9",
+    },
+  ]
+
+
+Number of calls: 1
+
+   × screenshot-bound native pointer dispatch > clicks a closed-shadow cross-origin framed checkbox at DPR 2 289ms
+     → expected "spy" to be called with arguments: [ ObjectContaining{…} ]
+
+Received: 
+
+  1st spy call:
+
+  Array [
+-   ObjectContaining {
+-     "frameOrigin": "http://child.test",
+-     "mainFrame": false,
++   Object {
++     "frameOrigin": "http://parent.test",
++     "frameUrl": "http://parent.test/",
++     "labels": Array [
++       "",
++       "",
++     ],
++     "mainFrame": true,
++     "nodeKey": "EF52189EF0AC2BF7EBFB1FD6D5EB943A:9",
+    },
+  ]
+
+
+Number of calls: 1
+
+   ✓ screenshot-bound native pointer dispatch > dispatches through an iframe owned by a closed shadow root 301ms
+   ✓ screenshot-bound native pointer dispatch > dispatches into a frame with its own CDP renderer session 723ms
+   × screenshot-bound native pointer dispatch > transforms frame-cropped pixels after page scroll 220ms
+     → expected [] to deeply equal [ { trusted: true, checked: true } ]
+   × screenshot-bound native pointer dispatch > transforms full-page pixels to the current viewport 235ms
+     → expected [] to deeply equal [ { trusted: true, checked: true } ]
+   × screenshot-bound native pointer dispatch > rejects frame-navigation changes without input dispatch 208ms
+     → promise resolved "'dispatched'" instead of rejecting
+   × screenshot-bound native pointer dispatch > rejects actual target move despite stable frame geometry 185ms
+     → promise resolved "'dispatched'" instead of rejecting
+   × screenshot-bound native pointer dispatch > rejects actual target replace despite stable frame geometry 213ms
+     → promise resolved "'dispatched'" instead of rejecting
+   ✓ screenshot-bound native pointer dispatch > rejects competing clicks, superseded images and out-of-image points 315ms
+   ✓ native screenshot/click tool contract on an isolated session > preserves DOM visibility, literal roles and blocker evidence after an uncertain screenshot click 2919ms
+   ✓ native screenshot/click tool contract on an isolated session > dispatches into a sandboxed cross-origin frame (inherited=false) 4463ms
+   ✓ native screenshot/click tool contract on an isolated session > dispatches into a sandboxed cross-origin frame (inherited=true) 4427ms
+   ✓ native screenshot/click tool contract on an isolated session > handles a closed-shadow popup link with success dispatch 4533ms
+   ✓ native screenshot/click tool contract on an isolated session > handles a closed-shadow popup link with uncertain dispatch 2466ms
+   ✓ native screenshot/click tool contract on an isolated session > reports success accurately and does not replay the screenshot 4614ms
+   ✓ native screenshot/click tool contract on an isolated session > reports transport accurately and does not replay the screenshot 2070ms
+   ✓ native screenshot/click tool contract on an isolated session > reports observation accurately and does not replay the screenshot 4491ms
+   ✓ native screenshot/click tool contract on an isolated session > navigates to an undeclared host through a screenshot-bound coordinate click 4752ms
+   ✓ native screenshot/click tool contract on an isolated session > distinguishes an unresolved screenshot-derived label from an expired physical ref 1399ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 9 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/bot/__tests__/screenshot-click.test.ts > screenshot-bound native pointer dispatch > awaits chooser readiness and rechecks stale before dispatch
+AssertionError: expected 'dispatched' to match object { code: 'stale_screenshot', …(1) }
+
+- Expected: 
+Object {
+  "code": "stale_screenshot",
+  "dispatch": "not_dispatched",
+}
+
++ Received: 
+"dispatched"
+
+ ❯ src/bot/__tests__/screenshot-click.test.ts:127:28
+    125|         const error = await observed;
+    126|         if (mode === "cancelled") expect(error).toBe(reason);
+    127|         else expect(error).toMatchObject({ code: "stale_screenshot", d…
+       |                            ^
+    128|         expect(authorize).not.toHaveBeenCalled();
+    129|         expect(mouse).not.toHaveBeenCalled();
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/9]⎯
+
+ FAIL  src/bot/__tests__/screenshot-click.test.ts > screenshot-bound native pointer dispatch > rechecks stale authority after chooser preparation
+AssertionError: promise resolved "'dispatched'" instead of rejecting
+
+- Expected: 
+[Error: rejected promise]
+
++ Received: 
+"dispatched"
+
+ ❯ src/bot/__tests__/screenshot-click.test.ts:160:30
+    158|         if (mode === "cancelled") await expect(result).rejects.toBe(re…
+    159|         else
+    160|           await expect(result).rejects.toMatchObject({
+       |                              ^
+    161|             code: "stale_screenshot",
+    162|             dispatch: "not_dispatched",
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/9]⎯
+
+ FAIL  src/bot/__tests__/screenshot-click.test.ts > screenshot-bound native pointer dispatch > clicks a closed-shadow cross-origin framed checkbox at DPR 1
+AssertionError: expected "spy" to be called with arguments: [ ObjectContaining{…} ]
+
+Received: 
+
+  1st spy call:
+
+  Array [
+-   ObjectContaining {
+-     "frameOrigin": "http://child.test",
+-     "mainFrame": false,
++   Object {
++     "frameOrigin": "http://parent.test",
++     "frameUrl": "http://parent.test/",
++     "labels": Array [
++       "",
++       "",
++     ],
++     "mainFrame": true,
++     "nodeKey": "A7E668963BEE7471E1203645D7218D25:9",
+    },
+  ]
+
+
+Number of calls: 1
+
+ ❯ src/bot/__tests__/screenshot-click.test.ts:405:27
+    403|           );
+    404|         }
+    405|         expect(authorize).toHaveBeenCalledWith(
+       |                           ^
+    406|           expect.objectContaining({ frameOrigin: "http://child.test", …
+    407|         );
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/9]⎯
+
+ FAIL  src/bot/__tests__/screenshot-click.test.ts > screenshot-bound native pointer dispatch > clicks a closed-shadow cross-origin framed checkbox at DPR 2
+AssertionError: expected "spy" to be called with arguments: [ ObjectContaining{…} ]
+
+Received: 
+
+  1st spy call:
+
+  Array [
+-   ObjectContaining {
+-     "frameOrigin": "http://child.test",
+-     "mainFrame": false,
++   Object {
++     "frameOrigin": "http://parent.test",
++     "frameUrl": "http://parent.test/",
++     "labels": Array [
++       "",
++       "",
++     ],
++     "mainFrame": true,
++     "nodeKey": "EF52189EF0AC2BF7EBFB1FD6D5EB943A:9",
+    },
+  ]
+
+
+Number of calls: 1
+
+ ❯ src/bot/__tests__/screenshot-click.test.ts:405:27
+    403|           );
+    404|         }
+    405|         expect(authorize).toHaveBeenCalledWith(
+       |                           ^
+    406|           expect.objectContaining({ frameOrigin: "http://child.test", …
+    407|         );
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[4/9]⎯
+
+ FAIL  src/bot/__tests__/screenshot-click.test.ts > screenshot-bound native pointer dispatch > transforms frame-cropped pixels after page scroll
+AssertionError: expected [] to deeply equal [ { trusted: true, checked: true } ]
+
+- Expected
++ Received
+
+- Array [
+-   Object {
+-     "checked": true,
+-     "trusted": true,
+-   },
+- ]
++ Array []
+
+ ❯ src/bot/__tests__/screenshot-click.test.ts:476:55
+    474|         () => {},
+    475|       );
+    476|       expect(await f.frame.evaluate("window.events")).toEqual([{ trust…
+       |                                                       ^
+    477|     } finally {
+    478|       await f.close();
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[5/9]⎯
+
+ FAIL  src/bot/__tests__/screenshot-click.test.ts > screenshot-bound native pointer dispatch > transforms full-page pixels to the current viewport
+AssertionError: expected [] to deeply equal [ { trusted: true, checked: true } ]
+
+- Expected
++ Received
+
+- Array [
+-   Object {
+-     "checked": true,
+-     "trusted": true,
+-   },
+- ]
++ Array []
+
+ ❯ src/bot/__tests__/screenshot-click.test.ts:490:55
+    488|       const shot = await f.controller.captureOperatorScreenshot({ full…
+    489|       await clickScreenshot(f.page, point(shot, 174, 244), () => {});
+    490|       expect(await f.frame.evaluate("window.events")).toEqual([{ trust…
+       |                                                       ^
+    491|     } finally {
+    492|       await f.close();
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[6/9]⎯
+
+ FAIL  src/bot/__tests__/screenshot-click.test.ts > screenshot-bound native pointer dispatch > rejects frame-navigation changes without input dispatch
+AssertionError: promise resolved "'dispatched'" instead of rejecting
+
+- Expected: 
+[Error: rejected promise]
+
++ Received: 
+"dispatched"
+
+ ❯ src/bot/__tests__/screenshot-click.test.ts:512:9
+    510|         await expect(
+    511|           clickScreenshot(f.page, point(shot, 174, 244), () => {}),
+    512|         ).rejects.toMatchObject({ code: "stale_screenshot", dispatch: …
+       |         ^
+    513|         expect(mouse).not.toHaveBeenCalled();
+    514|       } finally {
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[7/9]⎯
+
+ FAIL  src/bot/__tests__/screenshot-click.test.ts > screenshot-bound native pointer dispatch > rejects actual target move despite stable frame geometry
+ FAIL  src/bot/__tests__/screenshot-click.test.ts > screenshot-bound native pointer dispatch > rejects actual target replace despite stable frame geometry
+AssertionError: promise resolved "'dispatched'" instead of rejecting
+
+- Expected: 
+[Error: rejected promise]
+
++ Received: 
+"dispatched"
+
+ ❯ src/bot/__tests__/screenshot-click.test.ts:579:9
+    577|         await expect(
+    578|           clickScreenshot(f.page, point(shot, 174, 244), () => {}),
+    579|         ).rejects.toMatchObject({ code: "stale_screenshot" });
+       |         ^
+    580|         expect(mouse).not.toHaveBeenCalled();
+    581|       } finally {
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[8/9]⎯
+
+ Test Files  1 failed (1)
+      Tests  9 failed | 37 passed (46)
+   Start at  11:42:19
+   Duration  46.43s (transform 856ms, setup 29ms, collect 1.37s, tests 44.83s, environment 0ms, prepare 63ms)
+
+undefined
+/home/lunchbox/.local/state/beeline/corners/53aaf04a-05ff-47f1-bf99-8c0a5da47b1f/apps/mcp:
+ ERR_PNPM_RECURSIVE_EXEC_FIRST_FAIL  Command failed with exit code 1: vitest run src/bot/__tests__/screenshot-click.test.ts

@@ -1,0 +1,17 @@
+PAGE https://kling.ai/app Create Videos, Images and More in One Workspace
+node:internal/modules/run_main:107
+    triggerUncaughtException(
+    ^
+
+locator.click: Timeout 30000ms exceeded.
+Call log:
+[2m  - waiting for getByText('Sign In', { exact: true }).first()[22m
+
+    at <anonymous> (/home/lunchbox/.local/state/beeline/corners/53aaf04a-05ff-47f1-bf99-8c0a5da47b1f/apps/mcp/kling-diagnostic.ts:10:55) {
+  name: 'TimeoutError'
+}
+
+Node.js v24.16.0
+undefined
+/home/lunchbox/.local/state/beeline/corners/53aaf04a-05ff-47f1-bf99-8c0a5da47b1f/apps/mcp:
+ ERR_PNPM_RECURSIVE_EXEC_FIRST_FAIL  Command failed with exit code 1: tsx kling-diagnostic.ts
