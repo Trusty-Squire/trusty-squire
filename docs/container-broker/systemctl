@@ -1,0 +1,11 @@
+#!/bin/sh
+# Not systemd. A container without a user manager has no systemctl.
+# This recorder exists so a test can show the client called it and kept going.
+log=/var/log/systemctl-calls.log
+printf '%s systemctl' "$(date -Is)" >> "$log"
+for arg in "$@"; do
+  printf ' %s' "$arg" >> "$log"
+done
+printf '\n' >> "$log"
+echo "System has not been booted with systemd as init system (PID 1)." >&2
+exit 1
