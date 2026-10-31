@@ -158,6 +158,39 @@ stopped service produces no client-spawned broker.
 It fails when the native manager is unavailable; it does not substitute mocks or
 skip that acceptance.
 
+### Running in a container
+
+A container with no systemd user manager runs the broker itself. The container
+command is the unit ExecStart, and the runtime's restart policy is the supervisor:
+
+```
+node <package>/dist/bin.js broker
+```
+
+Set the environment the unit would set: `HOME`, `PATH`, `TRUSTY_SQUIRE_PROFILE_DIR`,
+and `TRUSTY_SQUIRE_BROKER_UNIT=1`. The account session has to already be on disk.
+`connect` is what creates that session, and it still requires a working systemd
+user manager or launchd GUI domain. It fails closed when `systemctl` or `launchctl`
+cannot register the unit, and it does not launch a broker as a fallback. Run
+`connect` where that manager exists, then start the broker from the container.
+
+`node <package>/dist/bin.js server` attaches to the broker that is already
+listening. Discovery may call `systemctl --user show`. A missing or failing
+`systemctl` is an unknown unit, not a client failure: the client uses the derived
+socket and does not start a broker.
+
+Restart with the container runtime, for example `docker run --restart=on-failure`.
+The policy runs when the container's main process exits non-zero on its own.
+`docker kill` is a manual stop and does not restart it. Chrome is detached from
+the broker. Killing only the node process and leaving Chrome in the same
+container makes the next start refuse the profile (`Profile lock does not
+identify Chrome for this profile`): there is no systemd scope to reap Chrome,
+and a PID-namespace init cannot be signalled with SIGKILL from inside the
+container. Stopping the whole container reaps Chrome, the next start sees a
+stale lock, and one broker listens. A main process that waits on the broker and
+exits with the broker's status turns an internal SIGKILL of that child into the
+container exit the restart policy needs.
+
 ### Service endpoint markers
 
 The installer writes a mode-0600 version-1 marker beside the canonical profile,
