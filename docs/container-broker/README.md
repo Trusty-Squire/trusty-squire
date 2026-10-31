@@ -1,8 +1,15 @@
 # Running the broker in a container
 
-The image has no systemd. Its default entrypoint is `entrypoint.sh`. That
-process runs `node .../dist/bin.js broker` and exits with the broker's status.
-It does not restart the broker. `docker run --restart=on-failure` does.
+1. Skip Squire's service install in the container. `connect` registers a
+   systemd user unit or a launchd agent, and this image has no service
+   manager. Run `connect` on a machine with systemd or launchd when you
+   need a real account. The client attaches to a broker that is already
+   listening.
+2. Keep the broker, or the one-shot entrypoint, as the container's main
+   process. The default entrypoint is `entrypoint.sh`. That process runs
+   `node .../dist/bin.js broker` and exits with the broker's status. It
+   does not restart the broker. A broker crash exits the container, and
+   `docker run --restart=on-failure` starts the whole container again.
 
 `docker kill` is a manual stop. The restart policy does not run. Kill the
 broker from inside the container. The entrypoint then exits 137 and Docker
@@ -16,7 +23,8 @@ to open a page. The fixture account is `container-broker-test` and its API
 base is `http://127.0.0.1:9`. It is not a real Squire account. A real account
 still comes from `connect` on a machine with systemd or launchd.
 
-Build from this directory:
+Build from the repository root. The `-f` path and the build context are
+both relative to that root:
 
 ```
 docker build -t ts-container-broker:test -f docs/container-broker/Dockerfile docs/container-broker
