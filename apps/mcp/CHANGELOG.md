@@ -1,5 +1,10 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.39-rc.1 (2026-10-30)
+
+- Expose Google iframe controls and verify cross-site popup adoption (#1120)
+- Fix OAuth click timeout reported as stale ref (#1119)
+
 ## 1.1.37-rc.2 (2026-10-25)
 
 - Fix approval account recovery and pin the passkey relying party ([PR](https://github.com/Trusty-Squire/trusty-squire/pull/1106)).
