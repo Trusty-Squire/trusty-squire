@@ -191,6 +191,15 @@ stale lock, and one broker listens. A main process that waits on the broker and
 exits with the broker's status turns an internal SIGKILL of that child into the
 container exit the restart policy needs.
 
+[`docs/container-broker/`](container-broker/README.md) is that run. The image
+entrypoint runs `node <package>/dist/bin.js broker` and exits with its status.
+It does not restart the broker. Build and start it with the commands in that
+directory, then kill the broker pid from inside the container. `docker kill`
+does not trip the policy. The entrypoint also writes a local fixture session
+so `operate_start` can open a public page. That fixture is not a real account,
+and its API base is loopback. A real account still comes from `connect` on a
+machine with systemd or launchd.
+
 ### Service endpoint markers
 
 The installer writes a mode-0600 version-1 marker beside the canonical profile,

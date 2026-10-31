@@ -1,0 +1,88 @@
+=== image 2026-10-31T12:06:05-04:00 ===
+
+template parsing error: template: :1:57: executing "" at <.Config.Cmd>: map has no entry for key "Cmd"
+=== run ===
+Error response from daemon: No such container: ts-container-broker-runtime
+42f602d813f96333abec9ed96bf34746d3541a88ebeee81c31e433b66b8544c1
+=== wait until listening ===
+listening after 2s
+=== before client inspect ===
+status=running exit=0 restart=0
+=== before client broker rows ===
+     13       1 node /opt/squire/node_modules/@trusty-squire/mcp/dist/bin.js broker
+=== before client broker count ===
+1
+=== client before kill ===
+PACKAGE 1.1.39
+BROKER listening
+CLIENT initialize bytes=2228 error=null isError=false session_id= url=
+CLIENT initialize body_head={"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{},"logging":{}},"serverInfo":{"name":"trusty-squire","version":"1.1.39"},"instructions":"Trusty Squire drives signup, provisioning, and checkout in a real browser\n(`operate_start`/`operate_observe`/`operate_click`/`operate_type`/`operate_upload`/\n`inject_card`/`operate_finish`) with a write-only credential vault.\nSecrets live encrypted in the vault;\nthey are NOT in the conversation context. Reading one back is possible but\ncostly — see fetch_credential below.\nFor inject_card, amount_cents is in the currency's smallest unit: USD $12.34 -> 1234;\nJPY ¥65,800 -> 65800 (do not multiply by 100); KRW works like JPY.\nVault routing:\n\n- User pastes a secret-shaped value (sk-…, ghp_…, AKIA…, eyJ…) into chat\n  → call store_credential AUTOMATICALLY; don't ask permission.\n- User refers to a saved credential by name or service ('my OpenAI key',\n  'the Stripe token') → call list_credentials to resolve the reference.\n- User wants an authenticated API call → call use_credential with the\n  service/reference + the HTTP request, using ${SECRET} (single-field)\n  or ${SECRET.<field>} (multi-field) placeholders. The server injects\n  the secret and returns only the upstream response; you never see the\n  value. The target host must be on the credential's allowed_hosts.\n- User wants to change allowed_hosts/login_hosts/name without changing the\n  secret → call edit_credential. User wants a saved credential removed → c
+CLIENT operate_start bytes=1687 error=null isError=false session_id=e491ccc3-9cf9-44a7-9aaf-0c4d2305af3f url=https://example.com/
+CLIENT operate_start body_head={"result":{"content":[{"type":"text","text":"{\"format\":\"browser-use-control-query\",\"url\":\"https://example.com/\",\"session_id\":\"e491ccc3-9cf9-44a7-9aaf-0c4d2305af3f\",\"stage\":\"browse\",\"hint\":\"- login: use whichever method the page offers (Google / GitHub / Microsoft / email). The account may already exist — log IN, don't re-sign-up.\\n- goal: for a known multi-step goal, start with operate_drive(url, goal, facts); use operate_start when you want to inspect the first page. This session is already open: call operate_drive(session_id, goal, facts) here, then resume the \",\"hint_overflow\":{\"remaining\":1,\"next_cursor\":\"2:1:1:ZO0XmmsNJn.hu5c2m73Fah4\"},\"semantic\":{\"title\":\"Example Domain\"},\"safe_table\":[[\"@e:n2aNMKHwGsx6qTXJ_JRuw4\",\"l\",\"@learn-more\"]],\"broker\":{\"targetId\":\"44DD6DA7885EC024B980E070F39110DD\",\"pid\":13}}"}],"structuredContent":{"format":"browser-use-control-query","url":"https://example.com/","session_id":"e491ccc3-9cf9-44a7-9aaf-0c4d2305af3f","stage":"browse","hint":"- login: use whichever method the page offers (Google / GitHub / Microsoft / email). The account may already exist — log IN, don't re-sign-up.\n- goal: for a known multi-step goal, start with operate_drive(url, goal, facts); use operate_start when you want to inspect the first page. This session is already open: call operate_drive(session_id, goal, facts) here, then resume the ","hint_overflow":{"remaining":1,"next_cursor":"2:1:1:ZO0XmmsNJn.hu5c2m73Fah4"},"sema
+CLIENT operate_finish bytes=529 error=null isError=false session_id=e491ccc3-9cf9-44a7-9aaf-0c4d2305af3f url=https://example.com/
+CLIENT operate_finish body_head={"result":{"content":[{"type":"text","text":"{\n  \"session_id\": \"e491ccc3-9cf9-44a7-9aaf-0c4d2305af3f\",\n  \"operation_id\": \"3\",\n  \"execution\": \"completed\",\n  \"mutation\": \"not_dispatched\",\n  \"cleanup\": \"closed\",\n  \"closed\": true,\n  \"url\": \"https://example.com/\"\n}"}],"structuredContent":{"session_id":"e491ccc3-9cf9-44a7-9aaf-0c4d2305af3f","operation_id":"3","execution":"completed","mutation":"not_dispatched","cleanup":"closed","closed":true,"url":"https://example.com/"}},"jsonrpc":"2.0","id":3}
+--- systemctl calls ---
+2026-10-31T16:06:06+00:00 systemctl --user show --type=service --all --no-pager -p Id -p ActiveState -p Environment -p ExecStart
+2026-10-31T16:06:07+00:00 systemctl --user show --type=service --all --no-pager -p Id -p ActiveState -p Environment -p ExecStart
+
+RESULT pass
+client_before_exit=0
+=== before kill inspect ===
+status=running exit=0 restart=0
+=== before kill broker rows ===
+     13       1 node /opt/squire/node_modules/@trusty-squire/mcp/dist/bin.js broker
+=== before kill broker count ===
+1
+=== kill broker child ===
+killing 13
+kill_exit=0
+=== after kill samples ===
+sample 1 status=running exit=0 restart=0 broker_count=OCI runtime exec failed: exec failed: unable to start container process: error executing setns process: exit status 1 exec=128
+sample 2 status=running exit=0 restart=1 broker_count=1 exec=0
+sample 3 status=running exit=0 restart=1 broker_count=1 exec=0
+sample 4 status=running exit=0 restart=1 broker_count=1 exec=0
+sample 5 status=running exit=0 restart=1 broker_count=1 exec=0
+sample 6 status=running exit=0 restart=1 broker_count=1 exec=0
+sample 7 status=running exit=0 restart=1 broker_count=1 exec=0
+sample 8 status=running exit=0 restart=1 broker_count=1 exec=0
+sample 9 status=running exit=0 restart=1 broker_count=1 exec=0
+sample 10 status=running exit=0 restart=1 broker_count=1 exec=0
+=== wait for restarted broker ===
+poll 1 status=running restart=1
+broker listening again
+=== after restart inspect ===
+status=running exit=0 restart=1 error= started=2026-10-31T16:06:09.78735708Z
+=== docker logs ===
+broker_pid=13
+broker_exit=137
+Killed
+broker_pid=13
+=== after restart broker rows ===
+     13       1 node /opt/squire/node_modules/@trusty-squire/mcp/dist/bin.js broker
+=== after restart broker count ===
+1
+=== client after restart ===
+PACKAGE 1.1.39
+BROKER listening
+CLIENT initialize bytes=2228 error=null isError=false session_id= url=
+CLIENT initialize body_head={"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{},"logging":{}},"serverInfo":{"name":"trusty-squire","version":"1.1.39"},"instructions":"Trusty Squire drives signup, provisioning, and checkout in a real browser\n(`operate_start`/`operate_observe`/`operate_click`/`operate_type`/`operate_upload`/\n`inject_card`/`operate_finish`) with a write-only credential vault.\nSecrets live encrypted in the vault;\nthey are NOT in the conversation context. Reading one back is possible but\ncostly — see fetch_credential below.\nFor inject_card, amount_cents is in the currency's smallest unit: USD $12.34 -> 1234;\nJPY ¥65,800 -> 65800 (do not multiply by 100); KRW works like JPY.\nVault routing:\n\n- User pastes a secret-shaped value (sk-…, ghp_…, AKIA…, eyJ…) into chat\n  → call store_credential AUTOMATICALLY; don't ask permission.\n- User refers to a saved credential by name or service ('my OpenAI key',\n  'the Stripe token') → call list_credentials to resolve the reference.\n- User wants an authenticated API call → call use_credential with the\n  service/reference + the HTTP request, using ${SECRET} (single-field)\n  or ${SECRET.<field>} (multi-field) placeholders. The server injects\n  the secret and returns only the upstream response; you never see the\n  value. The target host must be on the credential's allowed_hosts.\n- User wants to change allowed_hosts/login_hosts/name without changing the\n  secret → call edit_credential. User wants a saved credential removed → c
+CLIENT operate_start bytes=1687 error=null isError=false session_id=b9774837-d7cd-410d-ae28-0f16cd596a0c url=https://example.com/
+CLIENT operate_start body_head={"result":{"content":[{"type":"text","text":"{\"format\":\"browser-use-control-query\",\"url\":\"https://example.com/\",\"session_id\":\"b9774837-d7cd-410d-ae28-0f16cd596a0c\",\"stage\":\"browse\",\"hint\":\"- login: use whichever method the page offers (Google / GitHub / Microsoft / email). The account may already exist — log IN, don't re-sign-up.\\n- goal: for a known multi-step goal, start with operate_drive(url, goal, facts); use operate_start when you want to inspect the first page. This session is already open: call operate_drive(session_id, goal, facts) here, then resume the \",\"hint_overflow\":{\"remaining\":1,\"next_cursor\":\"2:1:1:jgRfNOLEIj.q9ByfFTWWYWW\"},\"semantic\":{\"title\":\"Example Domain\"},\"safe_table\":[[\"@e:ON4euMzvLRRRDbP3Ov2vC6\",\"l\",\"@learn-more\"]],\"broker\":{\"targetId\":\"3DFA45AB12F5BCD6ABCD30E2823932B2\",\"pid\":13}}"}],"structuredContent":{"format":"browser-use-control-query","url":"https://example.com/","session_id":"b9774837-d7cd-410d-ae28-0f16cd596a0c","stage":"browse","hint":"- login: use whichever method the page offers (Google / GitHub / Microsoft / email). The account may already exist — log IN, don't re-sign-up.\n- goal: for a known multi-step goal, start with operate_drive(url, goal, facts); use operate_start when you want to inspect the first page. This session is already open: call operate_drive(session_id, goal, facts) here, then resume the ","hint_overflow":{"remaining":1,"next_cursor":"2:1:1:jgRfNOLEIj.q9ByfFTWWYWW"},"sema
+CLIENT operate_finish bytes=529 error=null isError=false session_id=b9774837-d7cd-410d-ae28-0f16cd596a0c url=https://example.com/
+CLIENT operate_finish body_head={"result":{"content":[{"type":"text","text":"{\n  \"session_id\": \"b9774837-d7cd-410d-ae28-0f16cd596a0c\",\n  \"operation_id\": \"3\",\n  \"execution\": \"completed\",\n  \"mutation\": \"not_dispatched\",\n  \"cleanup\": \"closed\",\n  \"closed\": true,\n  \"url\": \"https://example.com/\"\n}"}],"structuredContent":{"session_id":"b9774837-d7cd-410d-ae28-0f16cd596a0c","operation_id":"3","execution":"completed","mutation":"not_dispatched","cleanup":"closed","closed":true,"url":"https://example.com/"}},"jsonrpc":"2.0","id":3}
+--- systemctl calls ---
+2026-10-31T16:06:06+00:00 systemctl --user show --type=service --all --no-pager -p Id -p ActiveState -p Environment -p ExecStart
+2026-10-31T16:06:07+00:00 systemctl --user show --type=service --all --no-pager -p Id -p ActiveState -p Environment -p ExecStart
+2026-10-31T16:06:12+00:00 systemctl --user show --type=service --all --no-pager -p Id -p ActiveState -p Environment -p ExecStart
+
+RESULT pass
+client_after_exit=0
+=== final inspect ===
+status=running exit=0 restart=1
+=== final broker rows ===
+     13       1 node /opt/squire/node_modules/@trusty-squire/mcp/dist/bin.js broker
+=== final broker count ===
+1
+=== done 2026-10-31T12:06:14-04:00 ===
+=== entrypoint confirm ===
+ENTRYPOINT=["/opt/squire/entrypoint.sh"]
