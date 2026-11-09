@@ -145,14 +145,20 @@ describe("list_credentials", () => {
 });
 
 describe("list_payment_cards", () => {
-  it("returns only saved card IDs and labels", async () => {
-    const listPaymentCards = vi
-      .fn()
-      .mockResolvedValue([{ id: "card_1", label: "Personal", brand: "Mastercard DBS" }]);
+  it("distinguishes identically labelled saved cards by last4 without returning blobs", async () => {
+    const listPaymentCards = vi.fn().mockResolvedValue([
+      { id: "card_1", label: "Personal", last4: "6413", brand: "Mastercard DBS", blob: "sealed" },
+      { id: "card_2", label: "Personal", last4: "9192", brand: "Mastercard DBS", blob: "sealed" },
+      { id: "legacy", label: "Old card", last4: null },
+    ]);
     const api = makeMockApi({ listPaymentCards } as unknown as ApiClient);
 
     await expect(listPaymentCardsTool.handler({}, api)).resolves.toEqual({
-      cards: [{ id: "card_1", label: "Personal" }],
+      cards: [
+        { id: "card_1", label: "Personal", last4: "6413" },
+        { id: "card_2", label: "Personal", last4: "9192" },
+        { id: "legacy", label: "Old card", last4: null },
+      ],
     });
   });
 });
