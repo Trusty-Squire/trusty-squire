@@ -450,8 +450,10 @@ main?" guard. That guard was wrong in both files (it fails under a bin
 symlink) and caused three shipped bugs; the structural fix is that
 there is nothing to guard. The installer writes
 `npx -y @trusty-squire/mcp@latest server` entries and registers the broker as a
-systemd user service on Linux or a launchd user agent on macOS. Only the service
-manager starts production brokers; clients wait boundedly and never spawn them.
+systemd user service on Linux or a launchd user agent on macOS. Those managers
+start production brokers; clients wait boundedly and never spawn them. When no
+user service manager exists, a tool call or `connect` starts one on-demand
+broker and does not restart it until the next call.
 The service's broker entry is durable, including when connect runs from npx.
 `src/__tests__/bin-smoke.test.ts` spawns the built artifact through a
 bin symlink and would catch any regression of the above.

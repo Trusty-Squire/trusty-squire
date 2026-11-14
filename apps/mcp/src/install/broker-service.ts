@@ -24,6 +24,7 @@ import {
   readBrokerAccountBinding,
 } from "../bot/broker/account-binding.js";
 import {
+  brokerSocketPath,
   defaultBrokerSocket,
   liveUnixSocket,
   parseManagedBrokerShow,
@@ -31,6 +32,7 @@ import {
 } from "../bot/broker/discovery.js";
 import { readBrokerUnitMarkerSync, writeBrokerUnitMarker } from "../bot/broker/managed-marker.js";
 import { sharedMcpSocketPath } from "../bot/broker/mcp-socket-path.js";
+import { ensureOnDemandBroker, userServiceManagerAvailable } from "../bot/broker/on-demand.js";
 import { ensureBetterSqlite3NativeBinding } from "../bot/sqlite-native.js";
 
 /** A completed in-profile connect makes its claimed account the profile owner.
@@ -178,12 +180,25 @@ export function renderLaunchdBroker(config: BrokerServiceConfig): string {
     )}</dict>\n<key>RunAtLoad</key><true/>\n<key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>\n<key>ThrottleInterval</key><integer>5</integer>\n<key>ExitTimeOut</key><integer>30</integer>\n<key>StandardOutPath</key><string>${xml(join(home, ".trusty-squire", `${config.name}.log`))}</string>\n<key>StandardErrorPath</key><string>${xml(join(home, ".trusty-squire", `${config.name}.log`))}</string>\n</dict></plist>\n`;
 }
 
+async function waitForBrokerListeners(socket: string, profile: string, name: string): Promise<void> {
+  const home = homedir();
+  const deadline = Date.now() + 10_000;
+  let delay = 100;
+  do {
+    if ((await liveUnixSocket(socket)) && (await liveUnixSocket(sharedMcpSocketPath(home, profile))))
+      return;
+    await new Promise((resolve) =>
+      setTimeout(resolve, Math.min(delay, Math.max(0, deadline - Date.now()))),
+    );
+    delay = Math.min(delay * 2, 1_000);
+  } while (Date.now() < deadline);
+  throw new Error(
+    `Broker not running after user service startup (${name}); inspect the service manager logs. No client broker fallback was attempted`,
+  );
+}
+
 /** Register/start through the OS manager, then independently read both listeners. */
 export async function installBrokerService(profileDir: string): Promise<void> {
-  if (process.platform !== "linux" && process.platform !== "darwin")
-    throw new Error(
-      "Broker user services require Linux systemd or macOS launchd; no broker was started",
-    );
   const home = homedir();
   const profile = profilePathIdentity(profileDir);
   const anchor = profileDeviceAnchor(profile);
@@ -198,6 +213,21 @@ export async function installBrokerService(profileDir: string): Promise<void> {
       marker.marker.profile.name !== anchor.name)
   )
     throw new Error("Broker service marker belongs to another profile");
+  if (!userServiceManagerAvailable()) {
+    if (marker.kind === "valid") {
+      await waitForBrokerListeners(marker.marker.socket, profile, "on-demand");
+      return;
+    }
+    await ensureOnDemandBroker(profile, {
+      wire: brokerSocketPath(profile),
+      mcp: sharedMcpSocketPath(home, profile),
+    });
+    return;
+  }
+  if (process.platform !== "linux" && process.platform !== "darwin")
+    throw new Error(
+      "Broker user services require Linux systemd or macOS launchd; no broker was started",
+    );
   let name = brokerServiceName(profile, home);
   let socket = marker.kind === "valid" ? marker.marker.socket : defaultBrokerSocket(profile);
   let existing = false;
@@ -361,20 +391,5 @@ export async function installBrokerService(profileDir: string): Promise<void> {
       run("launchctl", ["kickstart", target]);
     }
   }
-  const deadline = Date.now() + 10_000;
-  let delay = 100;
-  do {
-    if (
-      (await liveUnixSocket(socket)) &&
-      (await liveUnixSocket(sharedMcpSocketPath(home, profile)))
-    )
-      return;
-    await new Promise((resolve) =>
-      setTimeout(resolve, Math.min(delay, Math.max(0, deadline - Date.now()))),
-    );
-    delay = Math.min(delay * 2, 1_000);
-  } while (Date.now() < deadline);
-  throw new Error(
-    `Broker not running after user service startup (${name}); inspect the service manager logs. No client broker fallback was attempted`,
-  );
+  await waitForBrokerListeners(socket, profile, name);
 }

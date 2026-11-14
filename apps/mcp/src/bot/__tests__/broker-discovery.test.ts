@@ -580,7 +580,7 @@ describe("managed-broker connection discovery end-to-end", () => {
       stdio: "ignore",
     });
     try {
-      const client = await connectBroker(socket);
+      const client = await connectBroker(socket, { onDemand: false });
       try {
         expect(await liveUnixSocket(socket)).toBe(true);
         expect(await client.call("status", {})).toBeDefined();

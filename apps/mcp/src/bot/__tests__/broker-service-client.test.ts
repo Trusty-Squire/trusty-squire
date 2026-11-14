@@ -5,6 +5,8 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeAll, expect, it, vi } from "vitest";
 import { liveUnixSocket } from "../broker/discovery.js";
+import { writeBrokerUnitMarker } from "../broker/managed-marker.js";
+import { profileDeviceAnchor } from "../profile.js";
 
 const packageRoot = fileURLToPath(new URL("../../../", import.meta.url));
 const bin = join(packageRoot, "dist", "bin.js");
@@ -31,7 +33,26 @@ async function fixture() {
   };
   delete env.INVOCATION_ID;
   delete env.TRUSTY_SQUIRE_BROKER_UNIT;
+  cleanup.push(async () => {
+    for (const pid of await profileBrokers(profile)) {
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {
+        /* already gone */
+      }
+    }
+  });
   return { root, profile, env };
+}
+async function markManaged(profile: string, socket: string): Promise<void> {
+  const anchor = profileDeviceAnchor(profile);
+  if (anchor === null) throw new Error("profile has no device anchor");
+  await writeBrokerUnitMarker(profile, {
+    version: 1,
+    socket,
+    profile: anchor,
+    accountBinding: null,
+  });
 }
 async function stop(child: ChildProcessWithoutNullStreams) {
   if (child.exitCode !== null || child.signalCode !== null) return;
@@ -90,10 +111,10 @@ async function profileBrokers(profile: string): Promise<number[]> {
   return found.filter((pid): pid is number => pid !== undefined);
 }
 it.skipIf(process.platform !== "linux")(
-  "Reproduction BBC-1: unavailable sockets and a failed manager never create a broker",
+  "Reproduction BBC-1: a managed marker and a failed manager never create a broker",
   async () => {
     await Promise.all(
-      ["absent", "invalid-marker", "stale-socket"].map(async (mode) => {
+      ["invalid-marker", "valid-marker"].map(async (mode) => {
         const f = await fixture();
         if (mode === "invalid-marker")
           await writeFile(
@@ -101,7 +122,7 @@ it.skipIf(process.platform !== "linux")(
             "{ invalid",
             { mode: 0o600 },
           );
-        if (mode === "stale-socket") await writeFile(f.env.TRUSTY_SQUIRE_BROKER_SOCKET!, "stale");
+        if (mode === "valid-marker") await markManaged(f.profile, f.env.TRUSTY_SQUIRE_BROKER_SOCKET!);
         expect(await profileBrokers(f.profile)).toEqual([]);
         const { child, stderr } = processFor(f.env, "server");
         const { replies } = peer(child);
@@ -138,11 +159,17 @@ it.skipIf(process.platform !== "linux")(
   "concurrent clients initialize on a foreground broker and reconnect to its replacement",
   async () => {
     const f = await fixture();
+    await markManaged(f.profile, f.env.TRUSTY_SQUIRE_BROKER_SOCKET!);
     const relays = [processFor(f.env, "server"), processFor(f.env, "server")];
     const peers = relays.map(({ child }) => peer(child));
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    expect(await profileBrokers(f.profile)).toEqual([]);
-    let broker = processFor(f.env, "broker");
+    // Marker means join-only for clients. Start the harness-owned broker
+    // immediately so the relays' bounded wait still overlaps a listener; the
+    // unit flag is what a marked daemon requires before it will listen.
+    const brokerEnv = { ...f.env, TRUSTY_SQUIRE_BROKER_UNIT: "1" };
+    let broker = processFor(brokerEnv, "broker");
+    await vi.waitFor(async () => expect(await profileBrokers(f.profile)).toEqual([broker.child.pid]), {
+      timeout: 8_000,
+    });
     await vi.waitFor(
       async () => expect(await liveUnixSocket(f.env.TRUSTY_SQUIRE_BROKER_SOCKET!)).toBe(true),
       { timeout: 8_000 },
@@ -157,7 +184,7 @@ it.skipIf(process.platform !== "linux")(
     expect(await profileBrokers(f.profile)).toEqual([broker.child.pid]);
     const prior = broker.child.pid;
     await stop(broker.child);
-    broker = processFor(f.env, "broker");
+    broker = processFor(brokerEnv, "broker");
     await vi.waitFor(
       async () => expect(await liveUnixSocket(f.env.TRUSTY_SQUIRE_BROKER_SOCKET!)).toBe(true),
       { timeout: 8_000 },
@@ -181,6 +208,7 @@ it.skipIf(process.platform !== "linux")(
 );
 it("exits promptly when stdin closes during initial service wait", async () => {
   const f = await fixture();
+  await markManaged(f.profile, f.env.TRUSTY_SQUIRE_BROKER_SOCKET!);
   const { child } = processFor(f.env, "server");
   peer(child);
   const start = Date.now();

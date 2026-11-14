@@ -140,7 +140,7 @@ Connect never waits longer than the sign-in link lives — the wait is the link'
 
 Supported targets: `claude-code`, `cursor`, `codex`, `opencode`, `goose`, `cline`, `continue`, and `hermes`.
 
-On Linux, connect registers and starts a systemd user service; on macOS, a launchd user agent. A working user service manager is required. MCP clients connect to that broker and report "broker not running" after bounded retries if it is stopped. Installer-written client entries use `@trusty-squire/mcp@latest`. The interactive setup also offers an optional 2Captcha key, stored in your vault.
+On Linux, connect registers and starts a systemd user service; on macOS, a launchd user agent. When neither manager exists, connect and `mcp server` start one on-demand broker (no supervisor, at most one start per call). MCP clients connect to that broker and report "broker not running" after bounded retries if it is stopped, or the broker's own start error if an on-demand start fails. Installer-written client entries use `@trusty-squire/mcp@latest`. The interactive setup also offers an optional 2Captcha key, stored in your vault.
 
 | Command or option | Purpose |
 | --- | --- |

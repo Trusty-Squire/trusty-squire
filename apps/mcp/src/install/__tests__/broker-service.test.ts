@@ -14,6 +14,7 @@ import {
   type BrokerServiceConfig,
 } from "../broker-service.js";
 import { liveUnixSocket } from "../../bot/broker/discovery.js";
+import { ensureOnDemandBroker, userServiceManagerAvailable } from "../../bot/broker/on-demand.js";
 import {
   brokerUnitMarkerPath,
   readBrokerUnitMarkerSync,
@@ -29,6 +30,10 @@ vi.mock("../../bot/broker/discovery.js", async (original) => ({
   ...(await original<typeof Discovery>()),
   liveUnixSocket: vi.fn(async () => true),
 }));
+vi.mock("../../bot/broker/on-demand.js", () => ({
+  userServiceManagerAvailable: vi.fn(() => true),
+  ensureOnDemandBroker: vi.fn(async () => undefined),
+}));
 const platform = process.platform;
 const roots: string[] = [];
 let profile: string;
@@ -37,6 +42,8 @@ beforeEach(async () => {
   roots.push(profile);
   vi.mocked(execFileSync).mockReset().mockReturnValue("");
   vi.mocked(liveUnixSocket).mockReset().mockResolvedValue(true);
+  vi.mocked(userServiceManagerAvailable).mockReset().mockReturnValue(true);
+  vi.mocked(ensureOnDemandBroker).mockReset().mockResolvedValue(undefined);
   Object.defineProperty(process, "platform", { value: "linux" });
 });
 afterEach(async () => {
@@ -314,6 +321,38 @@ it("fails clearly on an unavailable manager without proceeding to startup", asyn
   await expect(installBrokerService(profile)).rejects.toThrow(/working systemctl user manager/);
   expect(execFileSync).toHaveBeenCalledTimes(1);
   expect(liveUnixSocket).not.toHaveBeenCalled();
+});
+it("starts an on-demand broker when no user manager exists and does not register a unit", async () => {
+  vi.mocked(userServiceManagerAvailable).mockReturnValueOnce(false);
+  await installBrokerService(profile);
+  expect(ensureOnDemandBroker).toHaveBeenCalledWith(
+    profile,
+    expect.objectContaining({ wire: expect.any(String), mcp: expect.any(String) }),
+  );
+  expect(readBrokerUnitMarkerSync(profile).kind).toBe("absent");
+  expect(
+    vi.mocked(execFileSync).mock.calls.some((call) => call[1]?.includes("enable")),
+  ).toBe(false);
+  expect(
+    vi.mocked(execFileSync).mock.calls.some((call) => call[1]?.includes("daemon-reload")),
+  ).toBe(false);
+});
+it("joins a valid marker without on-demand start when no user manager exists", async () => {
+  vi.mocked(userServiceManagerAvailable).mockReturnValue(false);
+  const anchor = profileDeviceAnchor(profile);
+  if (anchor === null) throw new Error("missing profile anchor");
+  await writeBrokerUnitMarker(profile, {
+    version: 1,
+    socket: join(profile, "broker.sock"),
+    profile: anchor,
+    accountBinding: null,
+  });
+  await installBrokerService(profile);
+  expect(ensureOnDemandBroker).not.toHaveBeenCalled();
+  expect(liveUnixSocket).toHaveBeenCalled();
+  expect(
+    vi.mocked(execFileSync).mock.calls.some((call) => call[1]?.includes("enable")),
+  ).toBe(false);
 });
 it("does not accept manager stdout as readiness proof", async () => {
   vi.useFakeTimers();

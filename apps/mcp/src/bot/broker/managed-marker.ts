@@ -1,6 +1,8 @@
 // Service endpoint markers survive profile-directory replacement. Each physical
 // profile has its own marker beside the directory; the default name remains
-// compatible with installed systemd units. Clients only read/join, never spawn.
+// compatible with installed systemd units. A valid or invalid marker means a
+// unit owns the profile: clients only read/join. An absent marker on a machine
+// with no user service manager may start one on-demand broker.
 // Version 1 records the wire socket, device anchor, and optional account binding.
 // Contract: docs/browser-broker.md.
 
@@ -25,7 +27,7 @@ export interface ManagedBrokerMarker {
 }
 
 /** Strict read outcome. `invalid` means present but unreadable or
- * unparsable. No read outcome permits a client to launch a broker. */
+ * unparsable. Valid and invalid markers do not permit a client to launch. */
 export type BrokerMarkerRead =
   | { kind: "absent" }
   | { kind: "invalid" }
