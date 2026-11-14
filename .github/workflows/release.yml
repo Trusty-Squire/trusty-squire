@@ -461,6 +461,7 @@ jobs:
           ( cd apps/mcp && pnpm pack --pack-destination "$PACK_DIR" )
           TARBALL="$(find "$PACK_DIR" -maxdepth 1 -type f -name '*.tgz' -print -quit)"
           test -n "$TARBALL"
+          node apps/mcp/scripts/restore-packed-launcher-mode.mjs "$TARBALL"
           echo "Publishing $TARBALL as @trusty-squire/mcp@${{ needs.verify.outputs.version }} with dist-tag ${{ needs.verify.outputs.npm_dist_tag }}"
           npm publish "$TARBALL" \
             --access=public \

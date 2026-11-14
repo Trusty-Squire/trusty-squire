@@ -1,7 +1,6 @@
 import type { Browser, BrowserContext } from "playwright";
 import { existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { type ChildProcess } from "node:child_process";
 import {
   closeProfileWithProof,
@@ -30,6 +29,7 @@ import {
   bindOwnerBrowserLaunchBounded,
   canSelfLaunchWithProxy,
   captureOwnedChromeProcessTreeProof,
+  chromeScopeLauncherExecutable,
   closeBrowserContextWithin,
   detectChromiumChannel,
   DEVTOOLS_ACTIVE_PORT_FILE,
@@ -47,9 +47,9 @@ import {
   registerSelfManagedChrome,
   releaseOwnedChromeProcessTree,
   resolveAttachedProfileChildIdentity,
-  resolveChannelBinary,
   resolveExplicitProxy,
   resolvePersistentFallbackIdentity,
+  resolveSelfLaunchBinary,
   selfManagedChromes,
   signalOwnedChromeProcessTree,
   spawnLocalBrowser,
@@ -602,8 +602,7 @@ export class BrowserProcessOwner {
     // fallbacks are the two the spawn genuinely cannot serve — no on-disk
     // binary for the channel, and a credentialed proxy the spawned Chrome
     // cannot authenticate — never a configuration choice.
-    const selfLaunchBinary =
-      resolveChannelBinary(channel) ?? (channel === null ? launcher.executablePath() : null);
+    const selfLaunchBinary = resolveSelfLaunchBinary(channel, () => launcher.executablePath());
     const useSelfLaunch =
       selfLaunchBinary !== null && existsSync(selfLaunchBinary) && canSelfLaunchWithProxy(proxy);
     let context: BrowserContext;
@@ -717,9 +716,7 @@ export class BrowserProcessOwner {
               },
               ...(process.platform === "linux"
                 ? {
-                    executablePath: fileURLToPath(
-                      new URL("../../assets/chrome-scope-launcher", import.meta.url),
-                    ),
+                    executablePath: chromeScopeLauncherExecutable(),
                   }
                 : channel !== null
                   ? { channel }

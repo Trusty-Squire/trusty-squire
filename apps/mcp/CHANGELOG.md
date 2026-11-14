@@ -49,6 +49,7 @@
 
 ## Unreleased
 
+- Ship `assets/chrome-scope-launcher` executable in the npm tarball and exec it through `/bin/sh` when the install is 0644; resolve bundled Chromium from `PLAYWRIGHT_BROWSERS_PATH` at launch time.
 - Start one on-demand broker from `mcp server` or `connect` when no systemd
   user manager or launchd GUI domain exists. Concurrent callers share a lock
   and a failed start is not retried; a dead broker is not restarted until the
