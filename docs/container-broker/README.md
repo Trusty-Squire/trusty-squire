@@ -1,61 +1,67 @@
-# Running the broker in a container
+# Running the broker without a service manager
 
-1. Skip Squire's service install in the container. `connect` registers a
-   systemd user unit or a launchd agent, and this image has no service
-   manager. Run `connect` on a machine with systemd or launchd when you
-   need a real account. The client attaches to a broker that is already
-   listening.
-2. Keep the broker, or the one-shot entrypoint, as the container's main
-   process. The default entrypoint is `entrypoint.sh`. That process runs
-   `node .../dist/bin.js broker` and exits with the broker's status. It
-   does not restart the broker. A broker crash exits the container, and
-   `docker run --restart=on-failure` starts the whole container again.
+This image has no systemd user manager and no launchd. Squire does not
+install a unit, and it does not supervise or restart the broker.
 
-`docker kill` is a manual stop. The restart policy does not run. Kill the
-broker from inside the container. The entrypoint then exits 137 and Docker
-starts the container again. One broker is running after that restart.
+1. The entrypoint writes a fixture session and idles. It does not start a
+   broker.
+2. The first `mcp server` tool call starts one broker, waits for it, and
+   then serves the call. Concurrent clients share a start lock, so they
+   produce exactly one broker.
+3. If that broker dies, nothing restarts it until the next client call,
+   which starts exactly one again.
+4. If the broker fails to come up, that call returns the broker's own
+   output and leaves no extra processes.
 
 `systemctl` in the image only appends the invocation to
 `/var/log/systemctl-calls.log` and exits 1. It does not start a broker.
 
-The entrypoint writes a local fixture session so `operate_start` is allowed
-to open a page. The fixture account is `container-broker-test` and its API
-base is `http://127.0.0.1:9`. It is not a real Squire account. A real account
-still comes from `connect` on a machine with systemd or launchd.
+The entrypoint writes a local fixture session and a loopback vault stub so
+`list_credentials` can succeed. The fixture account is `container-broker-test`
+and its API base is `http://127.0.0.1:18765`. It is not a real Squire account.
+Sign-in on machines like this uses the phone link.
 
-Build from the repository root. The `-f` path and the build context are
-both relative to that root:
-
-```
-docker build -t ts-container-broker:test -f docs/container-broker/Dockerfile docs/container-broker
-```
-
-Run, from a checkout of this repository:
+Build the image with `verify.sh` from the repository root. That script packs
+the local mcp package into the image (the published npm tarball does not
+include this on-demand start until it ships):
 
 ```
+docs/container-broker/verify.sh
+```
+
+Or, after `verify.sh` has prepared the build context:
+
+```
+docker build -t ts-container-broker:test /tmp/ts-container-broker-ctx
 docker rm -f ts-container-broker-runtime
-docker run -d --name ts-container-broker-runtime --restart=on-failure ts-container-broker:test
+docker run -d --name ts-container-broker-runtime ts-container-broker:test
 ```
 
-Public page, no account:
+There is no `--restart` policy. The container idles; the broker is not the
+main process.
+
+First tool call (starts one broker, `list_credentials` succeeds):
 
 ```
 docker exec ts-container-broker-runtime node /opt/squire/client.mjs
 ```
 
-Broker count and Docker's restart counter:
+Broker count:
 
 ```
 docker exec ts-container-broker-runtime ps -eo pid,ppid,args
-docker inspect ts-container-broker-runtime --format 'status={{.State.Status}} exit={{.State.ExitCode}} restart={{.RestartCount}}'
 ```
 
-Kill the broker, not the container:
+Two concurrent clients still produce one broker:
 
 ```
-docker exec ts-container-broker-runtime sh -c 'kill -9 "$(cat /tmp/broker.pid)"'
+docker exec ts-container-broker-runtime sh -c 'node /opt/squire/client.mjs & node /opt/squire/client.mjs & wait'
 ```
 
-Wait until inspect shows `status=running` and a higher `restart` count, then
-repeat the client command and `ps`. The client should open `https://example.com`
-again, and `ps` should show one `dist/bin.js broker` process.
+Kill the broker; it must not come back until the next client:
+
+```
+docker exec ts-container-broker-runtime sh -c 'pid=$(ps -eo pid,args | awk "/dist\\/bin.js broker/{print \$1; exit}"); kill -9 "$pid"'
+docker exec ts-container-broker-runtime ps -eo pid,args
+docker exec ts-container-broker-runtime node /opt/squire/client.mjs
+```

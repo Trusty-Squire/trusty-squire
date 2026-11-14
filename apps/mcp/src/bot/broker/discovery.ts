@@ -21,6 +21,7 @@ import {
   readBrokerUnitMarkerSync,
   type ManagedBrokerMarker,
 } from "./managed-marker.js";
+import { ensureOnDemandBroker } from "./on-demand.js";
 
 const BROKER_CONNECT_TIMEOUT_MS = 10_000;
 
@@ -247,8 +248,9 @@ export function managedBrokerUnitSocket(profileDir = currentProfileDir()): strin
 
 /** systemctl answer for this profile. A failure is deliberately "unknown",
  * NOT "no unit": inside bwrap sandboxes `systemctl --user` fails, and a
- * client still resolves the marker or derived endpoint. No result permits
- * client-side startup. */
+ * client still resolves the marker or derived endpoint. A live or unknown
+ * unit never permits a client-side start; an absent marker on a machine
+ * with no user service manager may start one on-demand broker. */
 export type ManagedUnitState =
   | { state: "live"; socket?: string | undefined; unit: ManagedBrokerUnit }
   | { state: "absent" }
@@ -396,6 +398,23 @@ export async function brokerConnectionTarget(
 export interface BrokerConnectOptions {
   accountId?: string | undefined;
   ceremony?: boolean;
+  /** When true (the default), a machine with no user service manager may start the broker once. */
+  onDemand?: boolean;
+}
+
+async function maybeStartOnDemandBroker(
+  profileDir: string,
+  options: { onDemand?: boolean | undefined; signal?: AbortSignal | undefined } = {},
+): Promise<void> {
+  if (options.onDemand === false) return;
+  if (readSystemctlUnits(profileDir).state === "live") return;
+  const startOptions: { signal?: AbortSignal } = {};
+  if (options.signal !== undefined) startOptions.signal = options.signal;
+  await ensureOnDemandBroker(
+    profileDir,
+    { wire: brokerSocketPath(profileDir), mcp: sharedMcpSocketPath(homedir(), profileDir) },
+    startOptions,
+  );
 }
 
 export async function connectBroker(
@@ -405,6 +424,7 @@ export async function connectBroker(
   const profileDir = currentProfileDir();
   ensureProfileDeviceAnchor(profileDir);
   const { socket } = await brokerConnectionTarget(profileDir, path, options);
+  await maybeStartOnDemandBroker(profileDir, { onDemand: options.onDemand });
   return await waitForBroker(async (remainingMs) => {
     try {
       return await BrokerClient.connect(socket, {
@@ -427,10 +447,12 @@ export async function connectBroker(
 export async function ensureSharedMcp(
   path = sharedMcpSocketPath(),
   signal?: AbortSignal,
+  options: { onDemand?: boolean } = {},
 ): Promise<void> {
   const profileDir = currentProfileDir();
   ensureProfileDeviceAnchor(profileDir);
   await brokerConnectionTarget(profileDir, resolveBrokerSocket(profileDir));
+  await maybeStartOnDemandBroker(profileDir, { onDemand: options.onDemand, signal });
   await waitForBroker(
     async () => ((await liveUnixSocket(path, signal)) ? true : undefined),
     signal,

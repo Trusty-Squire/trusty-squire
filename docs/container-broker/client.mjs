@@ -1,27 +1,40 @@
 import { spawn } from "node:child_process";
-import { readFileSync } from "node:fs";
-import { setTimeout as sleep } from "node:timers/promises";
+import { readdirSync, readFileSync } from "node:fs";
 
-const entry = "/opt/squire/node_modules/@trusty-squire/mcp/dist/bin.js";
-const brokerLog = "/tmp/broker.log";
+const packagedEntry = "/opt/squire/node_modules/@trusty-squire/mcp/dist/bin.js";
+const deployedEntry = "/opt/squire/dist/bin.js";
+const entry = packagedEntry;
+const fallbackEntry = deployedEntry;
+
+function resolveEntry() {
+  try {
+    readFileSync(entry);
+    return entry;
+  } catch {
+    return fallbackEntry;
+  }
+}
 
 function say(line) {
   process.stdout.write(`${line}\n`);
 }
 
-async function waitForListen() {
-  const deadline = Date.now() + 90_000;
-  let last = "";
-  while (Date.now() < deadline) {
+function profileBrokers(profile) {
+  const found = [];
+  for (const entryName of readdirSync("/proc")) {
+    if (!/^\d+$/.test(entryName)) continue;
+    let argv = "";
+    let env = "";
     try {
-      last = readFileSync(brokerLog, "utf8");
-      if (last.includes("[browser-broker] listening")) return;
-    } catch (error) {
-      last = error instanceof Error ? error.message : String(error);
+      argv = readFileSync(`/proc/${entryName}/cmdline`, "utf8");
+      env = readFileSync(`/proc/${entryName}/environ`, "utf8");
+    } catch {
+      continue;
     }
-    await sleep(200);
+    if (!argv.split("\0").includes("broker")) continue;
+    if (env.split("\0").includes(`TRUSTY_SQUIRE_PROFILE_DIR=${profile}`)) found.push(Number(entryName));
   }
-  throw new Error(`broker did not listen: ${last.slice(-2000)}`);
+  return found;
 }
 
 class McpClient {
@@ -80,46 +93,30 @@ class McpClient {
 
 function summarize(label, message) {
   const text = JSON.stringify(message);
-  let session = null;
-  let url = null;
   const isError = message.result?.isError === true || message.error !== undefined;
-  const content = message.result?.content;
-  if (Array.isArray(content)) {
-    for (const block of content) {
-      if (typeof block?.text !== "string") continue;
-      try {
-        const parsed = JSON.parse(block.text);
-        session = parsed.session_id ?? session;
-        url = parsed.url ?? parsed.final_url ?? url;
-      } catch {
-        /* observation text is not always JSON */
-      }
-    }
-  }
   say(
-    `CLIENT ${label} bytes=${text.length} error=${JSON.stringify(message.error ?? null)} isError=${isError} session_id=${session ?? ""} url=${url ?? ""}`,
+    `CLIENT ${label} bytes=${text.length} error=${JSON.stringify(message.error ?? null)} isError=${isError}`,
   );
   say(`CLIENT ${label} body_head=${text.slice(0, 1500)}`);
-  return { session, isError };
+  return { isError, message };
 }
 
-const version = JSON.parse(
-  readFileSync("/opt/squire/node_modules/@trusty-squire/mcp/package.json", "utf8"),
-).version;
-say(`PACKAGE ${version}`);
-await waitForListen();
-say("BROKER listening");
+const profile =
+  process.env.TRUSTY_SQUIRE_PROFILE_DIR ?? "/root/.trusty-squire/chrome-profile";
+say(`BROKERS_BEFORE ${JSON.stringify(profileBrokers(profile))}`);
 
-const server = spawn(process.execPath, [entry, "server"], {
+const server = spawn(process.execPath, [resolveEntry(), "server"], {
   env: {
     ...process.env,
     HOME: process.env.HOME ?? "/root",
-    TRUSTY_SQUIRE_PROFILE_DIR:
-      process.env.TRUSTY_SQUIRE_PROFILE_DIR ?? "/root/.trusty-squire/chrome-profile",
-    TRUSTY_SQUIRE_BROKER_UNIT: "1",
+    TRUSTY_SQUIRE_PROFILE_DIR: profile,
     TRUSTY_SQUIRE_AGENT_IDENTITY: "container-broker-test",
   },
   stdio: ["pipe", "pipe", "pipe"],
+});
+let stderr = "";
+server.stderr.on("data", (chunk) => {
+  stderr += chunk.toString();
 });
 const client = new McpClient(server);
 
@@ -134,30 +131,19 @@ try {
     20_000,
   );
   summarize("initialize", init);
+  if (init.error) throw new Error("initialize failed");
   client.notify("notifications/initialized", {});
-  const started = summarize(
-    "operate_start",
+  const listed = summarize(
+    "list_credentials",
     await client.request(
       "tools/call",
-      {
-        name: "operate_start",
-        arguments: { service_url: "https://example.com", format: "compact" },
-      },
-      180_000,
+      { name: "list_credentials", arguments: {} },
+      30_000,
     ),
   );
-  if (!started.session || started.isError) {
-    throw new Error("operate_start did not open https://example.com");
-  }
-  const finished = summarize(
-    "operate_finish",
-    await client.request(
-      "tools/call",
-      { name: "operate_finish", arguments: { session_id: started.session, outcome: "none" } },
-      60_000,
-    ),
-  );
-  if (finished.isError) throw new Error("operate_finish failed");
+  if (listed.isError) throw new Error("list_credentials failed");
+  const brokers = profileBrokers(profile);
+  say(`BROKERS_AFTER ${JSON.stringify(brokers)}`);
   let systemctl = "";
   try {
     systemctl = readFileSync("/var/log/systemctl-calls.log", "utf8");
@@ -172,12 +158,9 @@ try {
 } catch (error) {
   say("RESULT fail");
   say(error instanceof Error ? (error.stack ?? error.message) : String(error));
-  try {
-    say("--- broker log tail ---");
-    say(readFileSync(brokerLog, "utf8").slice(-4000));
-  } catch {
-    /* broker log missing */
-  }
+  say(`BROKERS_ON_FAIL ${JSON.stringify(profileBrokers(profile))}`);
+  say("--- server stderr tail ---");
+  say(stderr.slice(-4000));
   server.kill("SIGTERM");
   process.exit(1);
 }

@@ -34,8 +34,12 @@ line from `TRUSTY_SQUIRE_AGENT_IDENTITY` (or `unknown`), then relays MCP stdio
 messages in both directions.
 If the shared socket is down, the proxy waits with capped backoff. Initial
 startup fails after ten seconds with a clear "broker not running" error and a
-failed initialization/process. MCP clients never start, stop, or replace a broker,
+failed initialization/process. On a machine with a systemd user manager or
+launchd GUI domain, MCP clients never start, stop, or replace a broker,
 including when the user service is stopped, failed, absent, or inaccessible.
+When no user service manager exists, a tool call or `connect` that finds no
+broker starts it once, waits for it, and does not retry that attempt; a dead
+broker is not restarted until the next call.
 If the broker restarts, the proxy reconnects while the agent's pipe remains open,
 replays initialization, and returns an error for calls lost in flight. The
 connection owns the sessions it opened; dropping it closes those sessions after
@@ -107,9 +111,11 @@ derivation; `profileOperationLockPath`, `defaultBrokerSocket`, and
 ### User service installation and upgrades
 
 `npx -y @trusty-squire/mcp@latest connect` resolves the target's canonical profile,
-then registers and starts its service before preflight or enrollment. Linux requires
-a working systemd user manager; macOS requires a launchd GUI user domain. Windows
-and unavailable managers fail clearly without a direct broker fallback.
+then registers and starts its service before preflight or enrollment. Linux uses
+a working systemd user manager; macOS uses a launchd GUI user domain. When neither
+manager exists, `connect` and `mcp server` start one on-demand broker (see
+[Running without a service manager](#running-without-a-service-manager)). They
+never register, restart, or alter a systemd/launchd unit on that path.
 
 On Linux the default is `trusty-squire-broker.service` under
 `$XDG_CONFIG_HOME/systemd/user` (or `~/.config/systemd/user`). Additional physical
@@ -158,47 +164,50 @@ stopped service produces no client-spawned broker.
 It fails when the native manager is unavailable; it does not substitute mocks or
 skip that acceptance.
 
-### Running in a container
+### Running without a service manager
 
-A container with no systemd user manager runs the broker itself. The container
-command is the unit ExecStart, and the runtime's restart policy is the supervisor:
+A container, cloud agent host, or other environment with no systemd user manager
+and no launchd GUI domain has no supervisor for the broker. There is no
+watchdog, timer, or restart policy in Squire.
 
-```
-node <package>/dist/bin.js broker
-```
+When `mcp server` or `connect` finds no live broker:
 
-Set the environment the unit would set: `HOME`, `PATH`, `TRUSTY_SQUIRE_PROFILE_DIR`,
-and `TRUSTY_SQUIRE_BROKER_UNIT=1`. The account session has to already be on disk.
-`connect` is what creates that session, and it still requires a working systemd
-user manager or launchd GUI domain. It fails closed when `systemctl` or `launchctl`
-cannot register the unit, and it does not launch a broker as a fallback. Run
-`connect` where that manager exists, then start the broker from the container.
+1. One caller acquires a start lock; the others wait on that lock.
+2. If a Chrome left over from a dead broker still holds this profile,
+   that Chrome is signalled (`SIGINT`, then `SIGKILL` if needed). A live
+   broker's Chrome is never touched, and other profiles are not.
+3. The winner starts the broker once and waits for both sockets, at most ten
+   seconds. It does not set `TRUSTY_SQUIRE_BROKER_UNIT` and does not write a
+   unit marker.
+4. If that start fails, the call returns the broker's own output and does not
+   retry. Failed children are stopped so the attempt leaves no extra processes.
+5. If the broker later dies, nothing restarts it until the next tool call or
+   `connect`, which again starts it once.
 
-`node <package>/dist/bin.js server` attaches to the broker that is already
-listening. Discovery may call `systemctl --user show`. A missing or failing
-`systemctl` is an unknown unit, not a client failure: the client uses the derived
-socket and does not start a broker.
+A valid unit marker still means a managed unit owns the profile: clients join
+or wait, and they do not start a competitor. Machines with systemd or launchd
+are unchanged, including Beeline's `trusty-squire-broker.service`.
 
-Restart with the container runtime, for example `docker run --restart=on-failure`.
-The policy runs when the container's main process exits non-zero on its own.
-`docker kill` is a manual stop and does not restart it. Chrome is detached from
-the broker. Killing only the node process and leaving Chrome in the same
-container makes the next start refuse the profile (`Profile lock does not
-identify Chrome for this profile`): there is no systemd scope to reap Chrome,
-and a PID-namespace init cannot be signalled with SIGKILL from inside the
-container. Stopping the whole container reaps Chrome, the next start sees a
-stale lock, and one broker listens. A main process that waits on the broker and
-exits with the broker's status turns an internal SIGKILL of that child into the
-container exit the restart policy needs.
+`connect` on these hosts still needs an account session on disk for operator
+work. Sign-in uses the phone link (a separate path); this on-demand start only
+replaces the missing service manager.
+
+Discovery may call `systemctl --user show`. A missing or failing `systemctl` is
+an unknown unit, not a client failure. Unknown plus a live or marked unit still
+does not start a broker. Unknown plus no marker, and no working user manager,
+is the on-demand case.
+
+Chrome is detached from the broker. Killing only the node process and leaving
+Chrome in the same container would previously make the next start refuse the
+profile (`Profile lock does not identify Chrome for this profile`). The
+on-demand start reaps that orphaned Chrome when its owning broker is gone.
 
 [`docs/container-broker/`](container-broker/README.md) is that run. The image
-entrypoint runs `node <package>/dist/bin.js broker` and exits with its status.
-It does not restart the broker. Build and start it with the commands in that
-directory, then kill the broker pid from inside the container. `docker kill`
-does not trip the policy. The entrypoint also writes a local fixture session
-so `operate_start` can open a public page. That fixture is not a real account,
-and its API base is loopback. A real account still comes from `connect` on a
-machine with systemd or launchd.
+has no systemd. The entrypoint does not start a broker. The first `mcp server`
+tool call starts one. There is no container restart policy for the broker:
+killing it leaves none running until the next client call. The entrypoint
+writes a local fixture session so `list_credentials` can run. That fixture is
+not a real account, and its API base is a loopback stub.
 
 ### Service endpoint markers
 
@@ -224,9 +233,10 @@ Connect's sign-in ceremony skips that account comparison because the completed
 claim determines the account; an in-profile completed connect replaces the
 profile binding and the marker's declared account. A different profile still
 refuses `profile_mismatch`. Invalid markers cannot permit startup. `systemctl`
-failure remains unknown; neither unknown nor an absent marker permits a client
-to start a broker. Removing a marker or uninstalling a service leaves clients
-connection-only.
+failure remains unknown. A valid or invalid marker still does not permit a
+client to start a broker. An absent marker on a machine with no user service
+manager may start one on-demand broker. Removing a marker or uninstalling a
+service on a systemd/launchd host leaves clients connection-only.
 
 A marked daemon requires systemd's `INVOCATION_ID` or the explicit
 `TRUSTY_SQUIRE_BROKER_UNIT=1` environment before touching the profile lock, sockets,

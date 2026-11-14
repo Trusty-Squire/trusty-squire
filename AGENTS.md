@@ -483,11 +483,15 @@ weaker crash-orphan containment. Recent cookies may be lost on a crash; normal
 whole-browser stops flush them with SIGINT. In scope mode the next broker
 empties any surviving scope members. The broker is the
 only browser path, including `connect`, and starts without enrollment. Account
-identity is named by account-acting calls, never by `connect`. Clients never
-start, kill, or replace a broker. Only the OS user service manager starts
-production brokers; tests may explicitly own foreground brokers and stop
-them during cleanup. Unavailable sockets produce bounded backoff and a clear
-"broker not running" error. See [`docs/browser-broker.md`](docs/browser-broker.md).
+identity is named by account-acting calls, never by `connect`. On a machine
+with systemd or launchd, clients never start, kill, or replace a broker; only
+the OS user service manager starts production brokers. When no user service
+manager exists, a tool call or `connect` that finds no broker starts it once
+under a lock and does not restart it until the next call. Tests may explicitly
+own foreground brokers and stop them during cleanup. Unavailable sockets
+produce bounded backoff and a clear "broker not running" error, or the
+broker's own start failure when an on-demand start does not come up. See
+[`docs/browser-broker.md`](docs/browser-broker.md).
 
 ### 13. OAuth identity uses the real profile and a broker-local mutex
 

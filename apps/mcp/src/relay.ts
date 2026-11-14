@@ -37,6 +37,7 @@ export async function runRelay(): Promise<void> {
   let stopped = false;
   let connectedOnce = false;
   let ready = false;
+  let allowOnDemandStart = false;
   const pending = new Map<string, string | number>();
   const queued: string[] = [];
 
@@ -58,7 +59,7 @@ export async function runRelay(): Promise<void> {
   };
   const connect = () => {
     if (stopped) return;
-    void ensureSharedMcp(undefined, controller.signal)
+    void ensureSharedMcp(undefined, controller.signal, { onDemand: allowOnDemandStart })
       .then(() => {
         if (stopped) return;
         attach(createConnection(sharedMcpSocketPath()));
@@ -117,6 +118,7 @@ export async function runRelay(): Promise<void> {
       if (socket !== peer || stopped) return;
       socket = undefined;
       ready = false;
+      allowOnDemandStart = false;
       replayId = undefined;
       for (const id of pending.values()) {
         process.stdout.write(
@@ -138,6 +140,11 @@ export async function runRelay(): Promise<void> {
       if (frame.method === "initialize") initialize = line;
       if (frame.method === "notifications/initialized") initialized = line;
       queued.push(line);
+      if (!ready) {
+        const startNow = !allowOnDemandStart;
+        allowOnDemandStart = true;
+        if (startNow) connect();
+      }
       if (ready) flush();
     });
   });

@@ -42,6 +42,10 @@
 
 ## Unreleased
 
+- Start one on-demand broker from `mcp server` or `connect` when no systemd
+  user manager or launchd GUI domain exists. Concurrent callers share a lock
+  and a failed start is not retried; a dead broker is not restarted until the
+  next call. Machines with systemd or launchd are unchanged.
 - Headless `connect` prints a phone-openable `operate_share` live view of the
   ceremony tab, plus the Trusty Squire install URL, instead of hanging on a
   noVNC attach after provider logout. Every wait prints a status line and is
