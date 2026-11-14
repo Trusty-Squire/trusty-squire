@@ -9,11 +9,9 @@ CI cannot complete an OAuth login. `connect` is the only sign-in pathway, so
       completes on a machine with a user-visible display, and connect reports
       success only after its live provider probe sees that Google session.
 - [ ] On a headless Linux host with no user-visible display, `connect`
-      prints a reachable noVNC URL; keyboard and pointer
-      input complete sign-in from another device. Record
-      `pgrep -a 'Xvfb|x11vnc|websockify|cloudflared'` before each teardown case;
-      completion, timeout, error, Ctrl-C, SIGTERM, and SIGHUP must each return
-      to that baseline with no per-login helper or owned quick-tunnel process.
+      prints a reachable live-share URL and the Trusty Squire install URL;
+      keyboard and pointer input through that live view complete sign-in from
+      another device. Closing the ceremony must invalidate the share URL.
 - [ ] With both `TS_LOGIN_PUBLIC_HOSTNAME` and `TS_LOGIN_LOCAL_PORT` set,
       headless login reuses the operator-managed named tunnel while teardown
       removes the per-login display and local listener without stopping that
@@ -27,7 +25,7 @@ CI cannot complete an OAuth login. `connect` is the only sign-in pathway, so
       with no live screen gets the operator's private Xvfb.
 - [ ] Starting a concurrent `connect` exits non-zero without
       waiting and prints `another Trusty Squire session is already using
-      the browser — close it first`.
+    the browser — close it first`.
 
 ## Publish
 

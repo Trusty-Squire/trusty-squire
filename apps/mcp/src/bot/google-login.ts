@@ -9,11 +9,13 @@
 // band; Finish is reported through a nonce-scoped callback or the ceremony
 // tab reaching /install/done.
 
+import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import { readFileSync, readdirSync } from "node:fs";
 import { copyFile, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
+import boxen from "boxen";
 import chalk from "chalk";
 import {
   CHROME_PROFILE_DIR,
@@ -33,6 +35,7 @@ import { controlLabelV2, wireRoleToSafeRoleV2 } from "./compact-observation-v2.j
 import { extractGoogleAccountEmail } from "./oauth-login.js";
 export { extractGoogleAccountEmail };
 import {
+  INSTALL_COMPLETION_FRAGMENT_KEY,
   startInstallCompletionListener,
   withInstallCompletionCallback,
 } from "./install-completion.js";
@@ -542,15 +545,15 @@ export {
 export { hasDisplay } from "./display-env.js";
 
 // Where the ceremony browser ACTUALLY went, named by the path that placed it
-// — the screen the person running connect is at, a display only the noVNC URL
-// reaches, or nowhere showable at all. Nobody predicts this from their own
-// environment before a browser exists.
+// — the screen the person running connect is at, a live-share URL that
+// reaches the ceremony tab from a phone, or nowhere showable at all. Nobody
+// predicts this from their own environment before a browser exists.
 export type CeremonyBrowserPlacement =
   | { kind: "host_screen"; display?: string }
-  // A display nobody is sitting at, so it carries the address that reaches it.
-  // The placement is reported the moment the browser lands, while the tunnel is
-  // up and the run is still waiting — which is exactly when a caller needs to
-  // hand that address to a person.
+  // A tab nobody is sitting at, so it carries the live-share address that
+  // reaches it. The placement is reported the moment the share is ready, while
+  // the run is still waiting — which is exactly when a caller needs to hand
+  // that address to a person.
   | { kind: "virtual"; url: string }
   | { kind: "unreachable"; reason: string };
 
@@ -583,10 +586,12 @@ export interface RunInBotChromeOpts {
   // The ceremony never launches its own Chrome, so `ownBrowserPid` is always
   // null here: the broker's browser belongs to the broker.
   onBrowserPlacement?: (placement: CeremonyBrowserPlacement, ownBrowserPid: number | null) => void;
-  // Called when the noVNC rig's own lifetime expires — the wedged/never-polled
-  // ceremony the rig bound exists for. That path tears the rig down and exits
-  // the process, so it never returns through the caller's reporting frame and
-  // the caller reports here instead.
+  // Called when a leftover noVNC rig's own lifetime expires — the
+  // wedged/never-polled ceremony that rig bound exists for. Headless connect
+  // hands off through operate_share instead of standing a new rig, so this
+  // fires only if some other path still registered one. That path tears the
+  // rig down and exits the process, so it never returns through the caller's
+  // reporting frame and the caller reports here instead.
   onCeremonyExpired?: (ownBrowserPid: number | null) => void;
   // Deferred --force-relogin clears: `clearProviderCookies` busy-failed
   // because the broker's browser holds the profile, so the old provider
@@ -598,6 +603,8 @@ const LOGIN_BROWSER_CLOSED_ERROR =
   "the login browser closed before the session completed — re-run the command after closing any other Trusty Squire session";
 const LOGIN_STATUS_CHECK_STALLED_ERROR =
   "the login status check stopped responding before the session completed";
+const CEREMONY_COMMAND_TIMEOUT_MS = 15_000;
+const CEREMONY_SHARE_TIMEOUT_MS = 35_000;
 
 // The install-confirm ceremony: a tab in the shared broker browser, always.
 // The broker is the only thing that owns a browser, so the ceremony never has
@@ -605,9 +612,10 @@ const LOGIN_STATUS_CHECK_STALLED_ERROR =
 // `ownedHeadedBrowserEnvironment` launches it on the host display whenever the
 // daemon can see one. A daemon that inherited no DISPLAY (over SSH, from a
 // user service) parked its Chrome on a private Xvfb before this connect ever
-// ran; it keeps its noVNC exposure, because nothing here can move a live
-// Chrome between X displays and the profile it holds is the one the ceremony
-// needs.
+// ran; headless connect then hands that tab to the owner through
+// `operate_share` rather than attaching noVNC to the whole display. Nothing
+// here can move a live Chrome between X displays, and the profile it holds is
+// the one the ceremony needs.
 export async function runInBotChrome(opts: RunInBotChromeOpts): Promise<LoginRunResult> {
   return await runCeremonyInSharedBroker(opts);
 }
@@ -839,23 +847,126 @@ export function sharedBrowserDisclosureWarning(exposure: SharedCeremonyExposure)
   return "Trusty Squire will keep opening tabs in this browser — the one you're using.";
 }
 
+function unwrapCommandReply(reply: unknown): unknown {
+  if (reply !== null && typeof reply === "object" && "result" in reply) {
+    return Reflect.get(reply, "result");
+  }
+  return reply;
+}
+
 async function operateCommand(
   client: BrokerClient,
   sessionId: string,
   name: string,
   args: Record<string, unknown>,
+  timeoutMs?: number,
 ): Promise<unknown> {
   // The daemon's OperatorBroker.command parses every operator schema, which
   // REQUIRES args.session_id, and refuses a mismatched one with stale_lease —
   // it does not inject the id for us. The reply is the CommandResult envelope
   // `{ result: <tool payload> }`, the same wire the MCP forwarder rides: send
   // the id inside args and unwrap the envelope.
-  const reply = (await client.call("command", {
-    sessionId,
-    name,
-    args: { ...args, session_id: sessionId },
-  })) as { result?: unknown } | undefined;
-  return reply?.result;
+  const requestId = randomUUID();
+  const started = client.call(
+    "command",
+    {
+      sessionId,
+      name,
+      args: { ...args, session_id: sessionId },
+    },
+    requestId,
+  );
+  void started.catch(() => undefined);
+  if (timeoutMs === undefined) return unwrapCommandReply(await started);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const reply = await Promise.race([
+      started,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          void client.abort(requestId);
+          reject(
+            new Error(
+              `${name} did not finish within ${Math.round(timeoutMs / 1000)}s — ${name === "operate_share" ? "the live-share tunnel may be down" : "the shared browser may be busy"}`,
+            ),
+          );
+        }, timeoutMs);
+      }),
+    ]);
+    return unwrapCommandReply(reply);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+function liveShareUrlFromCommand(result: unknown): string | null {
+  if (result === null || typeof result !== "object" || !("url" in result)) return null;
+  const url = Reflect.get(result, "url");
+  return typeof url === "string" && url.trim() !== "" ? url : null;
+}
+
+function publicInstallConfirmUrl(confirmUrl: string): string {
+  try {
+    const parsed = new URL(confirmUrl);
+    if (parsed.hash.length === 0) return confirmUrl;
+    const fragment = new URLSearchParams(parsed.hash.slice(1));
+    fragment.delete(INSTALL_COMPLETION_FRAGMENT_KEY);
+    parsed.hash = fragment.toString();
+    return parsed.toString();
+  } catch {
+    return confirmUrl;
+  }
+}
+
+function styleCeremonyUrl(url: string): string {
+  return process.stderr.isTTY
+    ? `\x1b]8;;${url}\x1b\\${chalk.hex("#cf3a52").underline(url)}\x1b]8;;\x1b\\`
+    : url;
+}
+
+function printCeremonyInstallLink(installUrl: string): void {
+  console.error(
+    `\n[login] Install page (already open in the shared browser; finish it there, not in another browser):\n  ${styleCeremonyUrl(installUrl)}\n`,
+  );
+}
+
+function printCeremonyLiveShareBanner(shareUrl: string, installUrl: string): void {
+  const width = Math.max(40, Math.min((process.stdout.columns ?? 80) - 2, 78));
+  const body =
+    `Open this on your phone to finish sign-in in the shared browser:\n\n` +
+    `  ${styleCeremonyUrl(shareUrl)}\n\n` +
+    `The Trusty Squire install page is already loaded in that view:\n\n` +
+    `  ${styleCeremonyUrl(installUrl)}`;
+  console.error(
+    "\n" +
+      boxen(body, {
+        title: "Sign in to Trusty Squire",
+        titleAlignment: "left",
+        padding: { top: 0, bottom: 0, left: 1, right: 1 },
+        borderStyle: "single",
+        borderColor: "#cf3a52",
+        width,
+      }) +
+      "\n",
+  );
+}
+
+function ceremonyTabAlreadyVisible(
+  profileDir: string,
+): { visible: true; reason: string } | { visible: false } {
+  const holder = holderCeremonyDisplay(profileDir);
+  if (holder.kind === "unnamed") {
+    return drawsWindowsNatively()
+      ? { visible: true, reason: "this machine draws its windows natively" }
+      : { visible: false };
+  }
+  if (!holder.owned && hasDisplay()) {
+    return {
+      visible: true,
+      reason: "it runs on this machine's own screen, which you are signed in at",
+    };
+  }
+  return { visible: false };
 }
 
 // A deferred --force-relogin clear runs through the very tab the ceremony
@@ -871,11 +982,19 @@ async function logoutProvidersThroughSession(
   confirmUrl: string,
   providers: readonly OAuthProviderId[],
 ): Promise<void> {
+  console.error(`[login] Signing previous provider sessions out in the shared browser…`);
   for (const provider of providers) {
     try {
-      await operateCommand(client, sessionId, "operate_navigate", {
-        url: PROVIDER_LOGOUT_URLS[provider],
-      });
+      console.error(`[login] Opening ${provider} sign-out (bounded wait)…`);
+      await operateCommand(
+        client,
+        sessionId,
+        "operate_navigate",
+        {
+          url: PROVIDER_LOGOUT_URLS[provider],
+        },
+        CEREMONY_COMMAND_TIMEOUT_MS,
+      );
       if (provider === "github") {
         // operate_click only accepts a ref a prior observation minted — a
         // bare text selector never resolves (stale_ref). Observe the logout
@@ -886,7 +1005,13 @@ async function logoutProvidersThroughSession(
         // it `@sign-out-2`, hence the prefix match).
         let signedOut = false;
         try {
-          const observed = (await operateCommand(client, sessionId, "operate_observe", {})) as {
+          const observed = (await operateCommand(
+            client,
+            sessionId,
+            "operate_observe",
+            {},
+            CEREMONY_COMMAND_TIMEOUT_MS,
+          )) as {
             safe_table?: unknown[];
           };
           // The wire's control rows are positional tuples `[ref, role, facts?]`
@@ -908,9 +1033,15 @@ async function logoutProvidersThroughSession(
             );
           });
           if (signOut !== undefined) {
-            await operateCommand(client, sessionId, "operate_click", {
-              ref: (signOut as [string, unknown, unknown?])[0],
-            });
+            await operateCommand(
+              client,
+              sessionId,
+              "operate_click",
+              {
+                ref: (signOut as [string, unknown, unknown?])[0],
+              },
+              CEREMONY_COMMAND_TIMEOUT_MS,
+            );
             signedOut = true;
           }
         } catch {
@@ -934,7 +1065,14 @@ async function logoutProvidersThroughSession(
   // Best-effort as well: if it fails the poll reports honestly instead of
   // masking the failure as a clear success.
   try {
-    await operateCommand(client, sessionId, "operate_navigate", { url: confirmUrl });
+    console.error(`[login] Returning the shared browser to the install page…`);
+    await operateCommand(
+      client,
+      sessionId,
+      "operate_navigate",
+      { url: confirmUrl },
+      CEREMONY_COMMAND_TIMEOUT_MS,
+    );
   } catch (err) {
     console.error(
       `[login] could not return the shared browser's tab to the confirm page ` +
@@ -977,7 +1115,6 @@ export async function runCeremonyInSharedBroker(opts: RunInBotChromeOpts): Promi
     throw err;
   }
   let sessionId: string | undefined;
-  let stopExposure: (() => Promise<void>) | null | undefined;
   try {
     const open = (await client.call("open", {
       serviceUrl: opts.url,
@@ -1003,74 +1140,61 @@ export async function runCeremonyInSharedBroker(opts: RunInBotChromeOpts): Promi
           `check broker.log in the private broker socket directory.`,
       );
     }
+    const visibility = ceremonyTabAlreadyVisible(opts.profileDir);
+    const installUrl = publicInstallConfirmUrl(opts.url);
+    if (!visibility.visible) printCeremonyInstallLink(installUrl);
     if (opts.forceReloginProviders?.length) {
       await logoutProvidersThroughSession(client, sessionId, opts.url, opts.forceReloginProviders);
     }
-    // Headless: the broker's Chrome is on a private Xvfb until this process
-    // exposes that display over noVNC. A machine with a screen already sees
-    // the tab (already_visible). A tab no human can see is a tab no human
-    // can complete — and when it provably cannot be shown, waiting out the
-    // deadline would only burn it (round-12 review-3): fail now.
-    const exposure = await exposeSharedBrokerCeremonyDisplay(
-      opts.profileDir,
-      opts.onCeremonyExpired,
-      {
-        showPhone: async () => {
-          const clip = await operateCommand(client, sessionId!, "operate_ceremony_window", {
-            action: "show_phone",
-          });
-          if (
-            clip === null ||
-            typeof clip !== "object" ||
-            !["left", "top", "width", "height"].every((key) =>
-              Number.isInteger((clip as Record<string, unknown>)[key]),
-            ) ||
-            (clip as CeremonyDisplayClip).left < 0 ||
-            (clip as CeremonyDisplayClip).top < 0 ||
-            (clip as CeremonyDisplayClip).width <= 0 ||
-            (clip as CeremonyDisplayClip).height <= 0
-          ) {
-            throw new Error("broker did not return ceremony window bounds");
-          }
-          return clip as CeremonyDisplayClip;
-        },
-        restore: async () => {
-          await operateCommand(client, sessionId!, "operate_ceremony_window", {
-            action: "restore",
-          });
-        },
-      },
-    );
-    if (exposure.kind === "unshowable") {
-      opts.onBrowserPlacement?.({ kind: "unreachable", reason: exposure.reason }, null);
-      throw new Error(
-        `\n[login] The install page opened as a tab in the shared browser's private ` +
-          `display, which nothing here can show: ${exposure.reason}. Without a display ` +
-          `nobody can see or complete the sign-in, so this run stops instead of waiting ` +
-          `out its deadline. Recovery: install the noVNC helpers (x11vnc, websockify, ` +
-          `cloudflared — or set TS_LOGIN_PUBLIC_HOSTNAME and TS_LOGIN_LOCAL_PORT to use ` +
-          `your own tunnel) and run connect again.\n`,
-      );
-    }
-    opts.onBrowserPlacement?.(
-      exposure.kind === "already_visible"
-        ? { kind: "host_screen" }
-        : { kind: "virtual", url: exposure.url },
-      null,
-    );
-    // Only a real human-facing display that is already showing the person this
-    // browser — the one later sessions keep opening tabs in — earns the
-    // disclosure. The headless noVNC path prints nothing: its banner already
-    // carries the URL, and the tabs behind that URL are the same owner's.
-    if (exposure.kind === "already_visible") {
+    // Headless / SSH / TTY: the person running connect cannot see the shared
+    // browser. Reuse operate_share (the same live view operate sessions already
+    // hand to a phone) instead of attaching noVNC to the whole display. A
+    // machine with a screen already sees the tab. Print the share URL and the
+    // install URL before waiting on Finish so a phone can open them.
+    if (visibility.visible) {
+      opts.onBrowserPlacement?.({ kind: "host_screen" }, null);
       console.error(
         `\n[login] The install page opened as a tab in the shared browser's display ` +
-          `(${exposure.reason}) — complete the sign-in on that screen.\n`,
+          `(${visibility.reason}) — complete the sign-in on that screen.\n`,
       );
-      const warning = sharedBrowserDisclosureWarning(exposure);
+      const warning = sharedBrowserDisclosureWarning({
+        kind: "already_visible",
+        reason: visibility.reason,
+      });
       if (warning !== null) console.error(`${warning}\n`);
+    } else {
+      console.error(`[login] Creating a phone-openable live view of the shared browser…`);
+      let shareUrl: string;
+      try {
+        const shared = await operateCommand(
+          client,
+          sessionId,
+          "operate_share",
+          {},
+          CEREMONY_SHARE_TIMEOUT_MS,
+        );
+        const url = liveShareUrlFromCommand(shared);
+        if (url === null) throw new Error("broker did not return a live-share URL");
+        shareUrl = url;
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        opts.onBrowserPlacement?.({ kind: "unreachable", reason }, null);
+        throw new Error(
+          `\n[login] The install page opened as a tab in the shared browser, but nothing ` +
+            `here could create a phone-openable live view of it (${reason}). ` +
+            `The install URL is:\n  ${installUrl}\n` +
+            `Finish sign-in in that shared-browser tab (not in another browser). Re-run ` +
+            `\`npx @trusty-squire/mcp connect\` once the broker's live-share tunnel is working.\n`,
+        );
+      }
+      printCeremonyLiveShareBanner(shareUrl, installUrl);
+      opts.onBrowserPlacement?.({ kind: "virtual", url: shareUrl }, null);
     }
-    stopExposure = exposure.kind === "exposed" ? exposure.stop : null;
+    console.error(
+      chalk.dim(
+        `[login] Waiting for you to Finish sign-in. This wait ends when you click Finish, or when the sign-in link expires.`,
+      ),
+    );
     // Check the polled claim and loopback Finish callback before asking the
     // broker for a DOM observation. A slow or unavailable observation must not
     // hold up a Finish callback already received by this process. If the
@@ -1092,12 +1216,9 @@ export async function runCeremonyInSharedBroker(opts: RunInBotChromeOpts): Promi
     );
     return { status: ok ? "satisfied" : "timeout", closeState: "closed" };
   } finally {
-    // Exposure helpers go first (they are this process's own); the session
-    // tab goes at this connection's lease boundary, and releasing the
-    // connection is the boundary itself. The display and the browser stay
-    // with the broker daemon throughout.
-    if (stopExposure !== undefined && stopExposure !== null)
-      await stopExposure().catch(() => undefined);
+    // The session tab goes at this connection's lease boundary, and releasing
+    // the connection is the boundary itself. Closing the session invalidates
+    // its live share. The display and the browser stay with the broker daemon.
     if (sessionId !== undefined) await client.call("close", { sessionId }).catch(() => undefined);
     await client.release().catch(() => undefined);
   }
@@ -1138,11 +1259,12 @@ function openHandbackDetail(observation: unknown): string {
 // Shared timed-poll helper. `check` is invoked every 3s until it
 // resolves true or the deadline passes.
 // Emits a heartbeat to stderr every ~20s while waiting. After the local Chrome
-// window or remote noVNC URL opens, this loop is otherwise silent for up to the full
-// deadline — which is the connect-hang report: a headless box printed the
-// sign-in URL and then sat on a blank cursor, looking frozen. The heartbeat
-// (with remaining time) makes it obviously alive; quick completions (< 20s,
-// e.g. an already-valid session) print nothing.
+// window or remote live-share URL opens, this loop is otherwise silent for up
+// to the full deadline — which is the connect-hang report: a headless box
+// printed the sign-in URL and then sat on a blank cursor, looking frozen. The
+// heartbeat (with remaining time) makes it obviously alive; the ceremony also
+// prints one status line before this loop starts. Quick completions (< 20s,
+// e.g. an already-valid session) still skip further heartbeats.
 export async function pollUntil(
   deadline: number,
   check: () => Promise<boolean>,
@@ -1233,9 +1355,9 @@ export async function openInstallConfirmInBotChrome(
       placement: CeremonyBrowserPlacement,
       ownBrowserPid: number | null,
     ) => void;
-    // The ceremony's noVNC rig hit its own lifetime and is exiting the
-    // process; the caller reports that outcome from here, with the ceremony
-    // Chrome this run launched when there is one.
+    // A leftover noVNC rig hit its own lifetime and is exiting the process;
+    // the caller reports that outcome from here. Headless connect hands off
+    // through operate_share and does not stand a new rig.
     onCeremonyExpired?: (ownBrowserPid: number | null) => void;
     // Deferred --force-relogin providers (cleared through the ceremony
     // itself when the standalone cookie-clear busy-failed).

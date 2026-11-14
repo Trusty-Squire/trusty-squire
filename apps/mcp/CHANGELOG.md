@@ -42,6 +42,10 @@
 
 ## Unreleased
 
+- Headless `connect` prints a phone-openable `operate_share` live view of the
+  ceremony tab, plus the Trusty Squire install URL, instead of hanging on a
+  noVNC attach after provider logout. Every wait prints a status line and is
+  bounded. Finish is still required.
 - Expose login and approval inputs as flat object schemas for clients that
   cannot populate root unions. **Breaking change:** these calls now require an
   explicit action, and retired input aliases are rejected. See the

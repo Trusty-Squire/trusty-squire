@@ -6,7 +6,7 @@
 // report per line, written when the run's answer changes, and the last line
 // carries `terminal: true`. Connect blocks for minutes waiting on a human, and
 // a stream that only speaks once it settles is silent for exactly the window in
-// which the sign-in URL and the noVNC address are live — which left a caller
+// which the sign-in URL and the live-share address are live — which left a caller
 // scraping stderr prose, the thing this surface exists to delete.
 //
 // Connect runs before any MCP server exists, so the CLI carries the
