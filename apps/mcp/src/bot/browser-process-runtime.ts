@@ -1,9 +1,23 @@
 import { chromium as baseChromium } from "playwright";
 import { createRequire } from "node:module";
 import { Socket } from "node:net";
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import {
+  accessSync,
+  chmodSync,
+  constants as fsConstants,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { isAbsolute, join, resolve as resolvePath } from "node:path";
+import { fileURLToPath } from "node:url";
 import { spawn, type ChildProcess } from "node:child_process";
 import { linuxBrowserUsesScope, scopedChromeCommand } from "./browser-scope.js";
 import {
@@ -345,7 +359,7 @@ export async function detectChromiumChannel(): Promise<string | null> {
 // path. Returns null when the channel is unknown / not found on disk
 // (caller falls back to launchPersistentContext).
 export function resolveChannelBinary(channel: string | null): string | null {
-  if (channel === null) return null; // bundled Chromium — no self-launch
+  if (channel === null) return null;
   const explicit = process.env.UNIVERSAL_BOT_CHROME_BINARY;
   if (explicit !== undefined && explicit.length > 0) {
     return existsSync(explicit) ? explicit : null;
@@ -359,6 +373,111 @@ export function resolveChannelBinary(channel: string | null): string | null {
     }
   }
   return null;
+}
+
+// Playwright/Patchright snapshot PLAYWRIGHT_BROWSERS_PATH when their registry
+// module loads. A broker that inherits the env later, or a container that
+// installed Chromium at /ms-playwright, still needs a call-time lookup.
+export function playwrightBrowsersDirectory(env: NodeJS.ProcessEnv = process.env): string | null {
+  const defined = env.PLAYWRIGHT_BROWSERS_PATH;
+  if (defined === "0") return null;
+  if (defined !== undefined && defined.length > 0) {
+    return isAbsolute(defined) ? defined : resolvePath(defined);
+  }
+  if (process.platform === "darwin") return join(homedir(), "Library", "Caches", "ms-playwright");
+  if (process.platform === "win32") {
+    return join(env.LOCALAPPDATA || join(homedir(), "AppData", "Local"), "ms-playwright");
+  }
+  return join(env.XDG_CACHE_HOME || join(homedir(), ".cache"), "ms-playwright");
+}
+
+const PLAYWRIGHT_CHROMIUM_RELATIVE: readonly (readonly string[])[] = [
+  ["chrome-linux64", "chrome"],
+  ["chrome-linux", "chrome"],
+  [
+    "chrome-mac-arm64",
+    "Google Chrome for Testing.app",
+    "Contents",
+    "MacOS",
+    "Google Chrome for Testing",
+  ],
+  [
+    "chrome-mac-x64",
+    "Google Chrome for Testing.app",
+    "Contents",
+    "MacOS",
+    "Google Chrome for Testing",
+  ],
+  ["chrome-mac", "Chromium"],
+  ["chrome-win64", "chrome.exe"],
+  ["chrome-win", "chrome.exe"],
+];
+
+export function resolvePlaywrightChromiumExecutable(
+  env: NodeJS.ProcessEnv = process.env,
+): string | null {
+  const dir = playwrightBrowsersDirectory(env);
+  if (dir === null || !existsSync(dir)) return null;
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return null;
+  }
+  const chromiumDirs = names
+    .filter((name) => /^chromium-\d+$/.test(name))
+    .sort((a, b) => Number(b.slice("chromium-".length)) - Number(a.slice("chromium-".length)));
+  for (const name of chromiumDirs) {
+    for (const rel of PLAYWRIGHT_CHROMIUM_RELATIVE) {
+      const candidate = join(dir, name, ...rel);
+      if (existsSync(candidate)) return candidate;
+    }
+  }
+  return null;
+}
+
+export function resolveSelfLaunchBinary(
+  channel: string | null,
+  bundledFallback: () => string,
+): string | null {
+  const fromChannel = resolveChannelBinary(channel);
+  if (fromChannel !== null) return fromChannel;
+  if (channel !== null) return null;
+  return resolvePlaywrightChromiumExecutable() ?? bundledFallback();
+}
+
+function posixShSingleQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function pathIsExecutable(path: string): boolean {
+  try {
+    accessSync(path, fsConstants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function packagedChromeScopeLauncherPath(): string {
+  return fileURLToPath(new URL("../../assets/chrome-scope-launcher", import.meta.url));
+}
+
+// Playwright's executablePath must be +x. pnpm pack stores this asset as 0644,
+// so exec the packaged script through /bin/sh from a wrapper we chmod ourselves.
+export function chromeScopeLauncherExecutable(
+  source = packagedChromeScopeLauncherPath(),
+): string {
+  if (pathIsExecutable(source)) return source;
+  const dir = mkdtempSync(join(tmpdir(), "ts-chrome-scope-"));
+  const dest = join(dir, "chrome-scope-launcher");
+  writeFileSync(
+    dest,
+    `#!/bin/sh\nexec /bin/sh ${posixShSingleQuote(source)} "$@"\n`,
+    { mode: 0o755 },
+  );
+  chmodSync(dest, 0o755);
+  return dest;
 }
 
 // Whether to launch Chrome ourselves and attach over CDP, instead of
