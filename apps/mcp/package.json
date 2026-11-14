@@ -87,10 +87,6 @@
     "open": "^10.1.0",
     "ora": "^8.1.1",
     "patchright": "^1.60.2",
-    "playwright": "^1.59.0",
-    "playwright-extra": "^4.3.6",
-    "puppeteer-extra-plugin-stealth": "^2.11.2",
-    "rebrowser-playwright-core": "^1.52.0",
     "sharp": "^0.34.5",
     "smol-toml": "^1.6.1",
     "tldts": "^7.0.30",
@@ -105,6 +101,7 @@
     "@types/ws": "^8.18.1",
     "@vitest/coverage-v8": "^2.1.8",
     "@vouchflow/web": "0.3.1",
+    "playwright": "^1.59.0",
     "tsx": "^4.7.0",
     "typescript": "^5.7.2",
     "vitest": "^2.1.8"
