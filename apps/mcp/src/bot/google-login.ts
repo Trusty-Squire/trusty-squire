@@ -15,6 +15,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { copyFile, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
+import boxen from "boxen";
 import chalk from "chalk";
 import {
   CHROME_PROFILE_DIR,
@@ -919,12 +920,30 @@ function styleCeremonyUrl(url: string): string {
 
 function ceremonyLiveViewUrl(shareUrl: string, viewCode: string | null): string {
   const named = namedTunnelConfig();
-  if (named === null || viewCode === null) return shareUrl;
+  if (named === null) return shareUrl;
+  if (viewCode === null) {
+    throw new Error(
+      `the broker did not serve the live view on ${named.hostname}; restart the broker service so it picks up TS_LOGIN_PUBLIC_HOSTNAME`,
+    );
+  }
   return `https://${named.hostname}/#p=${viewCode}`;
 }
 
 function printCeremonyLiveViewLink(shareUrl: string): void {
-  console.error(`\n${styleCeremonyUrl(shareUrl)}\n`);
+  const width = Math.max(40, Math.min((process.stdout.columns ?? 80) - 2, 78));
+  const body = `Open this on any device, any network:\n\n  ${styleCeremonyUrl(shareUrl)}`;
+  console.error(
+    "\n" +
+      boxen(body, {
+        title: "Sign in to Trusty Squire",
+        titleAlignment: "left",
+        padding: { top: 0, bottom: 0, left: 1, right: 1 },
+        borderStyle: "single",
+        borderColor: "#cf3a52",
+        width,
+      }) +
+      "\n",
+  );
 }
 
 function ceremonyTabAlreadyVisible(

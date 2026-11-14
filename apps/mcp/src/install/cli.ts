@@ -42,7 +42,7 @@ import {
   type AgentDefinition,
   type AgentTarget,
 } from "./agents.js";
-import { detectAsn, type AsnInfo } from "../bot/index.js";
+import { detectAsn } from "../bot/index.js";
 import {
   detectProviderSessionsFromProfile,
   confirmLiveGoogleProviderSnapshot,
@@ -913,12 +913,7 @@ async function runConnectInstall(
   // Detect egress class so the asn rides along in the install payload
   // (API uses it to correlate captcha failures with network class).
   // Best-effort: a failure returns null and the install continues.
-  const asn = await ui.withSpinner({
-    start: "Detecting network",
-    done: "Network detected",
-    fail: () => "Network detection failed (continuing)",
-    task: () => detectAsn(),
-  });
+  const asn = await detectAsn().catch(() => null);
 
   // The machine token is the bot-internal credential the operator driver
   // uses for the LLM proxy and the operator inbox-OTP service. It
@@ -930,13 +925,6 @@ async function runConnectInstall(
     done: "Machine token issued",
     task: () => issueMachineToken(args.apiBase, fetch, asn ?? undefined),
   });
-
-  // Warn datacenter users explicitly. The whole captcha-bypass story
-  // depends on a residential egress IP — Hetzner / AWS / Codespaces
-  // get rejected by reCAPTCHA v2 regardless of fingerprint quality.
-  if (asn !== null) {
-    printAsnWarning(asn);
-  }
 
   // Browser confirm: bind this machine in the bot's real Chrome profile.
   // The user signs into trustysquire from inside the bot's persistent
@@ -1770,41 +1758,12 @@ async function pollForClaim(
   return null;
 }
 
-// Print a class-appropriate message about the network we detected.
-// Datacenter gets a clear warning + link; residential gets a brief
-// confirmation; unknown gets a heads-up. All to stderr.
-function printAsnWarning(asn: AsnInfo): void {
-  const orgDisplay = asn.org ?? "(unknown ASN)";
-  switch (asn.class) {
-    case "datacenter":
-      ui.panel(
-        `Detected network: ${ui.code(orgDisplay)}\n\n` +
-          `This looks like a datacenter / cloud network (Codespaces, AWS, ` +
-          `Hetzner, etc.). Some signups — especially those gated by ` +
-          `reCAPTCHA v2 — are likely to be blocked because anti-bot scoring ` +
-          `weighs network reputation heavily.\n\n` +
-          `For best results: run Trusty Squire from a laptop/desktop on a ` +
-          `home or office network. Cloud dev environments can still provision ` +
-          `services that don't gate signup with reCAPTCHA (Resend, IPInfo, ` +
-          `etc.), but Postmark/MailerSend and similar will likely fail.`,
-        { title: "⚠  Datacenter network", color: "yellow" },
-      );
-      return;
-    case "residential":
-      ui.success(`Detected network: ${orgDisplay} (residential — captchas should pass cleanly)`);
-      return;
-    case "unknown":
-      ui.info(`Detected network: ${orgDisplay} (couldn't classify — proceed and we'll see)`);
-      return;
-  }
-}
 
 export {
   connect,
   logout,
   parseArgs,
   pollForClaim,
-  printAsnWarning,
   resolveCopiedNpxServerLaunch,
   resolveServerLaunch,
 };
