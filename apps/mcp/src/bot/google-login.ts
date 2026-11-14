@@ -913,7 +913,14 @@ function styleCeremonyUrl(url: string): string {
 
 function ceremonyLiveViewUrl(shareUrl: string): string {
   const named = namedTunnelConfig();
-  return named !== null ? `https://${named.hostname}/` : shareUrl;
+  if (named === null) return shareUrl;
+  try {
+    const path = new URL(shareUrl).pathname;
+    if (!path.startsWith("/s/") || path === "/s/" || path === "/s") return shareUrl;
+    return `https://${named.hostname}${path.endsWith("/") ? path : `${path}/`}`;
+  } catch {
+    return shareUrl;
+  }
 }
 
 function printCeremonyLiveViewLink(shareUrl: string): void {
@@ -1119,7 +1126,8 @@ export async function runCeremonyInSharedBroker(opts: RunInBotChromeOpts): Promi
     // machine with a screen already sees the tab. Print one live-view URL
     // before waiting on Finish; never print the install URL. A named tunnel
     // (TS_LOGIN_PUBLIC_HOSTNAME / TS_LOGIN_LOCAL_PORT) is that short hostname
-    // root. A failed share stops with the cause and no fallback link.
+    // plus the share's access secret; the hostname root does not open the view.
+    // A failed share stops with the cause and no fallback link.
     if (visibility.visible) {
       opts.onBrowserPlacement?.({ kind: "host_screen" }, null);
       console.error(

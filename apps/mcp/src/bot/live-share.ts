@@ -33,30 +33,12 @@ type ShareGateway = {
   tunnel: Tunnel;
   tunnelFactory: TunnelFactory;
   shares: Map<string, LiveShare>;
-  rootShare?: LiveShare;
 };
 let gatewayStartup: Promise<ShareGateway> | null = null;
 
-function isNamedTunnelRootPath(url: string): boolean {
-  return url === "/" || url.startsWith("/?") || url === "/stream" || url.startsWith("/stream?");
-}
-
 function shareForRequest(gateway: ShareGateway, request: IncomingMessage): LiveShare | undefined {
-  const url = request.url ?? "";
-  const path = url.match(/^\/s\/[A-Za-z0-9_-]{43}\//)?.[0];
-  if (path !== undefined) return gateway.shares.get(path);
-  return isNamedTunnelRootPath(url) ? gateway.rootShare : undefined;
-}
-
-function aliasNamedTunnelRoot(request: IncomingMessage, share: LiveShare): void {
-  const url = request.url ?? "";
-  if (url === "/" || url.startsWith("/?")) {
-    request.url = share.path;
-    return;
-  }
-  if (url === "/stream" || url.startsWith("/stream?")) {
-    request.url = `${share.path}stream${url.slice("/stream".length)}`;
-  }
+  const path = (request.url ?? "").match(/^\/s\/[A-Za-z0-9_-]{43}\//)?.[0];
+  return path === undefined ? undefined : gateway.shares.get(path);
 }
 
 async function createShareGateway(tunnelFactory: TunnelFactory): Promise<ShareGateway> {
@@ -73,7 +55,6 @@ async function createShareGateway(tunnelFactory: TunnelFactory): Promise<ShareGa
       response.writeHead(404).end();
       return;
     }
-    aliasNamedTunnelRoot(request, share);
     share.server.emit("request", request, response);
   });
   gateway.server = server;
@@ -83,7 +64,6 @@ async function createShareGateway(tunnelFactory: TunnelFactory): Promise<ShareGa
       socket.end("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n");
       return;
     }
-    aliasNamedTunnelRoot(request, share);
     share.server.emit("upgrade", request, socket, head);
   });
   const named = tunnelFactory === startQuickViewTunnel ? namedTunnelConfig() : null;
@@ -291,7 +271,6 @@ export class LiveShare {
           throw new Error("operate session ended during share");
         this.gateway = gateway;
         gateway.shares.set(this.path, this);
-        gateway.rootShare = this;
         this.publicUrl = `${gateway.tunnel.url.replace(/\/$/, "")}${this.path}`;
         return this.publicUrl;
       }
@@ -785,7 +764,6 @@ export class LiveShare {
       this.release(viewer);
     }
     this.webSockets.close();
-    if (this.gateway?.rootShare === this) delete this.gateway.rootShare;
     this.gateway?.shares.delete(this.path);
     this.gateway = null;
     if (this.server.listening) this.server.close();

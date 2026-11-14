@@ -46,7 +46,7 @@ vi.mock("../../session-guard.js", () => ({
 const require = createRequire(import.meta.url);
 const CONFIRM_URL = "https://trustysquire.ai/install/confirm?install=fixture";
 const SHARE_URL = "https://share.example.test/s/ceremony-fixture/";
-const NAMED_VIEW_URL = "https://vnc.trustysquire.ai/";
+const NAMED_VIEW_URL = "https://vnc.trustysquire.ai/s/ceremony-fixture/";
 
 function countOccurrences(haystack: string, needle: string): number {
   let count = 0;
