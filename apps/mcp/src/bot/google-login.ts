@@ -15,7 +15,6 @@ import { readFileSync, readdirSync } from "node:fs";
 import { copyFile, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
-import boxen from "boxen";
 import chalk from "chalk";
 import {
   CHROME_PROFILE_DIR,
@@ -52,6 +51,7 @@ import {
   createRemoteLoginRig,
   createRemoteLoginVncSecrets,
   exposeRemoteLoginDisplay,
+  namedTunnelConfig,
   registerRemoteLoginRigCleanup,
   teardownRemoteLoginRig,
   type RemoteLoginRig,
@@ -911,21 +911,13 @@ function styleCeremonyUrl(url: string): string {
     : url;
 }
 
-function printCeremonyLiveShareBanner(shareUrl: string): void {
-  const width = Math.max(40, Math.min((process.stdout.columns ?? 80) - 2, 78));
-  const body = `Open this on your phone to finish sign-in:\n\n  ${styleCeremonyUrl(shareUrl)}`;
-  console.error(
-    "\n" +
-      boxen(body, {
-        title: "Sign in to Trusty Squire",
-        titleAlignment: "left",
-        padding: { top: 0, bottom: 0, left: 1, right: 1 },
-        borderStyle: "single",
-        borderColor: "#cf3a52",
-        width,
-      }) +
-      "\n",
-  );
+function ceremonyLiveViewUrl(shareUrl: string): string {
+  const named = namedTunnelConfig();
+  return named !== null ? `https://${named.hostname}/` : shareUrl;
+}
+
+function printCeremonyLiveViewLink(shareUrl: string): void {
+  console.error(`\n${styleCeremonyUrl(shareUrl)}\n`);
 }
 
 function ceremonyTabAlreadyVisible(
@@ -1124,10 +1116,10 @@ export async function runCeremonyInSharedBroker(opts: RunInBotChromeOpts): Promi
     // Headless / SSH / TTY: the person running connect cannot see the shared
     // browser. Reuse operate_share (the same live view operate sessions already
     // hand to a phone) instead of attaching noVNC to the whole display. A
-    // machine with a screen already sees the tab. Print the live-view URL
-    // before waiting on Finish so a phone can open it. The install page is
-    // already loaded there; never print that URL. A failed share stops with
-    // the cause and no fallback link.
+    // machine with a screen already sees the tab. Print one live-view URL
+    // before waiting on Finish; never print the install URL. A named tunnel
+    // (TS_LOGIN_PUBLIC_HOSTNAME / TS_LOGIN_LOCAL_PORT) is that short hostname
+    // root. A failed share stops with the cause and no fallback link.
     if (visibility.visible) {
       opts.onBrowserPlacement?.({ kind: "host_screen" }, null);
       console.error(
@@ -1140,7 +1132,6 @@ export async function runCeremonyInSharedBroker(opts: RunInBotChromeOpts): Promi
       });
       if (warning !== null) console.error(`${warning}\n`);
     } else {
-      console.error(`[login] Creating a phone-openable live view of the shared browser…`);
       let shareUrl: string;
       try {
         const shared = await operateCommand(
@@ -1152,7 +1143,7 @@ export async function runCeremonyInSharedBroker(opts: RunInBotChromeOpts): Promi
         );
         const url = liveShareUrlFromCommand(shared);
         if (url === null) throw new Error("broker did not return a live-share URL");
-        shareUrl = url;
+        shareUrl = ceremonyLiveViewUrl(url);
       } catch (err) {
         const reason = err instanceof Error ? err.message : String(err);
         opts.onBrowserPlacement?.({ kind: "unreachable", reason }, null);
@@ -1163,14 +1154,9 @@ export async function runCeremonyInSharedBroker(opts: RunInBotChromeOpts): Promi
             `\`npx @trusty-squire/mcp connect\` once the broker's live-share tunnel is working.\n`,
         );
       }
-      printCeremonyLiveShareBanner(shareUrl);
+      printCeremonyLiveViewLink(shareUrl);
       opts.onBrowserPlacement?.({ kind: "virtual", url: shareUrl }, null);
     }
-    console.error(
-      chalk.dim(
-        `[login] Waiting for you to Finish sign-in. This wait ends when you click Finish, or when the sign-in link expires.`,
-      ),
-    );
     // Check the polled claim and loopback Finish callback before asking the
     // broker for a DOM observation. A slow or unavailable observation must not
     // hold up a Finish callback already received by this process. If the

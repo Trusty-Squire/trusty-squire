@@ -347,8 +347,10 @@ in `apps/mcp/src/bot/display-env.ts`). Every other case — the broker's Xvfb,
 the host's screen seen from a screenless connect, or a holder with no
 discoverable display — hands the ceremony tab to the owner through
 `operate_share`, the same live view operate sessions already use. Connect
-prints that live-share URL before it waits on Finish. The share shows the
-ceremony tab only; see
+prints that live-share URL before it waits on Finish. When
+`TS_LOGIN_PUBLIC_HOSTNAME` and `TS_LOGIN_LOCAL_PORT` are set, the live view
+listens on that port and the printed URL is `https://<hostname>/`. The share
+shows the ceremony tab only; see
 [Operate live share](operate-live-share.md). A failed share stops the ceremony
 immediately with the cause and no URL rather than waiting out the deadline.
 Every wait prints a status line and is bounded. Cleanup closes the ceremony tab (which

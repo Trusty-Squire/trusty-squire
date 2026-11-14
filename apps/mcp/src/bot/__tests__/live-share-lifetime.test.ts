@@ -212,4 +212,28 @@ describe("live-share session lifetime", () => {
     active.closing = true;
     await expect(shareOperateSession(active, localTunnel)).rejects.toThrow("closed");
   });
+
+  it("serves a named-tunnel share at the hostname root", async () => {
+    const probe = createServer();
+    await new Promise<void>((resolve) => probe.listen(0, "127.0.0.1", resolve));
+    const port = (probe.address() as AddressInfo).port;
+    await new Promise<void>((resolve) => probe.close(() => resolve()));
+    vi.stubEnv("TS_LOGIN_PUBLIC_HOSTNAME", "vnc.example.test");
+    vi.stubEnv("TS_LOGIN_LOCAL_PORT", String(port));
+    const active = startSession();
+    vi.useRealTimers();
+    try {
+      await warmOperateShareGateway();
+      const shared = await shareOperateSession(active);
+      expect(new URL(shared.url).origin).toBe("https://vnc.example.test");
+      const root = await fetch(`http://127.0.0.1:${port}/`);
+      expect(root.status).toBe(200);
+      expect(await root.text()).toContain("Live browser");
+      const tokenPath = new URL(shared.url).pathname;
+      const token = await fetch(`http://127.0.0.1:${port}${tokenPath}`);
+      expect(token.status).toBe(200);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
 });

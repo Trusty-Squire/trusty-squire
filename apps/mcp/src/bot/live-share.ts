@@ -7,7 +7,11 @@ import type { Duplex } from "node:stream";
 import type { CDPSession, Frame, Page } from "playwright";
 import { WebSocket, WebSocketServer } from "ws";
 import type { Session } from "./session/model.js";
-import { startQuickViewTunnel } from "./remote-login-display.js";
+import {
+  loginPortAvailable,
+  namedTunnelConfig,
+  startQuickViewTunnel,
+} from "./remote-login-display.js";
 
 const SHARE_LIFETIME_MS = 10 * 60_000;
 const MAX_INPUT_BYTES = 4_096;
@@ -29,12 +33,30 @@ type ShareGateway = {
   tunnel: Tunnel;
   tunnelFactory: TunnelFactory;
   shares: Map<string, LiveShare>;
+  rootShare?: LiveShare;
 };
 let gatewayStartup: Promise<ShareGateway> | null = null;
 
+function isNamedTunnelRootPath(url: string): boolean {
+  return url === "/" || url.startsWith("/?") || url === "/stream" || url.startsWith("/stream?");
+}
+
 function shareForRequest(gateway: ShareGateway, request: IncomingMessage): LiveShare | undefined {
-  const path = request.url?.match(/^\/s\/[A-Za-z0-9_-]{43}\//)?.[0];
-  return path === undefined ? undefined : gateway.shares.get(path);
+  const url = request.url ?? "";
+  const path = url.match(/^\/s\/[A-Za-z0-9_-]{43}\//)?.[0];
+  if (path !== undefined) return gateway.shares.get(path);
+  return isNamedTunnelRootPath(url) ? gateway.rootShare : undefined;
+}
+
+function aliasNamedTunnelRoot(request: IncomingMessage, share: LiveShare): void {
+  const url = request.url ?? "";
+  if (url === "/" || url.startsWith("/?")) {
+    request.url = share.path;
+    return;
+  }
+  if (url === "/stream" || url.startsWith("/stream?")) {
+    request.url = `${share.path}stream${url.slice("/stream".length)}`;
+  }
 }
 
 async function createShareGateway(tunnelFactory: TunnelFactory): Promise<ShareGateway> {
@@ -51,6 +73,7 @@ async function createShareGateway(tunnelFactory: TunnelFactory): Promise<ShareGa
       response.writeHead(404).end();
       return;
     }
+    aliasNamedTunnelRoot(request, share);
     share.server.emit("request", request, response);
   });
   gateway.server = server;
@@ -60,16 +83,38 @@ async function createShareGateway(tunnelFactory: TunnelFactory): Promise<ShareGa
       socket.end("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n");
       return;
     }
+    aliasNamedTunnelRoot(request, share);
     share.server.emit("upgrade", request, socket, head);
   });
+  const named = tunnelFactory === startQuickViewTunnel ? namedTunnelConfig() : null;
   try {
+    if (named !== null && !(await loginPortAvailable(named.port))) {
+      throw new Error(
+        `login live view needs 127.0.0.1:${named.port} (TS_LOGIN_LOCAL_PORT) free`,
+      );
+    }
     await new Promise<void>((resolve, reject) => {
       server.once("error", reject);
-      server.listen(0, "127.0.0.1", () => {
+      server.listen(named?.port ?? 0, "127.0.0.1", () => {
         server.removeListener("error", reject);
         resolve();
       });
     });
+    if (named !== null) {
+      gateway.tunnel = {
+        url: `https://${named.hostname}`,
+        close: async () => undefined,
+        alive: () => true,
+      };
+      const response = await fetch(`http://127.0.0.1:${named.port}${readyPath}`, {
+        redirect: "error",
+      });
+      await response.body?.cancel();
+      if (response.status !== 204) {
+        throw new Error(`share gateway returned ${response.status}`);
+      }
+      return gateway;
+    }
     const tunnel = await tunnelFactory((server.address() as AddressInfo).port);
     gateway.tunnel = tunnel;
     // A printed quick-tunnel URL precedes DNS and edge-route readiness. Prove
@@ -246,6 +291,7 @@ export class LiveShare {
           throw new Error("operate session ended during share");
         this.gateway = gateway;
         gateway.shares.set(this.path, this);
+        gateway.rootShare = this;
         this.publicUrl = `${gateway.tunnel.url.replace(/\/$/, "")}${this.path}`;
         return this.publicUrl;
       }
@@ -739,6 +785,7 @@ export class LiveShare {
       this.release(viewer);
     }
     this.webSockets.close();
+    if (this.gateway?.rootShare === this) this.gateway.rootShare = undefined;
     this.gateway?.shares.delete(this.path);
     this.gateway = null;
     if (this.server.listening) this.server.close();

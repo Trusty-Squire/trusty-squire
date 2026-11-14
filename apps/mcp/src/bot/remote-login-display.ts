@@ -312,7 +312,7 @@ export function remoteLoginInstallHint(missing: readonly string[]): string {
   return lines.join("\n");
 }
 
-function namedTunnelConfig(): { hostname: string; port: number } | null {
+export function namedTunnelConfig(): { hostname: string; port: number } | null {
   const hostname = process.env.TS_LOGIN_PUBLIC_HOSTNAME?.trim();
   const rawPort = process.env.TS_LOGIN_LOCAL_PORT?.trim();
   if (hostname === undefined || hostname === "" || rawPort === undefined || rawPort === "") {
