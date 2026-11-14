@@ -362,7 +362,8 @@ jobs:
       # breakage fails the PR before merge. The real-browser tests (tests that
       # launch Chromium/Chrome — see vitest.tiers.ts REAL_BROWSER_FILES) do NOT
       # run on PRs: they are slow and flaky. They run post-merge in
-      # mcp-slow-tests.yml and gate a stable/`latest` release in release.yml.
+      # mcp-slow-tests.yml; a stable/`latest` promotion in release.yml requires
+      # that workflow run to have succeeded for the promoted SHA.
       # Only genuinely slow non-behavioral files (corpus evals, packaging
       # smoke, replay harness) defer to the post-merge/nightly workflow in
       # mcp-slow-tests.yml.

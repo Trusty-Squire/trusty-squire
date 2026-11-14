@@ -10,9 +10,9 @@ name: Release mcp
 #                        The operator supplies the stable X.Y.Z; it must equal
 #                        the package.json version with its prerelease suffix
 #                        stripped. Publishes the `latest` tag.
-#                        Test gate: fast tier + the FULL real-browser suite
-#                        (tests that launch Chromium/Chrome — see
-#                        apps/mcp/vitest.tiers.ts REAL_BROWSER_FILES).
+#                        Test gate: fast tier + a check that mcp-slow-tests.yml
+#                        already ran test:real-browser for this exact SHA and
+#                        concluded success. Promotion does not re-run the suite.
 #
 # Source of truth for an rc is apps/mcp/package.json `version`. A stable
 # promotion publishes the same tree under the operator-supplied stable version
@@ -49,11 +49,15 @@ concurrency:
 permissions:
   contents: write # create tags + releases
   id-token: write # npm provenance (sigstore)
+  actions: read # list mcp-slow-tests.yml runs for the stable-promotion SHA check
 
 jobs:
   # ---------------------------------------------------------------------------
-  # Gate: re-run lint + typecheck + test inside the same job graph as publish.
-  # We don't trust an out-of-band ci.yml result — explicit gate, explicit failure.
+  # Gate: re-run test:fast inside the same job graph as publish.
+  # Real-browser is the exception: a stable promotion checks that
+  # mcp-slow-tests.yml already succeeded for this SHA rather than spending
+  # ~25min re-running test:real-browser. Missing / in-progress / failed
+  # stops the promotion; this job never runs that suite itself.
   # ---------------------------------------------------------------------------
   verify:
     runs-on: ubuntu-24.04
@@ -114,16 +118,16 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "is_promotion=$IS_PROMOTION" >> "$GITHUB_OUTPUT"
           # Early semver prerelease detection (anything after a `-`). Drives
-          # which test tiers gate this run below: the real-browser tier runs
-          # ONLY for a stable/`latest` release. The read step recomputes the
-          # same predicate for the publish decision.
+          # which extra gate runs below: a stable/`latest` promotion requires
+          # a successful mcp-slow-tests.yml run for this SHA. The read step
+          # recomputes the same predicate for the publish decision.
           if [[ "$VERSION" == *"-"* ]]; then IS_PRE=true; else IS_PRE=false; fi
           echo "is_prerelease=$IS_PRE" >> "$GITHUB_OUTPUT"
           echo "Resolved release version: $VERSION (promotion=$IS_PROMOTION, prerelease=$IS_PRE)"
 
       # Most matching pushes are lockfile/workflow edits or retries of a version
-      # that is already live. Decide before installs, builds, or Chromium setup;
-      # the final read step still runs and supplies the normal publish outputs.
+      # that is already live. Decide before installs or builds; the final read
+      # step still runs and supplies the normal publish outputs.
       - name: Fast-path already released versions
         id: fast_path
         env:
@@ -168,22 +172,6 @@ jobs:
         # Explicitly list mcp's workspace deps (keep in sync with apps/mcp/package.json).
         run: pnpm --filter '@trusty-squire/skill-schema' --filter '@trusty-squire/recipe-schema' --filter '@trusty-squire/sdk' build
 
-      # The stable (`latest`) release gate includes the real-browser tier —
-      # tests that launch Chromium/Chrome (see vitest.tiers.ts
-      # REAL_BROWSER_FILES). Without a browser install the tier fails with
-      # "Executable doesn't exist" and publish is skipped (bit 1.1.5; the rc
-      # publish only survived on a warm runner cache). Prereleases skip both
-      # this step and the tier below — the fast non-browser tier is their
-      # entire test gate.
-      - name: Install Chromium for browser-backed MCP tests
-        if: steps.fast_path.outputs.already_released != 'true' && steps.resolve.outputs.is_prerelease == 'false'
-        run: pnpm --filter '@trusty-squire/mcp' exec playwright install --with-deps chromium
-      # Patchright pins its own Chromium revision, separate from Playwright's.
-      # The headed operator-upload cases launch through Patchright.
-      - name: Install Patchright Chromium for headed MCP tests
-        if: steps.fast_path.outputs.already_released != 'true' && steps.resolve.outputs.is_prerelease == 'false'
-        run: pnpm --filter '@trusty-squire/mcp' exec patchright install chromium
-
       # NOTE: lint + typecheck are intentionally NOT gating this pipeline yet.
       # The repo has pre-existing lint/typecheck debt (see ci.yml signal).
       # Tests are the real safety net — once cleanup lands, re-enable the
@@ -202,14 +190,16 @@ jobs:
           MCP_SKIP_PACK_SMOKE: "1"
         run: pnpm --filter @trusty-squire/mcp test:fast
 
-      # Real-browser tier: every test that launches Chromium/Chrome. Slow and
-      # flaky, so it gates ONLY a stable/`latest` release. A prerelease (rc →
-      # `next`) is gated by the fast non-browser tier alone above.
-      - name: Test (MCP real-browser tier, stable release only)
+      # Real-browser gate for a stable/`latest` promotion: reuse the post-merge
+      # mcp-slow-tests.yml run for this exact SHA (that workflow's push path
+      # runs `pnpm --filter @trusty-squire/mcp test:real-browser`). Do not
+      # re-run the suite here. A prerelease (rc → `next`) is gated by the
+      # fast non-browser tier alone above.
+      - name: Require MCP slow tests success for this SHA (stable promotion only)
         if: steps.fast_path.outputs.already_released != 'true' && steps.resolve.outputs.is_prerelease == 'false'
         env:
-          MCP_SKIP_PACK_SMOKE: "1"
-        run: pnpm --filter @trusty-squire/mcp test:real-browser
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: scripts/require-mcp-slow-tests-run.sh "${{ github.sha }}" "${{ github.repository }}"
 
       # Preflight: refuse to publish mcp unless the exact skill-schema version
       # its tarball will use exists on npm and exports every runtime symbol MCP

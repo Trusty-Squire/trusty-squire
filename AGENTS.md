@@ -528,7 +528,8 @@ never select or shard individual test names.
   Chromium/Chrome (`REAL_BROWSER_FILES`, incl. the browser halves of
   `REQUIRED_BEHAVIOR_FILES`/`REQUIRED_PAYMENT_SAFETY_FILES`). Runs post-merge
   in `.github/workflows/mcp-slow-tests.yml` and gates ONLY a stable/`latest`
-  release (release.yml dispatch; skipped for rc/`next` prereleases and PRs).
+  release (release.yml dispatch checks that workflow run for the promoted SHA
+  succeeded; skipped for rc/`next` prereleases and PRs).
   Never re-add these files to a PR or prerelease gate — they are the slow,
   flaky tail that made rc cuts painful.
 - **slow (`test:slow`)** — genuinely slow NON-behavioral files only (corpus

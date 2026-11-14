@@ -13,7 +13,7 @@
 # (~119s) when it cannot, session extras when a lifecycle hub changed, and
 # the full pass only for the browser / broker / vitest / lockfile cone.
 # Nightly / post-merge full pass and `test:real-browser` stay on
-# mcp-slow-tests.yml and stable/`latest` release gates.
+# mcp-slow-tests.yml. A stable/`latest` promotion reuses that run.
 commands:
   test: |
     set -eu

@@ -305,7 +305,10 @@ Stable is no longer a branch — it is an explicit promotion of `main` HEAD.
      burning a version number on `latest`)
    - refuse a dispatch from any branch other than `main`
    - no-op if tag `v<version>` exists or npm already serves that version
-   - run the same verify gate as an rc, rewrite `apps/mcp/package.json` to the
+   - require a successful MCP slow tests run for this exact SHA (the post-merge
+     `test:real-browser` gate); refuse if that run is missing, still running,
+     or failed — the promotion does not re-run the suite
+   - run the same fast-tier verify as an rc, rewrite `apps/mcp/package.json` to the
      stable version **in the runner only**, publish with provenance to
      `latest`, verify the dist-tag and tarball, and cut GitHub release
      `v<version>` targeting `main` HEAD
