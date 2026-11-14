@@ -37,6 +37,7 @@ export async function runRelay(): Promise<void> {
   let stopped = false;
   let connectedOnce = false;
   let ready = false;
+  let connecting = false;
   let allowOnDemandStart = false;
   const pending = new Map<string, string | number>();
   const queued: string[] = [];
@@ -58,13 +59,34 @@ export async function runRelay(): Promise<void> {
     delayMs = Math.min(delayMs * 2, 1_000);
   };
   const connect = () => {
-    if (stopped) return;
+    if (stopped || connecting || socket) return;
+    connecting = true;
+    if (retry) {
+      clearTimeout(retry);
+      retry = undefined;
+    }
+    if (!connectedOnce && startupTimer === undefined) {
+      startupTimer = setTimeout(
+        () =>
+          failStartup(
+            new Error(
+              "Trusty Squire broker not running: initial socket unavailable after 10 seconds. Start or repair the broker user service, or re-run connect to install it",
+            ),
+          ),
+        10_000,
+      );
+    }
     void ensureSharedMcp(undefined, controller.signal, { onDemand: allowOnDemandStart })
       .then(() => {
-        if (stopped) return;
+        if (stopped) {
+          connecting = false;
+          return;
+        }
         attach(createConnection(sharedMcpSocketPath()));
+        connecting = false;
       })
       .catch((error: unknown) => {
+        connecting = false;
         if (stopped) return;
         const message = error instanceof Error ? error.message : String(error);
         process.stderr.write(`[trusty-squire] relay: ${message}\n`);
@@ -77,6 +99,7 @@ export async function runRelay(): Promise<void> {
       peer.destroy();
       return;
     }
+    if (socket !== undefined && socket !== peer) socket.destroy();
     socket = peer;
     output = Buffer.alloc(0);
     peer.once("connect", () => {
@@ -141,9 +164,8 @@ export async function runRelay(): Promise<void> {
       if (frame.method === "notifications/initialized") initialized = line;
       queued.push(line);
       if (!ready) {
-        const startNow = !allowOnDemandStart;
         allowOnDemandStart = true;
-        if (startNow) connect();
+        connect();
       }
       if (ready) flush();
     });
@@ -173,21 +195,11 @@ export async function runRelay(): Promise<void> {
       }
       close(error);
     };
-    startupTimer = setTimeout(
-      () =>
-        failStartup(
-          new Error(
-            "Trusty Squire broker not running: initial socket unavailable after 10 seconds. Start or repair the broker user service, or re-run connect to install it",
-          ),
-        ),
-      10_000,
-    );
     process.stdin.once("end", () => close());
     process.stdin.once("close", () => close());
     process.once("SIGHUP", () => close());
     process.once("SIGTERM", () => close());
     process.once("SIGINT", () => close());
     process.stdin.resume();
-    connect();
   });
 }
