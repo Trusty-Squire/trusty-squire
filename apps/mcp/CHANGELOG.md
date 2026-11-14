@@ -3,8 +3,9 @@
 ## Unreleased
 
 - Headless `connect` prints one named-tunnel live-view URL
-  (`https://<TS_LOGIN_PUBLIC_HOSTNAME>/s/<token>/`). The hostname root does
-  not open the view. A failed live view stops with the cause and no fallback
+  (`https://<TS_LOGIN_PUBLIC_HOSTNAME>/#p=<8-char code>`). The hostname root
+  and wrong codes do not open the view. `operate_share` agent URLs stay
+  `/s/<token>/`. A failed live view stops with the cause and no fallback
   install URL.
 
 ## 1.1.40-rc.1 (2026-11-14)

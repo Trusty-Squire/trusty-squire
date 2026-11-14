@@ -8,6 +8,7 @@ import type { CDPSession, Frame, Page } from "playwright";
 import { WebSocket, WebSocketServer } from "ws";
 import type { Session } from "./session/model.js";
 import {
+  generateVncPassword,
   loginPortAvailable,
   namedTunnelConfig,
   startQuickViewTunnel,
@@ -24,30 +25,68 @@ type Tunnel = { url: string; close: () => Promise<void>; alive?: () => boolean }
 type TunnelFactory = (port: number) => Promise<Tunnel>;
 
 const shares = new WeakMap<Session, LiveShare>();
-type ShareDetails = { url: string; expires_at: string; control: "agent" | "human" };
+type ShareDetails = {
+  url: string;
+  expires_at: string;
+  control: "agent" | "human";
+  short_code?: string;
+};
 const pendingShares = new WeakMap<Session, Promise<ShareDetails>>();
 const agentTurn = new AsyncLocalStorage<LiveShare>();
+const namedViewGateHtml =
+  "<!doctype html><meta charset=\"utf-8\"><title></title><script>" +
+  "const m=/^#p=([A-Za-z0-9_-]{8})$/.exec(location.hash);" +
+  "if(m)location.replace(\"/p/\"+m[1]+\"/\");" +
+  "</script>";
 
 type ShareGateway = {
   server: Server;
   tunnel: Tunnel;
   tunnelFactory: TunnelFactory;
   shares: Map<string, LiveShare>;
+  shortCodes: Map<string, LiveShare>;
 };
 let gatewayStartup: Promise<ShareGateway> | null = null;
 
 function shareForRequest(gateway: ShareGateway, request: IncomingMessage): LiveShare | undefined {
-  const path = (request.url ?? "").match(/^\/s\/[A-Za-z0-9_-]{43}\//)?.[0];
-  return path === undefined ? undefined : gateway.shares.get(path);
+  const url = request.url ?? "";
+  const path = url.match(/^\/s\/[A-Za-z0-9_-]{43}\//)?.[0];
+  if (path !== undefined) return gateway.shares.get(path);
+  const short = url.match(/^\/p\/([A-Za-z0-9_-]{8})(?:\/|$)/);
+  return short === null ? undefined : gateway.shortCodes.get(short[1]);
+}
+
+function aliasShortViewPath(request: IncomingMessage, share: LiveShare): void {
+  const url = request.url ?? "";
+  const match = url.match(/^\/p\/[A-Za-z0-9_-]{8}(\/[^?]*)?(\?.*)?$/);
+  if (match === null) return;
+  const rest = match[1];
+  const query = match[2] ?? "";
+  const suffix = rest === undefined || rest === "/" ? "" : rest.replace(/^\//, "");
+  request.url = `${share.path}${suffix}${query}`;
+}
+
+function isNamedViewGate(url: string | undefined): boolean {
+  return url === "/" || (url !== undefined && url.startsWith("/?"));
 }
 
 async function createShareGateway(tunnelFactory: TunnelFactory): Promise<ShareGateway> {
   const shares = new Map<string, LiveShare>();
-  const gateway = { shares, tunnelFactory } as ShareGateway;
+  const shortCodes = new Map<string, LiveShare>();
+  const named = tunnelFactory === startQuickViewTunnel ? namedTunnelConfig() : null;
+  const gateway = { shares, shortCodes, tunnelFactory } as ShareGateway;
   const readyPath = `/ready/${randomBytes(32).toString("base64url")}`;
   const server = createServer((request, response: ServerResponse) => {
     if (request.method === "GET" && request.url === readyPath) {
       response.writeHead(204).end();
+      return;
+    }
+    if (named !== null && request.method === "GET" && isNamedViewGate(request.url)) {
+      response.writeHead(200, {
+        "Cache-Control": "no-store",
+        "Content-Type": "text/html; charset=utf-8",
+      });
+      response.end(namedViewGateHtml);
       return;
     }
     const share = shareForRequest(gateway, request);
@@ -55,6 +94,7 @@ async function createShareGateway(tunnelFactory: TunnelFactory): Promise<ShareGa
       response.writeHead(404).end();
       return;
     }
+    aliasShortViewPath(request, share);
     share.server.emit("request", request, response);
   });
   gateway.server = server;
@@ -64,9 +104,9 @@ async function createShareGateway(tunnelFactory: TunnelFactory): Promise<ShareGa
       socket.end("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n");
       return;
     }
+    aliasShortViewPath(request, share);
     share.server.emit("upgrade", request, socket, head);
   });
-  const named = tunnelFactory === startQuickViewTunnel ? namedTunnelConfig() : null;
   try {
     if (named !== null && !(await loginPortAvailable(named.port))) {
       throw new Error(
@@ -219,6 +259,7 @@ export class LiveShare {
   private frameHeight = 1;
   private inputTail: Promise<void> = Promise.resolve();
   private publicUrl: string | null = null;
+  private viewCode: string | undefined;
   private gateway: ShareGateway | null = null;
   private readonly pagePoll: NodeJS.Timeout;
   private pageUnavailable = false;
@@ -271,6 +312,12 @@ export class LiveShare {
           throw new Error("operate session ended during share");
         this.gateway = gateway;
         gateway.shares.set(this.path, this);
+        if (namedTunnelConfig() !== null) {
+          let code = generateVncPassword();
+          while (gateway.shortCodes.has(code)) code = generateVncPassword();
+          this.viewCode = code;
+          gateway.shortCodes.set(code, this);
+        }
         this.publicUrl = `${gateway.tunnel.url.replace(/\/$/, "")}${this.path}`;
         return this.publicUrl;
       }
@@ -302,6 +349,18 @@ export class LiveShare {
 
   get activeUrl(): string | null {
     return this.expired || this.gateway?.tunnel.alive?.() === false ? null : this.publicUrl;
+  }
+
+  toDetails(): ShareDetails | null {
+    const url = this.activeUrl;
+    if (url === null) return null;
+    const details: ShareDetails = {
+      url,
+      expires_at: new Date(this.expiresAt).toISOString(),
+      control: this.controlState,
+    };
+    if (this.viewCode !== undefined) details.short_code = this.viewCode;
+    return details;
   }
 
   /** The compatibility expiry rolls forward for the owning session's lifetime. */
@@ -764,6 +823,7 @@ export class LiveShare {
       this.release(viewer);
     }
     this.webSockets.close();
+    if (this.viewCode !== undefined) this.gateway?.shortCodes.delete(this.viewCode);
     this.gateway?.shares.delete(this.path);
     this.gateway = null;
     if (this.server.listening) this.server.close();
@@ -784,14 +844,11 @@ export async function shareOperateSession(
     if (page === null || page.isClosed() || session.closing)
       throw new Error("operate session is closed");
     const old = shares.get(session);
-    const existingUrl = old?.activeUrl;
-    if (old !== undefined && existingUrl !== null && existingUrl !== undefined) {
+    const existing = old?.toDetails();
+    if (old !== undefined && existing !== null) {
       old.renew();
-      return {
-        url: existingUrl,
-        expires_at: new Date(old.expiresAt).toISOString(),
-        control: old.controlState,
-      };
+      const renewed = old.toDetails();
+      if (renewed !== null) return renewed;
     }
     old?.stop();
     await old?.waitForInputToSettle();
@@ -800,12 +857,10 @@ export async function shareOperateSession(
     const share = new LiveShare(session, session.browser.page);
     shares.set(session, share);
     try {
-      const url = await share.start(tunnelFactory);
-      return {
-        url,
-        expires_at: new Date(share.expiresAt).toISOString(),
-        control: share.controlState,
-      };
+      await share.start(tunnelFactory);
+      const details = share.toDetails();
+      if (details === null) throw new Error("operate session ended during share");
+      return details;
     } catch (error) {
       if (shares.get(session) === share) shares.delete(session);
       throw error;

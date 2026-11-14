@@ -213,7 +213,7 @@ describe("live-share session lifetime", () => {
     await expect(shareOperateSession(active, localTunnel)).rejects.toThrow("closed");
   });
 
-  it("serves a named-tunnel share only at the token path", async () => {
+  it("keeps the agent named-tunnel URL on the token path and gates the short view code", async () => {
     const probe = createServer();
     await new Promise<void>((resolve) => probe.listen(0, "127.0.0.1", resolve));
     const port = (probe.address() as AddressInfo).port;
@@ -227,11 +227,19 @@ describe("live-share session lifetime", () => {
       const shared = await shareOperateSession(active);
       expect(new URL(shared.url).origin).toBe("https://vnc.example.test");
       expect(new URL(shared.url).pathname).toMatch(/^\/s\/[A-Za-z0-9_-]{43}\/$/);
+      expect(shared.url.includes("#p=")).toBe(false);
+      expect(shared.short_code).toMatch(/^[A-Za-z0-9_-]{8}$/);
       const root = await fetch(`http://127.0.0.1:${port}/`);
-      expect(root.status).toBe(404);
+      expect(root.status).toBe(200);
+      expect(await root.text()).not.toContain("Live browser");
       const token = await fetch(`http://127.0.0.1:${port}${new URL(shared.url).pathname}`);
       expect(token.status).toBe(200);
       expect(await token.text()).toContain("Live browser");
+      const gated = await fetch(`http://127.0.0.1:${port}/p/${shared.short_code}/`);
+      expect(gated.status).toBe(200);
+      expect(await gated.text()).toContain("Live browser");
+      const wrong = await fetch(`http://127.0.0.1:${port}/p/________/`);
+      expect(wrong.status).toBe(404);
     } finally {
       vi.unstubAllEnvs();
     }

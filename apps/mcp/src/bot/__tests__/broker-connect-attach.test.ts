@@ -46,7 +46,8 @@ vi.mock("../../session-guard.js", () => ({
 const require = createRequire(import.meta.url);
 const CONFIRM_URL = "https://trustysquire.ai/install/confirm?install=fixture";
 const SHARE_URL = "https://share.example.test/s/ceremony-fixture/";
-const NAMED_VIEW_URL = "https://vnc.trustysquire.ai/s/ceremony-fixture/";
+const VIEW_CODE = "abcdefgh";
+const NAMED_VIEW_URL = `https://vnc.trustysquire.ai/#p=${VIEW_CODE}`;
 
 function countOccurrences(haystack: string, needle: string): number {
   let count = 0;
@@ -103,6 +104,7 @@ const path = require("node:path");
 const [marker, socketPath, lockPath, connectMode, openNeedsUser, profileDir, finishAfterObserves, githubLogoutMiss, shareFails] = process.argv.slice(2);
 const CONFIRM_URL = ${JSON.stringify(CONFIRM_URL)};
 const SHARE_URL = ${JSON.stringify(SHARE_URL)};
+const VIEW_CODE = ${JSON.stringify(VIEW_CODE)};
 if (marker !== "broker") process.exit(78);
 // The ceremony's exposure helper discovers the shared display from the
 // browser process's OWN environment via the profile's SingletonLock symlink
@@ -210,6 +212,7 @@ const server = net.createServer((socket) => {
                 url: SHARE_URL,
                 expires_at: "2099-01-01T00:00:00.000Z",
                 control: "agent",
+                short_code: VIEW_CODE,
               },
             },
           });

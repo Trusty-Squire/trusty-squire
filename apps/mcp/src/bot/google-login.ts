@@ -905,22 +905,22 @@ function liveShareUrlFromCommand(result: unknown): string | null {
   return typeof url === "string" && url.trim() !== "" ? url : null;
 }
 
+function liveShareViewCodeFromCommand(result: unknown): string | null {
+  if (result === null || typeof result !== "object" || !("short_code" in result)) return null;
+  const code = Reflect.get(result, "short_code");
+  return typeof code === "string" && /^[A-Za-z0-9_-]{8}$/.test(code) ? code : null;
+}
+
 function styleCeremonyUrl(url: string): string {
   return process.stderr.isTTY
     ? `\x1b]8;;${url}\x1b\\${chalk.hex("#cf3a52").underline(url)}\x1b]8;;\x1b\\`
     : url;
 }
 
-function ceremonyLiveViewUrl(shareUrl: string): string {
+function ceremonyLiveViewUrl(shareUrl: string, viewCode: string | null): string {
   const named = namedTunnelConfig();
-  if (named === null) return shareUrl;
-  try {
-    const path = new URL(shareUrl).pathname;
-    if (!path.startsWith("/s/") || path === "/s/" || path === "/s") return shareUrl;
-    return `https://${named.hostname}${path.endsWith("/") ? path : `${path}/`}`;
-  } catch {
-    return shareUrl;
-  }
+  if (named === null || viewCode === null) return shareUrl;
+  return `https://${named.hostname}/#p=${viewCode}`;
 }
 
 function printCeremonyLiveViewLink(shareUrl: string): void {
@@ -1125,9 +1125,10 @@ export async function runCeremonyInSharedBroker(opts: RunInBotChromeOpts): Promi
     // hand to a phone) instead of attaching noVNC to the whole display. A
     // machine with a screen already sees the tab. Print one live-view URL
     // before waiting on Finish; never print the install URL. A named tunnel
-    // (TS_LOGIN_PUBLIC_HOSTNAME / TS_LOGIN_LOCAL_PORT) is that short hostname
-    // plus the share's access secret; the hostname root does not open the view.
-    // A failed share stops with the cause and no fallback link.
+    // (TS_LOGIN_PUBLIC_HOSTNAME / TS_LOGIN_LOCAL_PORT) prints hostname plus
+    // `#p=<8-char code>`; the hostname root and wrong codes do not open the view.
+    // operate_share's agent URL stays `/s/<token>/`. A failed share stops with
+    // the cause and no fallback link.
     if (visibility.visible) {
       opts.onBrowserPlacement?.({ kind: "host_screen" }, null);
       console.error(
@@ -1151,7 +1152,7 @@ export async function runCeremonyInSharedBroker(opts: RunInBotChromeOpts): Promi
         );
         const url = liveShareUrlFromCommand(shared);
         if (url === null) throw new Error("broker did not return a live-share URL");
-        shareUrl = ceremonyLiveViewUrl(url);
+        shareUrl = ceremonyLiveViewUrl(url, liveShareViewCodeFromCommand(shared));
       } catch (err) {
         const reason = err instanceof Error ? err.message : String(err);
         opts.onBrowserPlacement?.({ kind: "unreachable", reason }, null);

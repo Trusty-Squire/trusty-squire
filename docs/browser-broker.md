@@ -349,8 +349,9 @@ discoverable display — hands the ceremony tab to the owner through
 `operate_share`, the same live view operate sessions already use. Connect
 prints that live-share URL before it waits on Finish. When
 `TS_LOGIN_PUBLIC_HOSTNAME` and `TS_LOGIN_LOCAL_PORT` are set, the live view
-listens on that port and the printed URL is `https://<hostname>/s/<token>/`.
-The hostname root does not open the view. The share
+listens on that port and the printed URL is `https://<hostname>/#p=<8-char code>`.
+The hostname root and wrong codes do not open the view. `operate_share`
+agent URLs stay `/s/<token>/`. The share
 shows the ceremony tab only; see
 [Operate live share](operate-live-share.md). A failed share stops the ceremony
 immediately with the cause and no URL rather than waiting out the deadline.
