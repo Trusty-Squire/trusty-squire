@@ -601,7 +601,8 @@ describe("connect attaches to the live broker for the profile it is connecting",
         const logged = captured.lines.join("\n");
         expect(printedCeremonyUrls(logged)).toEqual([NAMED_VIEW_URL]);
         expect(logged).not.toMatch(/Open this on your phone/i);
-        expect(logged).not.toContain("Sign in to Trusty Squire");
+        expect(logged).toContain("Sign in to Trusty Squire");
+        expect(logged).toContain("Open this on any device, any network:");
       } finally {
         captured.restore();
       }
