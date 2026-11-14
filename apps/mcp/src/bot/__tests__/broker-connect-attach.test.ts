@@ -45,6 +45,7 @@ vi.mock("../../session-guard.js", () => ({
 
 const require = createRequire(import.meta.url);
 const CONFIRM_URL = "https://trustysquire.ai/install/confirm?install=fixture";
+const SHARE_URL = "https://share.example.test/s/ceremony-fixture/";
 // Minted by the same function the real observation uses, so the fixture can
 // never encode a label shape production does not emit.
 const SIGN_OUT_LABEL = controlLabelV2("Sign out")!;
@@ -63,8 +64,9 @@ const fs = require("node:fs");
 const net = require("node:net");
 const os = require("node:os");
 const path = require("node:path");
-const [marker, socketPath, lockPath, connectMode, openNeedsUser, profileDir, finishAfterObserves] = process.argv.slice(2);
+const [marker, socketPath, lockPath, connectMode, openNeedsUser, profileDir, finishAfterObserves, githubLogoutMiss] = process.argv.slice(2);
 const CONFIRM_URL = ${JSON.stringify(CONFIRM_URL)};
+const SHARE_URL = ${JSON.stringify(SHARE_URL)};
 if (marker !== "broker") process.exit(78);
 // The ceremony's exposure helper discovers the shared display from the
 // browser process's OWN environment via the profile's SingletonLock symlink
@@ -161,6 +163,19 @@ const server = net.createServer((socket) => {
         // "{ result: <tool payload> }" and the transport sends THAT as the
         // frame's result field -- mirror it exactly, or the caller's unwrap
         // of .result sees nothing.
+        if (request.params?.name === "operate_share") {
+          reply({
+            result: {
+              result: {
+                url: SHARE_URL,
+                expires_at: "2099-01-01T00:00:00.000Z",
+                control: "agent",
+              },
+            },
+          });
+          continue;
+        }
+        const signOutRow = [${JSON.stringify(SIGN_OUT_LABEL)}, "b", ${JSON.stringify(SIGN_OUT_LABEL)}];
         reply({
           result: {
             result:
@@ -170,13 +185,15 @@ const server = net.createServer((socket) => {
                       Number(finishAfterObserves) > 0 && observeCalls >= Number(finishAfterObserves)
                         ? "https://trustysquire.ai/install/done"
                         : CONFIRM_URL,
-                    safe_table: [
-                      [${JSON.stringify(SIGN_OUT_LABEL)}, "b", ${JSON.stringify(SIGN_OUT_LABEL)}],
-                    ],
+                    safe_table: githubLogoutMiss === "miss" ? [] : [signOutRow],
                   }
                 : { ok: true },
           },
         });
+        continue;
+      }
+      if (request.method === "abort") {
+        reply({ result: { ok: true } });
         continue;
       }
       if (request.method === "close") {
@@ -251,6 +268,10 @@ async function connectFixture(
     finishAfterObserves?: number;
     pollUntilDone?: (tabFinished: boolean) => Promise<boolean>;
     boundAccount?: string;
+    /** Connect over SSH/TTY with no screen of its own. */
+    headless?: boolean;
+    /** GitHub's logout page has no Sign out control. */
+    githubLogoutMiss?: boolean;
   } = {},
 ): Promise<{
   result: unknown;
@@ -259,6 +280,7 @@ async function connectFixture(
   openUrl: string | null;
   openCeremony: boolean;
   closedSession: string | null;
+  placement: { kind: string; url?: string; reason?: string } | undefined;
   commands: { name: string | null; args: Record<string, unknown> | null }[];
 }> {
   const root = await tempDir();
@@ -324,6 +346,7 @@ async function connectFixture(
       opts.openNeedsUser === true ? "needs-user" : "",
       targetProfile,
       String(opts.finishAfterObserves ?? 0),
+      opts.githubLogoutMiss === true ? "miss" : "",
     ],
     {
       stdio: ["ignore", "ignore", "pipe"],
@@ -343,12 +366,22 @@ async function connectFixture(
   await waitFor(() => existsSync(lockPath) && existsSync(socketPath));
 
   await waitFor(() => existsSync(lockPath + ".seen"), 5_000).catch(() => undefined);
+  if (opts.headless === true) {
+    vi.stubEnv("DISPLAY", "");
+    vi.stubEnv("SSH_CONNECTION", "10.0.0.1 1 10.0.0.2 22");
+    vi.stubEnv("SSH_TTY", "/dev/pts/1");
+    vi.stubEnv("XDG_SESSION_TYPE", "tty");
+  }
+  let placement: { kind: string; url?: string; reason?: string } | undefined;
   const result = await runCeremonyInSharedBroker({
     profileDir: targetProfile,
     url: CONFIRM_URL,
     deadline: Date.now() + 5_000,
     pollUntilDone: opts.pollUntilDone ?? (async () => true),
     bannerLabel: "fixture",
+    onBrowserPlacement: (value) => {
+      placement = value;
+    },
     ...(opts.forceReloginProviders
       ? { forceReloginProviders: opts.forceReloginProviders as ("google" | "github")[] }
       : {}),
@@ -388,6 +421,7 @@ async function connectFixture(
     openUrl: seen.openUrl,
     openCeremony: seen.openCeremony === true,
     closedSession: seen.closedSession,
+    placement,
     commands: seen.commands,
   };
 }
@@ -500,6 +534,75 @@ describe("connect attaches to the live broker for the profile it is connecting",
       );
       expect(outcome.closedSession).toBe("tab-1");
       expect(outcome.lockNeverReleased).toBe(true);
+    },
+  );
+
+  it(
+    "prints a phone-openable live-share link and the install URL when connect has no display",
+    { timeout: 30_000 },
+    async () => {
+      const lines: string[] = [];
+      const spy = vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+        lines.push(
+          args.map((value) => (typeof value === "string" ? value : String(value))).join(" "),
+        );
+      });
+      try {
+        const outcome = await connectFixture({ headless: true });
+        expect(outcome.result).toEqual({ status: "satisfied", closeState: "closed" });
+        expect(outcome.placement).toEqual({ kind: "virtual", url: SHARE_URL });
+        expect(outcome.commands.map((command) => command.name)).toContain("operate_share");
+        expect(outcome.commands.map((command) => command.name)).not.toContain(
+          "operate_ceremony_window",
+        );
+        const logged = lines.join("\n");
+        expect(logged).toContain(SHARE_URL);
+        expect(logged).toContain(CONFIRM_URL);
+        expect(logged).toMatch(/Open this on your phone/i);
+      } finally {
+        spy.mockRestore();
+      }
+    },
+  );
+
+  it(
+    "continues after a GitHub logout-page miss and still prints the phone-openable link",
+    { timeout: 30_000 },
+    async () => {
+      const lines: string[] = [];
+      const spy = vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+        lines.push(
+          args.map((value) => (typeof value === "string" ? value : String(value))).join(" "),
+        );
+      });
+      try {
+        const outcome = await connectFixture({
+          headless: true,
+          githubLogoutMiss: true,
+          forceReloginProviders: ["google", "github"],
+        });
+        expect(outcome.result).toEqual({ status: "satisfied", closeState: "closed" });
+        expect(outcome.placement).toEqual({ kind: "virtual", url: SHARE_URL });
+        expect(outcome.commands).toEqual([
+          {
+            name: "operate_navigate",
+            args: { url: "https://accounts.google.com/Logout", session_id: "tab-1" },
+          },
+          {
+            name: "operate_navigate",
+            args: { url: "https://github.com/logout", session_id: "tab-1" },
+          },
+          { name: "operate_observe", args: { session_id: "tab-1" } },
+          { name: "operate_navigate", args: { url: CONFIRM_URL, session_id: "tab-1" } },
+          { name: "operate_share", args: { session_id: "tab-1" } },
+        ]);
+        const logged = lines.join("\n");
+        expect(logged).toMatch(/did not show a Sign out control/);
+        expect(logged).toContain(SHARE_URL);
+        expect(logged).toContain(CONFIRM_URL);
+      } finally {
+        spy.mockRestore();
+      }
     },
   );
 

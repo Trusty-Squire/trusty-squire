@@ -782,7 +782,7 @@ headless display every other tab belongs to the same owner, acting for the
 same account, on a link handed to themselves, so
 `sharedBrowserDisclosureWarning` (`apps/mcp/src/bot/google-login.ts`) returns
 null and nothing prints — there is deliberately no shortened variant. The
-noVNC banner still carries the URL and password. Regression:
+live-share banner still carries the share URL and the install URL. Regression:
 `apps/mcp/src/bot/__tests__/shared-ceremony-exposure.test.ts`.
 
 ### 24. Google liveness is a server-side answer, not the My Account URL
@@ -839,7 +839,7 @@ Read this file. Follow the rules. Run the verify script. Paste the output. Then 
   The machine channel is NEWLINE-DELIMITED JSON: one complete, self-sufficient
   report per line, written whenever the run's answer changes, with exactly one
   `terminal: true` line and it last. A `--json` caller must never meet an empty
-  stdout, and the line naming a live sign-in URL or noVNC address goes out
+  stdout, and the line naming a live sign-in URL or live-share address goes out
   BEFORE the run blocks on a human — a surface that only speaks at settle is
   silent for the whole window in which those addresses are worth having. `needs-sign-in` carries its `sign_in_url` by construction
   (the type says so); an outcome with no live URL gets a different state, and
@@ -853,8 +853,8 @@ Read this file. Follow the rules. Run the verify script. Paste the output. Then 
   OBSERVED and handed back by whichever path placed the ceremony browser
   (`onBrowserPlacement` in `bot/google-login.ts`) — never predicted from the
   CLI process's own environment — and it never carries an address that will be
-  dead when the report is read: a virtual display's noVNC address ships on the
-  non-terminal line written while that tunnel is up, and the placement is never
+  dead when the report is read: a virtual placement's live-share URL ships on the
+  non-terminal line written once that share is ready, and the placement is never
   relabelled afterwards — one value, decided where the browser was placed. A refusal that means another session holds the browser —
   `ProfileBusyError` or a contention `BrokerRefusal` (`broker_unavailable`,
   `profile_busy`) — reaches connect typed and reports `busy` with the holder,

@@ -306,7 +306,7 @@ cookie snapshot can still be empty while the broker holds Chrome and must not
 turn that claim into a negative. No provider list is persisted in the account
 session file. A scoped GitHub refresh waits for its provider session during
 the ceremony and reports a missing requested session. The ceremony closes its
-tab and noVNC exposure after the claim and the person's Finish action. Finish
+tab and live-share URL after the claim and the person's Finish action. Finish
 reaches the CLI through the nonce-scoped callback or the broker observing
 `/install/done`; the wizard navigates there even if callback delivery fails.
 With `--skip-browser`, the claim happens in a different browser, so
@@ -325,35 +325,26 @@ no enrollment), whose browser hosts the tab. A host with a screen (`hasDisplay()
 display — no Xvfb, no noVNC. That decision is the daemon's, taken when it
 launches its Chrome: a broker started without DISPLAY (over SSH, or from a
 user service) cannot see the GUI session's display and parks its Chrome on a
-private Xvfb. A later connect from a screened terminal keeps the noVNC
-exposure for that Chrome rather than refusing — nothing here can move a live
-Chrome between X displays, and the profile that Chrome holds is the one the
-ceremony needs. Headless hosts likewise use the broker's private Xvfb and
-connect exposes it over noVNC for the ceremony (same x11vnc + websockify +
-tunnel stack as the standalone remote login, reaped at the ceremony's lease
-boundary) — a tab no human can see is a tab no human can complete.
+private Xvfb. Nothing here can move a live Chrome between X displays, and the
+profile that Chrome holds is the one the ceremony needs. Headless hosts
+likewise use the broker's private Xvfb.
 The ceremony lands where the PERSON RUNNING CONNECT can see it, and the
 broker's own environment never decides that: its Chrome may sit on the
 machine's screen while connect runs over SSH, or on a private Xvfb while
 connect runs at the desk. The tab counts as already visible only when the
 holder is on the machine's own screen AND this connect has one (`hasDisplay()`
-in `apps/mcp/src/bot/display-env.ts`); every other named display — the
-broker's Xvfb, or the host's screen seen from a screenless connect — is
-exposed over noVNC. The noVNC URL therefore shows whatever that display is
-carrying, the machine's own desktop included; the disclosure label says so.
-Display discovery reads the live Chrome process tree: Chrome
-can erase its main process environment while children retain DISPLAY/XAUTHORITY.
-The holder's own evidence classifies its display: every rig this repo starts
-sets DISPLAY and XAUTHORITY together, so a holder carrying DISPLAY without
-XAUTHORITY is provably on the machine's screen (startx/xinit, WSLg and several
-display managers do not export it). A display no evidence can name is
-unshowable and stops the ceremony immediately — except where windows are drawn
-natively (macOS, Windows), which has no X display to discover and no rig it
-could be hiding on. A failed noVNC exposure stops it immediately too.
-Cleanup removes the ceremony's helpers and tab, preserving the broker's browser
-and display even on setup failure.
-`shared-ceremony-exposure.test.ts` and `broker-connect-attach.test.ts` pin these
-contracts.
+in `apps/mcp/src/bot/display-env.ts`). Every other case — the broker's Xvfb,
+the host's screen seen from a screenless connect, or a holder with no
+discoverable display — hands the ceremony tab to the owner through
+`operate_share`, the same live view operate sessions already use. Connect
+prints that live-share URL and the Trusty Squire install URL before it waits
+on Finish. The share shows the ceremony tab only; see
+[Operate live share](operate-live-share.md). A failed share stops the ceremony
+immediately with the cause rather than waiting out the deadline. Every wait
+prints a status line and is bounded. Cleanup closes the ceremony tab (which
+invalidates its share) and preserves the broker's browser and display.
+`broker-connect-attach.test.ts` pins the headless link; `shared-ceremony-exposure.test.ts`
+pins how a holder display is classified.
 
 The ceremony adopts the browser's current proxy identity instead of requesting
 a conflicting bare browser. Its `ceremony` open enters the scoped admission
@@ -361,32 +352,20 @@ exception in `session/lifecycle.ts`: sign-in must be able to create the Google
 session it otherwise requires. Ordinary agent-facing `operate_start` admission
 is unchanged.
 
-Known property of that exposure, decided with the connect-browser-claim work:
-the noVNC URL shows the WHOLE shared display, not just the ceremony tab. While
-the ceremony runs (bounded by its deadline), anyone holding the URL can see —
-and, x11vnc not being view-only, drive — every tab the shared browser is
-running, including sibling operator sessions' tabs. The window is the
-ceremony deadline, and the URL is single-use: a fresh VNC password is minted
-per ceremony and the quick tunnel is torn down at the lease boundary. That
-window is held by the exposure helpers themselves, not by whoever is waiting
-on the sign-in: `registerRemoteLoginRigCleanup` arms a rig-owned lifetime —
-`LOGIN_RIG_OWNED_LIFETIME_MS` in `apps/mcp/src/pairing-ttl.ts`, the
-pairing-token window plus a short grace, a constant rather than an
-environment knob — when the rig is registered, so a connect that stops
-polling, wedges, or loses the process that spawned it cannot leave the display
-published past that bound. The
-`isOwnedLoginRigXauthority` check keeps real user desktops out of scope —
-this paragraph covers the broker's own rig only. This is a decision, not an
-oversight: do not narrow it without the maintainer's word.
+The live-share URL is a bearer capability for the ceremony tab. Its lifetime,
+raw pixels, and input rules are the operate live-share contract. Closing the
+ceremony session invalidates it. Do not attach noVNC to the shared display as
+the connect handoff: that showed every sibling tab, and a hung attach printed
+no URL.
 
 The exposure is warned about only where it is a real disclosure. The ceremony
 prints the shared-browser warning only when the tab lands on a real
 human-facing screen in the browser the person running connect is already using
 — the same browser later Trusty Squire sessions keep opening tabs in, so agent
-work then shares a browser with their own browsing. The headless noVNC
+work then shares a browser with their own browsing. The headless live-share
 ceremony prints no warning at all: its tabs all belong to the same owner,
 acting for the same account, on a link handed to themselves, so nothing is
-disclosed. The noVNC banner still carries the URL and password.
+disclosed. The live-share banner carries the share URL and the install URL.
 `sharedBrowserDisclosureWarning` in `apps/mcp/src/bot/google-login.ts` is the
 single place that decides it.
 
