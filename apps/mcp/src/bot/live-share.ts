@@ -785,7 +785,7 @@ export class LiveShare {
       this.release(viewer);
     }
     this.webSockets.close();
-    if (this.gateway?.rootShare === this) this.gateway.rootShare = undefined;
+    if (this.gateway?.rootShare === this) delete this.gateway.rootShare;
     this.gateway?.shares.delete(this.path);
     this.gateway = null;
     if (this.server.listening) this.server.close();
