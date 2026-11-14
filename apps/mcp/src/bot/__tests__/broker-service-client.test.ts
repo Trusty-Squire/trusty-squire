@@ -162,12 +162,14 @@ it.skipIf(process.platform !== "linux")(
     await markManaged(f.profile, f.env.TRUSTY_SQUIRE_BROKER_SOCKET!);
     const relays = [processFor(f.env, "server"), processFor(f.env, "server")];
     const peers = relays.map(({ child }) => peer(child));
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    expect(await profileBrokers(f.profile)).toEqual([]);
-    // Marker means join-only for clients. The harness-owned broker still needs
-    // the unit flag a marked daemon requires before it will listen.
+    // Marker means join-only for clients. Start the harness-owned broker
+    // immediately so the relays' bounded wait still overlaps a listener; the
+    // unit flag is what a marked daemon requires before it will listen.
     const brokerEnv = { ...f.env, TRUSTY_SQUIRE_BROKER_UNIT: "1" };
     let broker = processFor(brokerEnv, "broker");
+    await vi.waitFor(async () => expect(await profileBrokers(f.profile)).toEqual([broker.child.pid]), {
+      timeout: 8_000,
+    });
     await vi.waitFor(
       async () => expect(await liveUnixSocket(f.env.TRUSTY_SQUIRE_BROKER_SOCKET!)).toBe(true),
       { timeout: 8_000 },
