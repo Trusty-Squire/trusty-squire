@@ -66,8 +66,8 @@ describe("summarize (setup summary)", () => {
   it("offers and returns the default-on Email OTP setting through interactive settings", async () => {
     noteCalls.length = 0;
     confirmCalls.length = 0;
-    // Advanced setup, registry, Email OTP, 2Captcha, then Save.
-    confirmAnswers.push(true, true, true, false, true);
+    // Advanced setup, Email OTP, 2Captcha, then Save.
+    confirmAnswers.push(true, true, false, true);
 
     const settings = await runSettingsSetup({ initialTarget: "claude-code" });
 

@@ -1,7 +1,7 @@
 import type * as ChildProcess from "node:child_process";
 import type * as Discovery from "../../bot/broker/discovery.js";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import { homedir } from "node:os";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
@@ -119,6 +119,14 @@ it("passes the named login tunnel settings to the broker unit", async () => {
   expect(unit).toContain("TS_LOGIN_PUBLIC_HOSTNAME=vnc.example.test");
   expect(unit).toContain("TS_LOGIN_LOCAL_PORT=47823");
   vi.unstubAllEnvs();
+});
+it("removes durable broker copies no unit or running process uses", async () => {
+  const brokerRoot = join(homedir(), ".trusty-squire", "broker");
+  const stale = join(brokerRoot, "0.0.1-stale");
+  await mkdir(join(stale, "node_modules"), { recursive: true });
+  roots.push(stale);
+  await installBrokerService(profile);
+  await expect(stat(stale)).rejects.toThrow();
 });
 it("leaves an unchanged active Linux unit alone", async () => {
   await installBrokerService(profile);
@@ -471,6 +479,7 @@ it("preserves npx dependencies outside the cache and works after cache removal",
   await symlink("../missing", join(modules, ".bin", "dangling"));
   const stable = durableBrokerEntry(bin);
   expect(stable).not.toContain("_npx");
+  expect((await stat(stable)).ino).toBe((await stat(bin)).ino);
   expect(durableBrokerEntry(bin)).toBe(stable);
   await rm(join(root, "_npx"), { recursive: true });
   const result = spawnSync(process.execPath, [stable], { encoding: "utf8" });

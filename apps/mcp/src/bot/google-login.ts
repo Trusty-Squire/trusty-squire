@@ -149,16 +149,7 @@ export async function launchPersistentLoginContext(
 }
 
 function resolveChromium(): PersistentLauncher {
-  try {
-    const extra = require("playwright-extra") as {
-      chromium: PersistentLauncher & { use: (plugin: unknown) => unknown };
-    };
-    const stealth = require("puppeteer-extra-plugin-stealth") as () => unknown;
-    extra.chromium.use(stealth());
-    return extra.chromium;
-  } catch {
-    return (require("playwright") as { chromium: PersistentLauncher }).chromium;
-  }
+  return (require("patchright") as { chromium: PersistentLauncher }).chromium;
 }
 
 async function detectGoogleAccountEmailInContext(context: BrowserContext): Promise<string | null> {

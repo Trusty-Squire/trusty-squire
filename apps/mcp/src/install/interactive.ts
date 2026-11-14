@@ -119,7 +119,7 @@ async function pickAdvancedOptionsWithDefaults(opts: {
   const initialConsentOperatorInboxOtp = opts.initialConsentOperatorInboxOtp ?? true;
   const wantAdvanced = bailIfCancelled(
     await confirm({
-      message: "Configure advanced options? (registry, OTP)",
+      message: "Configure advanced options? (OTP)",
       initialValue: false,
     }),
   );
@@ -129,14 +129,6 @@ async function pickAdvancedOptionsWithDefaults(opts: {
       registryEnabled: initialRegistryEnabled,
     };
   }
-
-  const registryEnabled = bailIfCancelled(
-    await confirm({
-      message:
-        "Use the managed skill registry? This reuses shared signup recipes and lets successful non-personal recipes improve the registry.",
-      initialValue: initialRegistryEnabled,
-    }),
-  );
 
   const consentOperatorInboxOtp = bailIfCancelled(
     await confirm({
@@ -172,7 +164,7 @@ async function pickAdvancedOptionsWithDefaults(opts: {
 
   return {
     advancedConfigured: true,
-    registryEnabled,
+    registryEnabled: initialRegistryEnabled,
     consentOperatorInboxOtp,
     ...(twoCaptchaKey !== undefined ? { twoCaptchaKey } : {}),
   };
@@ -184,9 +176,6 @@ export function summarize(config: InteractiveConfig): void {
   lines.push(`${chalk.dim("Agent:        ")}${chalk.bold(agentLabel)}`);
   lines.push(`${chalk.dim("Signup:       ")}${chalk.dim("session agent")}`);
   lines.push(`${chalk.dim("OAuth:        ")}${chalk.dim("set up in browser")}`);
-  lines.push(
-    `${chalk.dim("Registry:     ")}${config.registryEnabled ? "managed" : chalk.yellow("disabled")}`,
-  );
   // Shown unconditionally (not gated on advancedConfigured) — this consent
   // defaults ON internally (readInboxConsent() in provision-drive.ts) whether
   // or not the user opens advanced setup, so the summary must say so even

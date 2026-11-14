@@ -1,13 +1,19 @@
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
-  cpSync,
+  copyFileSync,
   existsSync,
+  linkSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
+  readFileSync,
+  readlinkSync,
   realpathSync,
   renameSync,
   rmSync,
+  symlinkSync,
 } from "node:fs";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -105,10 +111,7 @@ export function durableBrokerEntry(
   mkdirSync(dirname(dirname(stableModules)), { recursive: true, mode: 0o700 });
   const staging = mkdtempSync(join(dirname(dirname(stableModules)), ".install-"));
   try {
-    cpSync(cacheModules, join(staging, "node_modules"), {
-      recursive: true,
-      verbatimSymlinks: true,
-    });
+    linkTree(cacheModules, join(staging, "node_modules"));
     if (!existsSync(join(staging, "node_modules", "@trusty-squire", "mcp", "dist", "bin.js")))
       throw new Error("Could not preserve the broker package outside the npx cache");
     ensureBetterSqlite3NativeBinding(join(staging, "node_modules"));
@@ -117,6 +120,56 @@ export function durableBrokerEntry(
     rmSync(staging, { recursive: true, force: true });
   }
   return stableBin;
+}
+
+// Hard-link the npx package tree instead of copying it: the durable broker
+// copy survives npx cache pruning either way, but linking takes a second
+// where copying the full dependency tree took a minute on a busy disk.
+function linkTree(source: string, target: string): void {
+  mkdirSync(target, { recursive: true });
+  for (const entry of readdirSync(source, { withFileTypes: true })) {
+    const from = join(source, entry.name);
+    const to = join(target, entry.name);
+    if (entry.isSymbolicLink()) symlinkSync(readlinkSync(from), to);
+    else if (entry.isDirectory()) linkTree(from, to);
+    else {
+      try {
+        linkSync(from, to);
+      } catch (error) {
+        // A hard link cannot cross filesystems; that file is copied.
+        if ((error as NodeJS.ErrnoException).code !== "EXDEV") throw error;
+        copyFileSync(from, to);
+      }
+    }
+  }
+}
+
+// Remove durable broker copies that no broker unit points at and no running
+// process uses. A broker keeps running the copy it started from after its unit
+// is rewritten, so running processes count as in use.
+function pruneUnusedBrokerVersions(home: string): void {
+  const root = join(home, ".trusty-squire", "broker");
+  const inUse = new Set<string>([VERSION]);
+  const versionRefs = /\.trusty-squire\/broker\/([^/"<\s]+)\/node_modules/g;
+  const running = execFileSync("ps", ["-eo", "args"], { encoding: "utf8" });
+  for (const match of running.matchAll(versionRefs)) inUse.add(match[1]!);
+  const registrations = [
+    join(process.env.XDG_CONFIG_HOME ?? join(home, ".config"), "systemd", "user"),
+    join(home, "Library", "LaunchAgents"),
+  ];
+  for (const dir of registrations) {
+    const names = existsSync(dir) ? readdirSync(dir) : [];
+    for (const name of names) {
+      if (!/^(trusty-squire-broker.*\.service|ai\.trustysquire\..*\.plist)$/.test(name)) continue;
+      const text = readFileSync(join(dir, name), "utf8");
+      for (const match of text.matchAll(versionRefs)) inUse.add(match[1]!);
+    }
+  }
+  for (const name of existsSync(root) ? readdirSync(root) : []) {
+    if (name.startsWith(".") || inUse.has(name)) continue;
+    if (!lstatSync(join(root, name)).isDirectory()) continue;
+    rmSync(join(root, name), { recursive: true, force: true });
+  }
 }
 
 export function brokerServiceName(profileDir: string, home = homedir()): string {
@@ -394,4 +447,5 @@ export async function installBrokerService(profileDir: string): Promise<void> {
     }
   }
   await waitForBrokerListeners(socket, profile, name);
+  pruneUnusedBrokerVersions(home);
 }

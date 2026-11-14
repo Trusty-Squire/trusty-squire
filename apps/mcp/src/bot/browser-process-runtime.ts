@@ -1,4 +1,4 @@
-import { chromium as baseChromium } from "playwright";
+import type { chromium as baseChromium } from "playwright";
 import { createRequire } from "node:module";
 import { Socket } from "node:net";
 import {
@@ -46,10 +46,8 @@ import {
   untrackOwnerProcess,
 } from "./owner-process-reaper.js";
 
-// Lazy registration: installing the plugin mutates the chromium singleton
-// from playwright-extra so we only do it once per process. We require()
-// the CJS modules lazily (the stealth toolchain only ships CJS) and treat
-// stealth as best-effort — a missing dep should never crash the bot.
+// patchright is loaded lazily through require() so importing this module
+// stays cheap for callers that never launch a browser.
 const require = createRequire(import.meta.url);
 
 export type StealthProfile = "baseline" | "cdp_hardened";
@@ -187,35 +185,14 @@ export async function closeLocalBrowserLaunch(
   (runtime.untrack ?? untrackOwnerBrowserLaunch)(marker);
 }
 
-// Whether to use the CDP-hardened launcher (patchright, which runs
-// evaluations in an isolated world and removes the automation tells —
-// mainWorldExecution, navigator.webdriver, viewport — that Turnstile /
-// reCAPTCHA-v3 / Google's consent SPA score on). See
-// docs/ARCHITECTURE.md.
-//
-// 2026-06-08 — DEFAULT FLIPPED ON. The baseline (playwright-extra +
-// stealth) self-inflicts a detectable navigator.webdriver via its manual
-// defineProperty patch, so it is strictly WORSE on the fingerprint. The
-// hardened launcher is all-green on the rebrowser bot-detector and was
-// live-A/B'd: meilisearch's Google consent-SPA block became a (handleable)
-// FedCM path, and render still signed up + extracted a key cleanly — no
-// crash on either (the old crash was the retired rebrowser fork, not
-// patchright). Default to hardened; opt out with BOT_CDP_HARDENED=0 for
-// the baseline. If patchright isn't installed, getChromium() falls back to
-// baseline gracefully.
-function cdpHardeningRequested(): boolean {
-  const v = process.env.BOT_CDP_HARDENED;
-  if (v === "0" || v === "false" || v === "off") return false;
-  return true;
-}
-
+// The operator browser always launches through patchright, which runs
+// evaluations in an isolated world and removes the automation tells
+// (mainWorldExecution, navigator.webdriver, viewport) that Turnstile,
+// reCAPTCHA v3 and Google's consent SPA score on. See docs/ARCHITECTURE.md.
 let cachedChromium: typeof baseChromium | null = null;
 
-// The stealth profile the cached launcher actually represents. Set the
-// first time getChromium() resolves a launcher and read back via
-// BrowserController.stealthProfile for the CaptchaEvent A/B tag. A
-// patchright load failure degrades it to "baseline" truthfully rather
-// than over-claiming "cdp_hardened" on a run that never got the patch.
+// The stealth profile the cached launcher represents, read back via
+// BrowserController.stealthProfile for the CaptchaEvent tag.
 let activeStealthProfile: StealthProfile = "baseline";
 
 export function activeStealthProfileValue(): StealthProfile {
@@ -224,49 +201,8 @@ export function activeStealthProfileValue(): StealthProfile {
 
 export function getChromium(): typeof baseChromium {
   if (cachedChromium !== null) return cachedChromium;
-  const hardened = cdpHardeningRequested();
-  try {
-    if (hardened) {
-      // patchright — a maintained Playwright fork that runs every
-      // evaluation in an ISOLATED world (so the bot's DOM probing is
-      // invisible to a page that traps DOM methods → closes the
-      // `mainWorldExecution` tell) and handles `navigator.webdriver`
-      // natively + correctly. Verified ALL-GREEN against the maintained
-      // rebrowser bot-detector (mainWorldExecution, navigatorWebdriver,
-      // viewport, runtimeEnableLeak all clean). It drives real Chrome
-      // (channel) directly — the earlier rebrowser fork couldn't, which is
-      // why the old hardened arm was forced onto bundled chromium and then
-      // crashed the OAuth flow. NO playwright-extra/stealth wrap here: the
-      // stealth plugin's manual `navigator.webdriver` defineProperty
-      // RE-ADDS a detectable property (proven counterproductive) — patchright
-      // does it right. See docs/ARCHITECTURE.md.
-      const patchright = require("patchright") as { chromium: typeof baseChromium };
-      cachedChromium = patchright.chromium;
-      activeStealthProfile = "cdp_hardened";
-      return cachedChromium;
-    }
-    // Baseline: playwright-extra + stealth (unchanged). addExtra(baseChromium)
-    // is exactly what playwright-extra's default `chromium` export already is.
-    const { addExtra } = require("playwright-extra") as {
-      addExtra: (launcher: unknown) => { use: (plugin: unknown) => unknown };
-    };
-    const stealth = require("puppeteer-extra-plugin-stealth") as () => unknown;
-    activeStealthProfile = "baseline";
-    const extra = addExtra(baseChromium);
-    extra.use(stealth());
-    cachedChromium = extra as unknown as typeof baseChromium;
-  } catch (err) {
-    // Fall back to vanilla playwright if stealth (or the rebrowser fork)
-    // isn't installed. The bot still works, it's just easier to
-    // fingerprint as a bot — and the A/B tag stays truthfully "baseline".
-    console.warn(
-      `[operator] hardened launcher unavailable, falling back to vanilla chromium: ${
-        err instanceof Error ? err.message : String(err)
-      }`,
-    );
-    cachedChromium = baseChromium;
-    activeStealthProfile = "baseline";
-  }
+  cachedChromium = (require("patchright") as { chromium: typeof baseChromium }).chromium;
+  activeStealthProfile = "cdp_hardened";
   return cachedChromium;
 }
 
