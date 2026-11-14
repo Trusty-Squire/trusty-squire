@@ -5,7 +5,8 @@ name: MCP slow tests
 # vitest.tiers.ts REAL_BROWSER_FILES) stay live without blocking release PRs.
 # The non-browser halves of the operator behavior/payment tiers still gate
 # every pull request via ci.yml's test:fast; their real-browser halves run
-# here after merge and gate a stable release in release.yml. Every merge that
+# here after merge. A stable promotion in release.yml reuses this workflow
+# run for that SHA (it does not re-run test:real-browser). Every merge that
 # can affect MCP runs the slow + real-browser partitions; the nightly run
 # executes the complete suite as a partition-drift backstop.
 on:

@@ -18,7 +18,8 @@ export const SLOW_POST_MERGE_FILES = [
 // directly, or real Chrome through the broker/self-launch child processes).
 // They are the slowest, flakiest part of the suite, so they do NOT gate pull
 // requests or prerelease publishes: they run post-merge (mcp-slow-tests.yml)
-// and gate only a stable/`latest` release (release.yml's real-browser tier).
+// and gate only a stable/`latest` release (release.yml checks that workflow
+// run for the promoted SHA).
 // Disjoint from SLOW_POST_MERGE_FILES (widget-corpus-eval is also real-browser
 // but stays in the slow tier; the full `vitest run` nightly suite covers
 // everything regardless).
@@ -115,9 +116,10 @@ export function excludingRealBrowser(files: string[]): string[] {
 // Operator behavior suites. These exercise the operator's fail-closed
 // session/OAuth/observation surfaces. The non-browser half gates every pull
 // request (via test:fast, alongside REQUIRED_PAYMENT_SAFETY_FILES' non-browser
-// half); the real-browser half runs in the real-browser tier (post-merge and
-// stable release). They run whole files — never select or shard individual
-// test names — same contract as REQUIRED_PAYMENT_SAFETY_FILES. The nightly
+// half); the real-browser half runs in the real-browser tier (post-merge;
+// a stable promotion reuses that mcp-slow-tests.yml run). They run whole
+// files — never select or shard individual test names — same contract as
+// REQUIRED_PAYMENT_SAFETY_FILES. The nightly
 // full suite still covers everything as a drift backstop.
 export const REQUIRED_BEHAVIOR_FILES = [
   "src/bot/__tests__/native-dialogs.test.ts",
