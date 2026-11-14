@@ -25,6 +25,7 @@ import {
   waitForProfileFree,
   withProfileOperationGuard,
 } from "./profile.js";
+import { loadBetterSqlite3 } from "./sqlite-native.js";
 import { closeBrowserContextWithin, registerLocalBrowserLaunch } from "./browser.js";
 import { connectBroker, resolveBrokerSocket } from "./broker/discovery.js";
 import { BrokerRefusal } from "./broker/refusal.js";
@@ -301,7 +302,7 @@ export async function detectProviderSessionsFromProfile(
       if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
       throw err;
     }
-    const { default: Database } = await import("better-sqlite3");
+    const Database = loadBetterSqlite3();
     const db = new Database(snapshot, { readonly: true, fileMustExist: true });
     try {
       const rows = db

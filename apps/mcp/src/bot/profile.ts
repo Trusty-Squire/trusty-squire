@@ -9,7 +9,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { createRequire } from "node:module";
 import { lstatSync, mkdirSync, readFileSync, readlinkSync, readdirSync } from "node:fs";
 import { hostname } from "node:os";
 import { dirname, join } from "node:path";
@@ -21,6 +20,7 @@ import {
   profileDeviceIdentity,
   profilePathIdentity,
 } from "./profile-path.js";
+import { loadBetterSqlite3 } from "./sqlite-native.js";
 
 export {
   CHROME_PROFILE_DIR,
@@ -430,8 +430,7 @@ export async function closeProfileWithProof(opts: {
   return "force_closed_unproven";
 }
 
-const require = createRequire(import.meta.url);
-const Database = require("better-sqlite3") as typeof import("better-sqlite3");
+const Database = loadBetterSqlite3();
 const profileOperationContext = new AsyncLocalStorage<ReadonlySet<string>>();
 
 /** A stable SQLite file is only the lock's inode; it contains no owner record. It
