@@ -347,11 +347,11 @@ in `apps/mcp/src/bot/display-env.ts`). Every other case — the broker's Xvfb,
 the host's screen seen from a screenless connect, or a holder with no
 discoverable display — hands the ceremony tab to the owner through
 `operate_share`, the same live view operate sessions already use. Connect
-prints that live-share URL and the Trusty Squire install URL before it waits
-on Finish. The share shows the ceremony tab only; see
+prints that live-share URL before it waits on Finish. The share shows the
+ceremony tab only; see
 [Operate live share](operate-live-share.md). A failed share stops the ceremony
-immediately with the cause rather than waiting out the deadline. Every wait
-prints a status line and is bounded. Cleanup closes the ceremony tab (which
+immediately with the cause and no URL rather than waiting out the deadline.
+Every wait prints a status line and is bounded. Cleanup closes the ceremony tab (which
 invalidates its share) and preserves the broker's browser and display.
 `broker-connect-attach.test.ts` pins the headless link; `shared-ceremony-exposure.test.ts`
 pins how a holder display is classified.
@@ -375,7 +375,7 @@ human-facing screen in the browser the person running connect is already using
 work then shares a browser with their own browsing. The headless live-share
 ceremony prints no warning at all: its tabs all belong to the same owner,
 acting for the same account, on a link handed to themselves, so nothing is
-disclosed. The live-share banner carries the share URL and the install URL.
+disclosed. The live-share banner carries only the live-view URL.
 `sharedBrowserDisclosureWarning` in `apps/mcp/src/bot/google-login.ts` is the
 single place that decides it.
 

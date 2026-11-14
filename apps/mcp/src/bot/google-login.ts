@@ -36,7 +36,6 @@ import { controlLabelV2, wireRoleToSafeRoleV2 } from "./compact-observation-v2.j
 import { extractGoogleAccountEmail } from "./oauth-login.js";
 export { extractGoogleAccountEmail };
 import {
-  INSTALL_COMPLETION_FRAGMENT_KEY,
   startInstallCompletionListener,
   withInstallCompletionCallback,
 } from "./install-completion.js";
@@ -906,38 +905,15 @@ function liveShareUrlFromCommand(result: unknown): string | null {
   return typeof url === "string" && url.trim() !== "" ? url : null;
 }
 
-function publicInstallConfirmUrl(confirmUrl: string): string {
-  try {
-    const parsed = new URL(confirmUrl);
-    if (parsed.hash.length === 0) return confirmUrl;
-    const fragment = new URLSearchParams(parsed.hash.slice(1));
-    fragment.delete(INSTALL_COMPLETION_FRAGMENT_KEY);
-    parsed.hash = fragment.toString();
-    return parsed.toString();
-  } catch {
-    return confirmUrl;
-  }
-}
-
 function styleCeremonyUrl(url: string): string {
   return process.stderr.isTTY
     ? `\x1b]8;;${url}\x1b\\${chalk.hex("#cf3a52").underline(url)}\x1b]8;;\x1b\\`
     : url;
 }
 
-function printCeremonyInstallLink(installUrl: string): void {
-  console.error(
-    `\n[login] Install page (already open in the shared browser; finish it there, not in another browser):\n  ${styleCeremonyUrl(installUrl)}\n`,
-  );
-}
-
-function printCeremonyLiveShareBanner(shareUrl: string, installUrl: string): void {
+function printCeremonyLiveShareBanner(shareUrl: string): void {
   const width = Math.max(40, Math.min((process.stdout.columns ?? 80) - 2, 78));
-  const body =
-    `Open this on your phone to finish sign-in in the shared browser:\n\n` +
-    `  ${styleCeremonyUrl(shareUrl)}\n\n` +
-    `The Trusty Squire install page is already loaded in that view:\n\n` +
-    `  ${styleCeremonyUrl(installUrl)}`;
+  const body = `Open this on your phone to finish sign-in:\n\n  ${styleCeremonyUrl(shareUrl)}`;
   console.error(
     "\n" +
       boxen(body, {
@@ -1142,16 +1118,16 @@ export async function runCeremonyInSharedBroker(opts: RunInBotChromeOpts): Promi
       );
     }
     const visibility = ceremonyTabAlreadyVisible(opts.profileDir);
-    const installUrl = publicInstallConfirmUrl(opts.url);
-    if (!visibility.visible) printCeremonyInstallLink(installUrl);
     if (opts.forceReloginProviders?.length) {
       await logoutProvidersThroughSession(client, sessionId, opts.url, opts.forceReloginProviders);
     }
     // Headless / SSH / TTY: the person running connect cannot see the shared
     // browser. Reuse operate_share (the same live view operate sessions already
     // hand to a phone) instead of attaching noVNC to the whole display. A
-    // machine with a screen already sees the tab. Print the share URL and the
-    // install URL before waiting on Finish so a phone can open them.
+    // machine with a screen already sees the tab. Print the live-view URL
+    // before waiting on Finish so a phone can open it. The install page is
+    // already loaded there; never print that URL. A failed share stops with
+    // the cause and no fallback link.
     if (visibility.visible) {
       opts.onBrowserPlacement?.({ kind: "host_screen" }, null);
       console.error(
@@ -1183,12 +1159,11 @@ export async function runCeremonyInSharedBroker(opts: RunInBotChromeOpts): Promi
         throw new Error(
           `\n[login] The install page opened as a tab in the shared browser, but nothing ` +
             `here could create a phone-openable live view of it (${reason}). ` +
-            `The install URL is:\n  ${installUrl}\n` +
             `Finish sign-in in that shared-browser tab (not in another browser). Re-run ` +
             `\`npx @trusty-squire/mcp connect\` once the broker's live-share tunnel is working.\n`,
         );
       }
-      printCeremonyLiveShareBanner(shareUrl, installUrl);
+      printCeremonyLiveShareBanner(shareUrl);
       opts.onBrowserPlacement?.({ kind: "virtual", url: shareUrl }, null);
     }
     console.error(

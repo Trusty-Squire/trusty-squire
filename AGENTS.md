@@ -786,7 +786,7 @@ headless display every other tab belongs to the same owner, acting for the
 same account, on a link handed to themselves, so
 `sharedBrowserDisclosureWarning` (`apps/mcp/src/bot/google-login.ts`) returns
 null and nothing prints — there is deliberately no shortened variant. The
-live-share banner still carries the share URL and the install URL. Regression:
+live-share banner carries only the live-view URL. Regression:
 `apps/mcp/src/bot/__tests__/shared-ceremony-exposure.test.ts`.
 
 ### 24. Google liveness is a server-side answer, not the My Account URL
