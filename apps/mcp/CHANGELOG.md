@@ -1,5 +1,12 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.40-rc.1 (2026-11-14)
+
+- Start the broker on demand when no systemd or launchd exists, with no supervisor or restart loop ([PR](https://github.com/Trusty-Squire/trusty-squire/pull/1126)).
+- Print a phone-openable live-share link from headless connect ([PR](https://github.com/Trusty-Squire/trusty-squire/pull/1125)).
+- Rebuild missing better-sqlite3 bindings instead of dying on npx cache reuse ([PR](https://github.com/Trusty-Squire/trusty-squire/pull/1124)).
+- Show saved card last four digits in the agent card list ([PR](https://github.com/Trusty-Squire/trusty-squire/pull/1123)).
+
 ## 1.1.39-rc.1 (2026-10-30)
 
 - Expose Google iframe controls and verify cross-site popup adoption (#1120)
