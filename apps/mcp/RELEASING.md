@@ -9,7 +9,8 @@ CI cannot complete an OAuth login. `connect` is the only sign-in pathway, so
       completes on a machine with a user-visible display, and connect reports
       success only after its live provider probe sees that Google session.
 - [ ] On a headless Linux host with no user-visible display, `connect`
-      prints a reachable live-share URL and the Trusty Squire install URL;
+      prints a reachable live-share URL (`https://<TS_LOGIN_PUBLIC_HOSTNAME>/#p=<code>`
+      when the named tunnel is set; the hostname root and wrong codes do not open the view);
       keyboard and pointer input through that live view complete sign-in from
       another device. Closing the ceremony must invalidate the share URL.
 - [ ] With both `TS_LOGIN_PUBLIC_HOSTNAME` and `TS_LOGIN_LOCAL_PORT` set,

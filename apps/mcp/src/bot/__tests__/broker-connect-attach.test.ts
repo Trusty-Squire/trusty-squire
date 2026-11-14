@@ -46,6 +46,43 @@ vi.mock("../../session-guard.js", () => ({
 const require = createRequire(import.meta.url);
 const CONFIRM_URL = "https://trustysquire.ai/install/confirm?install=fixture";
 const SHARE_URL = "https://share.example.test/s/ceremony-fixture/";
+const VIEW_CODE = "abcdefgh";
+const NAMED_VIEW_URL = `https://vnc.trustysquire.ai/#p=${VIEW_CODE}`;
+
+function countOccurrences(haystack: string, needle: string): number {
+  let count = 0;
+  let from = 0;
+  while (from <= haystack.length) {
+    const at = haystack.indexOf(needle, from);
+    if (at < 0) break;
+    count += 1;
+    from = at + needle.length;
+  }
+  return count;
+}
+
+function printedCeremonyUrls(logged: string): string[] {
+  const urls: string[] = [];
+  for (const url of [NAMED_VIEW_URL, SHARE_URL, CONFIRM_URL]) {
+    const n = countOccurrences(logged, url);
+    for (let i = 0; i < n; i++) urls.push(url);
+  }
+  return urls;
+}
+
+function captureConsoleError(): { lines: string[]; restore: () => void } {
+  const lines: string[] = [];
+  const spy = vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+    lines.push(args.map((value) => (typeof value === "string" ? value : String(value))).join(" "));
+  });
+  return {
+    lines,
+    restore: () => {
+      spy.mockRestore();
+    },
+  };
+}
+
 // Minted by the same function the real observation uses, so the fixture can
 // never encode a label shape production does not emit.
 const SIGN_OUT_LABEL = controlLabelV2("Sign out")!;
@@ -64,9 +101,10 @@ const fs = require("node:fs");
 const net = require("node:net");
 const os = require("node:os");
 const path = require("node:path");
-const [marker, socketPath, lockPath, connectMode, openNeedsUser, profileDir, finishAfterObserves, githubLogoutMiss] = process.argv.slice(2);
+const [marker, socketPath, lockPath, connectMode, openNeedsUser, profileDir, finishAfterObserves, githubLogoutMiss, shareFails] = process.argv.slice(2);
 const CONFIRM_URL = ${JSON.stringify(CONFIRM_URL)};
 const SHARE_URL = ${JSON.stringify(SHARE_URL)};
+const VIEW_CODE = ${JSON.stringify(VIEW_CODE)};
 if (marker !== "broker") process.exit(78);
 // The ceremony's exposure helper discovers the shared display from the
 // browser process's OWN environment via the profile's SingletonLock symlink
@@ -164,12 +202,17 @@ const server = net.createServer((socket) => {
         // frame's result field -- mirror it exactly, or the caller's unwrap
         // of .result sees nothing.
         if (request.params?.name === "operate_share") {
+          if (shareFails === "fail") {
+            reply({ error: { code: "share_failed", message: "live-share tunnel is down" } });
+            continue;
+          }
           reply({
             result: {
               result: {
                 url: SHARE_URL,
                 expires_at: "2099-01-01T00:00:00.000Z",
                 control: "agent",
+                short_code: VIEW_CODE,
               },
             },
           });
@@ -272,6 +315,8 @@ async function connectFixture(
     headless?: boolean;
     /** GitHub's logout page has no Sign out control. */
     githubLogoutMiss?: boolean;
+    /** operate_share refuses, so connect cannot create a live view. */
+    shareFails?: boolean;
   } = {},
 ): Promise<{
   result: unknown;
@@ -347,6 +392,7 @@ async function connectFixture(
       targetProfile,
       String(opts.finishAfterObserves ?? 0),
       opts.githubLogoutMiss === true ? "miss" : "",
+      opts.shareFails === true ? "fail" : "",
     ],
     {
       stdio: ["ignore", "ignore", "pipe"],
@@ -371,6 +417,8 @@ async function connectFixture(
     vi.stubEnv("SSH_CONNECTION", "10.0.0.1 1 10.0.0.2 22");
     vi.stubEnv("SSH_TTY", "/dev/pts/1");
     vi.stubEnv("XDG_SESSION_TYPE", "tty");
+    vi.stubEnv("TS_LOGIN_PUBLIC_HOSTNAME", "vnc.trustysquire.ai");
+    vi.stubEnv("TS_LOGIN_LOCAL_PORT", "47823");
   }
   let placement: { kind: string; url?: string; reason?: string } | undefined;
   const result = await runCeremonyInSharedBroker({
@@ -538,29 +586,40 @@ describe("connect attaches to the live broker for the profile it is connecting",
   );
 
   it(
-    "prints a phone-openable live-share link and the install URL when connect has no display",
+    "prints only the phone-openable live-share link when connect has no display",
     { timeout: 30_000 },
     async () => {
-      const lines: string[] = [];
-      const spy = vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
-        lines.push(
-          args.map((value) => (typeof value === "string" ? value : String(value))).join(" "),
-        );
-      });
+      const captured = captureConsoleError();
       try {
         const outcome = await connectFixture({ headless: true });
         expect(outcome.result).toEqual({ status: "satisfied", closeState: "closed" });
-        expect(outcome.placement).toEqual({ kind: "virtual", url: SHARE_URL });
+        expect(outcome.placement).toEqual({ kind: "virtual", url: NAMED_VIEW_URL });
         expect(outcome.commands.map((command) => command.name)).toContain("operate_share");
         expect(outcome.commands.map((command) => command.name)).not.toContain(
           "operate_ceremony_window",
         );
-        const logged = lines.join("\n");
-        expect(logged).toContain(SHARE_URL);
-        expect(logged).toContain(CONFIRM_URL);
-        expect(logged).toMatch(/Open this on your phone/i);
+        const logged = captured.lines.join("\n");
+        expect(printedCeremonyUrls(logged)).toEqual([NAMED_VIEW_URL]);
+        expect(logged).not.toMatch(/Open this on your phone/i);
+        expect(logged).not.toContain("Sign in to Trusty Squire");
       } finally {
-        spy.mockRestore();
+        captured.restore();
+      }
+    },
+  );
+
+  it(
+    "prints no URL when connect has a display",
+    { timeout: 30_000 },
+    async () => {
+      const captured = captureConsoleError();
+      try {
+        const outcome = await connectFixture();
+        expect(outcome.result).toEqual({ status: "satisfied", closeState: "closed" });
+        expect(outcome.commands.map((command) => command.name)).not.toContain("operate_share");
+        expect(printedCeremonyUrls(captured.lines.join("\n"))).toEqual([]);
+      } finally {
+        captured.restore();
       }
     },
   );
@@ -569,12 +628,7 @@ describe("connect attaches to the live broker for the profile it is connecting",
     "continues after a GitHub logout-page miss and still prints the phone-openable link",
     { timeout: 30_000 },
     async () => {
-      const lines: string[] = [];
-      const spy = vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
-        lines.push(
-          args.map((value) => (typeof value === "string" ? value : String(value))).join(" "),
-        );
-      });
+      const captured = captureConsoleError();
       try {
         const outcome = await connectFixture({
           headless: true,
@@ -582,7 +636,7 @@ describe("connect attaches to the live broker for the profile it is connecting",
           forceReloginProviders: ["google", "github"],
         });
         expect(outcome.result).toEqual({ status: "satisfied", closeState: "closed" });
-        expect(outcome.placement).toEqual({ kind: "virtual", url: SHARE_URL });
+        expect(outcome.placement).toEqual({ kind: "virtual", url: NAMED_VIEW_URL });
         expect(outcome.commands).toEqual([
           {
             name: "operate_navigate",
@@ -596,12 +650,37 @@ describe("connect attaches to the live broker for the profile it is connecting",
           { name: "operate_navigate", args: { url: CONFIRM_URL, session_id: "tab-1" } },
           { name: "operate_share", args: { session_id: "tab-1" } },
         ]);
-        const logged = lines.join("\n");
+        const logged = captured.lines.join("\n");
         expect(logged).toMatch(/did not show a Sign out control/);
-        expect(logged).toContain(SHARE_URL);
-        expect(logged).toContain(CONFIRM_URL);
+        expect(printedCeremonyUrls(logged)).toEqual([NAMED_VIEW_URL]);
       } finally {
-        spy.mockRestore();
+        captured.restore();
+      }
+    },
+  );
+
+  it(
+    "prints no URL when a live view cannot be created",
+    { timeout: 30_000 },
+    async () => {
+      const captured = captureConsoleError();
+      try {
+        const outcome = await connectFixture({ headless: true, shareFails: true });
+        expect(outcome.result).toBeInstanceOf(Error);
+        const message = (outcome.result as Error).message;
+        expect(message).toContain("phone-openable live view");
+        expect(message).toContain("live-share tunnel is down");
+        expect(message).not.toContain(CONFIRM_URL);
+        expect(message).not.toContain(SHARE_URL);
+        expect(outcome.placement?.kind).toBe("unreachable");
+        expect(
+          outcome.placement && outcome.placement.kind === "unreachable"
+            ? outcome.placement.reason
+            : "",
+        ).toContain("live-share tunnel is down");
+        expect(printedCeremonyUrls(captured.lines.join("\n"))).toEqual([]);
+      } finally {
+        captured.restore();
       }
     },
   );

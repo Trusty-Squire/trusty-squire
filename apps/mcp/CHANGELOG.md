@@ -1,5 +1,13 @@
 # Changelog — @trusty-squire/mcp
 
+## Unreleased
+
+- Headless `connect` prints one named-tunnel live-view URL
+  (`https://<TS_LOGIN_PUBLIC_HOSTNAME>/#p=<8-char code>`). The hostname root
+  and wrong codes do not open the view. `operate_share` agent URLs stay
+  `/s/<token>/`. A failed live view stops with the cause and no fallback
+  install URL.
+
 ## 1.1.40-rc.1 (2026-11-14)
 
 - Start the broker on demand when no systemd or launchd exists, with no supervisor or restart loop ([PR](https://github.com/Trusty-Squire/trusty-squire/pull/1126)).
