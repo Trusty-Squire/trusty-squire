@@ -52,8 +52,8 @@ function shareForRequest(gateway: ShareGateway, request: IncomingMessage): LiveS
   const url = request.url ?? "";
   const path = url.match(/^\/s\/[A-Za-z0-9_-]{43}\//)?.[0];
   if (path !== undefined) return gateway.shares.get(path);
-  const short = url.match(/^\/p\/([A-Za-z0-9_-]{8})(?:\/|$)/);
-  return short === null ? undefined : gateway.shortCodes.get(short[1]);
+  const short = url.match(/^\/p\/([A-Za-z0-9_-]{8})(?:\/|$)/)?.[1];
+  return short === undefined ? undefined : gateway.shortCodes.get(short);
 }
 
 function aliasShortViewPath(request: IncomingMessage, share: LiveShare): void {
