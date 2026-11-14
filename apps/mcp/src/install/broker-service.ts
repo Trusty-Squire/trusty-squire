@@ -31,6 +31,7 @@ import {
 } from "../bot/broker/discovery.js";
 import { readBrokerUnitMarkerSync, writeBrokerUnitMarker } from "../bot/broker/managed-marker.js";
 import { sharedMcpSocketPath } from "../bot/broker/mcp-socket-path.js";
+import { ensureBetterSqlite3NativeBinding } from "../bot/sqlite-native.js";
 
 /** A completed in-profile connect makes its claimed account the profile owner.
  * Publish the marker first so old agent clients stop joining before the
@@ -95,7 +96,10 @@ export function durableBrokerEntry(
   const cacheModules = dirname(dirname(pkgRoot));
   const stableModules = join(homedir(), ".trusty-squire", "broker", VERSION, "node_modules");
   const stableBin = join(stableModules, "@trusty-squire", "mcp", "dist", "bin.js");
-  if (existsSync(stableBin)) return stableBin;
+  if (existsSync(stableBin)) {
+    ensureBetterSqlite3NativeBinding(stableModules);
+    return stableBin;
+  }
   mkdirSync(dirname(dirname(stableModules)), { recursive: true, mode: 0o700 });
   const staging = mkdtempSync(join(dirname(dirname(stableModules)), ".install-"));
   try {
@@ -105,6 +109,7 @@ export function durableBrokerEntry(
     });
     if (!existsSync(join(staging, "node_modules", "@trusty-squire", "mcp", "dist", "bin.js")))
       throw new Error("Could not preserve the broker package outside the npx cache");
+    ensureBetterSqlite3NativeBinding(join(staging, "node_modules"));
     renameSync(staging, dirname(stableModules));
   } finally {
     rmSync(staging, { recursive: true, force: true });
