@@ -137,8 +137,13 @@ export function remoteLoginEnvironment(
   rig: RemoteLoginRig,
   baseEnv: NodeJS.ProcessEnv = process.env,
 ): NodeJS.ProcessEnv {
-  if (rig.display === undefined || rig.authFile === undefined) {
-    throw new Error("remote login display authorization is not ready");
+  if (rig.display === undefined) {
+    throw new Error("remote login display is not ready");
+  }
+  // A display started without access control (Xvfb -ac) has no Xauthority.
+  if (rig.authFile === undefined) {
+    const { XAUTHORITY: _unused, ...rest } = baseEnv;
+    return { ...rest, DISPLAY: rig.display };
   }
   return { ...baseEnv, DISPLAY: rig.display, XAUTHORITY: rig.authFile };
 }

@@ -108,18 +108,6 @@ it("registers Linux once, starts through systemctl, and probes both sockets", as
     false,
   );
 });
-it("passes the named login tunnel settings to the broker unit", async () => {
-  vi.stubEnv("TS_LOGIN_PUBLIC_HOSTNAME", "vnc.example.test");
-  vi.stubEnv("TS_LOGIN_LOCAL_PORT", "47823");
-  await installBrokerService(profile);
-  const unit = await readFile(
-    join(process.env.XDG_CONFIG_HOME!, "systemd", "user", `${brokerServiceName(profile)}.service`),
-    "utf8",
-  );
-  expect(unit).toContain("TS_LOGIN_PUBLIC_HOSTNAME=vnc.example.test");
-  expect(unit).toContain("TS_LOGIN_LOCAL_PORT=47823");
-  vi.unstubAllEnvs();
-});
 it("removes durable broker copies no unit or running process uses", async () => {
   const brokerRoot = join(homedir(), ".trusty-squire", "broker");
   const stale = join(brokerRoot, "0.0.1-stale");

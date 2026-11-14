@@ -19,8 +19,12 @@ function linuxContainment(): LinuxContainment {
     "--user", "--scope", "--collect", "--quiet", "--unit", probeUnit, "/bin/true",
   ], { stdio: "ignore", timeout: 3_000 }).status === 0;
   detected = { scope, setpriv };
-  process.stderr.write(`[browser-broker] Chrome containment=${scope ? "systemd-scope" : "process-group"}` +
-    `${!scope && !setpriv ? " (setpriv unavailable)" : ""}\n`);
+  // Broker log only: connect and other CLI commands also probe containment,
+  // and this diagnostic is not something a person running them can act on.
+  if (process.argv.includes("broker")) {
+    process.stderr.write(`[browser-broker] Chrome containment=${scope ? "systemd-scope" : "process-group"}` +
+      `${!scope && !setpriv ? " (setpriv unavailable)" : ""}\n`);
+  }
   return detected;
 }
 

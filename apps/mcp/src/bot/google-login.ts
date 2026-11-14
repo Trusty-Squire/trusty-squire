@@ -655,13 +655,6 @@ export async function exposeSharedBrokerCeremonyDisplay(
       kind: "already_visible",
       reason: "it runs on this machine's own screen, which you are signed in at",
     };
-  if (holder.authFile === null)
-    return {
-      kind: "unshowable",
-      reason:
-        "the browser holding the profile runs on a display with no XAUTHORITY in its launch " +
-        "record or process tree, so nothing here can authorize a noVNC attach to it",
-    };
   const authFile = holder.authFile;
   let rig: RemoteLoginRig | undefined;
   let clip: CeremonyDisplayClip | undefined;
@@ -672,7 +665,7 @@ export async function exposeSharedBrokerCeremonyDisplay(
     // Xvfb.
     createRemoteLoginVncSecrets(rig);
     rig.display = holder.display;
-    rig.authFile = authFile;
+    if (authFile !== null) rig.authFile = authFile;
     clip = await windowControl?.showPhone();
   } catch (err) {
     if (rig !== undefined) await teardownRemoteLoginRig(rig).catch(() => undefined);

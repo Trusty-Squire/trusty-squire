@@ -347,6 +347,20 @@ describe("exposeSharedBrokerCeremonyDisplay", () => {
     if (exposure.kind === "exposed") await exposure.stop();
   });
 
+  // An Xvfb started without access control (-ac) has no Xauthority at all;
+  // noVNC attaches to it with DISPLAY alone.
+  it("exposes a display with no XAUTHORITY over noVNC when connect has no screen", async () => {
+    const profile = await tempProfile();
+    const child = await spawnHolder({ PATH: process.env.PATH ?? "", DISPLAY: ":99" });
+    await holderOwnsProfile(profile, child);
+    mockState.attachSucceeds = true;
+    const exposure = await exposeSharedBrokerCeremonyDisplay(profile);
+    expect(exposure.kind).toBe("exposed");
+    expect(mockState.rigs[0]).toMatchObject({ display: ":99" });
+    expect(mockState.rigs[0]?.authFile).toBeUndefined();
+    if (exposure.kind === "exposed") await exposure.stop();
+  });
+
   // Every rig this repo starts sets DISPLAY and XAUTHORITY together, so a
   // holder carrying only DISPLAY is provably on the machine's own screen —
   // the holder's own evidence decides, not this process's environment.
