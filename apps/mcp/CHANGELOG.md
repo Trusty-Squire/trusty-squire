@@ -8,6 +8,11 @@
   `/s/<token>/`. A failed live view stops with the cause and no fallback
   install URL.
 
+## 1.1.41-rc.1 (2026-11-14)
+
+- Headless connect prints one short live-view link again ([PR](https://github.com/Trusty-Squire/trusty-squire/pull/1129)).
+- Keep chrome-scope-launcher executable after npm install and honor PLAYWRIGHT_BROWSERS_PATH ([PR](https://github.com/Trusty-Squire/trusty-squire/pull/1128)).
+
 ## 1.1.40-rc.1 (2026-11-14)
 
 - Start the broker on demand when no systemd or launchd exists, with no supervisor or restart loop ([PR](https://github.com/Trusty-Squire/trusty-squire/pull/1126)).
