@@ -1481,7 +1481,7 @@ async function runInstallClaim(
       // The account claim follows Google sign-in. A scoped GitHub refresh is
       // still in progress, so keep its shared-browser ceremony open until the
       // GitHub session reaches the real profile. Chrome may commit the cookie
-      // after a short delay; poll again rather than closing the live share.
+      // after a short delay; poll again rather than closing the noVNC bridge.
       observedProviders = await detectProviderSessionsFromProfile(options.profileDir).catch(
         () => [],
       );
