@@ -8,6 +8,10 @@
   `/s/<token>/`. A failed live view stops with the cause and no fallback
   install URL.
 
+## 1.1.44-rc.1 (2026-11-15)
+
+- Stop connect hanging after Finish on a browser's idle socket ([PR](https://github.com/Trusty-Squire/trusty-squire/pull/1137)).
+
 ## 1.1.43-rc.1 (2026-11-14)
 
 - Restore the noVNC sign-in and fix its attach on an Xvfb without access control ([PR](https://github.com/Trusty-Squire/trusty-squire/pull/1135)).
