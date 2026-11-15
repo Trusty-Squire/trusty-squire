@@ -777,14 +777,10 @@ async function settleAlreadyConnected(
 ): Promise<boolean> {
   if (args.forceRelogin) return false;
   const preflight = await checkAlreadyProvisioned(profileDir, accountId);
-  if (preflight.kind === "stale_google") {
-    // The app claim can survive Google's session. Refresh only Google through
-    // the ordinary ceremony so a plain connect offers the credential prompt.
-    args.forceRelogin = true;
-    args.forceReloginProvider = "google";
-    return false;
-  }
-  if (preflight.kind === "ceremony") return false;
+  // A Google session that looks stale goes through the ordinary ceremony
+  // without signing Google out first: the liveness check can be wrong, and
+  // signing out destroys a working session.
+  if (preflight.kind === "stale_google" || preflight.kind === "ceremony") return false;
   ui.divider();
   await hydrateArgsFromStoredPreferences(args, accountId);
   await ensureConsentRecorded(consentFromArgs(args), args.advancedConfigured === true, accountId);
