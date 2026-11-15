@@ -119,7 +119,10 @@ export async function startInstallCompletionListener(
           if (error !== undefined) reject(error);
           else resolve();
         });
-        server.closeIdleConnections();
+        // Chrome keeps sockets to this listener open (preconnects, keep-alive)
+        // without a request in flight; waiting for them held connect for
+        // minutes after Finish. The outcome is already recorded, so drop them.
+        server.closeAllConnections();
       });
     },
   };
