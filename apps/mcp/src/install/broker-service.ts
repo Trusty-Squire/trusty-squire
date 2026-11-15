@@ -360,8 +360,6 @@ export async function installBrokerService(profileDir: string): Promise<void> {
     "XDG_RUNTIME_DIR",
     "XDG_CONFIG_HOME",
     "PLAYWRIGHT_BROWSERS_PATH",
-    "TS_LOGIN_PUBLIC_HOSTNAME",
-    "TS_LOGIN_LOCAL_PORT",
     "TRUSTY_SQUIRE_API_BASE",
     "ADAPTER_REGISTRY_URL",
   ]) {
