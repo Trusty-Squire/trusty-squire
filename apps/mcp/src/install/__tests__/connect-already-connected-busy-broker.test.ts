@@ -337,7 +337,7 @@ it("does not claim connected when myaccount still answers but the Gmail feed ref
     GOOGLE_SESSION_COOKIES.map((name) => ({ host: ".google.com", name })),
   );
   profileLease = acquireProfileOperationGuard(profileDir);
-  await listenIdentityBroker(
+  const calls = await listenIdentityBroker(
     { status: 401, body: "<HTML><TITLE>Unauthorized</TITLE></HTML>" },
     // The stale page the old check was fooled by.
     "https://myaccount.google.com/",
@@ -348,6 +348,9 @@ it("does not claim connected when myaccount still answers but the Gmail feed ref
 
   expect(output).not.toContain("Already connected");
   expect(output).toContain("Opening the Trusty Squire install page");
+  // The liveness check can be wrong, so connect never signs Google out on it.
+  expect(JSON.stringify(calls)).not.toMatch(/Logout|logout/);
+  expect(output).not.toMatch(/signed out|cookies were cleared/);
 });
 
 // `JSON.parse(stdout)` is the whole machine contract, so a run that dies
