@@ -8,6 +8,10 @@
   `/s/<token>/`. A failed live view stops with the cause and no fallback
   install URL.
 
+## 1.1.45-rc.1 (2026-11-15)
+
+- Never sign Google out on connect's liveness check ([PR](https://github.com/Trusty-Squire/trusty-squire/pull/1139)).
+
 ## 1.1.44-rc.1 (2026-11-15)
 
 - Stop connect hanging after Finish on a browser's idle socket ([PR](https://github.com/Trusty-Squire/trusty-squire/pull/1137)).
