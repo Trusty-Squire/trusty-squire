@@ -1,3 +1,4 @@
+import { connect } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   startInstallCompletionListener,
@@ -46,6 +47,17 @@ describe("plain install completion listener", () => {
     expect(finished.headers.get("location")).toBe(doneUrl);
     expect(listener.isCompleted()).toBe(true);
     expect(listener.completedProviders()).toEqual(["google", "github"]);
+  });
+
+  it("closes while a browser still holds an idle socket to the listener", async () => {
+    listener = await startInstallCompletionListener("https://trustysquire.ai/install/done");
+    const port = Number(new URL(listener.callbackUrl).port);
+    const socket = connect(port, "127.0.0.1");
+    await new Promise<void>((resolve) => socket.once("connect", () => resolve()));
+    const closed = listener.close().then(() => "closed");
+    const timedOut = new Promise((resolve) => setTimeout(() => resolve("timed out"), 2_000));
+    await expect(Promise.race([closed, timedOut])).resolves.toBe("closed");
+    socket.destroy();
   });
 
   it("carries the callback in the confirm URL fragment, outside request logs", () => {
