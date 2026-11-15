@@ -8,6 +8,10 @@
   `/s/<token>/`. A failed live view stops with the cause and no fallback
   install URL.
 
+## 1.1.43-rc.1 (2026-11-14)
+
+- Restore the noVNC sign-in and fix its attach on an Xvfb without access control ([PR](https://github.com/Trusty-Squire/trusty-squire/pull/1135)).
+
 ## 1.1.42-rc.1 (2026-11-14)
 
 - Restore the boxed short login link (`https://vnc.trustysquire.ai/#p=<code>`) and drop the network lines from connect ([PR](https://github.com/Trusty-Squire/trusty-squire/pull/1132)).
