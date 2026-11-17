@@ -228,4 +228,60 @@ describe("HttpProxyExecutor.execute guards", () => {
     });
     expect(await asyncCode(executor.execute({ accountId: "a", http: { method: "GET", url: "https://x.com/" }, fields: ONE }))).toBe("unsupported_response_type");
   });
+
+  it.each(["buffered", "streamed"])("preserves GitHub raw contents through the %s proxy", async (mode) => {
+    // GitHub's contents API returns this vendor MIME for Accept: raw+json,
+    // but the body is the file itself, not JSON. Never parse or reserialize it.
+    const body = "# café\nconst token = '${SECRET}';\n";
+    const contentType = "application/vnd.github.raw+json; charset=utf-8";
+    const executor = new HttpProxyExecutor({
+      lookup: async () => ({ address: "203.0.113.5", family: 4 }),
+      dispatch: async () => ({
+        status: 200,
+        headers: { "content-type": contentType, "set-cookie": "session=private" },
+        bodyStream: streamOf(body),
+        truncated: false,
+      }),
+    });
+    const input = { accountId: "a", http: { method: "GET", url: "https://api.github.com/repos/owner/repo/contents/README.md" }, fields: ONE };
+    if (mode === "buffered") {
+      const result = await executor.execute(input);
+      expect(result.body).toBe(body);
+      expect(result.headers["content-type"]).toBe(contentType);
+      expect(result.headers["set-cookie"]).toBeUndefined();
+    } else {
+      const result = await executor.executeStream(input);
+      const chunks = [];
+      for await (const chunk of result.body) chunks.push(Buffer.from(chunk));
+      expect(Buffer.concat(chunks).toString("utf8")).toBe(body);
+      expect(result.headers["content-type"]).toBe(contentType);
+      expect(result.headers["set-cookie"]).toBeUndefined();
+    }
+  });
+
+  it.each(["[]", '[{"tag_name":"v1.2.3"}]'])("preserves a GitHub release response: %s", async (body) => {
+    const executor = new HttpProxyExecutor({
+      lookup: async () => ({ address: "203.0.113.5", family: 4 }),
+      dispatch: async () => ({ status: 200, headers: { "content-type": "application/json" }, bodyStream: streamOf(body), truncated: false }),
+    });
+    const result = await executor.execute({ accountId: "a", http: { method: "GET", url: "https://api.github.com/repos/owner/repo/releases" }, fields: ONE });
+    expect(result.body).toBe(body);
+  });
+
+  it("keeps the buffered size limit for GitHub raw content", async () => {
+    const executor = new HttpProxyExecutor({
+      maxResponseBytes: 3,
+      lookup: async () => ({ address: "203.0.113.5", family: 4 }),
+      dispatch: async () => ({ status: 200, headers: { "content-type": "application/vnd.github.raw+json" }, bodyStream: streamOf("large"), truncated: false }),
+    });
+    expect(await asyncCode(executor.execute({ accountId: "a", http: { method: "GET", url: "https://api.github.com/" }, fields: ONE }))).toBe("response_too_large");
+  });
+
+  it("does not admit arbitrary media types with a GitHub raw prefix", async () => {
+    const executor = new HttpProxyExecutor({
+      lookup: async () => ({ address: "203.0.113.5", family: 4 }),
+      dispatch: async () => ({ status: 200, headers: { "content-type": "application/vnd.github.raw+json-not-text" }, bodyStream: streamOf("bin"), truncated: false }),
+    });
+    expect(await asyncCode(executor.execute({ accountId: "a", http: { method: "GET", url: "https://api.github.com/" }, fields: ONE }))).toBe("unsupported_response_type");
+  });
 });
