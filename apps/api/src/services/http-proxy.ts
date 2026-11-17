@@ -493,7 +493,12 @@ export class HttpProxyExecutor {
     // carries no content — there is nothing to type-check, and refusing it
     // would turn an ordinary DELETE through a grant into a 502.
     if (!opts.canHaveBody) return headers;
-    const ok = contentType.startsWith("application/json") || contentType.startsWith("text/");
+    // GitHub's raw contents response is file text despite its +json suffix.
+    // Admit its exact media type and forward the existing body unchanged.
+    const mediaType = contentType.split(";", 1)[0]!.trim();
+    const ok =
+      contentType.startsWith("application/json") || contentType.startsWith("text/") ||
+      mediaType === "application/vnd.github.raw+json";
     if (!ok) {
       throw new ProxyError(
         "unsupported_response_type",
