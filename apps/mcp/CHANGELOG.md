@@ -8,6 +8,11 @@
   `/s/<token>/`. A failed live view stops with the cause and no fallback
   install URL.
 
+## 1.1.46-rc.1 (2026-11-19)
+
+- Admit concrete clear-winner choices below the 0.6 confidence threshold when confidence and pick probability are both at least 0.30 and the pick is at least twice the runner-up; fixed controls keep the 0.6 threshold ([PR](https://github.com/Trusty-Squire/trusty-squire/pull/1142)).
+- Preserve GitHub raw contents through the credential proxy ([PR](https://github.com/Trusty-Squire/trusty-squire/pull/1141)).
+
 ## 1.1.45-rc.1 (2026-11-15)
 
 - Never sign Google out on connect's liveness check ([PR](https://github.com/Trusty-Squire/trusty-squire/pull/1139)).
