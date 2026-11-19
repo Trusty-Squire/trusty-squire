@@ -538,6 +538,423 @@ describe("validate_choice", () => {
   });
 });
 
+// Explicit complete vectors keep the floor and runner-up boundaries readable.
+function vectorAnswer(
+  values: number[],
+  confidence = values[0]!,
+): {
+  criteria: Record<string, string>;
+  answer: JevAnswer;
+} {
+  const keys = values.map((_, index) => `pick_${index}`);
+  return {
+    criteria: Object.fromEntries(keys.map((key) => [key, key])),
+    answer: {
+      choice: keys[0]!,
+      confidence,
+      probabilities: Object.fromEntries(keys.map((key, i) => [key, values[i]!])),
+    },
+  };
+}
+
+function ambiguousAnswer(criteria: Record<string, string>, choice: string): JevAnswer {
+  const other = Object.keys(criteria).find((key) => key !== choice)!;
+  return {
+    choice,
+    confidence: 0.41,
+    probabilities: {
+      ...Object.fromEntries(Object.keys(criteria).map((key) => [key, 0])),
+      [choice]: 0.51,
+      [other]: 0.49,
+    },
+  };
+}
+
+describe("clear-winner admission", () => {
+  it.each([
+    [0.57, 0.2, 0.115, 0.115],
+    [0.32, 0.16, 0.13, 0.13, 0.13, 0.13],
+    [0.4, 0.2, 0.2, 0.2],
+    [0.3, 0.15, 0.1375, 0.1375, 0.1375, 0.1375],
+  ])("admits a complete clear-winner vector starting at %s", (...values) => {
+    const { criteria, answer } = vectorAnswer(values);
+    expect(admitsChoice(criteria, answer)).toEqual({ ok: true });
+  });
+
+  it.each([
+    [0.45, 0.3, 0.25],
+    [0.3, 0.1501, 0.137475, 0.137475, 0.137475, 0.137475],
+    [0.1, ...Array<number>(18).fill(0.05)],
+  ])("refuses an ambiguous or tiny winner starting at %s", (...values) => {
+    const { criteria, answer } = vectorAnswer(values);
+    expect(admitsChoice(criteria, answer)).toEqual({
+      kind: "low_confidence",
+      confidence: values[0],
+    });
+  });
+
+  it.each([
+    { values: [0.4, 0.2, 0.2, 0.2], confidence: 0.2999 },
+    { values: [0.2999, ...Array<number>(5).fill(0.7001 / 5)], confidence: 0.4 },
+    { values: [0.91, 0.09], confidence: 0.26 },
+    { values: [1], confidence: 0.2 },
+  ])("requires both floors: $confidence / $values", ({ values, confidence }) => {
+    const { criteria, answer } = vectorAnswer(values, confidence);
+    expect(admitsChoice(criteria, answer)).toEqual({ kind: "low_confidence", confidence });
+  });
+
+  it("refuses missing confidence and preserves the legacy threshold branch", () => {
+    const { criteria, answer } = vectorAnswer([0.5, 0.5], 0.6);
+    expect(admitsChoice(criteria, answer)).toEqual({ ok: true });
+    delete answer.confidence;
+    expect(admitsChoice(criteria, answer)).toEqual({ kind: "low_confidence", confidence: 0 });
+  });
+
+  it.each([
+    ["choice_not_offered", { choice: "absent", probabilities: { a: 1, b: 0 } }],
+    ["missing_probabilities", { choice: "a" }],
+    ["probability_keys_mismatch", { choice: "a", probabilities: { a: 1 } }],
+    ["probability_key_not_offered", { choice: "a", probabilities: { a: 1, c: 0 } }],
+    ["probability_not_unit_interval", { choice: "a", probabilities: { a: Infinity, b: 0 } }],
+    ["probability_not_unit_interval", { choice: "a", probabilities: { a: NaN, b: 0 } }],
+    ["probability_not_unit_interval", { choice: "a", probabilities: { a: 1.1, b: -0.1 } }],
+    ["probability_sum", { choice: "a", probabilities: { a: 0.32, b: 0.16 } }],
+    ["choice_not_argmax", { choice: "a", probabilities: { a: 0.2, b: 0.8 } }],
+  ] as const)("keeps validation precedence: %s", (reason, invalid) => {
+    for (const confidence of [0.4, 0.9]) {
+      expect(admitsChoice({ a: "a", b: "b" }, { ...invalid, confidence })).toEqual({
+        kind: "invalid_answer",
+        reason,
+        confidence,
+      });
+    }
+  });
+});
+
+describe("clear-winner decision routing", () => {
+  const buttons: WireRow[] = Array.from({ length: 6 }, (_, i) => [`@e:b${i}`, "b", `Action ${i}`]);
+  const base = {
+    rows: buttons,
+    facts: {},
+    lastFingerprint: null,
+    lastActionKey: null,
+    fingerprint: "fp",
+    goal: "perform Action 0",
+  };
+  const criteriaFor = (questions: ReturnType<typeof buildDriveQuestions>, name: string) => {
+    const q = questions[name];
+    if (q?.type !== "choice") throw new Error(`missing ${name}`);
+    return q.criteria;
+  };
+  const questions = buildDriveQuestions(buttons, {}, base.goal);
+  const ops = criteriaFor(questions, "operation");
+  const targets = criteriaFor(questions, "CLICK_target");
+  const targetKey = Object.keys(targets)[0]!;
+  const clickAnswers = () => ({
+    operation: valid("CLICK", ops),
+    CLICK_target: valid(targetKey, targets, 0.4),
+  });
+
+  it.each(["DONE", "BLOCKED", "NONE_OF_THESE", "GO_BACK", "WAIT", "INBOX"])(
+    "keeps the threshold for %s",
+    (choice) => {
+      // Include every control explicitly so GO_BACK/INBOX are tested even on a page without their usual context.
+      const criteria = Object.fromEntries(
+        ["CLICK", "TYPE_TEXT", "DONE", "BLOCKED", "NONE_OF_THESE", "GO_BACK", "WAIT", "INBOX"].map(
+          (key) => [key, key],
+        ),
+      );
+      const input = {
+        ...base,
+        questions: { operation: { type: "choice" as const, instructions: "next", criteria } },
+      };
+      expect(
+        decideAfterJev({ ...input, answers: { operation: valid(choice, criteria, 0.4) } }),
+      ).toMatchObject({ kind: "low_confidence", confidence: 0.4 });
+      const kinds: Record<string, string> = {
+        DONE: "complete",
+        BLOCKED: "stuck",
+        NONE_OF_THESE: "none_of_these",
+        GO_BACK: "go_back",
+        WAIT: "wait",
+        INBOX: "act",
+      };
+      expect(
+        decideAfterJev({ ...input, answers: { operation: valid(choice, criteria, 0.6) } }),
+      ).toMatchObject({ kind: kinds[choice] });
+    },
+  );
+
+  it.each([0.32, 0.4, 0.41, 0.57])("acts on a clear operation at %s", (confidence) => {
+    expect(
+      decideAfterJev({
+        ...base,
+        answers: {
+          operation: valid("CLICK", ops, confidence),
+          CLICK_target: valid(targetKey, targets),
+        },
+      }),
+    ).toMatchObject({ kind: "act", action: { kind: "click", target: "@e:b0" } });
+  });
+
+  it.each([
+    [0.57, 0.2, 0.115, 0.115],
+    [0.32, 0.16, 0.13, 0.13, 0.13, 0.13],
+    [0.4, 0.2, 0.2, 0.2],
+  ])("acts on the complete target vector starting at %s", (...values) => {
+    const rows = buttons.slice(0, values.length);
+    const q = buildDriveQuestions(rows, {}, base.goal);
+    const criteria = criteriaFor(q, "CLICK_target");
+    const keys = Object.keys(criteria);
+    const target = {
+      choice: keys[0]!,
+      confidence: values[0]!,
+      probabilities: Object.fromEntries(keys.map((key, i) => [key, values[i]!])),
+    };
+    expect(
+      decideAfterJev({
+        ...base,
+        rows,
+        answers: { operation: valid("CLICK", criteriaFor(q, "operation")), CLICK_target: target },
+      }),
+    ).toMatchObject({ kind: "act", action: { kind: "click", target: "@e:b0" } });
+  });
+
+  it("refuses either ambiguous head", () => {
+    expect(
+      decideAfterJev({
+        ...base,
+        answers: { ...clickAnswers(), operation: ambiguousAnswer(ops, "CLICK") },
+      }),
+    ).toMatchObject({ kind: "low_confidence" });
+    expect(
+      decideAfterJev({
+        ...base,
+        answers: { ...clickAnswers(), CLICK_target: ambiguousAnswer(targets, targetKey) },
+      }),
+    ).toMatchObject({ kind: "low_confidence" });
+  });
+
+  it("admits a wrong target too: scores do not establish semantic correctness", () => {
+    const wrong = Object.keys(targets)[5]!;
+    expect(
+      decideAfterJev({
+        ...base,
+        answers: { operation: valid("CLICK", ops), CLICK_target: valid(wrong, targets, 0.4) },
+      }),
+    ).toMatchObject({ kind: "act", action: { kind: "click", target: "@e:b5" } });
+    expect(
+      isExistingCredentialMutationRow(["@e:delete", "b", "Delete API key"], "https://x.test/keys"),
+    ).toBe(true);
+    expect(
+      isExistingCredentialMutationRow(
+        ["@e:delete", "b", "Delete project"],
+        "https://x.test/projects",
+      ),
+    ).toBe(false);
+  });
+
+  it("preserves consume-once and last-action failure behavior for low-score targets", () => {
+    const input = {
+      ...base,
+      answers: clickAnswers(),
+      consumedActionKey: "@e:b0",
+      boundFingerprint: "fp",
+    };
+    expect(decideAfterJev(input)).toEqual({ kind: "no_progress" });
+    expect(decideAfterJev({ ...input, fingerprint: "changed" })).toMatchObject({ kind: "act" });
+    expect(
+      decideAfterJev({
+        ...base,
+        lastActionKey: "@e:b0",
+        answers: { ...clickAnswers(), last_action_worked: { noul: 0.2 } },
+      }),
+    ).toMatchObject({ kind: "replan" });
+    expect(
+      decideAfterJev({
+        ...base,
+        lastActionKey: "@e:b1",
+        answers: { ...clickAnswers(), last_action_worked: { noul: 0.2 } },
+      }),
+    ).toMatchObject({ kind: "act" });
+    expect(
+      decideAfterJev({ ...base, lastActionKey: "@e:b0", answers: clickAnswers() }),
+    ).toMatchObject({ kind: "act" });
+  });
+
+  it("does not bypass the floor for a singleton target", () => {
+    const rows = buttons.slice(0, 1);
+    const q = buildDriveQuestions(rows, {}, base.goal);
+    const c = criteriaFor(q, "CLICK_target");
+    expect(
+      decideAfterJev({
+        ...base,
+        rows,
+        answers: {
+          operation: valid("CLICK", criteriaFor(q, "operation")),
+          CLICK_target: valid(Object.keys(c)[0]!, c, 0.2),
+        },
+      }),
+    ).toMatchObject({ kind: "low_confidence", confidence: 0.2 });
+  });
+
+  it("types a direct matching fact through a clear-winner field target", () => {
+    const rows: WireRow[] = Array.from({ length: 6 }, (_, i) => [
+      `@e:email${i}`,
+      "t",
+      `Email ${i}|f=email`,
+    ]);
+    const facts = { email: "ada@fixture.test" };
+    const q = buildDriveQuestions(rows, facts, "sign up");
+    const c = criteriaFor(q, "TYPE_TEXT_target");
+    expect(
+      decideAfterJev({
+        ...base,
+        rows,
+        facts,
+        goal: "sign up",
+        answers: {
+          operation: valid("TYPE_TEXT", criteriaFor(q, "operation")),
+          TYPE_TEXT_target: valid(Object.keys(c)[0]!, c, 0.4),
+        },
+      }),
+    ).toMatchObject({
+      kind: "act",
+      action: { kind: "type", target: "@e:email0", text: facts.email },
+    });
+  });
+
+  it.each(["form", "optional form", "generic"])(
+    "admits concrete %s values but retains the none threshold",
+    (kind) => {
+      const row: WireRow = [
+        "@e:input",
+        "t",
+        kind === "generic" ? "Search|f=search" : `Workspace alias${kind === "form" ? "|s=r" : ""}`,
+      ];
+      const rows = kind === "generic" ? [row] : [row, SUBMIT];
+      const facts = { a: "alpha", b: "beta", c: "gamma", d: "delta", e: "epsilon" };
+      const goal = kind === "generic" ? "Search for alpha" : "create an account";
+      const q = buildDriveQuestions(rows, facts, goal);
+      const target = criteriaFor(q, "TYPE_TEXT_target");
+      const valueName = kind === "generic" ? DRIVE_VALUE_QUESTION : "form_value_1";
+      const values = criteriaFor(q, valueName);
+      const input = { ...base, rows, facts, goal };
+      const answers = {
+        operation: valid("TYPE_TEXT", criteriaFor(q, "operation")),
+        TYPE_TEXT_target: valid(Object.keys(target)[0]!, target),
+      };
+      expect(
+        decideAfterJev({ ...input, answers: { ...answers, [valueName]: valid("a", values, 0.4) } }),
+      ).toMatchObject({ kind: "act", action: { kind: "type", target: row[0], text: "alpha" } });
+      expect(
+        decideAfterJev({
+          ...input,
+          answers: { ...answers, [valueName]: valid("none", values, 0.4) },
+        }),
+      ).toMatchObject({ kind: "low_confidence", confidence: 0.4 });
+      expect(
+        decideAfterJev({
+          ...input,
+          answers: { ...answers, [valueName]: valid("none", values, 0.8) },
+        }),
+      ).toMatchObject({ kind: kind === "optional form" ? "replan" : "needs_value" });
+    },
+  );
+
+  it("selects the exact option from a low-score target", () => {
+    const rows: WireRow[] = [["@e:country", "s", "Country|f=country"]];
+    const pageOptions = new Map([["@e:country", ["US", "UK", "CA", "JP"]]]);
+    const facts = { country: "US" };
+    const q = buildDriveQuestions(rows, facts, "sign up", false, [], "", pageOptions);
+    const targets = criteriaFor(q, "SELECT_target");
+    const key = Object.keys(targets).find((key) => targets[key]!.includes("US"))!;
+    expect(
+      decideAfterJev({
+        ...base,
+        rows,
+        facts,
+        pageOptions,
+        answers: {
+          operation: valid("SELECT", criteriaFor(q, "operation")),
+          SELECT_target: valid(key, targets, 0.4),
+        },
+      }),
+    ).toMatchObject({ kind: "act", action: { kind: "select", target: "@e:country", text: "US" } });
+  });
+
+  it("scrolls the selected direction from an exact 2x target", () => {
+    const rows = [OFFSCREEN];
+    const q = buildDriveQuestions(rows, {}, "sign up");
+    const c = criteriaFor(q, "SCROLL_target");
+    expect(
+      decideAfterJev({
+        ...base,
+        rows,
+        goal: "sign up",
+        answers: {
+          operation: valid("SCROLL", criteriaFor(q, "operation")),
+          SCROLL_target: valid("down", c, 0.4),
+        },
+      }),
+    ).toMatchObject({ kind: "act", action: { kind: "scroll", direction: "down" } });
+  });
+
+  it("keeps the raw email shortcut threshold while admitting an OTP target fallback", () => {
+    const otp: WireRow = ["@e:otp", "t", "Verification code|f=otp"];
+    const rows = [
+      otp,
+      ...buttons.map((_, i): WireRow => [`@e:field${i}`, "t", `Email ${i}|f=email`]),
+    ];
+    const q = buildDriveQuestions(rows, {}, "verify email");
+    const code = criteriaFor(q, "email_code_field");
+    const codeKey = Object.keys(code).find((key) => key !== "none")!;
+    const targets = criteriaFor(q, "TYPE_TEXT_target");
+    const otpKey = Object.keys(targets).find((key) =>
+      targets[key]!.toLowerCase().includes("verification"),
+    )!;
+    const direct = {
+      choice: codeKey,
+      confidence: 0.4,
+      probabilities: peakedProbabilities(Object.keys(code), codeKey),
+    };
+    const input = { ...base, rows, facts: {}, goal: "verify email" };
+    expect(decideAfterJev({ ...input, answers: { email_code_field: direct } })).toMatchObject({
+      kind: "invalid_answer",
+      reason: "missing_answer",
+    });
+    expect(
+      decideAfterJev({ ...input, answers: { email_code_field: { ...direct, confidence: 0.8 } } }),
+    ).toMatchObject({
+      kind: "act",
+      special: "inbox",
+      action: { kind: "type", target: otp[0], text: "" },
+    });
+    const answers = {
+      email_code_field: direct,
+      operation: valid("TYPE_TEXT", criteriaFor(q, "operation")),
+      TYPE_TEXT_target: valid(otpKey, targets, 0.4),
+    };
+    expect(decideAfterJev({ ...input, answers })).toMatchObject({
+      kind: "act",
+      special: "inbox",
+      action: { kind: "type", target: otp[0], text: "" },
+    });
+    for (const confidence of [0.4, 0.8]) {
+      const decision = decideAfterJev({
+        ...input,
+        facts: { otp: "123456" },
+        answers: { ...answers, email_code_field: { ...direct, confidence } },
+      });
+      expect(decision).toMatchObject({
+        kind: "act",
+        action: { kind: "type", target: otp[0], text: "123456" },
+      });
+      expect(decision).not.toHaveProperty("special");
+    }
+  });
+});
+
 describe("decideAfterJev stop reasons", () => {
   const facts = { email: "a@b.test", first_name: "Ada" };
   const questions = buildDriveQuestions(ROWS, facts, "sign up");
@@ -1313,11 +1730,7 @@ describe("decideAfterJev stop reasons", () => {
       decideAfterJev({
         ...base,
         answers: {
-          operation: {
-            choice: "CLICK",
-            confidence: 0.41,
-            probabilities: peakedProbabilities(Object.keys(operationCriteriaMap), "CLICK", 0.41),
-          },
+          operation: ambiguousAnswer(operationCriteriaMap, "CLICK"),
           CLICK_target: valid(go, clickCriteria),
         },
       }),

@@ -229,12 +229,13 @@ it("completes a confirmed order with a key-shaped Shopify token only in link des
 it.each([
   { label: "Rotate key", path: "/keys" },
   { label: "Delete key", path: "/keys" },
+  { label: "Delete API key", path: "/keys", confidence: 0.4 },
   { label: "Revoke credential", path: "/keys" },
   { label: "Reset", path: "/keys" },
   { label: "Delete", path: "/settings" },
 ])(
   "hands $label back before dispatch",
-  async ({ label, path }) => {
+  async ({ label, path, confidence = 1 }) => {
     await withKeyPage(`<main><h1>API keys</h1><button>${label}</button></main>`, async (sessionId) => {
       const driveAct = vi.fn<NonNullable<DriveDependencies["driveAct"]>>(async () => {
         throw new Error("mutation action must not dispatch");
@@ -253,7 +254,7 @@ it.each([
                   : keys[0]!;
               return [[name, {
                 choice,
-                confidence: 1,
+                confidence,
                 probabilities: Object.fromEntries(keys.map((key) => [key, key === choice ? 1 : 0])),
               }]];
             }),
