@@ -2588,7 +2588,7 @@ describe("operate_drive real-browser fixture", () => {
 <script>
   setTimeout(() => {
     document.querySelector("#body").textContent = "Your order is confirmed. #1042";
-  }, 6000);
+  }, 9000);
 </script>`;
     const { context, started } = await openFixture(SETTLING_HTML, "settling.test");
     try {

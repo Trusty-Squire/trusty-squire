@@ -67,6 +67,7 @@ export const REAL_BROWSER_FILES = [
   "src/bot/__tests__/drive-create-key-at-creation.test.ts",
   "src/bot/__tests__/drive-key-complete-refusal.test.ts",
   "src/bot/__tests__/drive-changing-controls-steps.test.ts",
+  "src/bot/__tests__/drive-wait-reoffered.test.ts",
   "src/bot/__tests__/drive-redirect-redecide.test.ts",
   "src/bot/__tests__/drive-shadow-overlay.test.ts",
   "src/bot/__tests__/drive-oauth-handoff-dispatch.test.ts",
