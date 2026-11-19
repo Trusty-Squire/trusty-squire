@@ -9,10 +9,12 @@
 // facts bag. A search or query field may receive a phrase Jev assigns from the
 // goal's own words or the facts; nothing is composed.
 //
-// Confidence below DRIVE_CONFIDENCE_THRESHOLD hands control back to the
-// operator. Answer-shape validation and purchase approval stay. Safety net is
-// validate_choice, fingerprint-bound consume-once, and three consecutive
-// non-wait actions with no page change (re-snapshot once before a strike).
+// Below DRIVE_CONFIDENCE_THRESHOLD, concrete choices need confidence and
+// selected probability >= 0.30 and a probability >= twice the runner-up.
+// Fixed controls and value "none" keep the threshold. Validation and purchase
+// approval stay. Safety net is validate_choice, fingerprint-bound consume-once,
+// and three consecutive non-wait actions with no page change (re-snapshot once
+// before a strike).
 
 import { appendFileSync } from "node:fs";
 import type { Page } from "playwright";
@@ -4151,7 +4153,24 @@ export function admitsChoice(
   const invalid = validateChoiceReason(criteria, answer);
   const confidence = confidenceOf(answer);
   if (invalid !== undefined) return { kind: "invalid_answer", reason: invalid, confidence };
-  if (confidence < threshold) return { kind: "low_confidence", confidence };
+  if (confidence < threshold) {
+    const choice = answer!.choice!;
+    const fixedChoices = ["DONE", "BLOCKED", "NONE_OF_THESE", "GO_BACK", "WAIT", "INBOX", "none"];
+    const minimumConfidence = 0.3;
+    const winnerRatio = 2;
+    const probabilities = answer!.probabilities!;
+    const selected = probabilities[choice]!;
+    let runnerUp = 0;
+    for (const [key, probability] of Object.entries(probabilities)) {
+      if (key !== choice) runnerUp = Math.max(runnerUp, probability);
+    }
+    if (
+      fixedChoices.includes(choice) ||
+      Math.min(confidence, selected) < minimumConfidence ||
+      selected < winnerRatio * runnerUp
+    )
+      return { kind: "low_confidence", confidence };
+  }
   return { ok: true };
 }
 

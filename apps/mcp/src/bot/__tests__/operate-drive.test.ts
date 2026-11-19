@@ -420,8 +420,14 @@ describe("history threading", () => {
       ["@e:disabled", "b", "Continue|s=d"],
     ];
     const state = buildJevState(
-      "verify email then get an API key", [], [], "https://app.example.test/keys",
-      "Keys", [], "", { rows },
+      "verify email then get an API key",
+      [],
+      [],
+      "https://app.example.test/keys",
+      "Keys",
+      [],
+      "",
+      { rows },
     );
     expect(state.elements.map((element) => element.id)).toEqual(rows.map((row) => row[0]));
     expect(state.goal).toEqual({
@@ -436,7 +442,9 @@ describe("history threading", () => {
     const instructions = nextActionInstructions(goal);
     expect(instructions).not.toContain("Current phase: done");
     expect(instructions).not.toContain("Current phase:");
-    expect(instructions).toContain("The goal is complete only when the page shows the requested result and every stated requirement is satisfied.");
+    expect(instructions).toContain(
+      "The goal is complete only when the page shows the requested result and every stated requirement is satisfied.",
+    );
     expect(goalPhaseAndDoneWhen(goal)).toEqual({
       done_when: "the page shows the requested result and every stated requirement is satisfied",
     });
@@ -535,6 +543,423 @@ describe("validate_choice", () => {
         { hard: true },
       ),
     ).toEqual({ kind: "low_confidence", confidence: 0.2 });
+  });
+});
+
+// Explicit complete vectors keep the floor and runner-up boundaries readable.
+function vectorAnswer(
+  values: number[],
+  confidence = values[0]!,
+): {
+  criteria: Record<string, string>;
+  answer: JevAnswer;
+} {
+  const keys = values.map((_, index) => `pick_${index}`);
+  return {
+    criteria: Object.fromEntries(keys.map((key) => [key, key])),
+    answer: {
+      choice: keys[0]!,
+      confidence,
+      probabilities: Object.fromEntries(keys.map((key, i) => [key, values[i]!])),
+    },
+  };
+}
+
+function ambiguousAnswer(criteria: Record<string, string>, choice: string): JevAnswer {
+  const other = Object.keys(criteria).find((key) => key !== choice)!;
+  return {
+    choice,
+    confidence: 0.41,
+    probabilities: {
+      ...Object.fromEntries(Object.keys(criteria).map((key) => [key, 0])),
+      [choice]: 0.51,
+      [other]: 0.49,
+    },
+  };
+}
+
+describe("clear-winner admission", () => {
+  it.each([
+    [0.57, 0.2, 0.115, 0.115],
+    [0.32, 0.16, 0.13, 0.13, 0.13, 0.13],
+    [0.4, 0.2, 0.2, 0.2],
+    [0.3, 0.15, 0.1375, 0.1375, 0.1375, 0.1375],
+  ])("admits a complete clear-winner vector starting at %s", (...values) => {
+    const { criteria, answer } = vectorAnswer(values);
+    expect(admitsChoice(criteria, answer)).toEqual({ ok: true });
+  });
+
+  it.each([
+    [0.45, 0.3, 0.25],
+    [0.3, 0.1501, 0.137475, 0.137475, 0.137475, 0.137475],
+    [0.1, ...Array<number>(18).fill(0.05)],
+  ])("refuses an ambiguous or tiny winner starting at %s", (...values) => {
+    const { criteria, answer } = vectorAnswer(values);
+    expect(admitsChoice(criteria, answer)).toEqual({
+      kind: "low_confidence",
+      confidence: values[0],
+    });
+  });
+
+  it.each([
+    { values: [0.4, 0.2, 0.2, 0.2], confidence: 0.2999 },
+    { values: [0.2999, ...Array<number>(5).fill(0.7001 / 5)], confidence: 0.4 },
+    { values: [0.91, 0.09], confidence: 0.26 },
+    { values: [1], confidence: 0.2 },
+  ])("requires both floors: $confidence / $values", ({ values, confidence }) => {
+    const { criteria, answer } = vectorAnswer(values, confidence);
+    expect(admitsChoice(criteria, answer)).toEqual({ kind: "low_confidence", confidence });
+  });
+
+  it("refuses missing confidence and preserves the legacy threshold branch", () => {
+    const { criteria, answer } = vectorAnswer([0.5, 0.5], 0.6);
+    expect(admitsChoice(criteria, answer)).toEqual({ ok: true });
+    delete answer.confidence;
+    expect(admitsChoice(criteria, answer)).toEqual({ kind: "low_confidence", confidence: 0 });
+  });
+
+  it.each([
+    ["choice_not_offered", { choice: "absent", probabilities: { a: 1, b: 0 } }],
+    ["missing_probabilities", { choice: "a" }],
+    ["probability_keys_mismatch", { choice: "a", probabilities: { a: 1 } }],
+    ["probability_key_not_offered", { choice: "a", probabilities: { a: 1, c: 0 } }],
+    ["probability_not_unit_interval", { choice: "a", probabilities: { a: Infinity, b: 0 } }],
+    ["probability_not_unit_interval", { choice: "a", probabilities: { a: NaN, b: 0 } }],
+    ["probability_not_unit_interval", { choice: "a", probabilities: { a: 1.1, b: -0.1 } }],
+    ["probability_sum", { choice: "a", probabilities: { a: 0.32, b: 0.16 } }],
+    ["choice_not_argmax", { choice: "a", probabilities: { a: 0.2, b: 0.8 } }],
+  ] as const)("keeps validation precedence: %s", (reason, invalid) => {
+    for (const confidence of [0.4, 0.9]) {
+      expect(admitsChoice({ a: "a", b: "b" }, { ...invalid, confidence })).toEqual({
+        kind: "invalid_answer",
+        reason,
+        confidence,
+      });
+    }
+  });
+});
+
+describe("clear-winner decision routing", () => {
+  const buttons: WireRow[] = Array.from({ length: 6 }, (_, i) => [`@e:b${i}`, "b", `Action ${i}`]);
+  const base = {
+    rows: buttons,
+    facts: {},
+    lastFingerprint: null,
+    lastActionKey: null,
+    fingerprint: "fp",
+    goal: "perform Action 0",
+  };
+  const criteriaFor = (questions: ReturnType<typeof buildDriveQuestions>, name: string) => {
+    const q = questions[name];
+    if (q?.type !== "choice") throw new Error(`missing ${name}`);
+    return q.criteria;
+  };
+  const questions = buildDriveQuestions(buttons, {}, base.goal);
+  const ops = criteriaFor(questions, "operation");
+  const targets = criteriaFor(questions, "CLICK_target");
+  const targetKey = Object.keys(targets)[0]!;
+  const clickAnswers = () => ({
+    operation: valid("CLICK", ops),
+    CLICK_target: valid(targetKey, targets, 0.4),
+  });
+
+  it.each(["DONE", "BLOCKED", "NONE_OF_THESE", "GO_BACK", "WAIT", "INBOX"])(
+    "keeps the threshold for %s",
+    (choice) => {
+      // Include every control explicitly so GO_BACK/INBOX are tested even on a page without their usual context.
+      const criteria = Object.fromEntries(
+        ["CLICK", "TYPE_TEXT", "DONE", "BLOCKED", "NONE_OF_THESE", "GO_BACK", "WAIT", "INBOX"].map(
+          (key) => [key, key],
+        ),
+      );
+      const input = {
+        ...base,
+        questions: { operation: { type: "choice" as const, instructions: "next", criteria } },
+      };
+      expect(
+        decideAfterJev({ ...input, answers: { operation: valid(choice, criteria, 0.4) } }),
+      ).toMatchObject({ kind: "low_confidence", confidence: 0.4 });
+      const kinds: Record<string, string> = {
+        DONE: "complete",
+        BLOCKED: "stuck",
+        NONE_OF_THESE: "none_of_these",
+        GO_BACK: "go_back",
+        WAIT: "wait",
+        INBOX: "act",
+      };
+      expect(
+        decideAfterJev({ ...input, answers: { operation: valid(choice, criteria, 0.6) } }),
+      ).toMatchObject({ kind: kinds[choice] });
+    },
+  );
+
+  it.each([0.32, 0.4, 0.41, 0.57])("acts on a clear operation at %s", (confidence) => {
+    expect(
+      decideAfterJev({
+        ...base,
+        answers: {
+          operation: valid("CLICK", ops, confidence),
+          CLICK_target: valid(targetKey, targets),
+        },
+      }),
+    ).toMatchObject({ kind: "act", action: { kind: "click", target: "@e:b0" } });
+  });
+
+  it.each([
+    [0.57, 0.2, 0.115, 0.115],
+    [0.32, 0.16, 0.13, 0.13, 0.13, 0.13],
+    [0.4, 0.2, 0.2, 0.2],
+  ])("acts on the complete target vector starting at %s", (...values) => {
+    const rows = buttons.slice(0, values.length);
+    const q = buildDriveQuestions(rows, {}, base.goal);
+    const criteria = criteriaFor(q, "CLICK_target");
+    const keys = Object.keys(criteria);
+    const target = {
+      choice: keys[0]!,
+      confidence: values[0]!,
+      probabilities: Object.fromEntries(keys.map((key, i) => [key, values[i]!])),
+    };
+    expect(
+      decideAfterJev({
+        ...base,
+        rows,
+        answers: { operation: valid("CLICK", criteriaFor(q, "operation")), CLICK_target: target },
+      }),
+    ).toMatchObject({ kind: "act", action: { kind: "click", target: "@e:b0" } });
+  });
+
+  it("refuses either ambiguous head", () => {
+    expect(
+      decideAfterJev({
+        ...base,
+        answers: { ...clickAnswers(), operation: ambiguousAnswer(ops, "CLICK") },
+      }),
+    ).toMatchObject({ kind: "low_confidence" });
+    expect(
+      decideAfterJev({
+        ...base,
+        answers: { ...clickAnswers(), CLICK_target: ambiguousAnswer(targets, targetKey) },
+      }),
+    ).toMatchObject({ kind: "low_confidence" });
+  });
+
+  it("admits a wrong target too: scores do not establish semantic correctness", () => {
+    const wrong = Object.keys(targets)[5]!;
+    expect(
+      decideAfterJev({
+        ...base,
+        answers: { operation: valid("CLICK", ops), CLICK_target: valid(wrong, targets, 0.4) },
+      }),
+    ).toMatchObject({ kind: "act", action: { kind: "click", target: "@e:b5" } });
+    expect(
+      isExistingCredentialMutationRow(["@e:delete", "b", "Delete API key"], "https://x.test/keys"),
+    ).toBe(true);
+    expect(
+      isExistingCredentialMutationRow(
+        ["@e:delete", "b", "Delete project"],
+        "https://x.test/projects",
+      ),
+    ).toBe(false);
+  });
+
+  it("preserves consume-once and last-action failure behavior for low-score targets", () => {
+    const input = {
+      ...base,
+      answers: clickAnswers(),
+      consumedActionKey: "@e:b0",
+      boundFingerprint: "fp",
+    };
+    expect(decideAfterJev(input)).toEqual({ kind: "no_progress" });
+    expect(decideAfterJev({ ...input, fingerprint: "changed" })).toMatchObject({ kind: "act" });
+    expect(
+      decideAfterJev({
+        ...base,
+        lastActionKey: "@e:b0",
+        answers: { ...clickAnswers(), last_action_worked: { noul: 0.2 } },
+      }),
+    ).toMatchObject({ kind: "replan" });
+    expect(
+      decideAfterJev({
+        ...base,
+        lastActionKey: "@e:b1",
+        answers: { ...clickAnswers(), last_action_worked: { noul: 0.2 } },
+      }),
+    ).toMatchObject({ kind: "act" });
+    expect(
+      decideAfterJev({ ...base, lastActionKey: "@e:b0", answers: clickAnswers() }),
+    ).toMatchObject({ kind: "act" });
+  });
+
+  it("does not bypass the floor for a singleton target", () => {
+    const rows = buttons.slice(0, 1);
+    const q = buildDriveQuestions(rows, {}, base.goal);
+    const c = criteriaFor(q, "CLICK_target");
+    expect(
+      decideAfterJev({
+        ...base,
+        rows,
+        answers: {
+          operation: valid("CLICK", criteriaFor(q, "operation")),
+          CLICK_target: valid(Object.keys(c)[0]!, c, 0.2),
+        },
+      }),
+    ).toMatchObject({ kind: "low_confidence", confidence: 0.2 });
+  });
+
+  it("types a direct matching fact through a clear-winner field target", () => {
+    const rows: WireRow[] = Array.from({ length: 6 }, (_, i) => [
+      `@e:email${i}`,
+      "t",
+      `Email ${i}|f=email`,
+    ]);
+    const facts = { email: "ada@fixture.test" };
+    const q = buildDriveQuestions(rows, facts, "sign up");
+    const c = criteriaFor(q, "TYPE_TEXT_target");
+    expect(
+      decideAfterJev({
+        ...base,
+        rows,
+        facts,
+        goal: "sign up",
+        answers: {
+          operation: valid("TYPE_TEXT", criteriaFor(q, "operation")),
+          TYPE_TEXT_target: valid(Object.keys(c)[0]!, c, 0.4),
+        },
+      }),
+    ).toMatchObject({
+      kind: "act",
+      action: { kind: "type", target: "@e:email0", text: facts.email },
+    });
+  });
+
+  it.each(["form", "optional form", "generic"])(
+    "admits concrete %s values but retains the none threshold",
+    (kind) => {
+      const row: WireRow = [
+        "@e:input",
+        "t",
+        kind === "generic" ? "Search|f=search" : `Workspace alias${kind === "form" ? "|s=r" : ""}`,
+      ];
+      const rows = kind === "generic" ? [row] : [row, SUBMIT];
+      const facts = { a: "alpha", b: "beta", c: "gamma", d: "delta", e: "epsilon" };
+      const goal = kind === "generic" ? "Search for alpha" : "create an account";
+      const q = buildDriveQuestions(rows, facts, goal);
+      const target = criteriaFor(q, "TYPE_TEXT_target");
+      const valueName = kind === "generic" ? DRIVE_VALUE_QUESTION : "form_value_1";
+      const values = criteriaFor(q, valueName);
+      const input = { ...base, rows, facts, goal };
+      const answers = {
+        operation: valid("TYPE_TEXT", criteriaFor(q, "operation")),
+        TYPE_TEXT_target: valid(Object.keys(target)[0]!, target),
+      };
+      expect(
+        decideAfterJev({ ...input, answers: { ...answers, [valueName]: valid("a", values, 0.4) } }),
+      ).toMatchObject({ kind: "act", action: { kind: "type", target: row[0], text: "alpha" } });
+      expect(
+        decideAfterJev({
+          ...input,
+          answers: { ...answers, [valueName]: valid("none", values, 0.4) },
+        }),
+      ).toMatchObject({ kind: "low_confidence", confidence: 0.4 });
+      expect(
+        decideAfterJev({
+          ...input,
+          answers: { ...answers, [valueName]: valid("none", values, 0.8) },
+        }),
+      ).toMatchObject({ kind: kind === "optional form" ? "replan" : "needs_value" });
+    },
+  );
+
+  it("selects the exact option from a low-score target", () => {
+    const rows: WireRow[] = [["@e:country", "s", "Country|f=country"]];
+    const pageOptions = new Map([["@e:country", ["US", "UK", "CA", "JP"]]]);
+    const facts = { country: "US" };
+    const q = buildDriveQuestions(rows, facts, "sign up", false, [], "", pageOptions);
+    const targets = criteriaFor(q, "SELECT_target");
+    const key = Object.keys(targets).find((key) => targets[key]!.includes("US"))!;
+    expect(
+      decideAfterJev({
+        ...base,
+        rows,
+        facts,
+        pageOptions,
+        answers: {
+          operation: valid("SELECT", criteriaFor(q, "operation")),
+          SELECT_target: valid(key, targets, 0.4),
+        },
+      }),
+    ).toMatchObject({ kind: "act", action: { kind: "select", target: "@e:country", text: "US" } });
+  });
+
+  it("scrolls the selected direction from an exact 2x target", () => {
+    const rows = [OFFSCREEN];
+    const q = buildDriveQuestions(rows, {}, "sign up");
+    const c = criteriaFor(q, "SCROLL_target");
+    expect(
+      decideAfterJev({
+        ...base,
+        rows,
+        goal: "sign up",
+        answers: {
+          operation: valid("SCROLL", criteriaFor(q, "operation")),
+          SCROLL_target: valid("down", c, 0.4),
+        },
+      }),
+    ).toMatchObject({ kind: "act", action: { kind: "scroll", direction: "down" } });
+  });
+
+  it("keeps the raw email shortcut threshold while admitting an OTP target fallback", () => {
+    const otp: WireRow = ["@e:otp", "t", "Verification code|f=otp"];
+    const rows = [
+      otp,
+      ...buttons.map((_, i): WireRow => [`@e:field${i}`, "t", `Email ${i}|f=email`]),
+    ];
+    const q = buildDriveQuestions(rows, {}, "verify email");
+    const code = criteriaFor(q, "email_code_field");
+    const codeKey = Object.keys(code).find((key) => key !== "none")!;
+    const targets = criteriaFor(q, "TYPE_TEXT_target");
+    const otpKey = Object.keys(targets).find((key) =>
+      targets[key]!.toLowerCase().includes("verification"),
+    )!;
+    const direct = {
+      choice: codeKey,
+      confidence: 0.4,
+      probabilities: peakedProbabilities(Object.keys(code), codeKey),
+    };
+    const input = { ...base, rows, facts: {}, goal: "verify email" };
+    expect(decideAfterJev({ ...input, answers: { email_code_field: direct } })).toMatchObject({
+      kind: "invalid_answer",
+      reason: "missing_answer",
+    });
+    expect(
+      decideAfterJev({ ...input, answers: { email_code_field: { ...direct, confidence: 0.8 } } }),
+    ).toMatchObject({
+      kind: "act",
+      special: "inbox",
+      action: { kind: "type", target: otp[0], text: "" },
+    });
+    const answers = {
+      email_code_field: direct,
+      operation: valid("TYPE_TEXT", criteriaFor(q, "operation")),
+      TYPE_TEXT_target: valid(otpKey, targets, 0.4),
+    };
+    expect(decideAfterJev({ ...input, answers })).toMatchObject({
+      kind: "act",
+      special: "inbox",
+      action: { kind: "type", target: otp[0], text: "" },
+    });
+    for (const confidence of [0.4, 0.8]) {
+      const decision = decideAfterJev({
+        ...input,
+        facts: { otp: "123456" },
+        answers: { ...answers, email_code_field: { ...direct, confidence } },
+      });
+      expect(decision).toMatchObject({
+        kind: "act",
+        action: { kind: "type", target: otp[0], text: "123456" },
+      });
+      expect(decision).not.toHaveProperty("special");
+    }
   });
 });
 
@@ -762,13 +1187,9 @@ describe("decideAfterJev stop reasons", () => {
     // Same rows on the checkout URL: Search must stay out of TYPE_TEXT so the
     // planner cannot type the purchase goal into it after inject_card.
     expect(
-      typeableCandidates(
-        rows,
-        facts,
-        true,
-        ["@e:email"],
-        "https://shop.test/checkouts/cn1",
-      ).map((row) => row.ref),
+      typeableCandidates(rows, facts, true, ["@e:email"], "https://shop.test/checkouts/cn1").map(
+        (row) => row.ref,
+      ),
     ).toEqual([]);
     const resolved = fillableCandidates(rows, facts, true, ["@e:email", "@e:state"]);
     expect(resolved).toEqual([]);
@@ -779,23 +1200,35 @@ describe("decideAfterJev stop reasons", () => {
     const shipping: WireRow = ["@e:rate", "r", "Standard shipping|s=u"];
     const card: WireRow = ["@e:pan", "t", "Card number|f=payment|s=r"];
     expect(checkoutWorkBeforeCard([address, shipping, card])).toBe(true);
-    expect(checkoutWorkBeforeCard([
-      ["@e:line1", "combobox", "Address|f=address_line1|s=r|n=1 Main St"],
-      shipping, card,
-    ])).toBe(true);
-    expect(checkoutWorkBeforeCard([
-      ["@e:line1", "combobox", "Address|f=address_line1|s=r|n=1 Main St"],
-      ["@e:rate", "r", "Standard shipping|s=c"], card,
-    ])).toBe(false);
-    expect(checkoutWorkBeforeCard([card], [{ kind: "validation", text: "Enter shipping address" }])).toBe(true);
-    expect(checkoutWorkBeforeCard([
-      ["@e:when", "t", "Delivery date|s=r"],
-      card,
-    ])).toBe(false);
-    expect(checkoutWorkBeforeCard([card], [{
-      kind: "validation",
-      text: "Card number CVV Expiration date (MM / YY) Name on card Delivery date Search payment",
-    }])).toBe(false);
+    expect(
+      checkoutWorkBeforeCard([
+        ["@e:line1", "combobox", "Address|f=address_line1|s=r|n=1 Main St"],
+        shipping,
+        card,
+      ]),
+    ).toBe(true);
+    expect(
+      checkoutWorkBeforeCard([
+        ["@e:line1", "combobox", "Address|f=address_line1|s=r|n=1 Main St"],
+        ["@e:rate", "r", "Standard shipping|s=c"],
+        card,
+      ]),
+    ).toBe(false);
+    expect(
+      checkoutWorkBeforeCard([card], [{ kind: "validation", text: "Enter shipping address" }]),
+    ).toBe(true);
+    expect(checkoutWorkBeforeCard([["@e:when", "t", "Delivery date|s=r"], card])).toBe(false);
+    expect(
+      checkoutWorkBeforeCard(
+        [card],
+        [
+          {
+            kind: "validation",
+            text: "Card number CVV Expiration date (MM / YY) Name on card Delivery date Search payment",
+          },
+        ],
+      ),
+    ).toBe(false);
   });
 
   it("does not treat a Shopify geo-default state as already filled", () => {
@@ -850,7 +1283,12 @@ describe("decideAfterJev stop reasons", () => {
 
   it("does not spill into other checkout forms after delivery is filled", () => {
     const checkout = "https://shop.example/checkouts/order";
-    const facts = { email: "buyer@example.test", first_name: "Ada", last_name: "Lovelace", state: "NY" };
+    const facts = {
+      email: "buyer@example.test",
+      first_name: "Ada",
+      last_name: "Lovelace",
+      state: "NY",
+    };
     const rows: WireRow[] = [
       ["@e:email", "t", "Email|f=email|fm=delivery|n=buyer@example.test"],
       ["@e:first", "t", "First name|f=first_name|fm=delivery|n=Ada"],
@@ -871,7 +1309,9 @@ describe("decideAfterJev stop reasons", () => {
       ["@e:apply", "b", "Apply|fm=discount"],
     ];
     const facts = { email: "buyer@example.test", discount_code: "WELCOME" };
-    expect(requiredFactTypeAction(rows, facts, [], "https://shop.example/checkout")).toBeUndefined();
+    expect(
+      requiredFactTypeAction(rows, facts, [], "https://shop.example/checkout"),
+    ).toBeUndefined();
   });
 
   it("waits for the product action before filling a lone newsletter form", () => {
@@ -879,12 +1319,14 @@ describe("decideAfterJev stop reasons", () => {
       ["@e:add", "b", "Add to cart"],
       ["@e:newsletter", "t", "Email|f=email|fm=newsletter"],
     ];
-    expect(requiredFactTypeAction(
-      rows,
-      { email: "buyer@example.test" },
-      [],
-      "https://shop.example/products/serum",
-    )).toBeUndefined();
+    expect(
+      requiredFactTypeAction(
+        rows,
+        { email: "buyer@example.test" },
+        [],
+        "https://shop.example/products/serum",
+      ),
+    ).toBeUndefined();
   });
 
   it("holds the card for an optional offscreen phone until the fact is typed", () => {
@@ -1313,11 +1755,7 @@ describe("decideAfterJev stop reasons", () => {
       decideAfterJev({
         ...base,
         answers: {
-          operation: {
-            choice: "CLICK",
-            confidence: 0.41,
-            probabilities: peakedProbabilities(Object.keys(operationCriteriaMap), "CLICK", 0.41),
-          },
+          operation: ambiguousAnswer(operationCriteriaMap, "CLICK"),
           CLICK_target: valid(go, clickCriteria),
         },
       }),
@@ -1325,21 +1763,51 @@ describe("decideAfterJev stop reasons", () => {
   });
 
   it("offers target keys, rather than operation names, for a drive resume", () => {
-    const options = resumeAnswerOptions([SUBMIT], {}, "Create account", false, "https://example.test/signup");
+    const options = resumeAnswerOptions(
+      [SUBMIT],
+      {},
+      "Create account",
+      false,
+      "https://example.test/signup",
+    );
     expect(options).toHaveProperty(slugFor(SUBMIT));
     expect(options).not.toHaveProperty("CLICK");
     expect(options).toHaveProperty("DONE");
-    expect(resumeAction("CLICK", [SUBMIT], {}, "Create account", undefined, "https://example.test/signup")).toMatchObject({
+    expect(
+      resumeAction(
+        "CLICK",
+        [SUBMIT],
+        {},
+        "Create account",
+        undefined,
+        "https://example.test/signup",
+      ),
+    ).toMatchObject({
       kind: "invalid_answer",
       reason: "resume_not_current_option",
       question: { options: expect.objectContaining({ [slugFor(SUBMIT)]: expect.any(String) }) },
     });
     const select: WireRow = ["@e:country", "s", "Country|f=country"];
     const facts = { country: "US" };
-    const selectOptions = resumeAnswerOptions([select], facts, "Create account", false, "https://example.test/signup");
+    const selectOptions = resumeAnswerOptions(
+      [select],
+      facts,
+      "Create account",
+      false,
+      "https://example.test/signup",
+    );
     const optionKey = Object.keys(selectOptions).find((key) => key.includes(":"));
     expect(optionKey).toBeDefined();
-    expect(resumeAction(optionKey!, [select], facts, "Create account", undefined, "https://example.test/signup")).toMatchObject({
+    expect(
+      resumeAction(
+        optionKey!,
+        [select],
+        facts,
+        "Create account",
+        undefined,
+        "https://example.test/signup",
+      ),
+    ).toMatchObject({
       kind: "act",
       action: { kind: "select", target: "@e:country", text: "US" },
     });
@@ -1354,11 +1822,19 @@ describe("decideAfterJev stop reasons", () => {
     const oldKey = Object.keys(offered).find((key) => offered[key] === "チェックアウトに進む");
     expect(oldKey).toBeDefined();
     const currentKey = resolveResumeAnswer(
-      oldKey!, current, prior, url, {}, "Proceed to checkout", false, offered,
+      oldKey!,
+      current,
+      prior,
+      url,
+      {},
+      "Proceed to checkout",
+      false,
+      offered,
     );
     expect(currentKey).not.toBe(oldKey);
-    expect(resumeAction(currentKey, current, {}, "Proceed to checkout", undefined, url))
-      .toMatchObject({ kind: "act", action: { kind: "click", target: original[0] } });
+    expect(
+      resumeAction(currentKey, current, {}, "Proceed to checkout", undefined, url),
+    ).toMatchObject({ kind: "act", action: { kind: "click", target: original[0] } });
   });
 
   it("accepts an offered expiry key after the goal changes and defers its value until card release", () => {
@@ -1436,21 +1912,31 @@ describe("decideAfterJev stop reasons", () => {
 
   it("accepts every handoff target key through the same capped decision space", () => {
     const rows: WireRow[] = Array.from({ length: 75 }, (_, index) => [
-      `@e:cart${index}`, "b", `Cart ${index}|f=cart_${index}`,
+      `@e:cart${index}`,
+      "b",
+      `Cart ${index}|f=cart_${index}`,
     ]);
     const url = "https://example.test/cart";
     const options = resumeAnswerOptions(rows, {}, "Open the cart", false, url);
-    const targetKeys = Object.keys(options).filter((key) => !["DONE", "BLOCKED", "NONE_OF_THESE", "WAIT"].includes(key));
+    const targetKeys = Object.keys(options).filter(
+      (key) => !["DONE", "BLOCKED", "NONE_OF_THESE", "WAIT"].includes(key),
+    );
     expect(targetKeys.length).toBeGreaterThan(0);
     for (const key of targetKeys) {
-      expect(resumeAction(key, rows, {}, "Open the cart", undefined, url), key).toMatchObject({ kind: "act" });
+      expect(resumeAction(key, rows, {}, "Open the cart", undefined, url), key).toMatchObject({
+        kind: "act",
+      });
     }
     for (const key of ["BLOCKED", "NONE_OF_THESE"]) {
-      expect(resumeAction(key, rows, {}, "Open the cart", undefined, url)).toMatchObject({ kind: "operator_handoff" });
+      expect(resumeAction(key, rows, {}, "Open the cart", undefined, url)).toMatchObject({
+        kind: "operator_handoff",
+      });
     }
     const invalid = resumeAction("missing_key", rows, {}, "Open the cart", undefined, url);
     expect(invalid).toMatchObject({ kind: "invalid_answer" });
-    expect((invalid as { question: { question: string } }).question.question).toContain(targetKeys[0]);
+    expect((invalid as { question: { question: string } }).question.question).toContain(
+      targetKeys[0],
+    );
   });
 
   it("reports invalid_answer with the validation reason instead of low_confidence", () => {
@@ -1843,17 +2329,35 @@ describe("form-fill assignment helpers", () => {
     expect(typedValueEquals("Squir", "Squire")).toBe(false);
     expect(typedValueEquals(undefined, "Squire")).toBe(false);
     expect(
-      typedValueEquals("(212) 555-0123", "2125550123", ["@e:phone", "t", "Phone (optional)|f=phone"]),
+      typedValueEquals("(212) 555-0123", "2125550123", [
+        "@e:phone",
+        "t",
+        "Phone (optional)|f=phone",
+      ]),
     ).toBe(true);
     expect(
       typedValueEquals("(212) 555-0124", "2125550123", ["@e:phone", "t", "Phone|f=phone"]),
     ).toBe(false);
     expect(typedValueEquals("01", "1", ["@e:qty", "t", "Quantity|it=number"])).toBe(true);
-    expect(typedValueEquals("11 / 29", "11/29", ["@e:exp", "t", "Expiration date (MM / YY)|f=card_expiry"])).toBe(true);
-    expect(typedValueEquals("11-29", "11 / 29", ["@e:exp", "t", "Expiration date (MM / YY)"])).toBe(true);
-    expect(typedValueEquals("12 / 29", "11/29", ["@e:exp", "t", "Expiration date (MM / YY)"])).toBe(false);
-    expect(typedValueEquals("2029-11-03", "2029/11/03", ["@e:date", "t", "Delivery date"])).toBe(true);
-    expect(typedValueEquals("4242-4242", "42424242", ["@e:pan", "t", "Card number|f=payment"])).toBe(true);
+    expect(
+      typedValueEquals("11 / 29", "11/29", [
+        "@e:exp",
+        "t",
+        "Expiration date (MM / YY)|f=card_expiry",
+      ]),
+    ).toBe(true);
+    expect(typedValueEquals("11-29", "11 / 29", ["@e:exp", "t", "Expiration date (MM / YY)"])).toBe(
+      true,
+    );
+    expect(typedValueEquals("12 / 29", "11/29", ["@e:exp", "t", "Expiration date (MM / YY)"])).toBe(
+      false,
+    );
+    expect(typedValueEquals("2029-11-03", "2029/11/03", ["@e:date", "t", "Delivery date"])).toBe(
+      true,
+    );
+    expect(
+      typedValueEquals("4242-4242", "42424242", ["@e:pan", "t", "Card number|f=payment"]),
+    ).toBe(true);
     expect(typedValueEquals("(212) 555-0123", "2125550123", ["@e:name", "t", "Name"])).toBe(false);
     expect(typedFieldMismatchReason("First name", "Squire", "Squir")).toBe(
       'typed First name as "Squire" but the field shows "Squir"',
@@ -1964,14 +2468,22 @@ describe("form-fill assignment helpers", () => {
       ["@e:keys", "l", "API keys"],
       ["@e:next", "b", "Continue"],
     ];
-    const targetRefs = (goal: string) => driveTargetSets(
-      rows, {}, false, [], "https://example.test/welcome", new Map(),
-      (text) => text, [], { goal },
-    ).CLICK.map((candidate) => candidate.ref);
+    const targetRefs = (goal: string) =>
+      driveTargetSets(
+        rows,
+        {},
+        false,
+        [],
+        "https://example.test/welcome",
+        new Map(),
+        (text) => text,
+        [],
+        { goal },
+      ).CLICK.map((candidate) => candidate.ref);
     expect(targetRefs("verify email then get an API key")).toEqual(targetRefs("get an API key"));
-    expect(targetRefs("get an API key")).toEqual(expect.arrayContaining([
-      "@e:home", "@e:skip", "@e:keys", "@e:next",
-    ]));
+    expect(targetRefs("get an API key")).toEqual(
+      expect.arrayContaining(["@e:home", "@e:skip", "@e:keys", "@e:next"]),
+    );
   });
 
   it("keeps a non-DONE answer when every listed control is suppressed", () => {
@@ -2279,8 +2791,24 @@ describe("form-fill assignment helpers", () => {
       code: null,
       link: null,
       messages: [
-        { index: 0, from: "noreply@dev.tiktok.com", subject: "Code", received_at: "2026-10-08", body: "Code 614208", codes: ["614208"], links: [] },
-        { index: 1, from: "other@example.com", subject: "Old code", received_at: "2026-10-07", body: "Code 123456", codes: ["123456"], links: [] },
+        {
+          index: 0,
+          from: "noreply@dev.tiktok.com",
+          subject: "Code",
+          received_at: "2026-10-08",
+          body: "Code 614208",
+          codes: ["614208"],
+          links: [],
+        },
+        {
+          index: 1,
+          from: "other@example.com",
+          subject: "Old code",
+          received_at: "2026-10-07",
+          body: "Code 123456",
+          codes: ["123456"],
+          links: [],
+        },
       ],
     };
     expect(inboxVerificationDecision(listing, "otp")).toBe("type_code");
@@ -2376,7 +2904,10 @@ describe("facts, fingerprint, compact merge", () => {
 
   it("keeps a Cal.com username field bound to the supplied username", () => {
     const username: WireRow = ["@e:user", "t", "Username|f=username|n=lb2gauntlet0926a"];
-    const facts = { email: "lunchboxfortwo+calgauntlet20260926a@gmail.com", username: "lb2gauntlet0926a" };
+    const facts = {
+      email: "lunchboxfortwo+calgauntlet20260926a@gmail.com",
+      username: "lb2gauntlet0926a",
+    };
     expect(matchingFactKeys(facts, username)).toEqual(["username"]);
     expect(requiredFactTypeAction([username], facts)).toBeUndefined();
     expect(matchingFactKeys({ email: facts.email }, username)).toEqual([]);
@@ -2874,11 +3405,14 @@ describe("select option key collisions", () => {
 describe("drive outbound choice budgets", () => {
   it("keeps a native form submit in model choices and handback after a long menu", () => {
     const rows: WireRow[] = [
-      ...Array.from({ length: 125 }, (_, index): WireRow => [
-        `@e:collection-${index}`,
-        "l",
-        `Collection ${index}|u=/collections/${index}`,
-      ]),
+      ...Array.from(
+        { length: 125 },
+        (_, index): WireRow => [
+          `@e:collection-${index}`,
+          "l",
+          `Collection ${index}|u=/collections/${index}`,
+        ],
+      ),
       ["@e:add", "b", "Add to cart|a=submit|fm=1"],
     ];
     const questions = buildDriveQuestions(rows, {}, "Add the serum to the cart");
@@ -2886,8 +3420,9 @@ describe("drive outbound choice budgets", () => {
     expect(click?.type).toBe("choice");
     if (click?.type !== "choice") return;
     expect(Object.values(click.criteria)).toContain("Add to cart");
-    expect(Object.values(resumeAnswerOptions(rows, {}, "Add the serum to the cart", false, "/")))
-      .toContain("Add to cart");
+    expect(
+      Object.values(resumeAnswerOptions(rows, {}, "Add the serum to the cart", false, "/")),
+    ).toContain("Add to cart");
   });
 
   it("reserves a usable search value when earlier click targets consume the budget", () => {
@@ -3175,14 +3710,18 @@ describe("third-party-only signup", () => {
 
   it("offers provider links alongside native fields", () => {
     const sets = driveTargetSets([google, github, email], { email: "a@b.test" }, false);
-    expect(sets.CLICK.map((candidate) => candidate.ref)).toEqual(expect.arrayContaining(["@e:g", "@e:h"]));
+    expect(sets.CLICK.map((candidate) => candidate.ref)).toEqual(
+      expect.arrayContaining(["@e:g", "@e:h"]),
+    );
     expect(sets.TYPE_TEXT.map((candidate) => candidate.ref)).toContain("@e:email");
   });
 
   it("does not remove provider links from the choices based on goal wording", () => {
     const rows = [google, github];
-    const refs = (goal: string) => driveTargetSets(rows, {}, false, [], "", new Map(),
-      (text) => text, [], { goal }).CLICK.map((candidate) => candidate.ref);
+    const refs = (goal: string) =>
+      driveTargetSets(rows, {}, false, [], "", new Map(), (text) => text, [], { goal }).CLICK.map(
+        (candidate) => candidate.ref,
+      );
     expect(refs("sign up without Google")).toEqual(refs("sign up with Google"));
   });
 
@@ -3485,7 +4024,9 @@ describe("post-confirmation navigation", () => {
       ["@e:keys", "l", "API Keys"],
       ["@e:out", "l", "Log out"],
     ];
-    expect(driveTargetSets(rows, {}, false).CLICK.map((candidate) => candidate.ref)).toContain("@e:out");
+    expect(driveTargetSets(rows, {}, false).CLICK.map((candidate) => candidate.ref)).toContain(
+      "@e:out",
+    );
     expect(invalidFieldReason([["@e:email", "t", "Email|f=email|s=i"]])).toMatch(
       /email was marked invalid/i,
     );
@@ -3559,7 +4100,9 @@ describe("post-confirmation navigation", () => {
       [],
       { goal: "extract an API key" },
     );
-    expect(sets.CLICK.map((entry) => entry.ref)).toEqual(expect.arrayContaining(["@e:docs", "@e:logo", "@e:set"]));
+    expect(sets.CLICK.map((entry) => entry.ref)).toEqual(
+      expect.arrayContaining(["@e:docs", "@e:logo", "@e:set"]),
+    );
     expect(sets.SELECT.map((entry) => entry.ref)).toContain("@e:env");
   });
 
@@ -3616,10 +4159,19 @@ describe("post-confirmation navigation", () => {
         visitedSectionKeys: [sectionIdentity(entries[0]!, settingsUrl)],
       },
     );
-    expect(afterOne.CLICK.map((entry) => entry.ref)).toEqual(expect.arrayContaining([
-      "@e:one", "@e:two", "@e:three", "@e:four", "@e:five",
-      "@e:docs", "@e:acct", "@e:bill", "@e:rep",
-    ]));
+    expect(afterOne.CLICK.map((entry) => entry.ref)).toEqual(
+      expect.arrayContaining([
+        "@e:one",
+        "@e:two",
+        "@e:three",
+        "@e:four",
+        "@e:five",
+        "@e:docs",
+        "@e:acct",
+        "@e:bill",
+        "@e:rep",
+      ]),
+    );
   });
 
   it("clears cycle and dead-action memory when the goal text changes", () => {
@@ -3679,9 +4231,21 @@ describe("drive approval amount", () => {
         },
       } as unknown as Session["activePayment"],
     };
-    const args = paymentArgs(pending, { card_ref: "card-new", merchant: "changed.test" }, "pay for the order", checkout,
-      [PAYMENT, cvv], ["Shipping $8.00\\nTotal $76.00 USD"]);
-    expect(args).toMatchObject({ approval_id: "approval_68", merchant: "whitejade.xyz", amount_cents: 6800, currency: "USD", card_ref: "card-original" });
+    const args = paymentArgs(
+      pending,
+      { card_ref: "card-new", merchant: "changed.test" },
+      "pay for the order",
+      checkout,
+      [PAYMENT, cvv],
+      ["Shipping $8.00\\nTotal $76.00 USD"],
+    );
+    expect(args).toMatchObject({
+      approval_id: "approval_68",
+      merchant: "whitejade.xyz",
+      amount_cents: 6800,
+      currency: "USD",
+      card_ref: "card-original",
+    });
   });
 
   it("does not let a facts amount replace the page total, and says they disagreed", () => {
@@ -3794,29 +4358,37 @@ describe("dialog overlay secret and oauth bounce rules", () => {
     expect(sets.CLICK.map((candidate) => candidate.ref)).toContain("@e:reset");
     expect(isExistingCredentialMutationRow(rows[1]!, "https://app.example.test/keys")).toBe(true);
     expect(isExistingCredentialMutationRow(rows[2]!, "https://app.example.test/keys")).toBe(true);
-    expect(isExistingCredentialMutationRow(
-      ["@e:delete", "b", "Delete"],
-      "https://app.example.test/settings",
-      [["@e:heading", "h1", "API Keys"]],
-    )).toBe(true);
-    expect(isExistingCredentialMutationRow(
-      ["@e:delete", "b", "Delete"],
-      "https://app.example.test/settings",
-      [],
-      "",
-      ["API Keys"],
-    )).toBe(true);
-    expect(isExistingCredentialMutationRow(
-      ["@e:action", "s", "Action"],
-      "https://app.example.test/settings",
-      [["@e:heading", "h1", "API Keys"]],
-      "Revoke",
-    )).toBe(true);
-    expect(isExistingCredentialMutationRow(
-      ["@e:delete", "b", "Delete"],
-      "https://app.example.test/settings",
-      [["@e:heading", "h1", "Team members"]],
-    )).toBe(false);
+    expect(
+      isExistingCredentialMutationRow(
+        ["@e:delete", "b", "Delete"],
+        "https://app.example.test/settings",
+        [["@e:heading", "h1", "API Keys"]],
+      ),
+    ).toBe(true);
+    expect(
+      isExistingCredentialMutationRow(
+        ["@e:delete", "b", "Delete"],
+        "https://app.example.test/settings",
+        [],
+        "",
+        ["API Keys"],
+      ),
+    ).toBe(true);
+    expect(
+      isExistingCredentialMutationRow(
+        ["@e:action", "s", "Action"],
+        "https://app.example.test/settings",
+        [["@e:heading", "h1", "API Keys"]],
+        "Revoke",
+      ),
+    ).toBe(true);
+    expect(
+      isExistingCredentialMutationRow(
+        ["@e:delete", "b", "Delete"],
+        "https://app.example.test/settings",
+        [["@e:heading", "h1", "Team members"]],
+      ),
+    ).toBe(false);
   });
 
   it("drops occluded controls and keeps the layer's own dismiss", () => {

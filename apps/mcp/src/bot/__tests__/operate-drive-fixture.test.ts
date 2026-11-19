@@ -450,6 +450,18 @@ function peaked(ids: string[], pick: string, peak = 0.91): Record<string, number
   return out;
 }
 
+// A close runner-up preserves handback fixtures under clear-winner admission.
+function ambiguousOperation(result: JevCallOutcome): void {
+  const answer = result.result.answers.operation!;
+  const choice = answer.choice!;
+  const keys = Object.keys(answer.probabilities!);
+  const runnerUp = keys.find((key) => key !== choice)!;
+  answer.confidence = 0.41;
+  answer.probabilities = Object.fromEntries(
+    keys.map((key) => [key, key === choice ? 0.51 : key === runnerUp ? 0.49 : 0]),
+  );
+}
+
 function jevFromQuestions(
   questions: Record<string, { type?: string; criteria?: Record<string, string> }>,
   preferDone = false,
@@ -630,7 +642,10 @@ describe("operate_drive real-browser fixture", () => {
         if ((await page.locator("#cart-count").textContent()) === "1") {
           return jevChoose(questions, "DONE");
         }
-        return jevChoose(questions, "CLICK", /^Add to cart$/i);
+        const result = jevChoose(questions, "CLICK", /^Add to cart$/i);
+        result.result.answers.operation!.confidence = 0.41;
+        result.result.answers.CLICK_target!.confidence = 0.4;
+        return result;
       });
       const result = await runOperateDrive(
         {
@@ -652,6 +667,113 @@ describe("operate_drive real-browser fixture", () => {
     }
   }, 30_000);
 
+  it("stops low-score clicks after three unchanged-page strikes", async () => {
+    const html = `<main>${Array.from(
+      { length: 6 },
+      (_, i) => `<button onclick="window.hits=(window.hits||0)+1">Action ${i}</button>`,
+    ).join("")}</main>`;
+    const { context, page, started } = await openFixture(html, "clear-winner-no-change.test");
+    try {
+      const dependencies = deps(async (_api, _state, questions) => {
+        const result = jevChoose(questions, "CLICK");
+        result.result.answers.operation!.confidence = 0.4;
+        const target = result.result.answers.CLICK_target!;
+        target.confidence = 0.4;
+        target.probabilities = peaked(Object.keys(target.probabilities!), target.choice!, 0.4);
+        return result;
+      });
+      const result = await runOperateDrive(
+        { session_id: started.session_id, goal: "try these actions", max_steps: 8 },
+        api(),
+        undefined,
+        dependencies,
+      );
+      expect(result.status).toBe("no_progress");
+      expect(result.trajectory).toHaveLength(3);
+      expect(result.trajectory.every((step) => step.confidence === 0.4)).toBe(true);
+      expect(await page.evaluate(() => (window as unknown as { hits: number }).hits)).toBe(3);
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
+  it("keeps card release pending after a low-score payment-entry click", async () => {
+    const html = `<main><h1>Checkout</h1><p>Total $1.00 USD</p>
+      <button id="new-card" onclick="this.outerHTML='<label>Card number <input id=pan autocomplete=cc-number></label><label>Security code <input id=cvv autocomplete=cc-csc></label>'">Use a new card</button>
+      <button id="pay" onclick="window.paid=true">Pay now</button></main>`;
+    const { context, page, started } = await openFixture(
+      html,
+      "clear-winner-card.test",
+      "standard",
+      "/checkout",
+    );
+    try {
+      const dependencies = deps(async (_api, _state, questions) => {
+        if (sessionForCall(started.session_id)!.releasedPaymentCard != null)
+          return jevChoose(questions, "DONE");
+        const result = jevChoose(questions, "CLICK", /Use a new card/i);
+        result.result.answers.operation!.confidence = 0.4;
+        result.result.answers.CLICK_target!.confidence = 0.4;
+        return result;
+      });
+      let approved = false;
+      const card = {
+        pan: "4111111111111111",
+        cvv: "739",
+        exp_month: "12",
+        exp_year: "2030",
+        name: "Ada",
+        billing: { line1: "1 Main St", city: "Boston", postal_code: "02110", country: "US" },
+      };
+      // The release adapter stands in for the separately tested passkey approval.
+      const inject = vi.fn<DriveDependencies["injectCard"]>(async (session, args) => {
+        if (!approved)
+          return { status: "approval_pending", approval_url: "https://approval.test/pending" };
+        const fields = await injectCardIntoSessionTargets(session.id, card, args.fields);
+        session.releasedPaymentCard = {
+          approvalId: "approved",
+          approvalUrl: "https://approval.test/pending",
+          checkout: {
+            merchant: "fixture.test",
+            checkout_origin: "https://clear-winner-card.test",
+            amount_cents: 100,
+            currency: "USD",
+          },
+          cardRef: "card-1",
+          last4: "1111",
+          deadline: Date.now() + 60_000,
+          card,
+        };
+        return { status: "card_injected", complete: true, fields };
+      });
+      dependencies.injectCard = inject;
+      const input = {
+        session_id: started.session_id,
+        goal: "enter the payment card",
+        facts: { card_ref: "card-1", merchant: "fixture.test" },
+        max_steps: 4,
+      };
+      const pending = await runOperateDrive(input, api(), undefined, dependencies);
+      expect(pending.status).toBe("pending_approval");
+      expect(pending.trajectory[0]).toMatchObject({ action: "click", confidence: 0.4 });
+      expect(await page.locator("#pan").inputValue()).toBe("");
+      expect(await page.locator("#cvv").inputValue()).toBe("");
+      expect(
+        await page.evaluate(() => (window as unknown as { paid?: boolean }).paid),
+      ).toBeUndefined();
+      approved = true;
+      const released = await runOperateDrive(input, api(), undefined, dependencies);
+      expect(released.status).toBe("complete");
+      expect(inject).toHaveBeenCalledTimes(2);
+      expect(await page.locator("#pan").inputValue()).toBe(card.pan);
+      expect(await page.locator("#cvv").inputValue()).toBe(card.cvv);
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
   it("offers the product submit on a low-confidence handback", async () => {
     const { context, page, started } = await openFixture(
       PRODUCT_WITH_NEWSLETTER_HTML,
@@ -663,7 +785,7 @@ describe("operate_drive real-browser fixture", () => {
       await page.setViewportSize({ width: 800, height: 600 });
       const dependencies = deps(async (_api, _state, questions) => {
         const answer = jevChoose(questions, "CLICK", /^Add to cart$/i);
-        answer.result.answers.operation!.confidence = 0.41;
+        ambiguousOperation(answer);
         return answer;
       });
       const result = await runOperateDrive(
@@ -5480,8 +5602,7 @@ describe("operate_drive feedback loop", () => {
       const dependencies = deps(async (_api, _state, questions) => {
         const result = jevFromQuestions(questions);
         setChoice(questions, "operation", "CLICK", result);
-        const answer = result.result.answers.operation;
-        if (answer !== undefined) answer.confidence = 0.41;
+        ambiguousOperation(result);
         return result;
       });
       const handoff = await runOperateDrive(
@@ -5509,7 +5630,7 @@ describe("operate_drive feedback loop", () => {
         const dependencies = deps(async (_api, _state, questions) => {
           const result = jevFromQuestions(questions);
           setChoice(questions, "operation", "CLICK", result);
-          result.result.answers.operation!.confidence = 0.41;
+          ambiguousOperation(result);
           return result;
         });
         const snapshots = vi.fn();
@@ -5599,7 +5720,7 @@ describe("operate_drive feedback loop", () => {
       const dependencies = deps(async (_api, _state, questions) => {
         const result = jevFromQuestions(questions);
         setChoice(questions, "operation", "CLICK", result);
-        result.result.answers.operation!.confidence = 0.41;
+        ambiguousOperation(result);
         return result;
       });
       const input = { session_id: started.session_id, goal: "Complete verification", max_steps: 4 };
@@ -5644,7 +5765,7 @@ describe("operate_drive feedback loop", () => {
       const dependencies = deps(async (_api, _state, questions) => {
         const result = jevFromQuestions(questions);
         setChoice(questions, "operation", "CLICK", result);
-        result.result.answers.operation!.confidence = 0.41;
+        ambiguousOperation(result);
         return result;
       });
       const handoff = await runOperateDrive(
@@ -5687,7 +5808,7 @@ describe("operate_drive feedback loop", () => {
       const dependencies = deps(async (_api, _state, questions) => {
         const result = jevFromQuestions(questions);
         setChoice(questions, "operation", "CLICK", result);
-        result.result.answers.operation!.confidence = 0.41;
+        ambiguousOperation(result);
         return result;
       });
       dependencies.pressCheckboxChallenge = async () => ({ found: false });
