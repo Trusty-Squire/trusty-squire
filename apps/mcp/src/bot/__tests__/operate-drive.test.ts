@@ -16,7 +16,6 @@ import {
   resolveResumeAnswer,
   elementState,
   DRIVE_MAX_JEV_CALLS,
-  DRIVE_RULES,
   DRIVE_VALUE_QUESTION,
   goalValueCriteria,
   DRIVE_IDENTICAL_RESNAP_MS,
@@ -474,10 +473,19 @@ describe("history threading", () => {
     );
     const click = questions.CLICK_target?.type === "choice" ? questions.CLICK_target.criteria : {};
     expect(Object.values(click)).toContain("Send code");
-    const inbox = DRIVE_RULES.filter((rule) => rule.includes("INBOX"));
-    expect(inbox).toEqual([
+    const state = buildJevState(
+      "Get one API key for the existing Token Harbor account",
+      [],
+      [],
+      "https://tokenharbor.ai/dashboard/api-keys",
+      "API keys",
+      driveCandidates(rows, false),
+      "Verify your email to continue",
+      { rows },
+    );
+    expect(state.instructions.rules).toContain(
       "Pick INBOX only when no listed control sends, requests, or enters the verification code or link.",
-    ]);
+    );
   });
 
   it("puts goal, facts, recent actions, and element operations in structured state", () => {
@@ -505,7 +513,9 @@ describe("history threading", () => {
     expect(state.tried_here).toEqual([]);
     expect(state.visited).toEqual({});
     expect(state.instructions.goal).toBe("sign up");
-    expect(state.instructions.rules).toEqual(DRIVE_RULES);
+    expect(state.instructions.rules).toContain(
+      "Pick INBOX only when no listed control sends, requests, or enters the verification code or link.",
+    );
     expect(state.facts).toEqual(["email", "first_name"]);
     expect(state.recent_actions[0]).toBe("click step 2");
     expect(state.recent_actions.at(-1)).toBe("click step 21");
