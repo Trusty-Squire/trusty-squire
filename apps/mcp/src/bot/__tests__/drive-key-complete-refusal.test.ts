@@ -120,110 +120,134 @@ it("trusts DONE on a copy-capable page despite a binding from the previous page"
 
 it("captures a Copy source on DONE even when the value has no recognized shape", async () => {
   const plainKey = "Ab3kZ9";
-  await withKeyPage(`<main><dialog open aria-label="API key created">
+  await withKeyPage(
+    `<main><dialog open aria-label="API key created">
     <p>${plainKey}</p>
     <button type="button" onclick="navigator.clipboard.writeText('${plainKey}')">Copy</button>
-  </dialog></main>`, async (sessionId) => {
-    const askJev = vi.fn<DriveDependencies["askJev"]>(async (_api, _state, questions) => ({
-      attempts: 1,
-      elapsedMs: 1,
-      result: {
-        answers: Object.fromEntries(
-          Object.entries(questions).flatMap(([name, question]) => {
-            if (question.type !== "choice") return [];
-            const keys = Object.keys(question.criteria);
-            const choice = name === "operation" ? "DONE" : keys[0]!;
-            return [[name, {
-              choice,
-              confidence: 1,
-              probabilities: Object.fromEntries(keys.map((key) => [key, key === choice ? 1 : 0])),
-            }]];
-          }),
-        ),
-      },
-    }));
-    const result = await runOperateDrive(
-      { session_id: sessionId, goal: "extract an API key", max_steps: 3, max_seconds: 10 },
-      api,
-      undefined,
-      dependencies(askJev),
-    );
-    expect(result.status).toBe("complete");
-    const session = sessionForCall(sessionId)!;
-    expect(await session.browser.readClipboard(session.browser.page!)).toBe(plainKey);
-  });
+  </dialog></main>`,
+    async (sessionId) => {
+      const askJev = vi.fn<DriveDependencies["askJev"]>(async (_api, _state, questions) => ({
+        attempts: 1,
+        elapsedMs: 1,
+        result: {
+          answers: Object.fromEntries(
+            Object.entries(questions).flatMap(([name, question]) => {
+              if (question.type !== "choice") return [];
+              const keys = Object.keys(question.criteria);
+              const choice = name === "operation" ? "DONE" : keys[0]!;
+              return [
+                [
+                  name,
+                  {
+                    choice,
+                    confidence: 1,
+                    probabilities: Object.fromEntries(
+                      keys.map((key) => [key, key === choice ? 1 : 0]),
+                    ),
+                  },
+                ],
+              ];
+            }),
+          ),
+        },
+      }));
+      const result = await runOperateDrive(
+        { session_id: sessionId, goal: "extract an API key", max_steps: 3, max_seconds: 10 },
+        api,
+        undefined,
+        dependencies(askJev),
+      );
+      expect(result.status).toBe("complete");
+      const session = sessionForCall(sessionId)!;
+      expect(await session.browser.readClipboard(session.browser.page!)).toBe(plainKey);
+    },
+  );
 }, 15_000);
 
 it("trusts the model's DONE on a page without a key", async () => {
-  await withKeyPage("<main><h1>API keys</h1><button>Create key</button><p>No key yet</p></main>", async (sessionId) => {
-    const session = sessionForCall(sessionId)!;
-    session.drive = emptyDriveState("extract an API key", {});
-    const askJev = vi.fn<DriveDependencies["askJev"]>(async (_api, _state, questions) => ({
-      attempts: 1,
-      elapsedMs: 1,
-      result: {
-        answers: Object.fromEntries(
-          Object.entries(questions).flatMap(([name, question]) => {
-            if (question.type !== "choice") return [];
-            const keys = Object.keys(question.criteria);
-            const choice = name === "operation" ? "DONE" : keys[0]!;
-            return [
-              [
-                name,
-                {
-                  choice,
-                  confidence: 1,
-                  probabilities: Object.fromEntries(
-                    keys.map((key) => [key, key === choice ? 1 : 0]),
-                  ),
-                },
-              ],
-            ];
-          }),
-        ),
-      },
-    }));
-    const result = await runOperateDrive(
-      { session_id: sessionId, goal: "extract an API key", max_steps: 3, max_seconds: 10 },
-      api,
-      undefined,
-      dependencies(askJev),
-    );
-    expect(askJev).toHaveBeenCalledTimes(1);
-    expect(result.status).toBe("complete");
-  });
+  await withKeyPage(
+    "<main><h1>API keys</h1><button>Create key</button><p>No key yet</p></main>",
+    async (sessionId) => {
+      const session = sessionForCall(sessionId)!;
+      session.drive = emptyDriveState("extract an API key", {});
+      const askJev = vi.fn<DriveDependencies["askJev"]>(async (_api, _state, questions) => ({
+        attempts: 1,
+        elapsedMs: 1,
+        result: {
+          answers: Object.fromEntries(
+            Object.entries(questions).flatMap(([name, question]) => {
+              if (question.type !== "choice") return [];
+              const keys = Object.keys(question.criteria);
+              const choice = name === "operation" ? "DONE" : keys[0]!;
+              return [
+                [
+                  name,
+                  {
+                    choice,
+                    confidence: 1,
+                    probabilities: Object.fromEntries(
+                      keys.map((key) => [key, key === choice ? 1 : 0]),
+                    ),
+                  },
+                ],
+              ];
+            }),
+          ),
+        },
+      }));
+      const result = await runOperateDrive(
+        { session_id: sessionId, goal: "extract an API key", max_steps: 3, max_seconds: 10 },
+        api,
+        undefined,
+        dependencies(askJev),
+      );
+      expect(askJev).toHaveBeenCalledTimes(1);
+      expect(result.status).toBe("complete");
+    },
+  );
 }, 15_000);
 
 it("completes a confirmed order with a key-shaped Shopify token only in link destinations", async () => {
-  await withKeyPage(orderConfirmationPage, async (sessionId) => {
-    const askJev = vi.fn<DriveDependencies["askJev"]>(async (_api, _state, questions) => ({
-      attempts: 1,
-      elapsedMs: 1,
-      result: {
-        answers: Object.fromEntries(
-          Object.entries(questions).flatMap(([name, question]) => {
-            if (question.type !== "choice") return [];
-            const keys = Object.keys(question.criteria);
-            const choice = name === "operation" ? "DONE" : keys[0]!;
-            return [[name, {
-              choice,
-              confidence: 1,
-              probabilities: Object.fromEntries(keys.map((key) => [key, key === choice ? 1 : 0])),
-            }]];
-          }),
-        ),
-      },
-    }));
-    const result = await runOperateDrive(
-      { session_id: sessionId, goal: "buy The Glow Serum", max_steps: 3, max_seconds: 10 },
-      api,
-      undefined,
-      dependencies(askJev),
-    );
-    expect(askJev).toHaveBeenCalled();
-    expect(result.status).toBe("complete");
-    expect(JSON.stringify(result.observation?.safe_table)).not.toContain("@key-value");
-  }, "/thank-you");
+  await withKeyPage(
+    orderConfirmationPage,
+    async (sessionId) => {
+      const askJev = vi.fn<DriveDependencies["askJev"]>(async (_api, _state, questions) => ({
+        attempts: 1,
+        elapsedMs: 1,
+        result: {
+          answers: Object.fromEntries(
+            Object.entries(questions).flatMap(([name, question]) => {
+              if (question.type !== "choice") return [];
+              const keys = Object.keys(question.criteria);
+              const choice = name === "operation" ? "DONE" : keys[0]!;
+              return [
+                [
+                  name,
+                  {
+                    choice,
+                    confidence: 1,
+                    probabilities: Object.fromEntries(
+                      keys.map((key) => [key, key === choice ? 1 : 0]),
+                    ),
+                  },
+                ],
+              ];
+            }),
+          ),
+        },
+      }));
+      const result = await runOperateDrive(
+        { session_id: sessionId, goal: "buy The Glow Serum", max_steps: 3, max_seconds: 10 },
+        api,
+        undefined,
+        dependencies(askJev),
+      );
+      expect(askJev).toHaveBeenCalled();
+      expect(result.status).toBe("complete");
+      expect(JSON.stringify(result.observation?.safe_table)).not.toContain("@key-value");
+    },
+    "/thank-you",
+  );
 }, 15_000);
 
 it.each([
@@ -236,42 +260,56 @@ it.each([
 ])(
   "hands $label back before dispatch",
   async ({ label, path, confidence = 1 }) => {
-    await withKeyPage(`<main><h1>API keys</h1><button>${label}</button></main>`, async (sessionId) => {
-      const driveAct = vi.fn<NonNullable<DriveDependencies["driveAct"]>>(async () => {
-        throw new Error("mutation action must not dispatch");
-      });
-      const askJev = vi.fn<DriveDependencies["askJev"]>(async (_api, _state, questions) => ({
-        attempts: 1,
-        elapsedMs: 1,
-        result: {
-          answers: Object.fromEntries(
-            Object.entries(questions).flatMap(([name, question]) => {
-              if (question.type !== "choice") return [];
-              const keys = Object.keys(question.criteria);
-              const choice = name === "operation" ? "CLICK" :
-                name === "CLICK_target"
-                  ? keys.find((candidate) => question.criteria[candidate]?.includes(label)) ?? keys[0]!
-                  : keys[0]!;
-              return [[name, {
-                choice,
-                confidence,
-                probabilities: Object.fromEntries(keys.map((key) => [key, key === choice ? 1 : 0])),
-              }]];
-            }),
-          ),
-        },
-      }));
-      const result = await runOperateDrive(
-        { session_id: sessionId, goal: "manage my API key", max_steps: 3, max_seconds: 3 },
-        api,
-        undefined,
-        { ...dependencies(askJev), driveAct },
-      );
-      expect(result.status).toBe("stuck");
-      expect(result.reason).toContain(`operator decision required before ${label}`);
-      expect(result.reason).toContain("no action was dispatched");
-      expect(driveAct).not.toHaveBeenCalled();
-    }, path);
+    await withKeyPage(
+      `<main><h1>API keys</h1><button>${label}</button></main>`,
+      async (sessionId) => {
+        const driveAct = vi.fn<NonNullable<DriveDependencies["driveAct"]>>(async () => {
+          throw new Error("mutation action must not dispatch");
+        });
+        const askJev = vi.fn<DriveDependencies["askJev"]>(async (_api, _state, questions) => ({
+          attempts: 1,
+          elapsedMs: 1,
+          result: {
+            answers: Object.fromEntries(
+              Object.entries(questions).flatMap(([name, question]) => {
+                if (question.type !== "choice") return [];
+                const keys = Object.keys(question.criteria);
+                const choice =
+                  name === "operation"
+                    ? "CLICK"
+                    : name === "CLICK_target"
+                      ? (keys.find((candidate) => question.criteria[candidate]?.includes(label)) ??
+                        keys[0]!)
+                      : keys[0]!;
+                return [
+                  [
+                    name,
+                    {
+                      choice,
+                      confidence,
+                      probabilities: Object.fromEntries(
+                        keys.map((key) => [key, key === choice ? 1 : 0]),
+                      ),
+                    },
+                  ],
+                ];
+              }),
+            ),
+          },
+        }));
+        const result = await runOperateDrive(
+          { session_id: sessionId, goal: "manage my API key", max_steps: 3, max_seconds: 3 },
+          api,
+          undefined,
+          { ...dependencies(askJev), driveAct },
+        );
+        expect(result.status).toBe("stuck");
+        expect(result.reason).toContain(`operator decision required before ${label}`);
+        expect(result.reason).toContain("no action was dispatched");
+        expect(driveAct).not.toHaveBeenCalled();
+      },
+      path,
+    );
   },
   15_000,
 );
