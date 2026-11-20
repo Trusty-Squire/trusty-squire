@@ -207,7 +207,6 @@ it("resumes a budget-ended inbox poll and fills newly arrived mail", async () =>
       found: true,
       code: "482619",
       link: null,
-      messages: [],
     });
     const resumed = await runOperateDrive(
       { session_id: sessionId, goal, max_steps: 1, max_seconds: 30 },
