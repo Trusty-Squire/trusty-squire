@@ -9,10 +9,8 @@
 // facts bag. A search or query field may receive a phrase Jev assigns from the
 // goal's own words or the facts; nothing is composed.
 //
-// Below DRIVE_CONFIDENCE_THRESHOLD, concrete choices need confidence and
-// selected probability >= 0.30 and a probability >= twice the runner-up.
-// Fixed controls and value "none" keep the threshold. Validation and purchase
-// approval stay. Safety net is validate_choice, fingerprint-bound consume-once,
+// Confidence admission and its session-identity exception are documented in
+// docs/operator-tool-surface.md. Safety net is validate_choice, fingerprint-bound consume-once,
 // and three consecutive non-wait actions with no page change (re-snapshot once
 // before a strike).
 
@@ -4243,6 +4241,26 @@ function refuseAdmission(
   );
 }
 
+function isSessionIdentityAccountChoice(
+  candidates: readonly DriveCandidate[],
+  votedChoice: string | undefined,
+  identityEmail: string | null | undefined,
+): boolean {
+  const identity = identityEmail?.trim().toLowerCase();
+  if (!identity || votedChoice === undefined) return false;
+  if (
+    !candidates.some((candidate) => /^use another account$/i.test(readableLabel(candidate.row)))
+  ) {
+    return false;
+  }
+  const emailsOf = (candidate: DriveCandidate): string[] =>
+    (readableLabel(candidate.row).match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) ?? []).map(
+      (email) => email.toLowerCase(),
+    );
+  const matches = candidates.filter((candidate) => emailsOf(candidate).includes(identity));
+  return matches.length === 1 && matches[0]!.slug === votedChoice;
+}
+
 export function decideAfterJev(input: {
   answers: Record<string, JevAnswer>;
   rows: readonly WireRow[];
@@ -4264,6 +4282,8 @@ export function decideAfterJev(input: {
    *  any page description so the reason reports the loop's own dispatch
    *  failure rather than describing an unchanged page. */
   dispatchFailure?: string | null;
+  /** The session's own account email, when known. */
+  identityEmail?: string | null;
 }): DriveDecision {
   const threshold = input.threshold ?? DRIVE_CONFIDENCE_THRESHOLD;
   const includePayment = input.cardRef !== undefined;
@@ -4400,7 +4420,14 @@ export function decideAfterJev(input: {
       { reversible: REVERSIBLE_OPERATIONS.has(choice as DriveOperation) },
       threshold,
     );
-    if (!("ok" in targetAdmission)) {
+    if (
+      !("ok" in targetAdmission) &&
+      !(
+        targetAdmission.kind === "low_confidence" &&
+        choice === "CLICK" &&
+        isSessionIdentityAccountChoice(sets.CLICK, targetAnswer?.choice, input.identityEmail)
+      )
+    ) {
       return refuseAdmission(targetAdmission, targetInstructions, targetCriteria, targetAnswer);
     }
     const targetChoice = targetAnswer!.choice!;
@@ -8080,6 +8107,7 @@ async function driveLoop(input: {
         boundFingerprint: drive.boundFingerprint,
         sets,
         questions,
+        identityEmail: session.userEmail,
         ...(drive.lastDispatchFailure === undefined
           ? {}
           : { dispatchFailure: drive.lastDispatchFailure }),

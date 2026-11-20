@@ -282,11 +282,20 @@ browser-use/jev-ultrafast (MIT) adoptions live in `operate-drive.ts`. Mapping:
 | 5 | SELECT option is a target (`slug:option`) | `selectTargets`, `selectTargetKey`, `lastSelectOptions` |
 | 6 | WAIT when the needed control is absent/disabled or results are loading | `DRIVE_RULES`, `{kind:"wait"}`, `DRIVE_WAIT_MS` |
 | 7 | Rules prose adapted from their MIT `NEXT_ACTION` / `TARGET` | `DRIVE_RULES` |
-| 8 | After answer-shape validation, concrete operation, target, and value choices below `DRIVE_CONFIDENCE_THRESHOLD` (0.6) are admitted only when both confidence and selected probability are at least 0.30, and selected probability is at least twice the runner-up; an option whose label is identical to the selected one is not a runner-up. Otherwise they return `low_confidence`. DONE, BLOCKED, NONE_OF_THESE, GO_BACK, WAIT, INBOX, and value `none` retain the 0.6 bar; the direct `email_code_field` shortcut also retains it. Purchase approval remains a separate check | `DRIVE_CONFIDENCE_THRESHOLD`, `admitsChoice`, `decideAfterJev` |
+| 8 | After answer-shape validation, concrete operation, target, and value choices below `DRIVE_CONFIDENCE_THRESHOLD` (0.6) normally require both confidence and selected probability of at least 0.30, and selected probability at least twice the runner-up; an option whose label is identical to the selected one is not a runner-up. Otherwise they return `low_confidence`, except for the session-identity CLICK target described below. DONE, BLOCKED, NONE_OF_THESE, GO_BACK, WAIT, INBOX, and value `none` retain the 0.6 bar; the direct `email_code_field` shortcut also retains it. Purchase approval remains a separate check | `DRIVE_CONFIDENCE_THRESHOLD`, `admitsChoice`, `decideAfterJev` |
 | 9 | Three consecutive non-wait actions with no fingerprint change | `DRIVE_STALE_LIMIT`, `staleNonWait` |
 | 10 | Decision bound to the observation fingerprint, consumed once | `boundFingerprint`, `consumedActionKey` |
 | 11 | Candidate and question budgets; only offered choices can be selected | `driveTargetSets`, `buildDriveQuestions` |
 | 12 | Snapshot, decision, guarded act through the shared executor, then bounded settling; automatic combobox opening follows the policy above | `drive-snapshot.ts`, `act/act.ts`, `act/identity.ts`, `drive-act.ts`, `operate-drive.ts` |
+
+For an admitted CLICK operation, a valid target vote that would otherwise return
+`low_confidence` is admitted when its chosen candidate is the only CLICK candidate
+whose readable label contains the session's known account email (case-insensitive),
+and a CLICK candidate has the exact readable label `Use another account`
+(case-insensitive). This exception admits the voted tile without redirecting to
+another candidate. Invalid answers retain their rejection and retry behavior;
+ordinary admitted votes remain unchanged. Regression coverage lives in
+[`drive-identity-account-choice.test.ts`](../apps/mcp/src/bot/__tests__/drive-identity-account-choice.test.ts).
 
 The drive considers up to 250 candidates and caps each decision batch at 128
 total choice criteria, including operation and goal-value choices. Truncation
