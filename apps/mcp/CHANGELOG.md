@@ -8,6 +8,10 @@
   `/s/<token>/`. A failed live view stops with the cause and no fallback
   install URL.
 
+## 1.1.48-rc.1 (2026-11-20)
+
+- operate_drive signup fixes: the pre-click occlusion check scrolls a target clipped by its own scroll box into view before calling it covered (a genuinely covering layer is still refused); a submit that first changes nothing tells the next decision why (the form's invalid fields, or that the site did not respond); the BLOCKED rule says an emailed code or link is not human verification ([PR](https://github.com/Trusty-Squire/trusty-squire/pull/1146)).
+
 ## 1.1.47-rc.1 (2026-11-20)
 
 - operate_drive signup fixes: drive reads get the observation's network-idle and DOM-quiet settle, and WAIT stays offered after a wait that left the page unchanged; an identically labeled twin no longer counts as the runner-up; the INBOX rule prefers a listed send-code control; covered dialog controls stay on the action menu beside Close ([PR](https://github.com/Trusty-Squire/trusty-squire/pull/1144)).
