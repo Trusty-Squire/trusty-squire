@@ -107,10 +107,15 @@ async function drive(
 
 it("finishes complete from a revealed key without asking the model", async () => {
   const persistCredentials = vi.fn(async () => true);
-  const { result, askJev } = await drive(`navigator.clipboard.writeText('${key}')`, persistCredentials);
-  expect(persistCredentials).toHaveBeenCalledWith(expect.objectContaining({
-    credentials: { api_key: key },
-  }));
+  const { result, askJev } = await drive(
+    `navigator.clipboard.writeText('${key}')`,
+    persistCredentials,
+  );
+  expect(persistCredentials).toHaveBeenCalledWith(
+    expect.objectContaining({
+      credentials: { api_key: key },
+    }),
+  );
   expect(result.status).toBe("complete");
   expect(askJev).not.toHaveBeenCalled();
 }, 15_000);
@@ -119,63 +124,105 @@ it("asks the model when the Copy control writes nothing", async () => {
   await expect(drive("")).rejects.toThrow("model asked");
 }, 15_000);
 
-it.each(["missing", "rejected", "failed"])("asks the model when storage is %s", async (mode) => {
-  const persistCredentials = mode === "missing" ? undefined : async () => {
-    if (mode === "failed") throw new Error("vault unavailable");
-    return false;
-  };
-  await expect(drive(`navigator.clipboard.writeText('${key}')`, persistCredentials ?? null))
-    .rejects.toThrow("model asked");
-}, 15_000);
+it.each(["missing", "rejected", "failed"])(
+  "asks the model when storage is %s",
+  async (mode) => {
+    const persistCredentials =
+      mode === "missing"
+        ? undefined
+        : async () => {
+            if (mode === "failed") throw new Error("vault unavailable");
+            return false;
+          };
+    await expect(
+      drive(`navigator.clipboard.writeText('${key}')`, persistCredentials ?? null),
+    ).rejects.toThrow("model asked");
+  },
+  15_000,
+);
 
 it("stores an opaque key after Copy relabels itself without another model decision", async () => {
   const context = await browser.newContext();
   const page = await context.newPage();
   const url = "https://app.example.test/keys";
   const opaqueKey = "Ab3kZ9";
-  await page.route("**/*", (route) => route.fulfill({
-    contentType: "text/html",
-    body: `<main><dialog open aria-label="API key created"><p>${opaqueKey}</p>
+  await page.route("**/*", (route) =>
+    route.fulfill({
+      contentType: "text/html",
+      body: `<main><dialog open aria-label="API key created"><p>${opaqueKey}</p>
       <button onclick="navigator.clipboard.writeText('${opaqueKey}');this.textContent='Copied!'">Copy</button>
       </dialog></main>`,
-  }));
+    }),
+  );
   await page.goto(url);
   const started = await startHarnessProvisionSession({
-    browser: BrowserController.fromHarnessPage(page), serviceUrl: url,
-    format: "compact", initialObservation: "drive",
+    browser: BrowserController.fromHarnessPage(page),
+    serviceUrl: url,
+    format: "compact",
+    initialObservation: "drive",
   });
   const askJev = vi.fn<DriveDependencies["askJev"]>(async (_api, _state, questions) => {
     if (askJev.mock.calls.length > 1) throw new Error("model asked after Copy");
     return {
-      attempts: 1, elapsedMs: 1,
+      attempts: 1,
+      elapsedMs: 1,
       result: {
-        answers: Object.fromEntries(Object.entries(questions).flatMap(([name, question]) => {
-          if (question.type !== "choice") return [];
-          const keys = Object.keys(question.criteria);
-          const choice = name === "operation" ? "CLICK" : name === "CLICK_target"
-            ? keys.find((key) => /copy/i.test(question.criteria[key]!))! : keys[0]!;
-          return [[name, { choice, confidence: 1, probabilities: Object.fromEntries(
-            keys.map((key) => [key, key === choice ? 1 : 0]),
-          ) }]];
-        })),
+        answers: Object.fromEntries(
+          Object.entries(questions).flatMap(([name, question]) => {
+            if (question.type !== "choice") return [];
+            const keys = Object.keys(question.criteria);
+            const choice =
+              name === "operation"
+                ? "CLICK"
+                : name === "CLICK_target"
+                  ? keys.find((key) => /copy/i.test(question.criteria[key]!))!
+                  : keys[0]!;
+            return [
+              [
+                name,
+                {
+                  choice,
+                  confidence: 1,
+                  probabilities: Object.fromEntries(
+                    keys.map((key) => [key, key === choice ? 1 : 0]),
+                  ),
+                },
+              ],
+            ];
+          }),
+        ),
       },
     };
   });
   const persistCredentials = vi.fn(async () => true);
   try {
     const result = await runOperateDrive(
-      { session_id: started.session_id, goal: "Get an API key and store it in the vault", max_steps: 3, max_seconds: 10 },
-      api, { persistCredentials }, {
-        askJev, act, observe, awaitVerification,
-        startSession: async () => { throw new Error("existing session"); },
+      {
+        session_id: started.session_id,
+        goal: "Get an API key and store it in the vault",
+        max_steps: 3,
+        max_seconds: 10,
+      },
+      api,
+      { persistCredentials },
+      {
+        askJev,
+        act,
+        observe,
+        awaitVerification,
+        startSession: async () => {
+          throw new Error("existing session");
+        },
         injectCard: async () => ({ status: "unused" }),
       },
     );
     expect(await page.getByRole("button").textContent()).toBe("Copied!");
     expect(persistCredentials).toHaveBeenCalledTimes(1);
-    expect(persistCredentials).toHaveBeenCalledWith(expect.objectContaining({
-      credentials: { api_key: opaqueKey },
-    }));
+    expect(persistCredentials).toHaveBeenCalledWith(
+      expect.objectContaining({
+        credentials: { api_key: opaqueKey },
+      }),
+    );
     expect(askJev).toHaveBeenCalledTimes(1);
     expect(result.status).toBe("complete");
   } finally {

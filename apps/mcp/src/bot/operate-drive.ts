@@ -111,11 +111,7 @@ import {
 } from "./captcha.js";
 import type { CaptchaSolveResult } from "./captcha.js";
 import { findCredentialTokens, isMaskedDisplay } from "./credential-shape.js";
-import {
-  extractCredentials,
-  storableCredentials,
-  type ExtractResult,
-} from "./capture/capture.js";
+import { extractCredentials, storableCredentials, type ExtractResult } from "./capture/capture.js";
 import {
   DRIVE_FIXED_GO_BACK,
   DRIVE_FIXED_NONE_OF_THESE,
@@ -1549,10 +1545,7 @@ export function pageShowsRevealedKey(rows: readonly WireRow[], _pageText: string
  * that says "finish once the key is in the vault" argues the model out of DONE,
  * so the drive attempts the DONE capture itself when this holds.
  */
-export function revealedKeyCaptureDue(
-  rows: readonly WireRow[],
-  copyDispatched: boolean,
-): boolean {
+export function revealedKeyCaptureDue(rows: readonly WireRow[], copyDispatched: boolean): boolean {
   if (
     rows.some(
       (row) =>
@@ -4384,12 +4377,12 @@ export function decideAfterJev(input: {
     const actionKey =
       choice === "SCROLL" && (DRIVE_SCROLL_DIRECTIONS as readonly string[]).includes(targetChoice)
         ? `scroll:${targetChoice}`
-        : (resolveActionChoice(targetChoice, [
+        : resolveActionChoice(targetChoice, [
             ...sets.CLICK,
             ...sets.TYPE_TEXT,
             ...sets.SELECT,
             ...sets.SCROLL,
-          ])?.ref ?? targetChoice);
+          ])?.ref ?? targetChoice;
 
     if (
       input.boundFingerprint === input.fingerprint &&
@@ -6176,8 +6169,7 @@ async function driveLoop(input: {
         drive.stallKeys ??= [];
         if (drive.stallKeys.includes(stallKey)) {
           return finish("stuck", {
-            reason:
-              "key not stored: supply store or use operate_extract with explicit capture",
+            reason: "key not stored: supply store or use operate_extract with explicit capture",
           });
         }
         drive.stallKeys.push(stallKey);
@@ -7220,7 +7212,7 @@ async function driveLoop(input: {
           ? session.browser.page === null
             ? ""
             : await documentEpochOf(session.browser.page)
-          : (drive.lastDocumentEpoch ?? "");
+          : drive.lastDocumentEpoch ?? "";
       if (
         beforeEpoch.length > 0 &&
         completionEpoch.length > 0 &&

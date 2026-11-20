@@ -114,9 +114,11 @@ it("captures a revealed key despite a binding from the previous page without ask
       { persistCredentials },
       dependencies(askJev),
     );
-    expect(persistCredentials).toHaveBeenCalledWith(expect.objectContaining({
-      credentials: { api_key: key },
-    }));
+    expect(persistCredentials).toHaveBeenCalledWith(
+      expect.objectContaining({
+        credentials: { api_key: key },
+      }),
+    );
     expect(result.status).toBe("complete");
     expect(askJev).not.toHaveBeenCalled();
   });
@@ -163,53 +165,71 @@ it("captures a Copy source on DONE even when the value has no recognized shape",
         dependencies(askJev),
       );
       expect(result.status).toBe("complete");
-      expect(persistCredentials).toHaveBeenCalledWith(expect.objectContaining({
-        credentials: { api_key: plainKey },
-      }));
+      expect(persistCredentials).toHaveBeenCalledWith(
+        expect.objectContaining({
+          credentials: { api_key: plainKey },
+        }),
+      );
       const session = sessionForCall(sessionId)!;
       expect(await session.browser.readClipboard(session.browser.page!)).toBe(plainKey);
     },
   );
 }, 15_000);
 
-it.each(["missing", "rejected", "failed"])("does not complete DONE when storage is %s", async (mode) => {
-  await withKeyPage(
-    `<main><dialog open aria-label="API key created">
+it.each(["missing", "rejected", "failed"])(
+  "does not complete DONE when storage is %s",
+  async (mode) => {
+    await withKeyPage(
+      `<main><dialog open aria-label="API key created">
       <p>Ab3kZ9</p><button onclick="navigator.clipboard.writeText('Ab3kZ9')">Copy</button>
     </dialog></main>`,
-    async (sessionId) => {
-      const askJev = vi.fn<DriveDependencies["askJev"]>(async (_api, _state, questions) => ({
-        attempts: 1,
-        elapsedMs: 1,
-        result: {
-          answers: Object.fromEntries(Object.entries(questions).flatMap(([name, question]) => {
-            if (question.type !== "choice") return [];
-            const keys = Object.keys(question.criteria);
-            const choice = name === "operation" ? "DONE" : keys[0]!;
-            return [[name, { choice, confidence: 1, probabilities: Object.fromEntries(
-              keys.map((key) => [key, key === choice ? 1 : 0]),
-            ) }]];
-          })),
-        },
-      }));
-      const persistCredentials = vi.fn(async () => {
-        if (mode === "failed") throw new Error("vault unavailable");
-        return false;
-      });
-      const result = await runOperateDrive(
-        { session_id: sessionId, goal: "extract an API key", max_steps: 3, max_seconds: 10 },
-        api,
-        mode === "missing" ? {} : { persistCredentials },
-        dependencies(askJev),
-      );
-      expect(askJev).toHaveBeenCalled();
-      expect(result.status).not.toBe("complete");
-      if (mode !== "missing") expect(persistCredentials).toHaveBeenCalledWith(
-        expect.objectContaining({ credentials: { api_key: "Ab3kZ9" } }),
-      );
-    },
-  );
-}, 15_000);
+      async (sessionId) => {
+        const askJev = vi.fn<DriveDependencies["askJev"]>(async (_api, _state, questions) => ({
+          attempts: 1,
+          elapsedMs: 1,
+          result: {
+            answers: Object.fromEntries(
+              Object.entries(questions).flatMap(([name, question]) => {
+                if (question.type !== "choice") return [];
+                const keys = Object.keys(question.criteria);
+                const choice = name === "operation" ? "DONE" : keys[0]!;
+                return [
+                  [
+                    name,
+                    {
+                      choice,
+                      confidence: 1,
+                      probabilities: Object.fromEntries(
+                        keys.map((key) => [key, key === choice ? 1 : 0]),
+                      ),
+                    },
+                  ],
+                ];
+              }),
+            ),
+          },
+        }));
+        const persistCredentials = vi.fn(async () => {
+          if (mode === "failed") throw new Error("vault unavailable");
+          return false;
+        });
+        const result = await runOperateDrive(
+          { session_id: sessionId, goal: "extract an API key", max_steps: 3, max_seconds: 10 },
+          api,
+          mode === "missing" ? {} : { persistCredentials },
+          dependencies(askJev),
+        );
+        expect(askJev).toHaveBeenCalled();
+        expect(result.status).not.toBe("complete");
+        if (mode !== "missing")
+          expect(persistCredentials).toHaveBeenCalledWith(
+            expect.objectContaining({ credentials: { api_key: "Ab3kZ9" } }),
+          );
+      },
+    );
+  },
+  15_000,
+);
 
 it("trusts the model's DONE on a page without a key", async () => {
   await withKeyPage(
@@ -325,8 +345,8 @@ it.each([
                   name === "operation"
                     ? "CLICK"
                     : name === "CLICK_target"
-                      ? (keys.find((candidate) => question.criteria[candidate]?.includes(label)) ??
-                        keys[0]!)
+                      ? keys.find((candidate) => question.criteria[candidate]?.includes(label)) ??
+                        keys[0]!
                       : keys[0]!;
                 return [
                   [

@@ -365,7 +365,7 @@ async function readCaptureElement(handle: ElementHandle<Node>) {
         .split(/\s+/)
         .map((id) =>
           root instanceof Document || root instanceof ShadowRoot
-            ? (root.getElementById(id)?.textContent ?? "")
+            ? root.getElementById(id)?.textContent ?? ""
             : "",
         )
         .join(" ")
