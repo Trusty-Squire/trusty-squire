@@ -7,6 +7,7 @@ import {
   revealedKeyCaptureDue,
   runOperateDrive,
   type DriveDependencies,
+  type DriveCallContext,
   type WireRow,
 } from "../operate-drive.js";
 import {
@@ -55,7 +56,10 @@ afterAll(async () => {
 const api = { useCredential: vi.fn() } as unknown as ApiClient;
 const key = "sk-beat-0123456789abcdefghijklmnopqrstuvwxyzABCDEFG";
 
-async function drive(copyScript: string) {
+async function drive(
+  copyScript: string,
+  persistCredentials: DriveCallContext["persistCredentials"] | null = async () => true,
+) {
   const context = await browser.newContext();
   const page = await context.newPage();
   const url = "https://app.example.test/dashboard/apikeys";
@@ -82,7 +86,7 @@ async function drive(copyScript: string) {
     const result = await runOperateDrive(
       { session_id: started.session_id, goal, max_steps: 3, max_seconds: 10 },
       api,
-      undefined,
+      { ...(persistCredentials == null ? {} : { persistCredentials }) },
       {
         askJev,
         act,
@@ -102,11 +106,24 @@ async function drive(copyScript: string) {
 }
 
 it("finishes complete from a revealed key without asking the model", async () => {
-  const { result, askJev } = await drive(`navigator.clipboard.writeText('${key}')`);
+  const persistCredentials = vi.fn(async () => true);
+  const { result, askJev } = await drive(`navigator.clipboard.writeText('${key}')`, persistCredentials);
+  expect(persistCredentials).toHaveBeenCalledWith(expect.objectContaining({
+    credentials: { api_key: key },
+  }));
   expect(result.status).toBe("complete");
   expect(askJev).not.toHaveBeenCalled();
 }, 15_000);
 
 it("asks the model when the Copy control writes nothing", async () => {
   await expect(drive("")).rejects.toThrow("model asked");
+}, 15_000);
+
+it.each(["missing", "rejected", "failed"])("asks the model when storage is %s", async (mode) => {
+  const persistCredentials = mode === "missing" ? undefined : async () => {
+    if (mode === "failed") throw new Error("vault unavailable");
+    return false;
+  };
+  await expect(drive(`navigator.clipboard.writeText('${key}')`, persistCredentials ?? null))
+    .rejects.toThrow("model asked");
 }, 15_000);

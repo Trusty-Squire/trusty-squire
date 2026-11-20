@@ -111,7 +111,11 @@ import {
 } from "./captcha.js";
 import type { CaptchaSolveResult } from "./captcha.js";
 import { findCredentialTokens, isMaskedDisplay } from "./credential-shape.js";
-import { extractCredentials, storableCredentials } from "./capture/capture.js";
+import {
+  extractCredentials,
+  storableCredentials,
+  type ExtractResult,
+} from "./capture/capture.js";
 import {
   DRIVE_FIXED_GO_BACK,
   DRIVE_FIXED_NONE_OF_THESE,
@@ -131,6 +135,7 @@ export interface DriveCallContext {
   notifyUser?: (message: string, data?: Record<string, unknown>) => Promise<void>;
   signal?: AbortSignal;
   consentInboxRead?: boolean;
+  persistCredentials?: (extracted: ExtractResult) => Promise<boolean>;
 }
 
 export type InjectCardFn = (
@@ -6154,11 +6159,13 @@ async function driveLoop(input: {
       // recognizable shape or label in the observation. Page evidence only
       // decides whether a failed extraction must hand back for explicit capture.
       const extracted = await extractCredentials(sessionId).catch(() => null);
-      if (
-        storableCredentials(extracted?.credentials ?? {}) === null &&
-        pageShowsCredentialValue(rows)
-      ) {
-        drive.history.push("DONE refused: a visible credential has no captured source");
+      const hasCredential = storableCredentials(extracted?.credentials ?? {}) !== null;
+      const stored =
+        hasCredential && extracted !== null && context?.persistCredentials !== undefined
+          ? await context.persistCredentials(extracted).catch(() => false)
+          : false;
+      if ((hasCredential && !stored) || (!hasCredential && pageShowsCredentialValue(rows))) {
+        drive.history.push("DONE refused: a visible credential was not stored");
         drive.consumedActionKey = null;
         const stallKey = pageProgressKey(
           observation.url,
@@ -6170,7 +6177,7 @@ async function driveLoop(input: {
         if (drive.stallKeys.includes(stallKey)) {
           return finish("stuck", {
             reason:
-              "no key with a known source: read the page with operate_observe and point capture at the key",
+              "key not stored: supply store or use operate_extract with explicit capture",
           });
         }
         drive.stallKeys.push(stallKey);
@@ -7443,7 +7450,10 @@ async function driveLoop(input: {
       }
       continue;
     }
-    if (revealedKeyCaptureDue(rows, drive.lastActionKey)) {
+    if (
+      context?.persistCredentials !== undefined &&
+      revealedKeyCaptureDue(rows, drive.lastActionKey)
+    ) {
       const captureKey = pageProgressKey(
         observation.url,
         rows,
@@ -7453,8 +7463,12 @@ async function driveLoop(input: {
       if (!revealedKeyCaptureAttempts.has(captureKey)) {
         revealedKeyCaptureAttempts.add(captureKey);
         const extracted = await extractCredentials(sessionId).catch(() => null);
-        if (storableCredentials(extracted?.credentials ?? {}) !== null) {
-          drive.history.push("revealed key captured from its Copy source");
+        if (
+          extracted !== null &&
+          storableCredentials(extracted.credentials) !== null &&
+          (await context.persistCredentials(extracted).catch(() => false))
+        ) {
+          drive.history.push("revealed key stored from its Copy source");
           return finish("complete");
         }
         // Capture invalidated the snapshot; re-read before asking about this page.

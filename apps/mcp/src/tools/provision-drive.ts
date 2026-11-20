@@ -1371,6 +1371,7 @@ const driveSchema = z
     url: z.string().url().optional(),
     goal: z.string().min(1).max(4000),
     facts: z.record(z.string(), z.string()).optional(),
+    store: storeShape.optional(),
     max_steps: z.number().int().min(1).max(60).optional(),
     max_seconds: z.number().int().min(1).max(120).optional(),
     answer: z.string().min(1).max(200).optional(),
@@ -1395,6 +1396,7 @@ export const operateDriveTool: Tool<z.infer<typeof driveSchema>> = {
     "Identity and payment values must come from facts; a search phrase may come from the goal. " +
     "Amount_cents is in the currency's smallest unit: USD $12.34 -> 1234; JPY ¥65,800 -> 65800 (do not multiply by 100); KRW works like JPY. " +
     "The loop can handle Google sign-in, verification mail, captcha, and card release. " +
+    "Pass store (the same destination as operate_extract) to vault a revealed key before completing. " +
     "max_steps (default 60) and max_seconds (default 45) bound a call. Resume a budget or other partial handoff on the " +
     "same session with added facts and/or answer from its options. The handoff includes status, current compact observation, " +
     "trajectory, done/remaining, and counters. complete means done; needs_value names a missing field; stuck and low_confidence " +
@@ -1419,6 +1421,18 @@ export const operateDriveTool: Tool<z.infer<typeof driveSchema>> = {
         ...(context?.signal === undefined ? {} : { signal: context.signal }),
         ...(context?.notifyUser === undefined ? {} : { notifyUser: context.notifyUser }),
         ...(consentInboxRead === undefined ? {} : { consentInboxRead }),
+        ...(args.store === undefined || api === null
+          ? {}
+          : {
+              persistCredentials: async (extracted: ExtractResult) =>
+                (await persistExtracted(
+                  extracted.session_id,
+                  extracted.url,
+                  extracted.credentials,
+                  args.store!,
+                  api,
+                )) !== null,
+            }),
       },
     );
   },
