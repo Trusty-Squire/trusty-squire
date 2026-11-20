@@ -8,6 +8,10 @@
   `/s/<token>/`. A failed live view stops with the cause and no fallback
   install URL.
 
+## 1.1.50-rc.1 (2026-11-20)
+
+- operate_drive key capture: a key revealed inline on the page (not in a dialog) is now captured from its own Copy control, either the one the drive just clicked (even after it reads "Copied") or the page's only clickable Copy control, and stored as before; the drive completes only after the vault write. On a sign-in page that offers a federated login (Continue with Google/GitHub/SSO), an empty email, username or password field no longer ends the drive `needs_value` before the step vote, so the drive can take the sign-in path the goal names; a password-only form keeps the handoff ([PR](https://github.com/Trusty-Squire/trusty-squire/pull/1150)).
+
 ## 1.1.49-rc.1 (2026-11-20)
 
 - operate_drive key capture: given `store`, a drive that shows a revealed key or has just clicked Copy (even when the button then reads "Copied!") vaults the key through the operate_extract store path and finishes complete without waiting for a DONE vote; without `store`, or if storing fails, it goes on to its next decision. DONE on a page with a captured or visible key now also completes only after the key is stored; otherwise it ends `stuck` ("key not stored"), so drive callers that want completion on a key page must pass `store`. An inbox read that finds no matching mail is reported to the next decision instead of re-reading the same empty inbox ([PR](https://github.com/Trusty-Squire/trusty-squire/pull/1148)).
