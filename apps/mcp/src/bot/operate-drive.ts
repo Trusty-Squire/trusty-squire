@@ -113,7 +113,11 @@ import {
 import type { CaptchaSolveResult } from "./captcha.js";
 import { findCredentialTokens, isMaskedDisplay } from "./credential-shape.js";
 import { extractCredentials, storableCredentials, type ExtractResult } from "./capture/capture.js";
-import { inventPassword, parsePasswordRequirements, passwordMeetsRequirements } from "./drive-password.js";
+import {
+  inventPassword,
+  parsePasswordRequirements,
+  passwordMeetsRequirements,
+} from "./drive-password.js";
 import {
   DRIVE_FIXED_GO_BACK,
   DRIVE_FIXED_NONE_OF_THESE,
@@ -2531,10 +2535,10 @@ export function isPasswordRow(row: WireRow): boolean {
 
 const CONFIRM_PASSWORD_KEY =
   /(?:^|_)(?:confirm|confirmation|repeat|re_?enter|re_?type|retype|verify|again)(?:_|$)/;
-const CREATE_ACCOUNT_LABEL =
-  /create\s+(?:an?\s+|my\s+|your\s+)?account|sign[\s-]*up|register/i;
+const CREATE_ACCOUNT_LABEL = /create\s+(?:an?\s+|my\s+|your\s+)?account|sign[\s-]*up|register/i;
 const LOGIN_LABEL = /\blog[\s-]*in\b|\bsign[\s-]*in\b/i;
-const RESET_PASSWORD_LABEL = /\b(?:reset|forgot|recover|change|update)\s+(?:(?:your|my)\s+)?password\b|\bpassword\s+(?:reset|recovery|change)\b/i;
+const RESET_PASSWORD_LABEL =
+  /\b(?:reset|forgot|recover|change|update)\s+(?:(?:your|my)\s+)?password\b|\bpassword\s+(?:reset|recovery|change)\b/i;
 
 const CURRENT_PASSWORD_KEY = /(?:^|_)(?:current|old|existing)(?:_|$)/;
 
@@ -2547,8 +2551,10 @@ export function isConfirmPasswordRow(row: WireRow): boolean {
 }
 
 function isPopulatedPasswordRow(row: WireRow): boolean {
-  return isPasswordRow(row) &&
-    (/(?:^|\|)s=[^|]*p/.test(row[2] ?? "") || (rowCurrentValue(row)?.length ?? 0) > 0);
+  return (
+    isPasswordRow(row) &&
+    (/(?:^|\|)s=[^|]*p/.test(row[2] ?? "") || (rowCurrentValue(row)?.length ?? 0) > 0)
+  );
 }
 
 export interface NewAccountPasswordTargets {
@@ -2583,14 +2589,18 @@ export function newAccountPasswordTargets(
     !filled.has(row[0]);
   const candidates = [
     ...rows.filter((row) => open(row) && !isConfirmPasswordRow(row)),
-    ...rows.filter((row) => open(row) && isConfirmPasswordRow(row) && reuseInventedPasswordFor(row)),
+    ...rows.filter(
+      (row) => open(row) && isConfirmPasswordRow(row) && reuseInventedPasswordFor(row),
+    ),
   ];
   const frameKey = (row: WireRow): string | undefined => /^@e:f\d+d/.exec(row[0])?.[0];
   for (const password of candidates) {
     if (matchingFactKeys(facts, password).length > 0) continue;
     const formId = rowFormId(password);
-    const scope = rows.filter((row) =>
-      frameKey(row) === frameKey(password) && (formId === undefined || rowFormId(row) === formId));
+    const scope = rows.filter(
+      (row) =>
+        frameKey(row) === frameKey(password) && (formId === undefined || rowFormId(row) === formId),
+    );
     const reuseInventedPassword = reuseInventedPasswordFor(password);
     const confirms = scope.filter(
       (row) => row !== password && open(row) && isConfirmPasswordRow(row),
@@ -2631,6 +2641,44 @@ export function newAccountPasswordTargets(
     };
   }
   return undefined;
+}
+
+const SIGN_IN_PATH = /(?:^|\/)(?:log[-_]?in|sign[-_]?in)(?:\/|$)/i;
+
+/**
+ * A sign-in form beside another way forward: a sign-up control, a federated
+ * login, or a button outside the form. Typing a supplied fact into that form,
+ * or stopping for its credentials, picks the login route before the step vote
+ * has seen the others, so the drive leaves this page to the vote.
+ */
+export function signInPageOffersOtherRoute(
+  rows: readonly WireRow[],
+  pageUrl: string,
+  headings: readonly string[] = [],
+): boolean {
+  const fields = rows.filter((row) => isFillableRow(row));
+  if (fields.length === 0) return false;
+  const formIds = new Set(fields.map(rowFormId).filter((id): id is string => id !== undefined));
+  const inForm = (row: WireRow): boolean => {
+    const id = rowFormId(row);
+    return id === undefined ? formIds.size === 0 : formIds.has(id);
+  };
+  const submits = rows.filter(
+    (row) => /(?:^|\|)a=submit(?:\||$)/.test(row[2] ?? "") && inForm(row),
+  );
+  if (submits.some((row) => CREATE_ACCOUNT_LABEL.test(readableLabel(row)))) return false;
+  const signIn =
+    SIGN_IN_PATH.test(urlPathname(pageUrl)) ||
+    [...submits.map(readableLabel), ...headings].some((text) => LOGIN_LABEL.test(text));
+  if (!signIn) return false;
+  return rows.some(
+    (row) =>
+      !isFillableRow(row) &&
+      !submits.includes(row) &&
+      (isOauthChromeRow(row) ||
+        (OAUTH_CONTROL_ROLES.has(row[1]) && CREATE_ACCOUNT_LABEL.test(readableLabel(row))) ||
+        ((row[1] === "b" || row[1] === "button") && !inForm(row))),
+  );
 }
 
 export function applyReleasedCardFacts(
@@ -5292,7 +5340,10 @@ async function captureDriveSession(
   bridge.reserve(compactV2EpochDoc(session, page), frameParts);
   rememberDriveIdentities(drive, snapshot.elements, snapshot.url);
   drive.snapshotControlDigest = await driveControlDigest(page);
-  drivePasswordControls.set(session, new Map(snapshot.elements.map((element) => [element.ref, element])));
+  drivePasswordControls.set(
+    session,
+    new Map(snapshot.elements.map((element) => [element.ref, element])),
+  );
   const rawRows = driveRowsFromSnapshot(snapshot);
   lastSelectOptions.set(session, snapshotSelectOptions(snapshot));
   const previousEpoch = drive.lastDocumentEpoch;
@@ -6065,9 +6116,10 @@ async function driveLoop(input: {
     if (location === undefined) return false;
     const { url, host } = location;
     const controls = drivePasswordControls.get(session);
-    const login = targets.identity === undefined
-      ? targets.login ?? session.signupIdentifier ?? getSessionUserEmail(sessionId)
-      : controls?.get(targets.identity[0])?.value;
+    const login =
+      targets.identity === undefined
+        ? (targets.login ?? session.signupIdentifier ?? getSessionUserEmail(sessionId))
+        : controls?.get(targets.identity[0])?.value;
     if (login == null || login.trim().length === 0) return false;
     const requirements = [targets.password, ...targets.confirms].map(passwordRequirementsFor);
     const prior = drive.inventedLogin;
@@ -7752,6 +7804,13 @@ async function driveLoop(input: {
       pageUrl,
     );
     let terminalOnly = false;
+    // Beside another route, a sign-in form's fields are one choice among
+    // several: neither auto-fill them nor stop for them before the vote.
+    const signInChoice = signInPageOffersOtherRoute(
+      rows,
+      pageUrl,
+      observation.semantic?.headings ?? [],
+    );
     // A rejected pre-act choice must reach the model on the refreshed page.
     // None of the automatic choices below may consume that opportunity.
     automaticDecisions: {
@@ -7808,9 +7867,10 @@ async function driveLoop(input: {
       const expiryRewrite = typeMustYield
         ? undefined
         : requiredExpiryLongRewriteAction(rows, drive.facts, drive.expiryShortWrittenRefs);
-      const typeFill = typeMustYield
-        ? undefined
-        : requiredFactTypeAction(rows, drive.facts, drive.filledRefs, pageUrl, drive.goal);
+      const typeFill =
+        typeMustYield || signInChoice
+          ? undefined
+          : requiredFactTypeAction(rows, drive.facts, drive.filledRefs, pageUrl, drive.goal);
       typeMustYield = false;
       const rewriteTarget = expiryRewrite?.target;
       const rewriteAttemptKey =
@@ -7868,7 +7928,8 @@ async function driveLoop(input: {
               drive.facts,
               drive.filledRefs,
               (row) => drivePasswordControls.get(session)?.get(row[0])?.frameHeadings ?? [],
-              (row) => drive.inventedLogin != null &&
+              (row) =>
+                drive.inventedLogin != null &&
                 drive.inventedLogin.host === signupLocationFor(row)?.host &&
                 session.secretSlots.has(DRIVE_PASSWORD_SLOT),
             );
@@ -7888,7 +7949,11 @@ async function driveLoop(input: {
             const current = rows.find((row) => row[0] === target[0]);
             if (current === undefined || isPopulatedPasswordRow(current)) continue;
             const password = session.secretSlots.get(DRIVE_PASSWORD_SLOT);
-            if (password === undefined || !passwordMeetsRequirements(password, passwordRequirementsFor(current))) continue;
+            if (
+              password === undefined ||
+              !passwordMeetsRequirements(password, passwordRequirementsFor(current))
+            )
+              continue;
             drive.boundFingerprint = driveProgressFingerprint(observation, rows, drive, session);
             drive.consumedActionKey = null;
             const applied = await applyDecision({
@@ -7908,6 +7973,7 @@ async function driveLoop(input: {
       // the page context before treating that field as a missing supplied fact.
       if (
         missing !== undefined &&
+        !signInChoice &&
         !emailCodeCandidates(rows, drive.filledRefs).some(
           (candidate) => candidate.ref === missing?.ref,
         )

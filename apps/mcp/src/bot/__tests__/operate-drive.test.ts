@@ -93,6 +93,7 @@ import {
   requiredExpiryLongRewriteAction,
   isRequiredRow,
   requiredFillableMissingFact,
+  signInPageOffersOtherRoute,
   applyReleasedCardFacts,
   ensureGeneratedFacts,
   isExpiryRow,
@@ -1162,6 +1163,97 @@ describe("decideAfterJev stop reasons", () => {
     ).toMatchObject({
       kind: "none_of_these",
       reason: "the action could not be dispatched",
+    });
+  });
+
+  describe("sign-in page beside another route (1.1.53 drive-only trace)", () => {
+    const email = { email: "new-user@example.test" };
+    // Pre-type rows of the three sign-in pages the 1.1.53 runs stopped on.
+    const tokenHarbor: WireRow[] = [
+      ["@e:f0d10", "b", "Sign in|a=submit|fm=1"],
+      ["@e:f0d1", "l", "Token Harbor Token Harbor|u=https://tokenharbor.ai/"],
+      ["@e:f0d2", "b", "Sign in"],
+      ["@e:f0d3", "b", "Sign up"],
+      ["@e:f0d4", "b", "Continue with Google"],
+      ["@e:f0d5", "b", "Continue with GitHub"],
+      ["@e:f0d6", "t", "Email|f=email|s=r|ph=you@example.com|fm=1"],
+      ["@e:f0d7", "t", "Password|f=password|s=r|ph=Password|fm=1"],
+      ["@e:f0d8", "l", "Forgot password?|f=password|u=https://tokenharbor.ai/forgot-password|fm=1"],
+      ["@e:f0d9", "b", "or use one time pin|f=otp|fm=1"],
+      ["@e:f0d13", "b", "Create an account"],
+    ];
+    const kenari: WireRow[] = [
+      ["@e:f0d4", "b", "Masuk|s=d|a=submit|fm=1"],
+      ["@e:f0d1", "b", "Daftar gratis"],
+      ["@e:f0d2", "t", "Email|f=email|s=r|ph=kamu@contoh.com|fm=1"],
+      ["@e:f0d3", "t", "Sandi|s=r|ph=Minimal 8 karakter|fm=1"],
+      ["@e:f0d5", "b", "Lupa sandi?"],
+    ];
+    const numes: WireRow[] = [
+      ["@e:f0d4", "b", "Sign in|a=submit|fm=1"],
+      ["@e:f0d1", "t", "Email|f=username|fm=1"],
+      ["@e:f0d2", "t", "Password|f=password|fm=1"],
+      [
+        "@e:f0d5",
+        "l",
+        "Continue with Google|u=https://auth.numes.ai/realms/numes/broker/google/login",
+      ],
+      ["@e:f0d8", "b", "Sign in with a passkey"],
+    ];
+    const numesUrl = "https://auth.numes.ai/realms/numes/protocol/openid-connect/auth?client_id=x";
+
+    it("recognizes each traced sign-in page that offers another route", () => {
+      expect(
+        signInPageOffersOtherRoute(tokenHarbor, "https://tokenharbor.ai/login?next=%2Fdashboard", [
+          "welcome back",
+        ]),
+      ).toBe(true);
+      expect(signInPageOffersOtherRoute(kenari, "https://kenari.id/login", ["masuk"])).toBe(true);
+      expect(signInPageOffersOtherRoute(numes, numesUrl, ["sign in to numes"])).toBe(true);
+      // These are the shortcuts the drive skips there: each would otherwise
+      // act before the vote, as the traced runs did.
+      expect(requiredFactTypeAction(tokenHarbor, email)?.target).toBe("@e:f0d6");
+      expect(requiredFillableMissingFact(kenari, email)?.ref).toBe("@e:f0d3");
+    });
+
+    it("recognizes the existing-account sign-in pages beside a federated login", () => {
+      const beatApi: WireRow[] = [
+        ["@e:user", "t", "Username or email|s=r|f=username|fm=1"],
+        ["@e:password", "t", "Password|s=r|f=password|fm=1"],
+        ["@e:submit", "b", "Sign in|a=submit|s=d|fm=1"],
+        ["@e:google", "b", "Continue with Google|s=d"],
+      ];
+      const zro: WireRow[] = [
+        ["@e:email", "t", "Email address|s=r|f=email|fm=1"],
+        ["@e:continue", "b", "Continue|a=submit|fm=1"],
+        ["@e:google", "b", "Continue with Google"],
+      ];
+      expect(signInPageOffersOtherRoute(beatApi, "https://beatapi.test/sign-in")).toBe(true);
+      expect(signInPageOffersOtherRoute(zro, "https://zro.test/sign-in")).toBe(true);
+    });
+
+    it("keeps the shortcuts on a sign-up form and on a sign-in form with no other route", () => {
+      const signup: WireRow[] = [
+        ["@e:email", "t", "Email|f=email|s=r|fm=1"],
+        ["@e:password", "t", "Password|f=password|s=r|fm=1"],
+        ["@e:create", "b", "Create account|a=submit|fm=1"],
+        ["@e:google", "b", "Continue with Google"],
+        ["@e:login", "l", "Log in|u=https://app.test/login"],
+      ];
+      expect(signInPageOffersOtherRoute(signup, "https://app.test/login?mode=signup")).toBe(false);
+      const loginOnly: WireRow[] = [
+        ["@e:email", "t", "Email|f=email|s=r|fm=1"],
+        ["@e:password", "t", "Password|f=password|s=r|fm=1"],
+        ["@e:submit", "b", "Sign in|a=submit|fm=1"],
+        ["@e:terms", "l", "Terms|u=https://app.test/terms"],
+      ];
+      expect(signInPageOffersOtherRoute(loginOnly, "https://app.test/login")).toBe(false);
+      const contact: WireRow[] = [
+        ["@e:email", "t", "Email|f=email|s=r|fm=1"],
+        ["@e:send", "b", "Send|a=submit|fm=1"],
+        ["@e:menu", "b", "Menu"],
+      ];
+      expect(signInPageOffersOtherRoute(contact, "https://app.test/contact")).toBe(false);
     });
   });
 
