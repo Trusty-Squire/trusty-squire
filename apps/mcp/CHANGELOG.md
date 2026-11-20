@@ -1,5 +1,9 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.56-rc.1 (2026-11-20)
+
+- fix(mcp): allow inbox polling to resume after budget exhaustion (#1164)
+
 ## 1.1.55-rc.1 (2026-11-20)
 
 - fix(mcp): handle localized signup passwords and bound drive OAuth waits (#1162)
