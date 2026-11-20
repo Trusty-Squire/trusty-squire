@@ -10,7 +10,7 @@ import {
   persistOperatorCaptureEvidence,
   throwIfOperatorRequestCancelled,
 } from "../bot/request-cancellation.js";
-import { runOperateDrive } from "../bot/operate-drive.js";
+import { runOperateDrive, type InventedLogin } from "../bot/operate-drive.js";
 import { runOperateCaptchaSolve } from "../bot/captcha-solve.js";
 import { detectCaptchaVariant, hasVisibleCheckboxCaptchaWidget } from "../bot/captcha.js";
 import { createHash, randomUUID } from "node:crypto";
@@ -642,6 +642,42 @@ export function storedExtractResult(
     url: extracted.url,
     stored_credential: stored,
   };
+}
+
+/**
+ * Vault the login operate_drive invented on a sign-up form, as a
+ * username_password credential whose login host is that site. An existing
+ * login for the same account is never overwritten: the new account may not
+ * exist yet, and the saved one may still be the account's only working copy.
+ */
+export async function storeInventedLogin(
+  api: ApiClient,
+  invented: InventedLogin,
+): Promise<boolean> {
+  const host = new URL(invented.url).hostname.toLowerCase().replace(/^www\./, "");
+  const service = getDomain(invented.url, { allowPrivateDomains: true }) ?? host;
+  const listed = await api
+    .listCredentials()
+    .then((result) => result.credentials)
+    .catch(() => null);
+  const plain = invented.login.slice(0, 60);
+  const taken =
+    listed === null ||
+    listed.some((credential) => credential.service === service && credential.label === plain);
+  const label = taken
+    ? `${invented.login.slice(0, 43)} ${new Date().toISOString().slice(0, 16)}`
+    : plain;
+  const observedHosts = observedHostsForSession(invented.sessionId);
+  await api.storeCredential({
+    service,
+    label,
+    fields: { login: invented.login, password: invented.password },
+    type: "username_password",
+    auth_strategy: "username_password",
+    login_hosts: [...new Set([host, service])],
+    ...(observedHosts.length > 0 ? { observed_hosts: observedHosts } : {}),
+  });
+  return true;
 }
 
 const finishDataSchema = z.record(z.union([z.string().max(4000), z.number(), z.boolean()]));
@@ -1421,6 +1457,9 @@ export const operateDriveTool: Tool<z.infer<typeof driveSchema>> = {
         ...(context?.signal === undefined ? {} : { signal: context.signal }),
         ...(context?.notifyUser === undefined ? {} : { notifyUser: context.notifyUser }),
         ...(consentInboxRead === undefined ? {} : { consentInboxRead }),
+        ...(api === null
+          ? {}
+          : { persistLogin: async (invented: InventedLogin) => storeInventedLogin(api, invented) }),
         ...(args.store === undefined || api === null
           ? {}
           : {

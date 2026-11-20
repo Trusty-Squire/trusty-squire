@@ -29,8 +29,10 @@ import {
 import {
   act,
   awaitVerification,
+  getSessionUserEmail,
   observe,
   startProvisionSession,
+  stashSecretSlot,
   TargetStaleError,
   type NeedsUserLogin,
   type Observation,
@@ -110,6 +112,7 @@ import {
 import type { CaptchaSolveResult } from "./captcha.js";
 import { findCredentialTokens, isMaskedDisplay } from "./credential-shape.js";
 import { extractCredentials, storableCredentials, type ExtractResult } from "./capture/capture.js";
+import { inventPassword, parsePasswordRequirements } from "./drive-password.js";
 import {
   DRIVE_FIXED_GO_BACK,
   DRIVE_FIXED_NONE_OF_THESE,
@@ -130,7 +133,20 @@ export interface DriveCallContext {
   signal?: AbortSignal;
   consentInboxRead?: boolean;
   persistCredentials?: (extracted: ExtractResult) => Promise<boolean>;
+  /** Vault an invented sign-up login; true only once it is stored. */
+  persistLogin?: (login: InventedLogin) => Promise<boolean>;
 }
+
+export interface InventedLogin {
+  sessionId: string;
+  /** The sign-up page the password is typed into. */
+  url: string;
+  login: string;
+  password: string;
+}
+
+/** The session slot that holds the drive's invented sign-up password. */
+export const DRIVE_PASSWORD_SLOT = "drive_password";
 
 export type InjectCardFn = (
   session: Session,
@@ -2510,6 +2526,96 @@ export function isPasswordRow(row: WireRow): boolean {
   const field = normalizeKey(fieldNameForRow(row));
   const label = normalizeKey(readableLabel(row));
   return field.includes("password") || label.includes("password");
+}
+
+const CONFIRM_PASSWORD_KEY =
+  /(?:^|_)(?:confirm|confirmation|repeat|re_?enter|re_?type|retype|verify|again)(?:_|$)/;
+const CREATE_ACCOUNT_LABEL =
+  /create\s+(?:an?\s+|my\s+|your\s+)?account|sign\s*up|register|get\s+started|\bjoin\b/i;
+const LOGIN_LABEL = /\blog\s*in\b|\bsign\s*in\b/i;
+
+const CURRENT_PASSWORD_KEY = /(?:^|_)(?:current|old|existing)(?:_|$)/;
+
+function passwordKey(row: WireRow): string {
+  return `${normalizeKey(fieldNameForRow(row))}_${normalizeKey(readableLabel(row))}`;
+}
+
+export function isConfirmPasswordRow(row: WireRow): boolean {
+  return isPasswordRow(row) && CONFIRM_PASSWORD_KEY.test(passwordKey(row));
+}
+
+export interface NewAccountPasswordTargets {
+  password: WireRow;
+  confirms: WireRow[];
+  /** The account identifier already on the form, when the form has one. */
+  login?: string;
+}
+
+/**
+ * The empty new-password field of a sign-up form, with its confirm field(s),
+ * when no password was supplied. A sign-in form's password is the user's
+ * existing secret and is never invented. A form whose email/username is still
+ * empty waits until that identifier is on the page, so the saved login names
+ * the account that was actually created.
+ */
+export function newAccountPasswordTargets(
+  rows: readonly WireRow[],
+  facts: Record<string, string>,
+  filledRefs: readonly string[],
+  pageUrl: string,
+  headings: readonly string[] = [],
+): NewAccountPasswordTargets | undefined {
+  const filled = new Set(filledRefs);
+  const open = (row: WireRow): boolean =>
+    isFillableRow(row) &&
+    isPasswordRow(row) &&
+    !isDisabledRow(row) &&
+    !isActedRow(row) &&
+    !filled.has(row[0]);
+  const password = rows.find((row) => open(row) && !isConfirmPasswordRow(row));
+  if (password === undefined || matchingFactKeys(facts, password).length > 0) return undefined;
+  const formId = rowFormId(password);
+  const scope = formId === undefined ? rows : rows.filter((row) => rowFormId(row) === formId);
+  const confirms = scope.filter(
+    (row) => row !== password && open(row) && isConfirmPasswordRow(row),
+  );
+  if (!isRequiredRow(password) && confirms.length === 0) return undefined;
+  const buttons = scope.filter((row) => row[1] === "b" || row[1] === "button");
+  const submits = buttons.filter((row) => /(?:^|\|)a=submit(?:\||$)/.test(row[2] ?? ""));
+  const creates = (list: readonly WireRow[]): boolean =>
+    list.some((row) => CREATE_ACCOUNT_LABEL.test(readableLabel(row)));
+  const logsIn = (list: readonly WireRow[]): boolean =>
+    list.some(
+      (row) =>
+        LOGIN_LABEL.test(readableLabel(row)) && !CREATE_ACCOUNT_LABEL.test(readableLabel(row)),
+    );
+  // A changed password is the user's existing secret plus a new one; the
+  // drive cannot know the existing one, so that form is never filled here.
+  if (scope.some((row) => isPasswordRow(row) && CURRENT_PASSWORD_KEY.test(passwordKey(row)))) {
+    return undefined;
+  }
+  const pool = submits.length > 0 ? submits : buttons;
+  const signup =
+    confirms.length > 0 ||
+    (creates(pool) && (!logsIn(pool) || inferPagePhase(pageUrl, headings) === "signup"));
+  if (!signup) return undefined;
+  const identity = scope.find(
+    (row) =>
+      isFillableRow(row) &&
+      !isPasswordRow(row) &&
+      ["email", "username"].includes(rowField(row) ?? ""),
+  );
+  if (identity !== undefined) {
+    const login = rowCurrentValue(identity);
+    if (login === undefined || login.trim().length === 0) return undefined;
+    return { password, confirms, login: login.trim() };
+  }
+  const supplied = facts.email ?? facts.username;
+  return {
+    password,
+    confirms,
+    ...(supplied === undefined || supplied.trim().length === 0 ? {} : { login: supplied.trim() }),
+  };
 }
 
 export function applyReleasedCardFacts(
@@ -5812,6 +5918,7 @@ async function driveLoop(input: {
   const selectAttempts = new Set<string>();
   let selectMustYield = false;
   const typeAttempts = new Set<string>();
+  const passwordAttempts = new Set<string>();
   const expiryRewriteAttempts = new Set<string>();
   let typeMustYield = false;
   let settleWaits = 0;
@@ -5911,6 +6018,54 @@ async function driveLoop(input: {
       question: { question: wall.message, options: {} },
       needsUser: wall,
     });
+
+  // Fill the drive's password slot for this sign-up form, vaulting the login
+  // before anything is typed. A login that could not be saved is never typed:
+  // an account whose password exists nowhere else is lost the moment it is made.
+  const inventSignupPassword = async (targets: NewAccountPasswordTargets): Promise<boolean> => {
+    if (context?.persistLogin === undefined) return false;
+    let host: string;
+    try {
+      host = new URL(observation.url).hostname.toLowerCase();
+    } catch {
+      return false;
+    }
+    const login = targets.login ?? session.signupIdentifier ?? getSessionUserEmail(sessionId);
+    if (login === null || login.length === 0) return false;
+    const prior = drive.inventedLogin;
+    if (
+      prior !== undefined &&
+      prior !== null &&
+      prior.host === host &&
+      prior.login === login &&
+      session.secretSlots.has(DRIVE_PASSWORD_SLOT)
+    ) {
+      return true;
+    }
+    const row = targets.password;
+    const placeholder = /(?:^|\|)ph=([^|]+)/.exec(row[2] ?? "")?.[1] ?? "";
+    const width = /(?:^|\|)w=(\d+)/.exec(row[2] ?? "")?.[1];
+    const pattern = /(?:^|\|)pt=([^|]+)/.exec(row[2] ?? "")?.[1];
+    const password = inventPassword(
+      parsePasswordRequirements(
+        `${readableLabel(row)}\n${placeholder}\n${observation.dom ?? ""}`,
+        width === undefined ? undefined : Number(width),
+        pattern,
+      ),
+    );
+    if (password === undefined) return false;
+    const stored = await context
+      .persistLogin({ sessionId, url: observation.url, login, password })
+      .catch(() => false);
+    if (!stored) {
+      drive.history.push("invented password not typed: the login could not be saved");
+      return false;
+    }
+    stashSecretSlot(sessionId, DRIVE_PASSWORD_SLOT, password);
+    drive.inventedLogin = { host, login };
+    drive.history.push(`invented a password for ${login} and saved the login`);
+    return true;
+  };
 
   const solveCaptcha = async (): Promise<string> =>
     (
@@ -7251,7 +7406,12 @@ async function driveLoop(input: {
       ...takeActProfile(drive),
     });
     drive.history.push(historyLine);
-    if (actDispatched && (decision.action.kind === "type" || decision.action.kind === "select")) {
+    if (
+      actDispatched &&
+      (decision.action.kind === "type" ||
+        decision.action.kind === "type_secret" ||
+        decision.action.kind === "select")
+    ) {
       const completionEpoch =
         acted.kind === "unsupported"
           ? session.browser.page === null
@@ -7666,6 +7826,47 @@ async function driveLoop(input: {
         if (automaticDecisionRefused) break automaticDecisions;
         spendStep("type");
         continue;
+      }
+      // A sign-up form's new password is invented rather than handed back:
+      // saved to the vault first, then typed from a sealed slot, so the value
+      // never reaches the model, the trace, or the handoff.
+      const passwordTargets =
+        context?.persistLogin === undefined
+          ? undefined
+          : newAccountPasswordTargets(
+              rows,
+              drive.facts,
+              drive.filledRefs,
+              pageUrl,
+              observation.semantic?.headings ?? [],
+            );
+      const passwordAttemptKey =
+        passwordTargets === undefined
+          ? undefined
+          : `${comboboxObservation}\t${passwordTargets.password[0]}`;
+      if (
+        passwordTargets !== undefined &&
+        passwordAttemptKey !== undefined &&
+        !passwordAttempts.has(passwordAttemptKey)
+      ) {
+        passwordAttempts.add(passwordAttemptKey);
+        const slotted = await inventSignupPassword(passwordTargets);
+        if (slotted) {
+          for (const target of [passwordTargets.password, ...passwordTargets.confirms]) {
+            drive.boundFingerprint = driveProgressFingerprint(observation, rows, drive, session);
+            drive.consumedActionKey = null;
+            const applied = await applyDecision({
+              kind: "act",
+              action: { kind: "type_secret", slot: DRIVE_PASSWORD_SLOT, target: target[0] },
+              actionKey: target[0],
+              confidence: 1,
+            });
+            if (applied !== "continue") return applied;
+            if (automaticDecisionRefused) break automaticDecisions;
+          }
+          spendStep("password");
+          continue;
+        }
       }
       // A required code field may have no recognizable label. Give the model
       // the page context before treating that field as a missing supplied fact.

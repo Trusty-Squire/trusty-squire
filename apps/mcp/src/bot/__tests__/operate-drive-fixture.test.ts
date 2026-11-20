@@ -6,6 +6,7 @@
 
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { chromium, type Browser, type Page } from "playwright";
 import type { ApiClient } from "../../api-client.js";
@@ -29,6 +30,7 @@ import {
   type DriveDependencies,
   type WireRow,
 } from "../operate-drive.js";
+import { storeInventedLogin } from "../../tools/provision-drive.js";
 import { finishProvisionSession, startHarnessProvisionSession } from "../provision-session.js";
 import type { ProvisionAction } from "../provision-session.js";
 import {
@@ -98,6 +100,28 @@ const CREATE_PASSWORD_NEXT_HTML = `<!doctype html><meta charset="utf-8"><title>S
     });
   });
 </script>`;
+
+const NEW_ACCOUNT_PASSWORD_HTML = `<!doctype html><meta charset="utf-8"><title>Token fixture</title>
+<main>
+  <h1>Welcome</h1>
+  <form id="f">
+    <label>Email <input id="email" name="email" type="email" required></label>
+    <label>Password (min 30 chars, required) <input id="password" name="password" type="password" required></label>
+    <label>Confirm password <input id="confirm" name="confirm_password" type="password" required></label>
+    <label><input id="age" type="checkbox" required> I confirm that I am at least 18</label>
+    <button id="create" type="submit">Create account</button>
+  </form>
+</main>`;
+
+const SIGN_IN_HTML = `<!doctype html><meta charset="utf-8"><title>Sign in fixture</title>
+<main>
+  <h1>Welcome back</h1>
+  <form id="f">
+    <label>Email <input id="email" name="email" type="email" required></label>
+    <label>Password <input id="password" name="password" type="password" required></label>
+    <button id="go" type="submit">Sign in</button>
+  </form>
+</main>`;
 
 const LINK_VERIFY_HTML = `<!doctype html><meta charset="utf-8"><title>Link verify</title>
 <main>
@@ -3965,6 +3989,127 @@ describe("operate_drive real-browser fixture", () => {
       expect(await page.locator("#password").inputValue()).toBe("");
       expect(await page.locator("#done").count()).toBe(0);
       expect(sessionForCall(started.session_id)?.drive?.facts.password).toBeUndefined();
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 60_000);
+
+  it("invents a sign-up password, vaults the login first, and fills the confirm field", async () => {
+    const { context, page, started } = await openFixture(
+      NEW_ACCOUNT_PASSWORD_HTML,
+      "invent-password.test",
+      "standard",
+      "/login",
+    );
+    const traceDir = mkdtempSync(join(tmpdir(), "drive-password-trace-"));
+    const tracePath = join(traceDir, "trace.jsonl");
+    const priorTrace = process.env.DRIVE_TRACE_PATH;
+    process.env.DRIVE_TRACE_PATH = tracePath;
+    const stored: Array<Record<string, unknown>> = [];
+    const vault = {
+      listCredentials: vi.fn(async () => ({ credentials: [] })),
+      storeCredential: vi.fn(async (input: Record<string, unknown>) => {
+        // The login is saved before anything is typed into the page.
+        expect(await page.locator("#password").inputValue()).toBe("");
+        stored.push(input);
+        return { reference: "vault://ref", service: input.service, label: input.label };
+      }),
+    } as unknown as ApiClient;
+    try {
+      const result = await runOperateDrive(
+        {
+          session_id: started.session_id,
+          goal: "create a new account",
+          facts: { email: "ada@fixture.test" },
+          max_steps: 4,
+        },
+        api(),
+        { persistLogin: async (invented) => storeInventedLogin(vault, invented) },
+        deps(async (_api, _state, questions) => jevChoose(questions, "DONE")),
+      );
+      const password = await page.locator("#password").inputValue();
+      expect(password.length).toBeGreaterThanOrEqual(30);
+      expect(await page.locator("#confirm").inputValue()).toBe(password);
+      expect(await page.locator("#email").inputValue()).toBe("ada@fixture.test");
+
+      expect(stored).toHaveLength(1);
+      expect(stored[0]).toMatchObject({
+        service: "invent-password.test",
+        label: "ada@fixture.test",
+        fields: { login: "ada@fixture.test", password },
+        type: "username_password",
+        auth_strategy: "username_password",
+        login_hosts: ["invent-password.test"],
+      });
+
+      expect(JSON.stringify(result)).not.toContain(password);
+      expect(readFileSync(tracePath, "utf8")).not.toContain(password);
+      const drive = sessionForCall(started.session_id)?.drive;
+      expect(drive?.facts.password).toBeUndefined();
+      expect(JSON.stringify(drive?.history ?? [])).not.toContain(password);
+      expect(JSON.stringify(drive?.trajectory ?? [])).not.toContain(password);
+    } finally {
+      if (priorTrace === undefined) delete process.env.DRIVE_TRACE_PATH;
+      else process.env.DRIVE_TRACE_PATH = priorTrace;
+      rmSync(traceDir, { recursive: true, force: true });
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 60_000);
+
+  it("does not type an invented password whose login could not be saved", async () => {
+    const { context, page, started } = await openFixture(
+      NEW_ACCOUNT_PASSWORD_HTML,
+      "invent-password-unsaved.test",
+      "standard",
+      "/signup",
+    );
+    try {
+      const result = await runOperateDrive(
+        {
+          session_id: started.session_id,
+          goal: "create a new account",
+          facts: { email: "ada@fixture.test" },
+          max_steps: 4,
+        },
+        api(),
+        { persistLogin: async () => false },
+        deps(async (_api, _state, questions) => jevFromQuestions(questions)),
+      );
+      expect(result.status).toBe("needs_value");
+      expect(result.field).toMatch(/password/i);
+      expect(await page.locator("#password").inputValue()).toBe("");
+      expect(sessionForCall(started.session_id)?.secretSlots.size).toBe(0);
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 60_000);
+
+  it("never invents the password of a sign-in form", async () => {
+    const { context, page, started } = await openFixture(
+      SIGN_IN_HTML,
+      "invent-password-signin.test",
+      "standard",
+      "/login",
+    );
+    const persistLogin = vi.fn(async () => true);
+    try {
+      const result = await runOperateDrive(
+        {
+          session_id: started.session_id,
+          goal: "sign in",
+          facts: { email: "ada@fixture.test" },
+          max_steps: 4,
+        },
+        api(),
+        { persistLogin },
+        deps(async (_api, _state, questions) => jevFromQuestions(questions)),
+      );
+      expect(result.status).toBe("needs_value");
+      expect(persistLogin).not.toHaveBeenCalled();
+      expect(await page.locator("#password").inputValue()).toBe("");
     } finally {
       await finishProvisionSession(started.session_id);
       await context.close();

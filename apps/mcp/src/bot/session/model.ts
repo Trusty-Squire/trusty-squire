@@ -270,6 +270,8 @@ export interface SessionDriveState {
   triedHereKey?: string | null;
   /** Progress keys where the decider already answered NONE_OF_THESE/re-plan. */
   stallKeys?: string[];
+  /** Sign-up login whose invented password sits in the drive's slot and the vault. */
+  inventedLogin?: { host: string; login: string } | null;
 }
 
 // The last extracted elements are resealed on every retain so each retained
