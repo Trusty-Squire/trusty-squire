@@ -1263,7 +1263,7 @@ describe("operate_drive real-browser fixture", () => {
       });
       const dispatch = vi.fn<NonNullable<DriveDependencies["driveAct"]>>(
         async (_sessionId, _action, deadline) => {
-          deadline!.executionStarted = true;
+          deadline!.dispatchAttempted = true;
           if (stage === "preflight") throw new OAuthAwaitingHumanError("execution expired");
           return await new Promise<never>((_resolve, reject) => {
             finishRead = () => reject(new OAuthAwaitingHumanError("execution released"));

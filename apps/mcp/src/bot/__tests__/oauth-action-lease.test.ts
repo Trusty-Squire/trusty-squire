@@ -136,7 +136,7 @@ describe("OAuth preflight under a drive deadline", () => {
       expect(result).toHaveBeenCalledOnce();
       expect(result.mock.calls[0]![0].observation.oauth.state).toBe("awaiting_human");
       expect(execution).toHaveBeenCalledTimes(probeMs < 20_000 ? 1 : 0);
-      expect(deadline.executionStarted === true).toBe(probeMs < 20_000);
+      expect(deadline.dispatchAttempted).not.toBe(true);
       await pending;
       finishExecution();
       await vi.advanceTimersByTimeAsync(10_000);
@@ -192,7 +192,7 @@ describe("OAuth preflight under a drive deadline", () => {
       oauth: { state: "awaiting_human" },
     });
     expect(boundary.gate).not.toHaveBeenCalled();
-    expect(deadline.executionStarted).not.toBe(true);
+    expect(deadline.dispatchAttempted).not.toBe(true);
     await pending;
   });
 });
@@ -227,7 +227,7 @@ describe("OAuth fallback caller deadline", () => {
     await vi.advanceTimersByTimeAsync(15_000);
     expect(result).toHaveBeenCalledOnce();
     expect(result.mock.calls[0]![0].oauth.state).toBe("awaiting_human");
-    expect(deadline.executionStarted).not.toBe(true);
+    expect(deadline.dispatchAttempted).not.toBe(true);
     await pending;
     await vi.advanceTimersByTimeAsync(20_000);
   });

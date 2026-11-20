@@ -7595,7 +7595,7 @@ async function driveLoop(input: {
       return await executeDecision(decision, jevMs, modelChosen, deadline);
     } catch (error) {
       if (deadline !== undefined && error instanceof OAuthAwaitingHumanError) {
-        if (deadline.executionStarted !== true) drive.consumedActionKey = null;
+        if (deadline.dispatchAttempted !== true) drive.consumedActionKey = null;
         return finish("budget", { reason: error.message });
       }
       throw error;

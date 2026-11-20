@@ -332,7 +332,7 @@ const DEFAULT_OAUTH_AUTOMATED_ACTION_TIMEOUT_MS = 30_000;
 const DEFAULT_OAUTH_HUMAN_HANDOFF_TIMEOUT_MS = 5 * 60_000;
 
 export interface OAuthActionDeadline {
-  executionStarted?: boolean;
+  dispatchAttempted?: boolean;
   completionCheck?: () => Promise<OAuthCompletionEvidence | null>;
   expiresAt: number;
   timeoutMs: number;
@@ -571,6 +571,7 @@ export async function loginWithOAuth(
     dispatch: (handle: ElementHandle<Element>, confirmTarget: () => Promise<void>) => Promise<void>,
   ) => Promise<void>,
   reportHumanChallenge?: OAuthChallengeReporter,
+  onDispatchAttempted?: () => void,
 ): Promise<void> {
   const product = browser.page;
   const context = browser.context;
@@ -842,6 +843,16 @@ export async function loginWithOAuth(
     }
     return null;
   };
+  const assertDispatchBudget = (): void => {
+    if (Date.now() >= oauthDeadline) {
+      throw new OAuthAwaitingHumanError(
+        `OAuth has not been attempted yet: the ${Math.ceil(oauthBudgetMs / 1000)}-second ` +
+          `budget elapsed before the OAuth control on ${safeOrigin(productUrl)} was clicked. ` +
+          "Retry oauth_login.",
+        "not_attempted",
+      );
+    }
+  };
   registerCompletionCheck?.(completionEvidence);
   product.on("framenavigated", onProductNavigation);
   context.on("request", onContextRequest);
@@ -875,23 +886,20 @@ export async function loginWithOAuth(
     product.on("popup", onPopup);
     product.once("close", onProductClose);
     try {
-      if (Date.now() >= oauthDeadline) {
-        throw new OAuthAwaitingHumanError(
-          `OAuth has not been attempted yet: the ${Math.ceil(oauthBudgetMs / 1000)}-second ` +
-            `budget elapsed before the OAuth control on ${safeOrigin(productUrl)} was clicked. ` +
-            "Retry oauth_login.",
-          "not_attempted",
-        );
-      }
+      assertDispatchBudget();
       try {
         if (dispatchAuthorizedClick === undefined) {
-          actionStarted = true;
           // Direct native login has no broker-prepared handle. Record the
           // same dispatch boundary while retaining ordinary click semantics.
           await browser.clickWithDispatchTracking(
             { kind: "selector", selector, method: "click" },
             undefined,
-            () => browser.click({ kind: "selector", selector, method: "click" }),
+            async () => {
+              assertDispatchBudget();
+              actionStarted = true;
+              onDispatchAttempted?.();
+              await browser.click({ kind: "selector", selector, method: "click" });
+            },
           );
         } else {
           await dispatchAuthorizedClick(async (handle, confirmTarget) => {
@@ -918,14 +926,7 @@ export async function loginWithOAuth(
               } catch (error) {
                 throw new BrowserClickDispatchError("not_dispatched", error);
               }
-              if (Date.now() >= oauthDeadline) {
-                throw new OAuthAwaitingHumanError(
-                  `OAuth has not been attempted yet: the ${Math.ceil(oauthBudgetMs / 1000)}-second ` +
-                    `budget elapsed before the OAuth control on ${safeOrigin(productUrl)} was clicked. ` +
-                    "Retry oauth_login.",
-                  "not_attempted",
-                );
-              }
+              assertDispatchBudget();
               const guardKey = `__ts_oauth_click_${Math.random().toString(36).slice(2)}`;
               await handle.evaluate(
                 (element, guard) => {
@@ -960,12 +961,14 @@ export async function loginWithOAuth(
                 },
                 { key: guardKey, expected: expectedSignature },
               );
-              actionStarted = true;
               try {
                 await browser.clickWithDispatchTracking(
                   { kind: "handle", handle, method: "click" },
                   undefined,
                   async () => {
+                    assertDispatchBudget();
+                    actionStarted = true;
+                    onDispatchAttempted?.();
                     await handle.click({
                       timeout: Math.min(8000, remainingBudgetMs()),
                       noWaitAfter: true,

@@ -274,7 +274,6 @@ async function withOAuthActionBoundary(
     deadline,
     async () => {
       try {
-        deadline.executionStarted = true;
         return await withinOAuthActionDeadline(run(deadline), deadline);
       } catch (error) {
         const uncertain = oauthErrorAfterDispatchAttempt(session, error);
@@ -449,6 +448,9 @@ async function runSerializedOAuthBoundary(
           } finally {
             composed.dispose();
           }
+        },
+        () => {
+          deadline.dispatchAttempted = true;
         },
       );
       // Human completion returns custody to bounded machine work. Give DOM
