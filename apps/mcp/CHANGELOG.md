@@ -3,9 +3,6 @@
 ## 1.1.53-rc.1 (2026-11-20)
 
 - feat(mcp): let operate_drive invent and vault signup passwords (#1157)
-- release(mcp): 1.1.52-rc.1 (#1156)
-- fix(mcp): drop the drive's federated-login needs_value shims (#1155)
-- fix(mcp): admit account chooser votes matching session identity (#1154)
 
 ## 1.1.52-rc.1 (2026-11-20)
 
