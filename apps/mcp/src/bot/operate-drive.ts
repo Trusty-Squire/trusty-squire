@@ -238,7 +238,7 @@ export const DRIVE_RULES: readonly string[] = [
   "Recent WAIT actions are not evidence of loading. Prefer a useful visible control over WAIT.",
   "DONE requires visible evidence that ALL requirements are satisfied. If asked to open a result, a matching link is not enough.",
   "BLOCKED means no supported operation can make progress, including reading the inbox.",
-  "When the page says to check email, or the goal needs verification and no useful control is listed, pick INBOX.",
+  "Pick INBOX only when no listed control sends, requests, or enters the verification code or link.",
   "Do not choose a field that already contains the requested value.",
   "Identifying values come only from the provided facts; never invent them.",
   "A search or query field may receive a phrase assigned from the goal or facts; pick none rather than composing one.",
@@ -817,9 +817,6 @@ export function isConsentRow(row: WireRow): boolean {
   );
 }
 
-const LAYER_CONTROL_LABEL =
-  /^(?:close|dismiss|skip(?:\s+for\s+now)?|not now|maybe later|no thanks|accept(?:\s+(?:all|cookies?))?|allow(?:\s+(?:all|cookies?))?|got it|ok|copy|done|reject(?:\s+all)?|decline|necessary only)(?:[.…])?$/;
-
 /** Wallet sign-in may open when checkout email is filled, without a wallet choice. */
 export function isWalletSignInPrompt(pageText: string): boolean {
   const shopConfirmation =
@@ -842,33 +839,6 @@ export function walletSignInDismissRef(rows: readonly WireRow[]): string | null 
         ),
     )?.[0] ?? null
   );
-}
-
-export function pageOcclusionLayer(rows: readonly WireRow[]): "dialog" | "overlay" | undefined {
-  if (rows.some((row) => rowOccluder(row) === "dialog")) return "dialog";
-  // A local decoration can cover one control without covering the page.
-  // Treat an overlay as a page layer only when it offers a way through it.
-  const hasOverlay = rows.some((row) => rowOccluder(row) === "overlay");
-  if (hasOverlay && rows.some((row) => isLayerControlRow(row, "overlay"))) return "overlay";
-  return undefined;
-}
-
-export function isLayerControlRow(row: WireRow, layer: "dialog" | "overlay"): boolean {
-  if (isConsentRow(row)) return true;
-  if (LAYER_CONTROL_LABEL.test(readableLabel(row).toLowerCase().trim())) return true;
-  return layer === "dialog" && isRevealOrCopyRow(row);
-}
-
-export function isLayerCandidateRow(
-  row: WireRow,
-  _rows: readonly WireRow[],
-  layer: "dialog" | "overlay",
-): boolean {
-  const occluder = rowOccluder(row);
-  if (isLayerControlRow(row, layer)) return true;
-  // The snapshot names covered controls, not the complete contents of a
-  // dialog. Its own forward controls can have no occlusion marker at all.
-  return occluder === undefined;
 }
 
 export function pagePathKey(url: string): string {
@@ -3679,11 +3649,9 @@ export function driveTargetSets(
   // entire candidate budget and make another action kind disappear.
   const candidateBudget = () => ({ n: DRIVE_MAX_CANDIDATES });
   const skipped = new Set(skippedClickRefs);
-  const layer = pageOcclusionLayer(rows);
   const failed = new Set(aim.failedKeys ?? []);
   const keepRow = (row: WireRow): boolean => {
     if (failed.has(actionFailureKey(row, pageUrl)) || failed.has(row[0])) return false;
-    if (layer !== undefined && !isLayerCandidateRow(row, rows, layer)) return false;
     return true;
   };
   const aimInput = {
@@ -3733,7 +3701,7 @@ export function driveTargetSets(
   if (select.length > 0) operations.push("SELECT");
   if (scroll.length > 0) operations.push("SCROLL");
   if (!skipped.has("INBOX")) operations.push("INBOX");
-  if (!skipped.has("WAIT")) operations.push("WAIT");
+  operations.push("WAIT");
   operations.push("DONE");
   operations.push("BLOCKED");
   return { operations, TYPE_TEXT: typeText, SELECT: select, CLICK: click, SCROLL: scroll };
@@ -4162,7 +4130,10 @@ export function admitsChoice(
     const selected = probabilities[choice]!;
     let runnerUp = 0;
     for (const [key, probability] of Object.entries(probabilities)) {
-      if (key !== choice) runnerUp = Math.max(runnerUp, probability);
+      // An identically labeled twin is not a competing answer; it only
+      // splits the model's mass between two indistinguishable options.
+      if (key !== choice && criteria[key] !== criteria[choice])
+        runnerUp = Math.max(runnerUp, probability);
     }
     if (
       fixedChoices.includes(choice) ||
@@ -6201,19 +6172,6 @@ async function driveLoop(input: {
       drive.lastFingerprint = driveProgressFingerprint(observation, rows, drive, session);
       drive.lastActionKey = "WAIT";
       drive.consumedActionKey = null;
-      if (
-        modelChosen &&
-        rows.length > 0 &&
-        pageProgressKey(
-          observation.url,
-          rows,
-          drive.filledRefs,
-          observation.semantic?.headings ?? [],
-        ) === beforeKey
-      ) {
-        const dead = markDead("WAIT");
-        if (dead !== "continue") return dead;
-      }
       return "continue";
     }
     if (decision.kind === "stuck") {
@@ -7633,7 +7591,7 @@ async function driveLoop(input: {
         const stillWaiting = afterSubmit
           ? now() - started < waitBudget
           : settleWaits < DRIVE_EMPTY_SNAPSHOT_WAITS;
-        if (stillWaiting && !(drive.exhaustedActionKeys ?? []).includes("WAIT")) {
+        if (stillWaiting) {
           settleWaits += 1;
           const applied = await applyDecision({ kind: "wait", confidence: 1 });
           if (applied !== "continue") return applied;
@@ -7648,11 +7606,7 @@ async function driveLoop(input: {
         // One re-observe only for an ambiguous disabled submit. A rendered
         // challenge goes to the solver immediately — and we never reset this
         // counter, so an in-progress solve cannot fall back into a bare wait.
-        if (
-          !pageHasRenderedCaptcha(rows) &&
-          widgetWaits < DRIVE_WIDGET_UNREADY_WAITS &&
-          !(drive.exhaustedActionKeys ?? []).includes("WAIT")
-        ) {
+        if (!pageHasRenderedCaptcha(rows) && widgetWaits < DRIVE_WIDGET_UNREADY_WAITS) {
           widgetWaits += 1;
           const applied = await applyDecision({ kind: "wait", confidence: 1 });
           if (applied !== "continue") return applied;

@@ -16,7 +16,6 @@ import {
   resolveResumeAnswer,
   elementState,
   DRIVE_MAX_JEV_CALLS,
-  DRIVE_RULES,
   DRIVE_VALUE_QUESTION,
   goalValueCriteria,
   DRIVE_IDENTICAL_RESNAP_MS,
@@ -141,8 +140,6 @@ import {
   redactSecretShapedValue,
   looksLikeMaskedSecretDisplay,
   rowShowsSecretEvidence,
-  pageOcclusionLayer,
-  isLayerCandidateRow,
   recordUndeliveredDecision,
   oauthHandoffReturnedToStart,
   oauthReturnedToLoginReason,
@@ -454,6 +451,43 @@ describe("history threading", () => {
     });
   });
 
+  it("tells the model to click a listed send-code control before INBOX (Token Harbor trace)", () => {
+    // Gauntlet drive-trace line 26: "verify your email to continue" with Send
+    // code listed. The old rule sent the model to INBOX (.42) although no code
+    // had been sent yet and Send code (.72) was listed.
+    const rows: WireRow[] = [
+      ["@e:f0d13", "l", "API Key|u=https://tokenharbor.ai/dashboard/api-keys|oc=dialog"],
+      ["@e:f0d30", "b", "+ New key|oc=dialog"],
+      ["@e:f0d27", "b", "Cookie settings|oc=dialog"],
+      ["@e:f0d34", "b", "Send code"],
+      ["@e:f0d35", "b", "Cancel"],
+      ["@e:f0d36", "b", "Verify|s=d"],
+    ];
+    const questions = buildDriveQuestions(
+      rows,
+      {},
+      "Get one API key for the existing Token Harbor account",
+      false,
+      [],
+      "https://tokenharbor.ai/dashboard/api-keys",
+    );
+    const click = questions.CLICK_target?.type === "choice" ? questions.CLICK_target.criteria : {};
+    expect(Object.values(click)).toContain("Send code");
+    const state = buildJevState(
+      "Get one API key for the existing Token Harbor account",
+      [],
+      [],
+      "https://tokenharbor.ai/dashboard/api-keys",
+      "API keys",
+      driveCandidates(rows, false),
+      "Verify your email to continue",
+      { rows },
+    );
+    expect(state.instructions.rules).toContain(
+      "Pick INBOX only when no listed control sends, requests, or enters the verification code or link.",
+    );
+  });
+
   it("puts goal, facts, recent actions, and element operations in structured state", () => {
     const history = Array.from({ length: 22 }, (_, i) => `click step ${i}`);
     const state = buildJevState(
@@ -479,7 +513,9 @@ describe("history threading", () => {
     expect(state.tried_here).toEqual([]);
     expect(state.visited).toEqual({});
     expect(state.instructions.goal).toBe("sign up");
-    expect(state.instructions.rules).toEqual(DRIVE_RULES);
+    expect(state.instructions.rules).toContain(
+      "Pick INBOX only when no listed control sends, requests, or enters the verification code or link.",
+    );
     expect(state.facts).toEqual(["email", "first_name"]);
     expect(state.recent_actions[0]).toBe("click step 2");
     expect(state.recent_actions.at(-1)).toBe("click step 21");
@@ -609,6 +645,35 @@ describe("clear-winner admission", () => {
   ])("requires both floors: $confidence / $values", ({ values, confidence }) => {
     const { criteria, answer } = vectorAnswer(values, confidence);
     expect(admitsChoice(criteria, answer)).toEqual({ kind: "low_confidence", confidence });
+  });
+
+  it("does not count an identically labeled twin as the runner-up (BeatAPI trace)", () => {
+    // Gauntlet drive-trace line 38: two "Create API key" buttons split the
+    // model's mass .49/.42; every differently labeled option was <= .08.
+    const criteria = {
+      kapi_keys_u_https_beatapi_io_dashboard_ap: "API keys",
+      kcreate_an_api_key_u_https_beatapi_io_das: "Create an API key",
+      kview_tour_b: "View tour",
+      kcreate_api_key_b: "Create API key",
+      kcreate_api_key_b_2: "Create API key",
+    };
+    const answer: JevAnswer = {
+      choice: "kcreate_api_key_b",
+      confidence: 0.46,
+      probabilities: {
+        kapi_keys_u_https_beatapi_io_dashboard_ap: 0.01,
+        kcreate_an_api_key_u_https_beatapi_io_das: 0.08,
+        kview_tour_b: 0,
+        kcreate_api_key_b: 0.49,
+        kcreate_api_key_b_2: 0.42,
+      },
+    };
+    expect(admitsChoice(criteria, answer)).toEqual({ ok: true });
+    // A differently labeled runner-up at the same mass still refuses.
+    expect(admitsChoice({ ...criteria, kcreate_api_key_b_2: "Delete API key" }, answer)).toEqual({
+      kind: "low_confidence",
+      confidence: 0.46,
+    });
   });
 
   it("refuses missing confidence and preserves the legacy threshold branch", () => {
@@ -3084,7 +3149,7 @@ describe("facts, fingerprint, compact merge", () => {
       ["@e:go", "WAIT"],
     );
     expect(sets.CLICK.map((c) => c.ref)).toEqual(["@e:ok", "@e:ad"]);
-    expect(sets.operations).not.toContain("WAIT");
+    expect(sets.operations).toContain("WAIT");
   });
 
   it("keeps acted markers and committed field state in the progress fingerprint", () => {
@@ -4391,15 +4456,46 @@ describe("dialog overlay secret and oauth bounce rules", () => {
     ).toBe(false);
   });
 
-  it("drops occluded controls and keeps the layer's own dismiss", () => {
+  it("keeps a covered dialog's Create and Cancel beside Close (BeatAPI trace)", () => {
+    // Gauntlet drive-trace line 36: the open model picker covered Create and
+    // Cancel, and with them filtered out Close was the only way to finish the
+    // form, so the half-made key was dismissed.
+    const rows: WireRow[] = [
+      ["@e:f0d25", "b", "Create|a=submit|fm=1|oc=overlay"],
+      ["@e:f0d21", "t", "Key Name|s=r|n=grunt|fm=1|oc=overlay"],
+      ["@e:f0d22", "t", "Remaining spending limit (credits / USD)|it=number|im=decimal|fm=1"],
+      ["@e:f0d23", "b", "Usage restrictions|fm=1"],
+      ["@e:f0d125", "b", "Remove deepseek-v4.1-flash-free|fm=1"],
+      ["@e:f0d27", "t", "Search models|f=search|ph=Search models|fm=1"],
+      ["@e:f0d31", "c", "claude-haiku-5-5|s=u|fm=1|oc=overlay"],
+      ["@e:f0d33", "c", "claude-opus-5-5|s=u|fm=1|oc=dialog"],
+      ["@e:f0d36", "c", "gpt-5.6-luna|s=u|fm=1"],
+      ["@e:f0d51", "c", "deepseek-v4.1-flash-free|s=c|fm=1"],
+      ["@e:f0d24", "b", "Cancel|fm=1|oc=overlay"],
+      ["@e:f0d26", "b", "Close|v=offscreen"],
+    ];
+    const sets = driveTargetSets(
+      rows,
+      {},
+      false,
+      ["@e:f0d21"],
+      "https://beatapi.io/dashboard/apikeys",
+      new Map(),
+      (text) => text,
+      [],
+      { goal: "Get one API key for the existing BeatAPI account named grunt" },
+    );
+    const refs = sets.CLICK.map((entry) => entry.ref);
+    expect(refs).toContain("@e:f0d25");
+    expect(refs).toContain("@e:f0d24");
+    expect(refs).toContain("@e:f0d26");
+  });
+
+  it("keeps a dialog's covered controls beside its own dismiss", () => {
     const key: WireRow = ["@e:key", "t", "API key|n=tvly-dev-****abcd|oc=dialog"];
     const create: WireRow = ["@e:new", "b", "Create API key|oc=dialog"];
     const close: WireRow = ["@e:x", "b", "Close"];
     const copy: WireRow = ["@e:copy", "b", "Copy"];
-    expect(pageOcclusionLayer([key, create, close, copy])).toBe("dialog");
-    expect(isLayerCandidateRow(create, [key, create, close, copy], "dialog")).toBe(false);
-    expect(isLayerCandidateRow(close, [key, create, close, copy], "dialog")).toBe(true);
-    expect(isLayerCandidateRow(copy, [key, create, close, copy], "dialog")).toBe(true);
     const sets = driveTargetSets(
       [key, create, close, copy],
       {},
@@ -4411,14 +4507,14 @@ describe("dialog overlay secret and oauth bounce rules", () => {
       [],
       { goal: "extract an API key" },
     );
-    expect(sets.CLICK.map((entry) => entry.ref)).toEqual(["@e:x", "@e:copy"]);
-    expect(sets.CLICK.map((entry) => entry.ref)).not.toContain("@e:new");
+    expect(sets.CLICK.map((entry) => entry.ref)).toEqual(
+      expect.arrayContaining(["@e:new", "@e:x", "@e:copy"]),
+    );
   });
 
   it("keeps overlay dismiss when every row is marked oc=overlay", () => {
     const terms: WireRow = ["@e:terms", "c", "I agree to the terms|oc=overlay"];
     const accept: WireRow = ["@e:ok", "b", "Accept all|oc=overlay"];
-    expect(pageOcclusionLayer([terms, accept])).toBe("overlay");
     const sets = driveTargetSets(
       [terms, accept],
       {},
@@ -4430,7 +4526,7 @@ describe("dialog overlay secret and oauth bounce rules", () => {
       [],
       { goal: "create an account" },
     );
-    expect(sets.CLICK.map((entry) => entry.ref)).toEqual(["@e:ok"]);
+    expect(sets.CLICK.map((entry) => entry.ref)).toContain("@e:ok");
   });
 
   it("offers an unoccluded checkout button inside a cart dialog", () => {

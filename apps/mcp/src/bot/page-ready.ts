@@ -454,6 +454,9 @@ export async function waitForPageReady(
       });
       break;
     }
+    // A drive read gets the same settle as an observation: a dashboard's nav
+    // shell renders before its fetched content. This only delays the read.
+    case "drive-read":
     case "observation": // 1.5 s network cap, then 500 ms DOM-quiet floor with 2 s deadline.
       add("observation_network", C.observationNetwork, async (cap) => {
         networkBusy = !(await load("networkidle")(cap));

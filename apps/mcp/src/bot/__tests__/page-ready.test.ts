@@ -9,6 +9,10 @@ describe("page readiness", () => {
     querySelectorAll: () => never[];
   };
   let page: Page;
+  let loadStates: Array<{ state: string; timeout: number }>;
+  let mutate: () => void;
+  // A drive read first settles like an observation: network idle, then a DOM-quiet floor.
+  const settled = PAGE_READY_CAPS.observationQuiet;
 
   beforeEach(() => {
     vi.useFakeTimers();
@@ -19,7 +23,24 @@ describe("page readiness", () => {
     };
     vi.stubGlobal("document", document);
     vi.stubGlobal("requestAnimationFrame", (callback: () => void) => setTimeout(callback, 16));
+    mutate = () => undefined;
+    vi.stubGlobal(
+      "MutationObserver",
+      class {
+        constructor(callback: () => void) {
+          mutate = callback;
+        }
+        observe() {}
+        disconnect() {
+          mutate = () => undefined;
+        }
+      },
+    );
+    loadStates = [];
     page = {
+      waitForLoadState: async (state: string, options: { timeout: number }) => {
+        loadStates.push({ state, timeout: options.timeout });
+      },
       evaluate: async (fn: (arg: unknown) => unknown, arg: unknown) => fn(arg),
       waitForFunction: async (
         fn: (arg: unknown) => unknown,
@@ -45,12 +66,45 @@ describe("page readiness", () => {
 
   it("waits for a blank stage to render before allowing a drive read", async () => {
     const waiting = waitForPageReady(page, { kind: "drive-read" });
-    await vi.advanceTimersByTimeAsync(96);
+    await vi.advanceTimersByTimeAsync(settled + 96);
     document.body.innerText = "Payment details";
     await vi.advanceTimersByTimeAsync(16);
     const readiness = await waiting;
     expect(readiness.ready).toBe(true);
-    expect(readiness.elapsedMs).toBeGreaterThanOrEqual(96);
+    expect(readiness.elapsedMs).toBeGreaterThanOrEqual(settled + 96);
+  });
+
+  it("settles a drive read like an observation before reading a rendered shell", async () => {
+    // Gauntlet drive-trace lines 39-41: Pollinations' nav shell was read
+    // before its key list loaded, so the drive saw only navigation.
+    document.body.innerText = "Credits\nQuests\nKeys";
+    let done = false;
+    const waiting = waitForPageReady(page, { kind: "drive-read" }).then((readiness) => {
+      done = true;
+      return readiness;
+    });
+    await vi.advanceTimersByTimeAsync(300);
+    mutate();
+    await vi.advanceTimersByTimeAsync(settled - 16);
+    expect(done).toBe(false);
+    await vi.advanceTimersByTimeAsync(32);
+    const readiness = await waiting;
+    expect(readiness.ready).toBe(true);
+    expect(readiness.elapsedMs).toBeGreaterThanOrEqual(300 + settled);
+    expect(loadStates).toEqual([
+      { state: "networkidle", timeout: PAGE_READY_CAPS.observationNetwork },
+    ]);
+  });
+
+  it("bounds the drive-read DOM settle on a page that never goes quiet", async () => {
+    document.body.innerText = "Live dashboard";
+    const ticker = setInterval(() => mutate(), 100);
+    const waiting = waitForPageReady(page, { kind: "drive-read" });
+    await vi.advanceTimersByTimeAsync(PAGE_READY_CAPS.observationQuietDeadline + 16);
+    clearInterval(ticker);
+    const readiness = await waiting;
+    expect(readiness.ready).toBe(true);
+    expect(readiness.elapsedMs).toBeGreaterThanOrEqual(PAGE_READY_CAPS.observationQuietDeadline);
   });
 
   it("waits for Shopify shipping-rate radios before the approval total read", async () => {
@@ -74,10 +128,10 @@ describe("page readiness", () => {
 
   it("reports an unrendered document after the original 1.5 s cap", async () => {
     const waiting = waitForPageReady(page, { kind: "drive-read" });
-    await vi.advanceTimersByTimeAsync(PAGE_READY_CAPS.driveEmpty + 16);
+    await vi.advanceTimersByTimeAsync(settled + PAGE_READY_CAPS.driveEmpty + 16);
     const readiness = await waiting;
     expect(readiness).toMatchObject({ ready: false, reason: "no_rendered_content" });
-    expect(readiness.elapsedMs).toBeGreaterThanOrEqual(PAGE_READY_CAPS.driveEmpty);
+    expect(readiness.elapsedMs).toBeGreaterThanOrEqual(settled + PAGE_READY_CAPS.driveEmpty);
   });
 
   it.each(["Loading...", "Loading your workspace..."])(
@@ -85,7 +139,7 @@ describe("page readiness", () => {
     async (label) => {
       document.body.innerText = label;
       const waiting = waitForPageReady(page, { kind: "drive-read" });
-      await vi.advanceTimersByTimeAsync(PAGE_READY_CAPS.driveEmpty + 16);
+      await vi.advanceTimersByTimeAsync(settled + PAGE_READY_CAPS.driveEmpty + 16);
       expect(await waiting).toMatchObject({ ready: false, reason: "no_rendered_content" });
     },
   );
@@ -125,7 +179,7 @@ describe("page readiness", () => {
     };
     page = { ...page, frames: () => [mainFrame, frame], mainFrame: () => mainFrame } as Page;
     const waiting = waitForPageReady(page, { kind: "drive-read" });
-    await vi.advanceTimersByTimeAsync(PAGE_READY_CAPS.driveEmpty + 16);
+    await vi.advanceTimersByTimeAsync(settled + PAGE_READY_CAPS.driveEmpty + 16);
     expect(await waiting).toMatchObject({ ready: false, reason: "no_rendered_content" });
   });
 
