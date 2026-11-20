@@ -9,10 +9,8 @@
 // facts bag. A search or query field may receive a phrase Jev assigns from the
 // goal's own words or the facts; nothing is composed.
 //
-// Below DRIVE_CONFIDENCE_THRESHOLD, concrete choices need confidence and
-// selected probability >= 0.30 and a probability >= twice the runner-up.
-// Fixed controls and value "none" keep the threshold. Validation and purchase
-// approval stay. Safety net is validate_choice, fingerprint-bound consume-once,
+// Confidence admission and its session-identity exception are documented in
+// docs/operator-tool-surface.md. Safety net is validate_choice, fingerprint-bound consume-once,
 // and three consecutive non-wait actions with no page change (re-snapshot once
 // before a strike).
 
