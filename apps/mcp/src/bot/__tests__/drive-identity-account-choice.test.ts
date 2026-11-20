@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { JevAnswer } from "../jev-client.js";
 import { buildDriveQuestions, decideAfterJev, type WireRow } from "../operate-drive.js";
 
 // Rows and vote shapes from a recorded account-chooser step (names, emails and
@@ -51,8 +52,9 @@ function clickSlugs(): { app: string; ada: string; bo: string; other: string } {
 }
 
 function decide(
-  target: { choice: string; probabilities: Record<string, number>; confidence: number },
+  target: JevAnswer,
   identityEmail: string | null,
+  pageRows: WireRow[] = rows,
 ) {
   return decideAfterJev({
     answers: {
@@ -69,20 +71,9 @@ function decide(
           GO_BACK: 0.04,
         },
       },
-      CLICK_target: {
-        ...target,
-        // Every other offered control drew no vote, as in the recorded step.
-        probabilities: {
-          ...Object.fromEntries(
-            Object.keys(clickQuestion?.type === "choice" ? clickQuestion.criteria : {}).map(
-              (key) => [key, 0],
-            ),
-          ),
-          ...target.probabilities,
-        },
-      },
+      CLICK_target: target,
     },
-    rows,
+    rows: pageRows,
     facts: {},
     lastFingerprint: null,
     lastActionKey: null,
@@ -98,7 +89,17 @@ describe("account-choice vote and the session identity", () => {
   const split = {
     choice: slugs.ada,
     confidence: 0.44,
-    probabilities: { [slugs.app]: 0.32, [slugs.ada]: 0.51, [slugs.bo]: 0.09, [slugs.other]: 0.08 },
+    probabilities: {
+      ...Object.fromEntries(
+        Object.keys(clickQuestion?.type === "choice" ? clickQuestion.criteria : {}).map(
+          (key) => [key, 0],
+        ),
+      ),
+      [slugs.app]: 0.32,
+      [slugs.ada]: 0.51,
+      [slugs.bo]: 0.09,
+      [slugs.other]: 0.08,
+    },
   };
 
   it("stops as low_confidence on the recorded split when the identity is unknown", () => {
@@ -112,16 +113,63 @@ describe("account-choice vote and the session identity", () => {
     });
   });
 
-  it("chooses the session's account over another account tile the vote picked", () => {
-    const wrongTile = {
+  it("does not admit a different account's low-confidence vote", () => {
+    expect(decide({
+      ...split,
       choice: slugs.bo,
-      confidence: 0.5,
-      probabilities: { [slugs.app]: 0.1, [slugs.ada]: 0.3, [slugs.bo]: 0.55, [slugs.other]: 0.05 },
-    };
-    expect(decide(wrongTile, "ada@example.test")).toMatchObject({
+      probabilities: { ...split.probabilities, [slugs.ada]: 0.09, [slugs.bo]: 0.51 },
+    }, "ada@example.test")).toMatchObject({ kind: "low_confidence" });
+  });
+
+  it("preserves an admitted vote for another account", () => {
+    expect(decide({
+      ...split,
+      choice: slugs.bo,
+      confidence: 0.9,
+      probabilities: {
+        ...split.probabilities,
+        [slugs.app]: 0.02,
+        [slugs.ada]: 0.09,
+        [slugs.bo]: 0.81,
+      },
+    }, "ada@example.test")).toMatchObject({
       kind: "act",
-      action: { kind: "click", target: "@e:f0d2" },
+      action: { kind: "click", target: "@e:f0d3" },
     });
+  });
+
+  it("keeps ordinary email-bearing rows subject to confidence admission", () => {
+    const contacts: WireRow[] = rows.map((row) =>
+      row[0] === "@e:f0d4" ? [row[0], row[1], "View contacts"] : row,
+    );
+    const question = buildDriveQuestions(contacts, {}, goal).CLICK_target;
+    if (question?.type !== "choice") throw new Error("no CLICK target question");
+    const contactSlug = Object.keys(question.criteria).find((key) =>
+      question.criteria[key]!.startsWith("View contacts"),
+    );
+    if (contactSlug === undefined) throw new Error("no contact slug");
+    const probabilities = Object.fromEntries(Object.entries(split.probabilities).map(
+      ([key, value]) => [key === slugs.other ? contactSlug : key, value],
+    ));
+    expect(decide({ ...split, probabilities }, "ada@example.test", contacts))
+      .toMatchObject({ kind: "low_confidence" });
+  });
+
+  it.each([
+    ["missing probabilities", { choice: slugs.ada, confidence: 0.44 }, "missing_probabilities"],
+    ["ref alias", { ...split, choice: "@e:f0d2" }, "choice_not_offered"],
+    ["missing keys", { ...split, probabilities: { [slugs.ada]: 1 } }, "probability_keys_mismatch"],
+    ["unoffered key", {
+      ...split,
+      probabilities: Object.fromEntries(Object.entries(split.probabilities).map(([key, value]) =>
+        [key === slugs.app ? "unoffered" : key, value],
+      )),
+    }, "probability_key_not_offered"],
+    ["invalid value", { ...split, probabilities: { ...split.probabilities, [slugs.app]: -0.1 } }, "probability_not_unit_interval"],
+    ["invalid sum", { ...split, probabilities: { ...split.probabilities, [slugs.app]: 0 } }, "probability_sum"],
+    ["non-argmax choice", { ...split, probabilities: { ...split.probabilities, [slugs.app]: 0.51, [slugs.ada]: 0.32 } }, "choice_not_argmax"],
+  ] as const)("rejects %s even when the choice matches the identity", (_, target, reason) => {
+    expect(decide(target, "ada@example.test")).toMatchObject({ kind: "invalid_answer", reason });
   });
 
   it("leaves a vote for a control without an email to the ordinary admission", () => {
@@ -129,6 +177,7 @@ describe("account-choice vote and the session identity", () => {
       choice: slugs.app,
       confidence: 0.44,
       probabilities: {
+        ...split.probabilities,
         [slugs.app]: 0.51,
         [slugs.ada]: 0.32,
         [slugs.bo]: 0.09,

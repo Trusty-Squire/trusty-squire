@@ -4243,27 +4243,22 @@ function refuseAdmission(
   );
 }
 
-// An account chooser's vote is between controls that each show an account's
-// email. The session already knows its own identity, so when the voted control
-// is one of those and exactly one CLICK candidate shows the session's email,
-// that candidate is the account to choose, however the vote split.
-export function sessionIdentityClickCandidate(
+function isSessionIdentityAccountChoice(
   candidates: readonly DriveCandidate[],
   votedChoice: string | undefined,
   identityEmail: string | null | undefined,
-): DriveCandidate | undefined {
+): boolean {
   const identity = identityEmail?.trim().toLowerCase();
-  if (identity === undefined || identity.length === 0 || votedChoice === undefined) {
-    return undefined;
+  if (!identity || votedChoice === undefined) return false;
+  if (!candidates.some((candidate) => /^use another account$/i.test(readableLabel(candidate.row)))) {
+    return false;
   }
   const emailsOf = (candidate: DriveCandidate): string[] =>
     (readableLabel(candidate.row).match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) ?? []).map(
       (email) => email.toLowerCase(),
     );
-  const voted = resolveActionChoice(votedChoice, candidates);
-  if (voted === undefined || emailsOf(voted).length === 0) return undefined;
   const matches = candidates.filter((candidate) => emailsOf(candidate).includes(identity));
-  return matches.length === 1 ? matches[0] : undefined;
+  return matches.length === 1 && matches[0]!.slug === votedChoice;
 }
 
 export function decideAfterJev(input: {
@@ -4425,14 +4420,17 @@ export function decideAfterJev(input: {
       { reversible: REVERSIBLE_OPERATIONS.has(choice as DriveOperation) },
       threshold,
     );
-    const identityChoice =
-      choice === "CLICK"
-        ? sessionIdentityClickCandidate(sets.CLICK, targetAnswer?.choice, input.identityEmail)
-        : undefined;
-    if (!("ok" in targetAdmission) && identityChoice === undefined) {
+    if (
+      !("ok" in targetAdmission) &&
+      !(
+        targetAdmission.kind === "low_confidence" &&
+        choice === "CLICK" &&
+        isSessionIdentityAccountChoice(sets.CLICK, targetAnswer?.choice, input.identityEmail)
+      )
+    ) {
       return refuseAdmission(targetAdmission, targetInstructions, targetCriteria, targetAnswer);
     }
-    const targetChoice = identityChoice?.slug ?? targetAnswer!.choice!;
+    const targetChoice = targetAnswer!.choice!;
     const actionKey =
       choice === "SCROLL" && (DRIVE_SCROLL_DIRECTIONS as readonly string[]).includes(targetChoice)
         ? `scroll:${targetChoice}`
