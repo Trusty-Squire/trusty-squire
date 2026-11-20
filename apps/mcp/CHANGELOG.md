@@ -8,6 +8,10 @@
   `/s/<token>/`. A failed live view stops with the cause and no fallback
   install URL.
 
+## 1.1.47-rc.1 (2026-11-20)
+
+- operate_drive signup fixes: drive reads get the observation's network-idle and DOM-quiet settle, and WAIT stays offered after a wait that left the page unchanged; an identically labeled twin no longer counts as the runner-up; the INBOX rule prefers a listed send-code control; covered dialog controls stay on the action menu beside Close ([PR](https://github.com/Trusty-Squire/trusty-squire/pull/1144)).
+
 ## 1.1.46-rc.1 (2026-11-19)
 
 - Admit concrete clear-winner choices below the 0.6 confidence threshold when confidence and pick probability are both at least 0.30 and the pick is at least twice the runner-up; fixed controls keep the 0.6 threshold ([PR](https://github.com/Trusty-Squire/trusty-squire/pull/1142)).
