@@ -425,6 +425,7 @@ export function resetDriveGoalMemory(drive: SessionDriveState): void {
   drive.boundFingerprint = null;
   drive.lastFingerprint = null;
   drive.lastActionKey = null;
+  drive.pendingCopyCapture = null;
   drive.visitedSectionKeys = [];
   drive.seenDestinations = [];
   drive.awaitingDecideAfterExplore = false;
@@ -455,6 +456,7 @@ export function emptyDriveState(goal: string, facts: Record<string, string>): Se
     expiryLongAttemptedRefs: [],
     lastQuestion: null,
     lastActionKey: null,
+    pendingCopyCapture: null,
     lastFingerprint: null,
     jevCalls: 0,
     staleNonWait: 0,
@@ -1549,7 +1551,7 @@ export function pageShowsRevealedKey(rows: readonly WireRow[], _pageText: string
  */
 export function revealedKeyCaptureDue(
   rows: readonly WireRow[],
-  lastActionKey: string | null,
+  copyDispatched: boolean,
 ): boolean {
   if (
     rows.some(
@@ -1560,10 +1562,7 @@ export function revealedKeyCaptureDue(
   ) {
     return true;
   }
-  return rows.some(
-    (row) =>
-      row[0] === lastActionKey && isRevealOrCopyRow(row) && /^copy\b/i.test(readableLabel(row)),
-  );
+  return copyDispatched;
 }
 
 function pageShowsCredentialValue(rows: readonly WireRow[]): boolean {
@@ -6158,6 +6157,7 @@ async function driveLoop(input: {
       // Try the known Copy source on every DONE, even if the value has no
       // recognizable shape or label in the observation. Page evidence only
       // decides whether a failed extraction must hand back for explicit capture.
+      drive.pendingCopyCapture = null;
       const extracted = await extractCredentials(sessionId).catch(() => null);
       const hasCredential = storableCredentials(extracted?.credentials ?? {}) !== null;
       const stored =
@@ -6784,10 +6784,18 @@ async function driveLoop(input: {
     };
     const oauthPageBefore = decision.action.kind === "oauth_login" ? session.browser.page : null;
     if (oauthPageBefore !== null) session.browser.armOpenedTabAdoption();
+    drive.pendingCopyCapture =
+      decision.action.kind === "click" &&
+      clickedBefore !== undefined &&
+      isRevealOrCopyRow(clickedBefore) &&
+      /^copy\b/i.test(readableLabel(clickedBefore))
+        ? { url: urlBeforeClick, documentEpoch: beforeEpoch }
+        : null;
     let acted: DriveActResult;
     try {
       acted = await actDriveSafely(session, sessionId, decision.action, dependencies);
     } catch (error) {
+      drive.pendingCopyCapture = null;
       if (decision.action.kind === "oauth_login") {
         appendDriveTrace(session, {
           at: "oauth_dispatch",
@@ -6830,6 +6838,7 @@ async function driveLoop(input: {
       });
     }
     if (acted.kind === "stale") {
+      drive.pendingCopyCapture = null;
       if (decision.action.kind === "oauth_login") {
         appendDriveTrace(session, {
           at: "oauth_handoff",
@@ -6948,6 +6957,7 @@ async function driveLoop(input: {
         });
       }
       if (safe.dispatchFailure !== undefined) {
+        drive.pendingCopyCapture = null;
         actDispatched = false;
         drive.lastDispatchFailure = safe.dispatchFailure;
         drive.consumedActionKey = null;
@@ -7451,8 +7461,16 @@ async function driveLoop(input: {
       continue;
     }
     if (
+      drive.pendingCopyCapture != null &&
+      (drive.pendingCopyCapture.url !== observation.url ||
+        documentOriginOf(drive.pendingCopyCapture.documentEpoch) !==
+          documentOriginOf(drive.lastDocumentEpoch ?? ""))
+    ) {
+      drive.pendingCopyCapture = null;
+    }
+    if (
       context?.persistCredentials !== undefined &&
-      revealedKeyCaptureDue(rows, drive.lastActionKey)
+      revealedKeyCaptureDue(rows, drive.pendingCopyCapture != null)
     ) {
       const captureKey = pageProgressKey(
         observation.url,
@@ -7462,6 +7480,7 @@ async function driveLoop(input: {
       );
       if (!revealedKeyCaptureAttempts.has(captureKey)) {
         revealedKeyCaptureAttempts.add(captureKey);
+        drive.pendingCopyCapture = null;
         const extracted = await extractCredentials(sessionId).catch(() => null);
         if (
           extracted !== null &&
@@ -7475,6 +7494,7 @@ async function driveLoop(input: {
         const recapture = await snapshotOrTimeout(framesIfNeeded());
         if (recapture !== "ok") return recapture;
       }
+      drive.pendingCopyCapture = null;
     }
     const includePayment = drive.facts.card_ref !== undefined;
     drive.facts = ensureGeneratedFacts(

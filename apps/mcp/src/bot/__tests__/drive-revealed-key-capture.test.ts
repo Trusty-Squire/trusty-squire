@@ -31,17 +31,17 @@ const withoutMarker = beatApiRevealedRows.slice(0, 3);
 
 describe("revealedKeyCaptureDue", () => {
   it("is due when the page shows a revealed secret row (trace step 5)", () => {
-    expect(revealedKeyCaptureDue(beatApiRevealedRows, null)).toBe(true);
+    expect(revealedKeyCaptureDue(beatApiRevealedRows, false)).toBe(true);
   });
 
   it("is due after the recorded Copy click (trace step 6)", () => {
-    expect(revealedKeyCaptureDue(beatApiRevealedRows, "@e:f0d128")).toBe(true);
-    expect(revealedKeyCaptureDue(withoutMarker, "@e:f0d128")).toBe(true);
+    expect(revealedKeyCaptureDue(beatApiRevealedRows, true)).toBe(true);
+    expect(revealedKeyCaptureDue(withoutMarker, true)).toBe(true);
+    expect(revealedKeyCaptureDue([["@e:f0d128", "b", "Copied!"]], true)).toBe(true);
   });
 
   it("is not due without a revealed key or a clicked Copy control", () => {
-    expect(revealedKeyCaptureDue(withoutMarker, null)).toBe(false);
-    expect(revealedKeyCaptureDue(withoutMarker, "@e:f0d129")).toBe(false);
+    expect(revealedKeyCaptureDue(withoutMarker, false)).toBe(false);
   });
 });
 
@@ -126,4 +126,60 @@ it.each(["missing", "rejected", "failed"])("asks the model when storage is %s", 
   };
   await expect(drive(`navigator.clipboard.writeText('${key}')`, persistCredentials ?? null))
     .rejects.toThrow("model asked");
+}, 15_000);
+
+it("stores an opaque key after Copy relabels itself without another model decision", async () => {
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  const url = "https://app.example.test/keys";
+  const opaqueKey = "Ab3kZ9";
+  await page.route("**/*", (route) => route.fulfill({
+    contentType: "text/html",
+    body: `<main><dialog open aria-label="API key created"><p>${opaqueKey}</p>
+      <button onclick="navigator.clipboard.writeText('${opaqueKey}');this.textContent='Copied!'">Copy</button>
+      </dialog></main>`,
+  }));
+  await page.goto(url);
+  const started = await startHarnessProvisionSession({
+    browser: BrowserController.fromHarnessPage(page), serviceUrl: url,
+    format: "compact", initialObservation: "drive",
+  });
+  const askJev = vi.fn<DriveDependencies["askJev"]>(async (_api, _state, questions) => {
+    if (askJev.mock.calls.length > 1) throw new Error("model asked after Copy");
+    return {
+      attempts: 1, elapsedMs: 1,
+      result: {
+        answers: Object.fromEntries(Object.entries(questions).flatMap(([name, question]) => {
+          if (question.type !== "choice") return [];
+          const keys = Object.keys(question.criteria);
+          const choice = name === "operation" ? "CLICK" : name === "CLICK_target"
+            ? keys.find((key) => /copy/i.test(question.criteria[key]!))! : keys[0]!;
+          return [[name, { choice, confidence: 1, probabilities: Object.fromEntries(
+            keys.map((key) => [key, key === choice ? 1 : 0]),
+          ) }]];
+        })),
+      },
+    };
+  });
+  const persistCredentials = vi.fn(async () => true);
+  try {
+    const result = await runOperateDrive(
+      { session_id: started.session_id, goal: "Get an API key and store it in the vault", max_steps: 3, max_seconds: 10 },
+      api, { persistCredentials }, {
+        askJev, act, observe, awaitVerification,
+        startSession: async () => { throw new Error("existing session"); },
+        injectCard: async () => ({ status: "unused" }),
+      },
+    );
+    expect(await page.getByRole("button").textContent()).toBe("Copied!");
+    expect(persistCredentials).toHaveBeenCalledTimes(1);
+    expect(persistCredentials).toHaveBeenCalledWith(expect.objectContaining({
+      credentials: { api_key: opaqueKey },
+    }));
+    expect(askJev).toHaveBeenCalledTimes(1);
+    expect(result.status).toBe("complete");
+  } finally {
+    await finishProvisionSession(started.session_id);
+    await context.close();
+  }
 }, 15_000);
