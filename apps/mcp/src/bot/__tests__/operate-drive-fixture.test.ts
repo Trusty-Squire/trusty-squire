@@ -4188,6 +4188,60 @@ describe("operate_drive real-browser fixture", () => {
     60_000,
   );
 
+  it("saves an embedded signup for its own frame host and form", async () => {
+    const main = `<!doctype html><h1>Sign in</h1><form>
+      <label>Email<input id="email" type="email" value="merchant@fixture.test"></label>
+      <label>Confirm password<input id="confirm" type="password" required></label>
+      <button type="submit">Sign in</button>
+    </form>`;
+    const embedded = `<!doctype html><h1>Create account</h1><form>
+      <label>Email<input id="email" type="email" value="provider@fixture.test"></label>
+      <label>Password<input id="password" type="password" required
+        oninput="document.getElementById('confirmation').hidden=false"></label>
+      <label id="confirmation" hidden>Confirm password<input id="confirm" type="password" required></label>
+      <button type="submit">Create account</button>
+    </form>`;
+    const { context, page, started } = await openFixture(main, "merchant.test", "standard", "/checkout");
+    const stored: Array<Record<string, unknown>> = [];
+    const vault = { storeCredential: async (input: Record<string, unknown>) => {
+      stored.push(input);
+      return { reference: "vault://embedded", service: input.service, label: input.label };
+    } } as unknown as ApiClient;
+    try {
+      await page.route("https://accounts.provider.test/**", (route) =>
+        route.fulfill({ contentType: "text/html", body: embedded }));
+      await page.evaluate(() => {
+        const frame = document.createElement("iframe");
+        frame.src = "https://accounts.provider.test/signup";
+        frame.width = "600";
+        frame.height = "400";
+        document.body.append(frame);
+      });
+      const frame = page.frameLocator("iframe");
+      await frame.locator("#password").waitFor();
+      await runOperateDrive(
+        { session_id: started.session_id, goal: "create a new account", facts: { card_ref: "fixture-card" }, max_steps: 4 },
+        api(),
+        { persistLogin: (login) => storeInventedLogin(vault, login) },
+        deps(async (_api, _state, questions) => jevChoose(questions, "DONE")),
+      );
+      const password = await frame.locator("#password").inputValue();
+      expect(password).not.toBe("");
+      expect(await frame.locator("#confirm").inputValue()).toBe(password);
+      expect(await page.locator("#confirm").inputValue()).toBe("");
+      expect(stored).toHaveLength(1);
+      expect(stored[0]).toMatchObject({
+        service: "provider.test",
+        login_hosts: ["accounts.provider.test", "provider.test"],
+        fields: { login: "provider@fixture.test", password },
+      });
+      expect(sessionForCall(started.session_id)?.drive?.inventedLogin?.host).toBe("accounts.provider.test");
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 60_000);
+
   it("invents a sign-up password, vaults the login first, and fills the confirm field", async () => {
     const { context, page, started } = await openFixture(
       NEW_ACCOUNT_PASSWORD_HTML,

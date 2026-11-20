@@ -2570,8 +2570,8 @@ export function newAccountPasswordTargets(
   rows: readonly WireRow[],
   facts: Record<string, string>,
   filledRefs: readonly string[],
-  headings: readonly string[] = [],
-  reuseInventedPassword = false,
+  headingsFor: (row: WireRow) => readonly string[] = () => [],
+  reuseInventedPasswordFor: (row: WireRow) => boolean = () => false,
 ): NewAccountPasswordTargets | undefined {
   const filled = new Set(filledRefs);
   const open = (row: WireRow): boolean =>
@@ -2583,10 +2583,13 @@ export function newAccountPasswordTargets(
     !filled.has(row[0]);
   const password =
     rows.find((row) => open(row) && !isConfirmPasswordRow(row)) ??
-    (reuseInventedPassword ? rows.find((row) => open(row) && isConfirmPasswordRow(row)) : undefined);
+    rows.find((row) => open(row) && isConfirmPasswordRow(row) && reuseInventedPasswordFor(row));
   if (password === undefined || matchingFactKeys(facts, password).length > 0) return undefined;
   const formId = rowFormId(password);
-  const scope = formId === undefined ? rows : rows.filter((row) => rowFormId(row) === formId);
+  const frameKey = (row: WireRow): string | undefined => /^@e:f\d+d/.exec(row[0])?.[0];
+  const scope = rows.filter((row) =>
+    frameKey(row) === frameKey(password) && (formId === undefined || rowFormId(row) === formId));
+  const reuseInventedPassword = reuseInventedPasswordFor(password);
   const confirms = scope.filter(
     (row) => row !== password && open(row) && isConfirmPasswordRow(row),
   );
@@ -2599,7 +2602,7 @@ export function newAccountPasswordTargets(
     return undefined;
   }
   const pool = submits.length > 0 ? submits : buttons;
-  const evidence = [...pool.map(readableLabel), ...headings];
+  const evidence = [...pool.map(readableLabel), ...headingsFor(password)];
   if (evidence.some((label) => LOGIN_LABEL.test(label) || RESET_PASSWORD_LABEL.test(label))) {
     return undefined;
   }
@@ -6042,14 +6045,21 @@ async function driveLoop(input: {
       control?.minLength,
     );
   };
+  const signupLocationFor = (row: WireRow): { url: string; host: string } | undefined => {
+    const url = drivePasswordControls.get(session)?.get(row[0])?.frameUrl;
+    if (url === undefined) return undefined;
+    try {
+      const host = new URL(url).hostname.toLowerCase();
+      return host.length === 0 ? undefined : { url, host };
+    } catch {
+      return undefined;
+    }
+  };
   const inventSignupPassword = async (targets: NewAccountPasswordTargets): Promise<boolean> => {
     if (context?.persistLogin === undefined) return false;
-    let host: string;
-    try {
-      host = new URL(observation.url).hostname.toLowerCase();
-    } catch {
-      return false;
-    }
+    const location = signupLocationFor(targets.password);
+    if (location === undefined) return false;
+    const { url, host } = location;
     const controls = drivePasswordControls.get(session);
     const login = targets.identity === undefined
       ? targets.login ?? session.signupIdentifier ?? getSessionUserEmail(sessionId)
@@ -6071,7 +6081,7 @@ async function driveLoop(input: {
     const password = inventPassword(requirements[0]!, ...requirements.slice(1));
     if (password === undefined) return false;
     const stored = await context
-      .persistLogin({ sessionId, url: observation.url, login, password })
+      .persistLogin({ sessionId, url, login, password })
       .catch(() => false);
     if (!stored) {
       drive.history.push("invented password not typed: the login could not be saved");
@@ -7853,9 +7863,9 @@ async function driveLoop(input: {
               rows,
               drive.facts,
               drive.filledRefs,
-              observation.semantic?.headings ?? [],
-              drive.inventedLogin != null &&
-                drive.inventedLogin.host === new URL(pageUrl).hostname.toLowerCase() &&
+              (row) => drivePasswordControls.get(session)?.get(row[0])?.frameHeadings ?? [],
+              (row) => drive.inventedLogin != null &&
+                drive.inventedLogin.host === signupLocationFor(row)?.host &&
                 session.secretSlots.has(DRIVE_PASSWORD_SLOT),
             );
       const passwordAttemptKey =

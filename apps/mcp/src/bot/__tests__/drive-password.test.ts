@@ -234,7 +234,7 @@ describe("newAccountPasswordTargets", () => {
 
   it("selects pending confirmations after the primary was filled or removed", () => {
     for (const rows of [signup, signup.filter((row) => row[0] !== "@e:pw")]) {
-      const targets = newAccountPasswordTargets(rows, {}, ["@e:pw"], [], true);
+      const targets = newAccountPasswordTargets(rows, {}, ["@e:pw"], () => [], () => true);
       expect(targets?.password[0]).toBe("@e:pw2");
       expect(targets?.confirms).toEqual([]);
     }
@@ -245,23 +245,23 @@ describe("newAccountPasswordTargets", () => {
       row[0] === "@e:create" ? [row[0], "b", "Reset password|a=submit|fm=1"] : row,
     );
     expect(newAccountPasswordTargets(reset, { email: "ada@fixture.test" }, [])).toBeUndefined();
-    expect(newAccountPasswordTargets(reset, {}, ["@e:pw"], [], true)).toBeUndefined();
+    expect(newAccountPasswordTargets(reset, {}, ["@e:pw"], () => [], () => true)).toBeUndefined();
   });
 
   it.each(["Get started", "Join"])("does not invent from a generic %s submit", (label) => {
     const rows: WireRow[] = signup.map((row) =>
       row[0] === "@e:create" ? [row[0], "b", `${label}|a=submit|fm=1`] : row,
     );
-    expect(newAccountPasswordTargets(rows, {}, [], ["Sign in"])).toBeUndefined();
+    expect(newAccountPasswordTargets(rows, {}, [], () => ["Sign in"])).toBeUndefined();
     expect(newAccountPasswordTargets(rows, {}, [])).toBeUndefined();
-    expect(newAccountPasswordTargets(rows, {}, [], ["Create account"])).toBeDefined();
+    expect(newAccountPasswordTargets(rows, {}, [], () => ["Create account"])).toBeDefined();
   });
 
   it.each(["Sign in", "Sign-in", "Reset password", "Password reset"])(
     "rejects explicit %s evidence even with a create-account submit",
     (heading) => {
-      expect(newAccountPasswordTargets(signup, {}, [], [heading])).toBeUndefined();
-      expect(newAccountPasswordTargets(signup, {}, ["@e:pw"], [heading], true)).toBeUndefined();
+      expect(newAccountPasswordTargets(signup, {}, [], () => [heading])).toBeUndefined();
+      expect(newAccountPasswordTargets(signup, {}, ["@e:pw"], () => [heading], () => true)).toBeUndefined();
     },
   );
 
@@ -270,7 +270,7 @@ describe("newAccountPasswordTargets", () => {
       row[0] === "@e:create" ? [row[0], "b", "Continue|a=submit|fm=1"] : row,
     );
     expect(newAccountPasswordTargets(rows, {}, [])).toBeUndefined();
-    expect(newAccountPasswordTargets(rows, {}, ["@e:pw"], [], true)?.password[0]).toBe("@e:pw2");
+    expect(newAccountPasswordTargets(rows, {}, ["@e:pw"], () => [], () => true)?.password[0]).toBe("@e:pw2");
   });
 
   it("excludes populated primary and confirmation controls", () => {
@@ -282,7 +282,26 @@ describe("newAccountPasswordTargets", () => {
       row[0] === "@e:pw2" ? [row[0], row[1], row[2]!.replace("s=r", "s=rp")] : row,
     );
     expect(newAccountPasswordTargets(confirm, {}, [])?.confirms).toEqual([]);
-    expect(newAccountPasswordTargets(confirm, {}, ["@e:pw"], [], true)).toBeUndefined();
+    expect(newAccountPasswordTargets(confirm, {}, ["@e:pw"], () => [], () => true)).toBeUndefined();
+  });
+
+  it.each(["|fm=1", ""])("keeps signup selection inside its frame with form metadata %s", (form) => {
+    const rows: WireRow[] = [
+      ["@e:f0d1", "t", `Confirm password|f=password|s=r${form}`],
+      ["@e:f0d2", "t", `Email|f=email|n=merchant@fixture.test${form}`],
+      ["@e:f0d3", "b", `Sign in|a=submit${form}`],
+      ["@e:f1d1", "t", `Email|f=email|n=provider@fixture.test${form}`],
+      ["@e:f1d2", "t", `Password|f=password|s=r${form}`],
+      ["@e:f1d3", "t", `Confirm password|f=password|s=r${form}`],
+      ["@e:f1d4", "b", `Create account|a=submit${form}`],
+    ];
+    const headings = (row: WireRow) => row[0].startsWith("@e:f1") ? ["Create account"] : ["Sign in"];
+    const targets = newAccountPasswordTargets(rows, {}, [], headings);
+    expect(targets?.identity?.[0]).toBe("@e:f1d1");
+    expect(targets?.confirms.map((row) => row[0])).toEqual(["@e:f1d3"]);
+    const continued = newAccountPasswordTargets(rows, {}, ["@e:f1d2"], headings,
+      (row) => row[0].startsWith("@e:f1"));
+    expect(continued?.password[0]).toBe("@e:f1d3");
   });
 
   it("never fills a change-password form", () => {

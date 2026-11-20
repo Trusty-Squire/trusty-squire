@@ -50,6 +50,7 @@ export interface DriveSnapshotElement {
   /** Live CSS/Playwright selector for the node, used to re-resolve identity. */
   selector?: string;
   frameUrl?: string;
+  frameHeadings?: string[];
   frameOrigin?: string;
   /** Resolved href for a link, used to prefer in-app paths over docs. */
   href?: string;
@@ -1130,6 +1131,7 @@ export async function captureFrameSnapshot(
       elements: raw.elements.map((element) => ({
         ...element,
         frameUrl,
+        frameHeadings: raw.headings,
         frameOrigin,
       })),
     };
