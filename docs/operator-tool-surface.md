@@ -93,8 +93,9 @@ password. Password invention requires a control with `type="password"`,
 in any page language. Initial invention requires explicit Create
 account, Sign up, or Register evidence, or a new-account shape: an email or
 username field on the same form plus a password the page marks
-`autocomplete="new-password"`. Forms with a `current-password` field or three
-or more password fields, and the current page reached directly through an inbox
+`autocomplete="new-password"`. Forms with any control annotated
+`autocomplete="current-password"` (including a revealed `type="text"` control)
+or three or more password fields, and the current page reached directly through an inbox
 link, are excluded. Later pages remain eligible. Textual sign-in, reset, and
 current-password exclusions use English labels; `new-password` alone does not
 distinguish a localized signup from a localized reset form.
@@ -300,6 +301,9 @@ the per-call allowances within the registered schema's limits. A drive-dispatche
 OAuth step shares the call's remaining `max_seconds` across preflight checks,
 the human-handoff window, fallback dispatch, and post-action reads. OAuth phase
 changes do not extend that limit; exhaustion returns a `budget` handoff.
+If an OAuth deadline expires before dispatch is attempted, the control remains
+eligible for retry on the next call; after dispatch may have occurred, the drive
+preserves that uncertainty rather than treating the control as unclicked.
 A `budget` handoff preserves partial progress for another call on the same
 session. `jev_unavailable`, `no_progress`, and `evaluate_timeout` also return
 handoffs; the last indicates that an in-page evaluation exceeded its deadline.
