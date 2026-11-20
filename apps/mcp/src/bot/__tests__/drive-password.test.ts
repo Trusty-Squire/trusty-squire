@@ -374,15 +374,16 @@ describe("newAccountPasswordTargets", () => {
     expect(newAccountPasswordTargets(rows, {}, [])).toBeUndefined();
   });
 
+  // Added controls belong to the same frame as the captured Kenari form.
   const pairedSignup: WireRow[] = [
     ...kenariSignup,
-    ["@e:pw2", "t", "Ulangi sandi|f=password|ac=new-password|s=r|fm=1"],
+    ["@e:f0d15", "t", "Ulangi sandi|f=password|ac=new-password|s=r|fm=1"],
   ];
 
   it("assigns primary and confirmation roles before filtering filled controls", () => {
     const targets = newAccountPasswordTargets(pairedSignup, {}, []);
     expect(targets?.password[0]).toBe("@e:f0d9");
-    expect(targets?.confirms.map((row) => row[0])).toEqual(["@e:pw2"]);
+    expect(targets?.confirms.map((row) => row[0])).toEqual(["@e:f0d15"]);
     expect(targets?.reuseOnly).toBe(false);
     for (const populated of [true, false]) {
       const rows: WireRow[] = pairedSignup.map((row) =>
@@ -397,7 +398,7 @@ describe("newAccountPasswordTargets", () => {
         () => [],
         () => true,
       );
-      expect(confirmation?.password[0]).toBe("@e:pw2");
+      expect(confirmation?.password[0]).toBe("@e:f0d15");
       expect(confirmation?.confirms).toEqual([]);
       expect(confirmation?.reuseOnly).toBe(true);
     }
@@ -422,8 +423,11 @@ describe("newAccountPasswordTargets", () => {
   it.each(["current", "third"])("excludes a %s password on Indonesian forms", (kind) => {
     const rows: WireRow[] =
       kind === "current"
-        ? [...pairedSignup, ["@e:old", "t", "Sandi lama|f=password|ac=current-password|s=rp|fm=1"]]
-        : [...pairedSignup, ["@e:old", "t", "Sandi lama|f=password|s=rp|fm=1"]];
+        ? [
+            ...pairedSignup,
+            ["@e:f0d16", "t", "Sandi lama|f=password|ac=current-password|s=rp|fm=1"],
+          ]
+        : [...pairedSignup, ["@e:f0d16", "t", "Sandi lama|f=password|s=rp|fm=1"]];
     expect(newAccountPasswordTargets(rows, {}, [])).toBeUndefined();
     expect(
       newAccountPasswordTargets(
