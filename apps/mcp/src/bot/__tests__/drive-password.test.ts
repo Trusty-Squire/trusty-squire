@@ -452,6 +452,31 @@ describe("newAccountPasswordTargets", () => {
     ).toBeUndefined();
   });
 
+  it.each([
+    ["same form", "@e:f0d16", 1, false],
+    ["another form", "@e:f0d16", 2, true],
+    ["another frame", "@e:f1d16", 1, true],
+  ] as const)("scopes revealed current-password exclusion to %s", (_scope, ref, form, eligible) => {
+    const rows: WireRow[] = [
+      ...pairedSignup,
+      [ref, "t", `Sandi lama|ac=current-password|s=p|n=existing-secret|fm=${form}`],
+    ];
+    for (const reuse of [false, true]) {
+      const targets = newAccountPasswordTargets(
+        rows,
+        {},
+        reuse ? ["@e:f0d9"] : [],
+        () => ["Create account"],
+        () => reuse,
+      );
+      if (eligible) {
+        expect(targets?.password[0]).toBe(reuse ? "@e:f0d15" : "@e:f0d9");
+      } else {
+        expect(targets).toBeUndefined();
+      }
+    }
+  });
+
   it("excludes current-password even on a single-field signup-labeled form", () => {
     const rows: WireRow[] = kenariSignup.map((row) =>
       row[0] === "@e:f0d9"

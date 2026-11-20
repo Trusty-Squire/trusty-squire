@@ -2637,7 +2637,7 @@ export function newAccountPasswordTargets(
     const passwords = scope.filter((row) => isFillableRow(row) && isPasswordRow(row));
     if (
       passwords.length >= 3 ||
-      passwords.some((row) => passwordAutocomplete(row) === "current-password")
+      scope.some((row) => passwordAutocomplete(row) === "current-password")
     ) {
       continue;
     }
