@@ -2691,8 +2691,6 @@ export function ensureGeneratedFacts(
   if (next.name === undefined && first.length > 0 && last.length > 0) {
     next.name = `${first} ${last}`;
   }
-  // Password creation belongs to operate_login's sealed signup path. A required
-  // password without a fact reaches the drive's needs_value handoff.
   return next;
 }
 
