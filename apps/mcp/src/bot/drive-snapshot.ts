@@ -158,12 +158,11 @@ export function inferFieldFromControl(input: {
   name?: string;
   placeholder?: string;
   inputType?: string;
-  passwordAutocomplete?: string;
 }): string | undefined {
   const type = (input.inputType ?? "").toLowerCase();
   if (type === "email") return "email";
   // The control's own type names a password in every language; its label may not.
-  if (type === "password" || input.passwordAutocomplete !== undefined) return "password";
+  if (type === "password") return "password";
   if (looksLikeEmailAddress(input.placeholder ?? "") || looksLikeEmailAddress(input.label)) {
     return "email";
   }
@@ -208,14 +207,12 @@ export function driveRowsFromSnapshot(snapshot: DriveSnapshot): SnapshotRow[] {
       ...(element.name === undefined ? {} : { name: element.name }),
       ...(element.placeholder === undefined ? {} : { placeholder: element.placeholder }),
       ...(element.inputType === undefined ? {} : { inputType: element.inputType }),
-      ...(element.passwordAutocomplete === undefined
-        ? {}
-        : { passwordAutocomplete: element.passwordAutocomplete }),
     });
     if (field !== undefined) facts.push(`f=${field}`);
     if (element.passwordAutocomplete !== undefined)
       facts.push(`ac=${element.passwordAutocomplete}`);
-    if (element.inputType === "number") facts.push("it=number");
+    if (element.inputType === "number" || element.inputType === "password")
+      facts.push(`it=${element.inputType}`);
     const states: string[] = [];
     if (element.required === true) states.push("r");
     if (element.disabled === true) states.push("d");

@@ -145,7 +145,9 @@ describe("drive snapshot conversion", () => {
         ],
       }),
     );
-    expect(rows[0]?.[2]).toBe("Sandi|f=password|ac=new-password|s=r|ph=Minimal 8 karakter|fm=1");
+    expect(rows[0]?.[2]).toBe(
+      "Sandi|f=password|ac=new-password|it=password|s=r|ph=Minimal 8 karakter|fm=1",
+    );
     expect(inferFieldFromControl({ label: "Sandi", role: "textbox", inputType: "password" })).toBe(
       "password",
     );
@@ -153,9 +155,29 @@ describe("drive snapshot conversion", () => {
       inferFieldFromControl({
         label: "Sandi",
         role: "textbox",
-        passwordAutocomplete: "current-password",
+        inputType: "text",
       }),
-    ).toBe("password");
+    ).toBeUndefined();
+  });
+
+  it("does not admit autocomplete-only text controls for password invention", () => {
+    const rows = driveRowsFromSnapshot(
+      snapshot({
+        elements: [
+          {
+            ref: "@e:f0d9",
+            role: "textbox",
+            label: "Sandi",
+            inputType: "text",
+            passwordAutocomplete: "new-password",
+            required: true,
+            operations: ["fill"],
+            frameOrdinal: 0,
+          },
+        ],
+      }),
+    );
+    expect(rows[0]?.[2]).toBe("Sandi|ac=new-password|s=r");
   });
 
   it("omits marked card values and keeps select option text", () => {

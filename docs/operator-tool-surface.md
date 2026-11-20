@@ -89,8 +89,8 @@ search or query field may receive a phrase Jev assigns from the goal's own
 words or the facts; identity and payment fields still require a fact.
 
 On a new-account form, omit the password fact to let the drive invent a random
-password. Password controls are recognized by input type or password
-autocomplete, in any page language. Initial invention requires explicit Create
+password. Password invention requires a control with `type="password"`,
+in any page language. Initial invention requires explicit Create
 account, Sign up, or Register evidence, or a new-account shape: an email or
 username field on the same form plus a password the page marks
 `autocomplete="new-password"`. Forms with a `current-password` field or three

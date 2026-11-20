@@ -2614,6 +2614,7 @@ export function newAccountPasswordTargets(
   const open = (row: WireRow): boolean =>
     isFillableRow(row) &&
     isPasswordRow(row) &&
+    /(?:^|\|)it=password(?:\||$)/.test(row[2] ?? "") &&
     !isDisabledRow(row) &&
     !isPopulatedPasswordRow(row) &&
     !isActedRow(row) &&

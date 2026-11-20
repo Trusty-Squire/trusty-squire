@@ -93,11 +93,12 @@ describe("OAuth action deadline under a caller budget", () => {
 });
 
 describe("OAuth preflight under a drive deadline", () => {
-  it.each([18_000, 30_000])(
+  it.each([18_000, 30_000, 35_000])(
     "includes a %i ms identity probe in the caller budget",
     async (probeMs) => {
       vi.useFakeTimers();
-      const deadline = oauthActionDeadline("google", 20_000);
+      const callerMs = probeMs === 35_000 ? 45_000 : 20_000;
+      const deadline = oauthActionDeadline("google", callerMs);
       let finishExecution = () => {};
       const execution = vi.fn(async () => {
         resetOAuthActionDeadline(deadline, oauthHumanHandoffTimeoutMs());
@@ -131,10 +132,10 @@ describe("OAuth preflight under a drive deadline", () => {
         undefined,
         undefined,
         { drive: true, oauthDeadline: deadline },
-      ).then(result);
-      await vi.advanceTimersByTimeAsync(20_000);
+      ).then(result, result);
+      await vi.advanceTimersByTimeAsync(Math.min(callerMs, 30_000));
       expect(result).toHaveBeenCalledOnce();
-      expect(result.mock.calls[0]![0].observation.oauth.state).toBe("awaiting_human");
+      expect(result.mock.calls[0]![0]).toBeInstanceOf(OAuthAwaitingHumanError);
       expect(execution).toHaveBeenCalledTimes(probeMs < 20_000 ? 1 : 0);
       expect(deadline.dispatchAttempted).not.toBe(true);
       await pending;
@@ -143,7 +144,7 @@ describe("OAuth preflight under a drive deadline", () => {
     },
   );
 
-  it("bounds the drive target guard before the identity probe", async () => {
+  it.each([80, 45_000])("bounds the drive target guard with a %i ms caller budget", async (callerMs) => {
     vi.useFakeTimers();
     const page = {
       url: () => "https://fixture.test/signup",
@@ -179,18 +180,15 @@ describe("OAuth preflight under a drive deadline", () => {
       ]),
     } as Session["drive"];
     const result = vi.fn();
-    const deadline = oauthActionDeadline("google", 80);
+    const deadline = oauthActionDeadline("google", callerMs);
     const pending = dispatchDriveAct(
       "budget",
       { kind: "oauth_login", target: "@e:go", provider: "google" },
       deadline,
-    ).then(result);
-    await vi.advanceTimersByTimeAsync(80);
+    ).then(result, result);
+    await vi.advanceTimersByTimeAsync(Math.min(callerMs, 30_000));
     expect(result).toHaveBeenCalledOnce();
-    expect(result.mock.calls[0]![0]).toMatchObject({
-      kind: "ok",
-      oauth: { state: "awaiting_human" },
-    });
+    expect(result.mock.calls[0]![0]).toBeInstanceOf(OAuthAwaitingHumanError);
     expect(boundary.gate).not.toHaveBeenCalled();
     expect(deadline.dispatchAttempted).not.toBe(true);
     await pending;
@@ -198,7 +196,7 @@ describe("OAuth preflight under a drive deadline", () => {
 });
 
 describe("OAuth fallback caller deadline", () => {
-  it("keeps the original deadline when an unregistered drive target falls back to public act", async () => {
+  it.each([20_000, 45_000])("keeps a %i ms deadline through public OAuth fallback", async (callerMs) => {
     vi.useFakeTimers();
     const browser = {
       page: null,
@@ -215,18 +213,18 @@ describe("OAuth fallback caller deadline", () => {
       userEmail: null,
     });
     boundary.gate.mockImplementation(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 30_000));
+      await new Promise((resolve) => setTimeout(resolve, 60_000));
       return { ok: true };
     });
-    const deadline = oauthActionDeadline("google", 20_000);
+    const deadline = oauthActionDeadline("google", callerMs);
     const action = { kind: "oauth_login", target: "Google", provider: "google" } as const;
     expect(await dispatchDriveAct("fallback", action, deadline)).toEqual({ kind: "unsupported" });
     await vi.advanceTimersByTimeAsync(5_000);
     const result = vi.fn();
-    const pending = act("fallback", action, "compact", "compact", true, deadline).then(result);
-    await vi.advanceTimersByTimeAsync(15_000);
+    const pending = act("fallback", action, "compact", "compact", true, deadline).then(result, result);
+    await vi.advanceTimersByTimeAsync(Math.min(callerMs, 30_000) - 5_000);
     expect(result).toHaveBeenCalledOnce();
-    expect(result.mock.calls[0]![0].oauth.state).toBe("awaiting_human");
+    expect(result.mock.calls[0]![0]).toBeInstanceOf(OAuthAwaitingHumanError);
     expect(deadline.dispatchAttempted).not.toBe(true);
     await pending;
     await vi.advanceTimersByTimeAsync(20_000);
@@ -256,6 +254,7 @@ describe("OAuth fallback caller deadline", () => {
         currentUrl: () => "https://fixture.test/signup",
         maskOperatorOutput: <T>(value: T): T => value,
         withDispatchPacing: async () => {
+          deadline.dispatchAttempted = true;
           throw new OAuthAwaitingHumanError("OAuth interrupted");
         },
       } as unknown as BrowserController;
@@ -276,7 +275,7 @@ describe("OAuth fallback caller deadline", () => {
         undefined,
         undefined,
         { drive: true, oauthDeadline: deadline },
-      ).then(result);
+      ).then(result, result);
       await vi.advanceTimersByTimeAsync(20_000);
       expect(recover).toHaveBeenCalledOnce();
       expect(boundary.observe).toHaveBeenCalledTimes(stage === "observation" ? 1 : 0);

@@ -609,6 +609,13 @@ export async function actInternally(
         )
       : await execute(undefined);
   } catch (error) {
+    if (
+      error instanceof OAuthAwaitingHumanError &&
+      options?.oauthDeadline?.capAt !== undefined &&
+      options.oauthDeadline.dispatchAttempted !== true
+    ) {
+      throw error;
+    }
     if (session !== undefined && (action.kind === "oauth_login" || action.kind === "oauth_click")) {
       const progress = oauthErrorAfterDispatchAttempt(session, error);
       if (progress !== null) return { observation: progress, outcome: {} };
@@ -722,6 +729,13 @@ export async function act(
       ? result.observation
       : { ...result.observation, three_ds: threeDs };
   } catch (error) {
+    if (
+      error instanceof OAuthAwaitingHumanError &&
+      oauthDeadline?.capAt !== undefined &&
+      oauthDeadline.dispatchAttempted !== true
+    ) {
+      throw error;
+    }
     timing.enter("reply");
     if ((action.kind === "click" || action.kind === "upload") && action.screenshot) {
       if (error instanceof ScreenshotClickError) throw error;
@@ -1761,6 +1775,13 @@ export async function dispatchDriveAct(
         : { needsUser: result.observation.needs_user }),
     };
   } catch (error) {
+    if (
+      error instanceof OAuthAwaitingHumanError &&
+      deadline?.capAt !== undefined &&
+      deadline.dispatchAttempted !== true
+    ) {
+      throw error;
+    }
     const session = sessionForCall(sessionId);
     if (error instanceof OAuthAwaitingHumanError && session !== undefined) {
       return {
