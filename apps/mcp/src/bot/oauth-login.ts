@@ -335,6 +335,8 @@ export interface OAuthActionDeadline {
   completionCheck?: () => Promise<OAuthCompletionEvidence | null>;
   expiresAt: number;
   timeoutMs: number;
+  /** The caller's own budget end (a drive's max_seconds); no reset extends past it. */
+  capAt?: number;
   provider: OAuthProviderId | undefined;
   timedOut: boolean;
   inFlight: Set<Promise<unknown>>;
@@ -358,12 +360,18 @@ export function oauthHumanHandoffTimeoutMs(): number {
   return configuredOAuthActionTimeoutMs() ?? DEFAULT_OAUTH_HUMAN_HANDOFF_TIMEOUT_MS;
 }
 
-export function oauthActionDeadline(provider: OAuthProviderId | undefined): OAuthActionDeadline {
-  const timeoutMs = oauthAutomatedActionTimeoutMs();
+export function oauthActionDeadline(
+  provider: OAuthProviderId | undefined,
+  budgetMs?: number,
+): OAuthActionDeadline {
+  const now = Date.now();
+  const capAt = budgetMs === undefined ? undefined : now + Math.max(0, budgetMs);
+  const expiresAt = Math.min(now + oauthAutomatedActionTimeoutMs(), capAt ?? Infinity);
   let signalPhaseChanged!: () => void;
   return {
-    expiresAt: Date.now() + timeoutMs,
-    timeoutMs,
+    expiresAt,
+    timeoutMs: expiresAt - now,
+    ...(capAt === undefined ? {} : { capAt }),
     provider,
     timedOut: false,
     inFlight: new Set(),
@@ -375,8 +383,9 @@ export function oauthActionDeadline(provider: OAuthProviderId | undefined): OAut
 }
 
 export function resetOAuthActionDeadline(deadline: OAuthActionDeadline, timeoutMs: number): void {
-  deadline.timeoutMs = timeoutMs;
-  deadline.expiresAt = Date.now() + timeoutMs;
+  const now = Date.now();
+  deadline.expiresAt = Math.min(now + timeoutMs, deadline.capAt ?? Infinity);
+  deadline.timeoutMs = Math.max(0, deadline.expiresAt - now);
   deadline.timedOut = false;
   deadline.signalPhaseChanged();
   deadline.phaseChanged = new Promise<void>((resolve) => {

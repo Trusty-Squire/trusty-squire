@@ -47,6 +47,8 @@ export interface DriveSnapshotElement {
   labelComparable?: boolean;
   /** The input `type` (`email`, `text`, …), when the node is an input. */
   inputType?: string;
+  /** The input's own password autocomplete token: a new account's or a sign-in's secret. */
+  passwordAutocomplete?: "new-password" | "current-password";
   /** Live CSS/Playwright selector for the node, used to re-resolve identity. */
   selector?: string;
   frameUrl?: string;
@@ -156,9 +158,12 @@ export function inferFieldFromControl(input: {
   name?: string;
   placeholder?: string;
   inputType?: string;
+  passwordAutocomplete?: string;
 }): string | undefined {
   const type = (input.inputType ?? "").toLowerCase();
   if (type === "email") return "email";
+  // The control's own type names a password in every language; its label may not.
+  if (type === "password" || input.passwordAutocomplete !== undefined) return "password";
   if (looksLikeEmailAddress(input.placeholder ?? "") || looksLikeEmailAddress(input.label)) {
     return "email";
   }
@@ -203,8 +208,13 @@ export function driveRowsFromSnapshot(snapshot: DriveSnapshot): SnapshotRow[] {
       ...(element.name === undefined ? {} : { name: element.name }),
       ...(element.placeholder === undefined ? {} : { placeholder: element.placeholder }),
       ...(element.inputType === undefined ? {} : { inputType: element.inputType }),
+      ...(element.passwordAutocomplete === undefined
+        ? {}
+        : { passwordAutocomplete: element.passwordAutocomplete }),
     });
     if (field !== undefined) facts.push(`f=${field}`);
+    if (element.passwordAutocomplete !== undefined)
+      facts.push(`ac=${element.passwordAutocomplete}`);
     if (element.inputType === "number") facts.push("it=number");
     const states: string[] = [];
     if (element.required === true) states.push("r");
@@ -817,7 +827,8 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
         /^(?:show|hide|toggle)(?:\s+password)?$/i.test(
           (control.getAttribute("aria-label") ?? control.textContent ?? "").trim(),
         );
-      const foreignControl = (control: Element): boolean => control !== element && !auxiliary(control);
+      const foreignControl = (control: Element): boolean =>
+        control !== element && !auxiliary(control);
       let container: Element = element;
       while (
         container.parentElement !== null &&
@@ -852,12 +863,15 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
       ...localHelp,
       element.getAttribute("aria-description") ?? "",
       ...(element.getAttribute("aria-describedby") ?? "").split(/\s+/).flatMap((id) => {
-        const described = ownerRoot instanceof Document || ownerRoot instanceof ShadowRoot
-          ? ownerRoot.getElementById(id)
-          : null;
+        const described =
+          ownerRoot instanceof Document || ownerRoot instanceof ShadowRoot
+            ? ownerRoot.getElementById(id)
+            : null;
         return described === null ? [] : [described.textContent ?? ""];
       }),
-    ].join(" ").trim();
+    ]
+      .join(" ")
+      .trim();
     const ariaLabel = element.getAttribute("aria-label")?.trim() ?? "";
     const inputName =
       element instanceof HTMLInputElement ||
@@ -866,6 +880,15 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
         ? element.name.trim()
         : (element.getAttribute("name") ?? "").trim();
     const inputType = element instanceof HTMLInputElement ? element.type : "";
+    const autocompleteTokens =
+      element instanceof HTMLInputElement
+        ? (element.getAttribute("autocomplete") ?? "").toLowerCase().split(/\s+/)
+        : [];
+    const passwordAutocomplete = autocompleteTokens.includes("new-password")
+      ? "new-password"
+      : autocompleteTokens.includes("current-password")
+        ? "current-password"
+        : undefined;
     const pattern = element instanceof HTMLInputElement ? element.pattern.trim() : "";
     const inputMode = element.getAttribute("inputmode")?.trim() ?? "";
     const invalid =
@@ -911,6 +934,7 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
       ...(href.length > 0 ? { href } : {}),
       ...(inputName.length > 0 ? { name: inputName } : {}),
       ...(inputType.length > 0 ? { inputType } : {}),
+      ...(passwordAutocomplete === undefined ? {} : { passwordAutocomplete }),
       ...(pattern.length > 0 ? { pattern } : {}),
       ...(inputMode.length > 0 ? { inputMode } : {}),
       ...(invalid ? { invalid: true } : {}),

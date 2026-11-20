@@ -89,8 +89,13 @@ search or query field may receive a phrase Jev assigns from the goal's own
 words or the facts; identity and payment fields still require a fact.
 
 On a new-account form, omit the password fact to let the drive invent a random
-password. Initial invention requires explicit Create account, Sign up, or
-Register evidence; sign-in, reset, and existing-password forms are excluded.
+password. Password controls are recognized by input type or password
+autocomplete, in any page language. Initial invention requires explicit Create
+account, Sign up, or Register evidence, or a new-account shape: an email or
+username field on the same form plus a password the page marks
+`autocomplete="new-password"` or exactly two password fields, with no
+`current-password` field. Sign-in, reset, and existing-password forms are
+excluded.
 Populated password controls are preserved. Account identifiers and confirmation
 controls are scoped to the password's form and frame. The account identifier
 comes from the form's exact email/username value, or, on a password-only step,
@@ -286,7 +291,9 @@ option-ownership regressions live in
 [`operate-drive-fixture.test.ts`](../apps/mcp/src/bot/__tests__/operate-drive-fixture.test.ts).
 
 Calls default to 60 steps and 45 seconds; `max_steps` and `max_seconds` set
-the per-call allowances within the registered schema's limits.
+the per-call allowances within the registered schema's limits. A drive-dispatched
+OAuth wait, including its human-handoff window, ends within the call's remaining
+`max_seconds`.
 A `budget` handoff preserves partial progress for another call on the same
 session. `jev_unavailable`, `no_progress`, and `evaluate_timeout` also return
 handoffs; the last indicates that an in-page evaluation exceeded its deadline.

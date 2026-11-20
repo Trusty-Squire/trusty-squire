@@ -2555,6 +2555,10 @@ const RESET_PASSWORD_LABEL =
 
 const CURRENT_PASSWORD_KEY = /(?:^|_)(?:current|old|existing)(?:_|$)/;
 
+function passwordAutocomplete(row: WireRow): string | undefined {
+  return /(?:^|\|)ac=([^|]+)/.exec(row[2] ?? "")?.[1];
+}
+
 function passwordKey(row: WireRow): string {
   return `${normalizeKey(fieldNameForRow(row))}_${normalizeKey(readableLabel(row))}`;
 }
@@ -2615,8 +2619,13 @@ export function newAccountPasswordTargets(
         frameKey(row) === frameKey(password) && (formId === undefined || rowFormId(row) === formId),
     );
     const reuseInventedPassword = reuseInventedPasswordFor(password);
+    // Structure, not wording: with no sign-in secret on the form, the second
+    // of exactly two password fields repeats the new one.
+    const passwords = scope.filter((row) => isFillableRow(row) && isPasswordRow(row));
+    const signInSecret = passwords.some((row) => passwordAutocomplete(row) === "current-password");
+    const pairedNew = !signInSecret && passwords.length === 2;
     const confirms = scope.filter(
-      (row) => row !== password && open(row) && isConfirmPasswordRow(row),
+      (row) => row !== password && open(row) && (isConfirmPasswordRow(row) || pairedNew),
     );
     if (!isRequiredRow(password) && confirms.length === 0 && !reuseInventedPassword) continue;
     const buttons = scope.filter((row) => row[1] === "b" || row[1] === "button");
@@ -2631,16 +2640,22 @@ export function newAccountPasswordTargets(
     if (evidence.some((label) => LOGIN_LABEL.test(label) || RESET_PASSWORD_LABEL.test(label))) {
       continue;
     }
-    const signup =
-      (reuseInventedPassword && isConfirmPasswordRow(password)) ||
-      evidence.some((label) => CREATE_ACCOUNT_LABEL.test(label));
-    if (!signup) continue;
     const identity = scope.find(
       (row) =>
         isFillableRow(row) &&
         !isPasswordRow(row) &&
         ["email", "username"].includes(rowField(row) ?? ""),
     );
+    // A reset form also repeats a new password, but it names no account.
+    const newAccountShape =
+      !signInSecret &&
+      identity !== undefined &&
+      (confirms.length > 0 || passwordAutocomplete(password) === "new-password");
+    const signup =
+      (reuseInventedPassword && isConfirmPasswordRow(password)) ||
+      newAccountShape ||
+      evidence.some((label) => CREATE_ACCOUNT_LABEL.test(label));
+    if (!signup) continue;
     if (identity !== undefined) {
       const login = rowCurrentValue(identity);
       if (login === undefined || login.trim().length === 0) continue;
@@ -5387,10 +5402,11 @@ async function actDriveSafely(
   sessionId: string,
   action: ProvisionAction,
   deps: DriveDependencies,
+  budgetMs: number,
 ): Promise<DriveActResult> {
   if (deps.driveAct !== undefined) return await deps.driveAct(sessionId, action);
   if (session.browser.page === null) return { kind: "unsupported" };
-  return await dispatchDriveAct(sessionId, action);
+  return await dispatchDriveAct(sessionId, action, budgetMs);
 }
 
 /** The loop's own, page-independent account of a refused/undispatched act. */
@@ -6872,7 +6888,7 @@ async function driveLoop(input: {
           target: decision.action.target,
           text: driveInboxValue(verification).code!,
         };
-        const acted = await actDriveSafely(session, sessionId, typed, dependencies);
+        const acted = await actDriveSafely(session, sessionId, typed, dependencies, remainingMs());
         if (acted.kind !== "ok") {
           const safe = await actSafely(dependencies, sessionId, typed);
           if (safe.dispatchFailure === undefined) dispatchedActs += 1;
@@ -6997,7 +7013,13 @@ async function driveLoop(input: {
         : null;
     let acted: DriveActResult;
     try {
-      acted = await actDriveSafely(session, sessionId, decision.action, dependencies);
+      acted = await actDriveSafely(
+        session,
+        sessionId,
+        decision.action,
+        dependencies,
+        remainingMs(),
+      );
     } catch (error) {
       drive.pendingCopyCapture = null;
       if (decision.action.kind === "oauth_login") {
@@ -7215,6 +7237,9 @@ async function driveLoop(input: {
         }
       }
       if (acted.oauth?.state === "awaiting_human" && onProviderPage) {
+        // The wait ended with the call's own budget, not for want of a sign-in;
+        // the next call resumes on the provider page.
+        if (remainingMs() <= 0) return finish("budget", { reason: acted.oauth.reason });
         const wall = {
           wall: "oauth_sign_in",
           message: `${acted.oauth.reason} Run \`npx @trusty-squire/mcp connect --json\` to get the shared-browser sign_in_url for the person, then resume observing this session.`,

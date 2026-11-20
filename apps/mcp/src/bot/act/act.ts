@@ -117,6 +117,8 @@ import {
 // act issued while a drive session is open keeps tool behaviour.
 export type ActExecutorOptions = {
   drive?: boolean;
+  /** The caller's remaining time budget; an OAuth wait never runs past it. */
+  budgetMs?: number;
 };
 
 const DRIVE_DISPATCH: ActExecutorOptions = { drive: true };
@@ -230,6 +232,7 @@ async function withOAuthActionBoundary(
   provider: OAuthProviderId | undefined,
   run: (deadline: OAuthActionDeadline) => Promise<InternalActResult>,
   outputFormat: "compact" | "full",
+  budgetMs?: number,
 ): Promise<InternalActResult> {
   if (provider === "google") {
     const gate = await googleSessionGateForSession(session.id);
@@ -251,7 +254,7 @@ async function withOAuthActionBoundary(
       };
     }
   }
-  const deadline = oauthActionDeadline(provider);
+  const deadline = oauthActionDeadline(provider, budgetMs);
   const releaseCooldownMs = oauthLoginLeaseCooldownMs();
   // A deadline expiry must NOT terminalize the session: the in-flight OAuth
   // operation is budget-bounded (loginWithOAuth races its own completion
@@ -584,7 +587,7 @@ export async function actInternally(
         : await run();
     };
     return session !== undefined && (action.kind === "oauth_login" || action.kind === "oauth_click")
-      ? await withOAuthActionBoundary(session, oauthProvider, execute, "compact")
+      ? await withOAuthActionBoundary(session, oauthProvider, execute, "compact", options?.budgetMs)
       : await execute(undefined);
   } catch (error) {
     if (session !== undefined && (action.kind === "oauth_login" || action.kind === "oauth_click")) {
@@ -1673,6 +1676,7 @@ async function guardDriveOauthTarget(sessionId: string, target: string): Promise
 export async function dispatchDriveAct(
   sessionId: string,
   action: ProvisionAction,
+  budgetMs?: number,
 ): Promise<DriveActResult> {
   // "unsupported" means the shared executor has no drive verb for this action
   // and the caller should fall back to the tools path. A DISPATCH failure is a
@@ -1708,7 +1712,7 @@ export async function dispatchDriveAct(
       "none",
       undefined,
       undefined,
-      DRIVE_DISPATCH,
+      budgetMs === undefined ? DRIVE_DISPATCH : { ...DRIVE_DISPATCH, budgetMs },
     );
     // An OAuth act can end on a wall (no live provider session, a 2FA hand-off)
     // WITHOUT dispatching: the executor returns that as an observation. The
