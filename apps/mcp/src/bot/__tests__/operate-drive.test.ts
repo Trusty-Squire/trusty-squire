@@ -1197,6 +1197,19 @@ describe("decideAfterJev stop reasons", () => {
     ).toBe("@e:company");
   });
 
+  it("counts a federated login disabled behind a challenge widget", () => {
+    // BeatAPI /sign-in (bootstrap run 14): a Turnstile widget holds every
+    // login control disabled, so the disabled-submit path must get its turn.
+    const rows: WireRow[] = [
+      ["@e:user", "t", "Username or email|s=r|f=username"],
+      ["@e:password", "t", "Password|s=r|f=password"],
+      ["@e:sign-in", "b", "Sign in|a=submit|s=d"],
+      ["@e:continue-with-google", "b", "Continue with Google|s=d"],
+      ["@e:github", "b", "Continue with GitHub|s=d"],
+    ];
+    expect(requiredFillableMissingFact(rows, {})).toBeUndefined();
+  });
+
   it("does not generate a password fact on a create-account step", () => {
     const rows: WireRow[] = [
       ["@e:password", "t", "New password|f=password|s=r"],

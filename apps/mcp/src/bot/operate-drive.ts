@@ -3302,9 +3302,9 @@ export function requiredFillableMissingFact(
   const filled = new Set(filledRefs);
   // Beside a federated login control, an empty sign-in field is one of two
   // ways in, not a missing value: the step vote picks the path the goal names.
-  const federatedLogin = rows.some(
-    (row) => isOauthChromeRow(row) && !isFillableRow(row) && !isDisabledRow(row),
-  );
+  // A disabled control still counts: a page can hold every login control
+  // disabled behind a challenge widget, which the disabled-submit path waits on.
+  const federatedLogin = rows.some((row) => isOauthChromeRow(row) && !isFillableRow(row));
   for (const row of rows) {
     if (!isFillableRow(row) || isDisabledRow(row) || isActedRow(row) || filled.has(row[0]))
       continue;
