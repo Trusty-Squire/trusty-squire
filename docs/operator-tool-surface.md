@@ -91,13 +91,15 @@ words or the facts; identity and payment fields still require a fact.
 On a new-account form, omit the password fact to let the drive invent a random
 password. Initial invention requires explicit Create account, Sign up, or
 Register evidence; sign-in, reset, and existing-password forms are excluded.
-Populated password controls are preserved. The account identifier comes from
-the form's exact email/username value, or, on a password-only step, supplied
-facts or the session's signup identifier/account email. With an authenticated
-vault client, the drive saves a new `username_password` credential before typing
-from a sealed session slot. It does not overwrite an existing saved login or
-require `store`, which controls key capture separately. Saving the login does
-not establish that account creation succeeded. If generation or storage fails,
+Populated password controls are preserved. Account identifiers and confirmation
+controls are scoped to the password's form and frame. The account identifier
+comes from the form's exact email/username value, or, on a password-only step,
+supplied facts or the session's signup identifier/account email. With an
+authenticated vault client, the drive saves a new `username_password` credential for the
+password control's frame site before typing from a sealed session slot. It does
+not overwrite an existing saved login or require `store`, which controls key
+capture separately. Saving the login does not establish that account creation
+succeeded. If generation or storage fails,
 the password stays unfilled and the ordinary handoff applies.
 
 Generation defaults to 24 characters, adjusted for the primary and currently
