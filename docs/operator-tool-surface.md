@@ -195,7 +195,10 @@ It returns a handoff (never a bare page): status, the current compact
 observation with the same stable refs, trajectory, and done/remaining.
 `needs_value` names the missing field's label; a country control already
 showing a value, and expiry or cardholder-name controls on a drive carrying
-`card_ref`, do not raise it. `stuck` means no listed element advances the
+`card_ref`, do not raise it. When the page offers an enabled federated-login
+control, empty email, username, login, and password fields also leave the login
+path to the step decision instead of raising `needs_value`; other required
+fields retain the normal handoff. `stuck` means no listed element advances the
 goal. Resume the same session with `answer` (a
 readable action slug from the handoff options, `done`, or `stuck`) and/or
 added `facts`. Use the single-step primitives only for a handoff you are
@@ -516,8 +519,12 @@ With a destination and an authenticated vault client, a revealed-secret row
 (`@key-value` or `secret=1`) or a successfully dispatched Copy click triggers
 extraction and storage before the next model decision. The Copy evidence
 survives a button changing its label to “Copied!” on the same document and URL.
-Extraction still uses the Copy source described above; a revealed-secret row
-does not itself supply the credential value. Successful storage returns
+If no modal Copy control is found, automatic capture uses the just-clicked Copy
+ref while it remains in the snapshot, even after its label changes. Otherwise
+it uses the sole eligible clickable Copy row; multiple candidates leave the
+inline source unresolved. Extraction keeps only the value that capture's Copy
+click writes to the clipboard; a revealed-secret row does not itself supply
+the credential value. Successful storage returns
 `complete` without waiting for the model to choose DONE. Each page state gets
 one automatic capture attempt per call; a failed extraction or storage attempt
 returns to ordinary decision-making after a fresh snapshot.

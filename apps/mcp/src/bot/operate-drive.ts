@@ -1558,6 +1558,24 @@ export function revealedKeyCaptureDue(rows: readonly WireRow[], copyDispatched: 
   return copyDispatched;
 }
 
+/** The Copy control of a key revealed inline (not in a dialog): the one the
+ * drive just clicked while it is still rowed (its label may now read
+ * "Copied"), else the page's only clickable Copy row. Several candidates name
+ * no source, so none is chosen. */
+export function revealedSecretCopyRef(
+  rows: readonly WireRow[],
+  clickedRef: string | undefined,
+): string | undefined {
+  if (clickedRef !== undefined && rows.some((row) => row[0] === clickedRef)) return clickedRef;
+  const copies = rows.filter(
+    (row) =>
+      isRevealOrCopyRow(row) &&
+      /^copy\b/i.test(readableLabel(row)) &&
+      !/\|(?:oc=|s=d(?:\||$))/.test(row[2] ?? ""),
+  );
+  return copies.length === 1 ? copies[0]![0] : undefined;
+}
+
 function pageShowsCredentialValue(rows: readonly WireRow[]): boolean {
   if (pageShowsRevealedKey(rows)) return true;
   // A labeled value can be a key even when it has no recognizable prefix or
@@ -3282,10 +3300,22 @@ export function requiredFillableMissingFact(
   goal: string = "",
 ): DriveCandidate | undefined {
   const filled = new Set(filledRefs);
+  // Beside a federated login control, an empty sign-in field is one of two
+  // ways in, not a missing value: the step vote picks the path the goal names.
+  const federatedLogin = rows.some(
+    (row) => isOauthChromeRow(row) && !isFillableRow(row) && !isDisabledRow(row),
+  );
   for (const row of rows) {
     if (!isFillableRow(row) || isDisabledRow(row) || isActedRow(row) || filled.has(row[0]))
       continue;
     if (isPaymentRow(row) || isCvvRow(row) || isOtpRow(row) || allowsGoalValueAssignment(row))
+      continue;
+    if (
+      federatedLogin &&
+      [fieldNameForRow(row), readableLabel(row)].some((text) =>
+        /(?:^|_)(?:e_?mail|user_?name|login|password)(?:_|$)/.test(normalizeKey(text)),
+      )
+    )
       continue;
     if (
       isFormValueField(row, rows, goal) &&
@@ -4377,12 +4407,12 @@ export function decideAfterJev(input: {
     const actionKey =
       choice === "SCROLL" && (DRIVE_SCROLL_DIRECTIONS as readonly string[]).includes(targetChoice)
         ? `scroll:${targetChoice}`
-        : resolveActionChoice(targetChoice, [
+        : (resolveActionChoice(targetChoice, [
             ...sets.CLICK,
             ...sets.TYPE_TEXT,
             ...sets.SELECT,
             ...sets.SCROLL,
-          ])?.ref ?? targetChoice;
+          ])?.ref ?? targetChoice);
 
     if (
       input.boundFingerprint === input.fingerprint &&
@@ -6781,7 +6811,7 @@ async function driveLoop(input: {
       clickedBefore !== undefined &&
       isRevealOrCopyRow(clickedBefore) &&
       /^copy\b/i.test(readableLabel(clickedBefore))
-        ? { url: urlBeforeClick, documentEpoch: beforeEpoch }
+        ? { url: urlBeforeClick, documentEpoch: beforeEpoch, ref: clickedBefore[0] }
         : null;
     let acted: DriveActResult;
     try {
@@ -7212,7 +7242,7 @@ async function driveLoop(input: {
           ? session.browser.page === null
             ? ""
             : await documentEpochOf(session.browser.page)
-          : drive.lastDocumentEpoch ?? "";
+          : (drive.lastDocumentEpoch ?? "");
       if (
         beforeEpoch.length > 0 &&
         completionEpoch.length > 0 &&
@@ -7472,8 +7502,9 @@ async function driveLoop(input: {
       );
       if (!revealedKeyCaptureAttempts.has(captureKey)) {
         revealedKeyCaptureAttempts.add(captureKey);
+        const copyRef = revealedSecretCopyRef(rows, drive.pendingCopyCapture?.ref);
         drive.pendingCopyCapture = null;
-        const extracted = await extractCredentials(sessionId).catch(() => null);
+        const extracted = await extractCredentials(sessionId, copyRef).catch(() => null);
         if (
           extracted !== null &&
           storableCredentials(extracted.credentials) !== null &&
