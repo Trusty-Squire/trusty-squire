@@ -21,9 +21,14 @@ afterAll(async () => {
 });
 
 describe("drive OAuth dispatch beside a required email form", () => {
-  it.each(["separate form", "outside a form"])(
-    "dispatches an identity control %s while the email form is empty",
-    async (placement) => {
+  it.each([
+    ["separate form", false],
+    ["separate form", true],
+    ["outside a form", false],
+    ["outside a form", true],
+  ] as const)(
+    "votes for an identity control %s with supplied email %s",
+    async (placement, suppliedEmail) => {
       const provider = Object.keys(OAUTH_PROVIDERS)[0]!;
       const label = `Sign up with ${provider}`;
       const control = `<button type="button">${label}</button>`;
@@ -32,7 +37,7 @@ describe("drive OAuth dispatch beside a required email form", () => {
       const page = await context.newPage();
       await page.goto(
         `data:text/html,${encodeURIComponent(
-          `<form><label>Email address <input type="email" required></label><button>Continue</button></form>${identityControl}`,
+          `<form><label>Email address <input type="email" required></label><label>Password <input type="password" required></label><button>Continue</button></form>${identityControl}`,
         )}`,
       );
       const started = await startHarnessProvisionSession({
@@ -41,10 +46,12 @@ describe("drive OAuth dispatch beside a required email form", () => {
         format: "compact",
         initialObservation: "drive",
       });
-      let dispatches = 0;
+      const dispatches: string[] = [];
+      let votes = 0;
       try {
         const deps: DriveDependencies = {
           askJev: async (_api, _state, questions) => {
+            votes += 1;
             const operation = questions.operation;
             const click = questions.CLICK_target;
             if (operation?.type !== "choice" || click?.type !== "choice") {
@@ -80,18 +87,26 @@ describe("drive OAuth dispatch beside a required email form", () => {
           },
           awaitVerification,
           injectCard: async () => ({ status: "unused" }),
-          driveAct: async () => {
-            dispatches += 1;
+          driveAct: async (_sessionId, action) => {
+            dispatches.push(action.kind);
             return { kind: "ok", combobox: false };
           },
         };
         await runOperateDrive(
-          { session_id: started.session_id, goal: label, max_steps: 1 },
+          {
+            session_id: started.session_id,
+            goal: label,
+            facts: suppliedEmail ? { email: "new-user@example.test" } : {},
+            max_steps: 1,
+          },
           {} as ApiClient,
           undefined,
           deps,
         );
-        expect(dispatches).toBe(1);
+        expect(votes).toBe(1);
+        expect(dispatches).toEqual(["oauth_login"]);
+        expect(await page.locator('input[type="email"]').inputValue()).toBe("");
+        expect(await page.locator('input[type="password"]').inputValue()).toBe("");
       } finally {
         await finishProvisionSession(started.session_id);
         await context.close();

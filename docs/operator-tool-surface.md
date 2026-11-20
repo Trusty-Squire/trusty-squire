@@ -217,8 +217,8 @@ It returns a handoff (never a bare page): status, the current compact
 observation with the same stable refs, trajectory, and done/remaining.
 `needs_value` names the missing field's label; a country control already
 showing a value, and expiry or cardholder-name controls on a drive carrying
-`card_ref`, do not raise it, and neither does a sign-in form's empty field
-before the step vote when the page also offers another route. `stuck` means no listed element advances the
+`card_ref`, do not raise it. Empty required fields do not stop the drive before
+the step vote. `stuck` means no listed element advances the
 goal. Resume the same session with `answer` (a
 readable action slug from the handoff options, `done`, or `stuck`) and/or
 added `facts`. Use the single-step primitives only for a handoff you are
@@ -268,12 +268,10 @@ automatically when a supplied fact matches its field, including `ticket_type`,
 observation fingerprint. A stale, occluded, or offscreen click yields the next
 decision to Jev even if the recovery observation changes. A matching page-wide
 option also yields to Jev: the dispatcher cannot establish custom option
-ownership and does not select it or mark the field filled. A native select or
-a typeable control whose field matches a supplied fact is filled by the drive
-itself before Jev is asked, once per target per observation fingerprint,
-except a sign-in form's typeable fields on a page that also offers another
-route (a sign-up control, a federated login, or a button outside the form),
-which the step vote handles. A
+ownership and does not select it or mark the field filled. A native select whose
+field matches a supplied fact is filled by the drive itself before Jev is asked,
+once per target per observation fingerprint. Ordinary typeable fields go through
+the step vote, which can choose TYPE_TEXT with a supplied fact. A
 checkout page's offscreen fillables stay eligible, because the act path
 scrolls a target into view before it measures; a control already displaying
 that fact is not offered again. Recovery and

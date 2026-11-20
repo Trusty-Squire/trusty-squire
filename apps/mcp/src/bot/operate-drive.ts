@@ -2643,44 +2643,6 @@ export function newAccountPasswordTargets(
   return undefined;
 }
 
-const SIGN_IN_PATH = /(?:^|\/)(?:log[-_]?in|sign[-_]?in)(?:\/|$)/i;
-
-/**
- * A sign-in form beside another way forward: a sign-up control, a federated
- * login, or a button outside the form. Typing a supplied fact into that form,
- * or stopping for its credentials, picks the login route before the step vote
- * has seen the others, so the drive leaves this page to the vote.
- */
-export function signInPageOffersOtherRoute(
-  rows: readonly WireRow[],
-  pageUrl: string,
-  headings: readonly string[] = [],
-): boolean {
-  const fields = rows.filter((row) => isFillableRow(row));
-  if (fields.length === 0) return false;
-  const formIds = new Set(fields.map(rowFormId).filter((id): id is string => id !== undefined));
-  const inForm = (row: WireRow): boolean => {
-    const id = rowFormId(row);
-    return id === undefined ? formIds.size === 0 : formIds.has(id);
-  };
-  const submits = rows.filter(
-    (row) => /(?:^|\|)a=submit(?:\||$)/.test(row[2] ?? "") && inForm(row),
-  );
-  if (submits.some((row) => CREATE_ACCOUNT_LABEL.test(readableLabel(row)))) return false;
-  const signIn =
-    SIGN_IN_PATH.test(urlPathname(pageUrl)) ||
-    [...submits.map(readableLabel), ...headings].some((text) => LOGIN_LABEL.test(text));
-  if (!signIn) return false;
-  return rows.some(
-    (row) =>
-      !isFillableRow(row) &&
-      !submits.includes(row) &&
-      (isOauthChromeRow(row) ||
-        (OAUTH_CONTROL_ROLES.has(row[1]) && CREATE_ACCOUNT_LABEL.test(readableLabel(row))) ||
-        ((row[1] === "b" || row[1] === "button") && !inForm(row))),
-  );
-}
-
 export function applyReleasedCardFacts(
   facts: Record<string, string>,
   card:
@@ -3397,31 +3359,6 @@ function autoFillFormScope(
   if (ranked[0]![1].size === 0) return null;
   if (ranked.length > 1 && ranked[0]![1].size === ranked[1]![1].size) return null;
   return ranked[0]![0];
-}
-
-/** The typeable fact the drive must write itself before asking the model.
- *
- * Offscreen rows stay eligible: the act path scrolls them into view before
- * typing, so a host phone fact is no longer a burned attempt.
- */
-export function requiredFactTypeAction(
-  rows: readonly WireRow[],
-  facts: Record<string, string>,
-  filledRefs: readonly string[] = [],
-  pageUrl: string = "",
-  _goal?: string,
-): { target: string; text: string } | undefined {
-  const includePayment = facts.card_ref !== undefined;
-  const formScope = autoFillFormScope(rows, facts, pageUrl);
-  if (formScope === null) return undefined;
-  for (const candidate of fillableCandidates(rows, facts, includePayment, filledRefs, pageUrl)) {
-    if (isSelectRow(candidate.row)) continue;
-    if (formScope !== undefined && rowFormId(candidate.row) !== formScope) continue;
-    const fact = firstFactValue(facts, matchingFactKeys(facts, candidate.row));
-    if (fact === undefined) continue;
-    return { target: candidate.ref, text: fact };
-  }
-  return undefined;
 }
 
 export function requiredFactComboboxAction(
@@ -5986,7 +5923,6 @@ async function driveLoop(input: {
   let comboboxMustYield = false;
   const selectAttempts = new Set<string>();
   let selectMustYield = false;
-  const typeAttempts = new Set<string>();
   const passwordAttempts = new Set<string>();
   const expiryRewriteAttempts = new Set<string>();
   let typeMustYield = false;
@@ -7787,13 +7723,6 @@ async function driveLoop(input: {
       },
     );
     let pageUrl = observation.url;
-    let missing = requiredFillableMissingFact(
-      rows,
-      drive.facts,
-      drive.filledRefs,
-      pageUrl,
-      drive.goal,
-    );
     let pageOptions =
       lastSelectOptions.get(session) ?? selectOptionsFromElements(session.lastElements);
     const remainingFills = fillableCandidates(
@@ -7804,13 +7733,6 @@ async function driveLoop(input: {
       pageUrl,
     );
     let terminalOnly = false;
-    // Beside another route, a sign-in form's fields are one choice among
-    // several: neither auto-fill them nor stop for them before the vote.
-    const signInChoice = signInPageOffersOtherRoute(
-      rows,
-      pageUrl,
-      observation.semantic?.headings ?? [],
-    );
     // A rejected pre-act choice must reach the model on the refreshed page.
     // None of the automatic choices below may consume that opportunity.
     automaticDecisions: {
@@ -7867,10 +7789,6 @@ async function driveLoop(input: {
       const expiryRewrite = typeMustYield
         ? undefined
         : requiredExpiryLongRewriteAction(rows, drive.facts, drive.expiryShortWrittenRefs);
-      const typeFill =
-        typeMustYield || signInChoice
-          ? undefined
-          : requiredFactTypeAction(rows, drive.facts, drive.filledRefs, pageUrl, drive.goal);
       typeMustYield = false;
       const rewriteTarget = expiryRewrite?.target;
       const rewriteAttemptKey =
@@ -7894,27 +7812,6 @@ async function driveLoop(input: {
         if (applied !== "continue") return applied;
         if (automaticDecisionRefused) break automaticDecisions;
         spendStep("expiry_rewrite");
-        continue;
-      }
-      const typeAttemptKey =
-        typeFill === undefined ? undefined : `${comboboxObservation}\t${typeFill.target}`;
-      if (
-        typeFill !== undefined &&
-        typeAttemptKey !== undefined &&
-        !typeAttempts.has(typeAttemptKey)
-      ) {
-        typeAttempts.add(typeAttemptKey);
-        drive.boundFingerprint = driveProgressFingerprint(observation, rows, drive, session);
-        drive.consumedActionKey = null;
-        const applied = await applyDecision({
-          kind: "act",
-          action: { kind: "type", target: typeFill.target, text: typeFill.text },
-          actionKey: typeFill.target,
-          confidence: 1,
-        });
-        if (applied !== "continue") return applied;
-        if (automaticDecisionRefused) break automaticDecisions;
-        spendStep("type");
         continue;
       }
       // A sign-up form's new password is invented rather than handed back:
@@ -7969,27 +7866,6 @@ async function driveLoop(input: {
           continue;
         }
       }
-      // A required code field may have no recognizable label. Give the model
-      // the page context before treating that field as a missing supplied fact.
-      if (
-        missing !== undefined &&
-        !signInChoice &&
-        !emailCodeCandidates(rows, drive.filledRefs).some(
-          (candidate) => candidate.ref === missing?.ref,
-        )
-      ) {
-        const field = fieldLabelForRow(missing.row);
-        return finish("needs_value", {
-          field,
-          question: {
-            question: `Missing value for ${field}`,
-            options: Object.fromEntries(
-              Object.keys(drive.facts).map((key) => [key, `the provided ${key} value`]),
-            ),
-          },
-        });
-      }
-
       // A rendered page can legitimately have no controls (including DONE).
       // The readiness result, rather than row count, decides whether to wait.
       // Per page, and read before the settle branch below: dead actions recorded
@@ -8243,13 +8119,6 @@ async function driveLoop(input: {
     // branch on the same iteration.
     if (automaticDecisionRefused) {
       pageUrl = observation.url;
-      missing = requiredFillableMissingFact(
-        rows,
-        drive.facts,
-        drive.filledRefs,
-        pageUrl,
-        drive.goal,
-      );
       pageOptions =
         lastSelectOptions.get(session) ?? selectOptionsFromElements(session.lastElements);
       terminalOnly = false;
@@ -8418,6 +8287,13 @@ async function driveLoop(input: {
       answers = retried.result.answers;
       decision = decide(answers);
     }
+    const missing = requiredFillableMissingFact(
+      rows,
+      drive.facts,
+      drive.filledRefs,
+      pageUrl,
+      drive.goal,
+    );
     if (missing !== undefined && answers[DRIVE_EMAIL_CODE_QUESTION]?.choice === DRIVE_FIXED_NONE) {
       const field = fieldLabelForRow(missing.row);
       return finish("needs_value", {
