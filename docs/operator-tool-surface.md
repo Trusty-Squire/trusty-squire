@@ -140,7 +140,9 @@ card still use those primitives. The two-head Jev request, structured state,
 choice validation, WAIT, SELECT option targets, snapshot evaluate, and drive
 rules prose are adapted from browser-use/jev-ultrafast (MIT).
 The model's INBOX rule prefers listed controls that send, request, or enter a
-verification code or link before reading mail.
+verification code or link before reading mail. An emailed code or link is not
+human verification and is never itself a reason to choose BLOCKED: the drive
+can read the inbox.
 
 WAIT and BLOCKED are offered only while no listed work remains: an enabled
 fill, select, choice, or non-OAuth submit that is actually offered keeps both
@@ -159,6 +161,12 @@ that budget, and a stale or occluded click ref is withheld until the observation
 fingerprint changes. After five such dead actions on one page, or when they
 leave no actionable operation, the drive ends with `no_progress` and a `reason`
 naming them.
+
+When a submit first produces no response, the drive adds a notice to its
+observation and history naming the submitted form's fields that fail native
+browser constraint validation, with their labels and validation messages. If
+none can be read, the notice says the site did not respond to that control on
+that page.
 
 A drive snapshot ref names the control that snapshot recorded — its selector,
 frame, role, label, and a link's destination — not a position within it. Every
@@ -207,7 +215,10 @@ that also ends polling when animation frames are suspended. It detects
 content movement, not complete page readiness; later asynchronous content
 may still require another observation or WAIT. A guarded action whose target
 sits outside the viewport scrolls it into view instantly before the occlusion
-measurement, so an offscreen control does not burn the attempt.
+measurement, so an offscreen control does not burn the attempt. If a target
+inside the viewport appears covered, the guard also scrolls it into its
+containing scroll boxes and checks again; a target that remains covered is
+still refused.
 
 A snapshot with no controls — a same-document checkout stage swap, or a page
 still hydrating — is re-observed after up to three automatic waits per blank

@@ -89,6 +89,7 @@ import {
   driveControlDigest,
   pageFingerprintOf,
   reenterDriveField,
+  submitFormInvalidFields,
 } from "./drive-act.js";
 import { PAGE_READY_CAPS, waitForPageReady, type PageReadyResult } from "./page-ready.js";
 import { rememberDriveIdentities, resolveIdentityScope } from "./act/identity.js";
@@ -237,7 +238,7 @@ export const DRIVE_RULES: readonly string[] = [
   "WAIT only when the needed control is absent or disabled, or submitted results are still loading.",
   "Recent WAIT actions are not evidence of loading. Prefer a useful visible control over WAIT.",
   "DONE requires visible evidence that ALL requirements are satisfied. If asked to open a result, a matching link is not enough.",
-  "BLOCKED means no supported operation can make progress, including reading the inbox.",
+  "BLOCKED means no supported operation can make progress, including reading the inbox. A code or link sent by email is not human verification: the drive reads the inbox itself, so it is never a reason for BLOCKED.",
   "Pick INBOX only when no listed control sends, requests, or enters the verification code or link.",
   "Do not choose a field that already contains the requested value.",
   "Identifying values come only from the provided facts; never invent them.",
@@ -1102,6 +1103,19 @@ export function submitHadNoResponse(input: {
 
 export function silentSubmitReason(label: string, url: string): string {
   return `site did not respond to ${label} on ${pagePathKey(url)}`;
+}
+
+/** What the next decision is told after a submit first changes nothing:
+ *  the form's own invalid fields when the browser blocked it, otherwise that
+ *  the site did not respond. */
+export function silentSubmitNotice(
+  label: string,
+  url: string,
+  invalidFields: readonly string[],
+): string {
+  return invalidFields.length > 0
+    ? `${label} had no effect: ${invalidFields.join("; ")}`
+    : silentSubmitReason(label, url);
 }
 
 export function filledFormIds(
@@ -7039,6 +7053,23 @@ async function driveLoop(input: {
             });
           }
           drive.silentSubmitKeys.push(stable);
+          // Name why it did nothing before the control is retired, so the
+          // next decision can fill what is missing.
+          const identity = drive.identities?.get(decision.actionKey);
+          const livePage = session.browser.page;
+          const scope =
+            identity === undefined || livePage === null
+              ? null
+              : await resolveIdentityScope(livePage, decision.actionKey, identity);
+          const notice = silentSubmitNotice(
+            readableLabel(clickedBefore),
+            urlBeforeClick,
+            identity === undefined || scope === null
+              ? []
+              : await submitFormInvalidFields(scope, identity.selector),
+          );
+          drive.history.push(notice);
+          observation = attachObservationNotice(observation, notice);
         }
       }
       drive.lastActProfile = {
