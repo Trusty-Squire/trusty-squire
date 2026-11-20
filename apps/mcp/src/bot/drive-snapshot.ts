@@ -24,6 +24,7 @@ export interface DriveSnapshotElement {
   role: string;
   label: string;
   value?: string;
+  populated?: boolean;
   checked?: boolean;
   selected?: boolean;
   expanded?: boolean;
@@ -35,7 +36,9 @@ export interface DriveSnapshotElement {
   submit?: boolean;
   /** The control's own `maxlength`, when it declares one. */
   width?: number;
+  minLength?: number;
   placeholder?: string;
+  description?: string;
   /** The control's HTML `name`, when it has one. */
   name?: string;
   /** The `aria-label` ATTRIBUTE, not the resolved accessible name. */
@@ -47,6 +50,7 @@ export interface DriveSnapshotElement {
   /** Live CSS/Playwright selector for the node, used to re-resolve identity. */
   selector?: string;
   frameUrl?: string;
+  frameHeadings?: string[];
   frameOrigin?: string;
   /** Resolved href for a link, used to prefer in-app paths over docs. */
   href?: string;
@@ -206,6 +210,7 @@ export function driveRowsFromSnapshot(snapshot: DriveSnapshot): SnapshotRow[] {
     if (element.required === true) states.push("r");
     if (element.disabled === true) states.push("d");
     if (element.invalid === true) states.push("i");
+    if (element.populated === true) states.push("p");
     if (element.checked === true) states.push("c");
     if (element.checked === false && (element.role === "checkbox" || element.role === "radio")) {
       states.push("u");
@@ -793,9 +798,66 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
       element.maxLength > 0
         ? element.maxLength
         : undefined;
+    const minLength =
+      (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) &&
+      element.minLength > 0
+        ? element.minLength
+        : undefined;
     const href =
       element instanceof HTMLAnchorElement && element.href.length > 0 ? element.href : "";
     const placeholder = element.getAttribute("placeholder")?.trim() ?? "";
+    const ownerRoot = element.getRootNode();
+    const localHelp: string[] = [];
+    if (element instanceof HTMLInputElement && element.type === "password") {
+      const controls =
+        'input,textarea,select,button,[contenteditable],[role="textbox"],[role="combobox"],[role="checkbox"],[role="radio"]';
+      const auxiliary = (control: Element): boolean =>
+        control instanceof HTMLButtonElement &&
+        control.type === "button" &&
+        /^(?:show|hide|toggle)(?:\s+password)?$/i.test(
+          (control.getAttribute("aria-label") ?? control.textContent ?? "").trim(),
+        );
+      const foreignControl = (control: Element): boolean => control !== element && !auxiliary(control);
+      let container: Element = element;
+      while (
+        container.parentElement !== null &&
+        !container.parentElement.matches("form,body,main,section,article,fieldset") &&
+        Array.from(container.parentElement.querySelectorAll(controls)).every(
+          (control) => !foreignControl(control),
+        )
+      ) {
+        container = container.parentElement;
+      }
+      if (container instanceof HTMLElement) localHelp.push(container.innerText);
+      const helpSibling = (sibling: Element): boolean =>
+        (sibling.matches("small,p,span,div,ul,ol") || auxiliary(sibling)) &&
+        (!sibling.matches(controls) || auxiliary(sibling)) &&
+        !Array.from(sibling.querySelectorAll(controls)).some(foreignControl);
+      for (const direction of ["nextElementSibling", "previousElementSibling"] as const) {
+        const help: string[] = [];
+        let sibling = container[direction];
+        while (sibling !== null && helpSibling(sibling)) {
+          if (visible(sibling) && sibling instanceof HTMLElement) help.push(sibling.innerText);
+          sibling = sibling[direction];
+        }
+        if (
+          direction === "nextElementSibling" ||
+          (sibling instanceof HTMLLabelElement && sibling.control === element)
+        ) {
+          localHelp.push(...help);
+        }
+      }
+    }
+    const description = [
+      ...localHelp,
+      element.getAttribute("aria-description") ?? "",
+      ...(element.getAttribute("aria-describedby") ?? "").split(/\s+/).flatMap((id) => {
+        const described = ownerRoot instanceof Document || ownerRoot instanceof ShadowRoot
+          ? ownerRoot.getElementById(id)
+          : null;
+        return described === null ? [] : [described.textContent ?? ""];
+      }),
+    ].join(" ").trim();
     const ariaLabel = element.getAttribute("aria-label")?.trim() ?? "";
     const inputName =
       element instanceof HTMLInputElement ||
@@ -829,6 +891,9 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
       frameOrdinal,
       selector: selectorFor(element),
       ...(value === undefined ? {} : { value }),
+      ...(element instanceof HTMLInputElement && element.type === "password"
+        ? { populated: element.value.length > 0 }
+        : {}),
       ...(checked === undefined ? {} : { checked }),
       ...(selected === undefined ? {} : { selected }),
       ...(expanded === undefined ? {} : { expanded }),
@@ -838,7 +903,9 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
       ...(picker ? { picker: true } : {}),
       ...(submit ? { submit: true } : {}),
       ...(width === undefined ? {} : { width }),
+      ...(minLength === undefined ? {} : { minLength }),
       ...(placeholder.length > 0 ? { placeholder } : {}),
+      ...(description.length > 0 ? { description } : {}),
       ...(ariaLabel.length > 0 ? { ariaLabel } : {}),
       ...(labelComparable ? { labelComparable: true } : {}),
       ...(href.length > 0 ? { href } : {}),
@@ -1064,6 +1131,7 @@ export async function captureFrameSnapshot(
       elements: raw.elements.map((element) => ({
         ...element,
         frameUrl,
+        frameHeadings: raw.headings,
         frameOrigin,
       })),
     };
@@ -1184,11 +1252,11 @@ export async function frameDynamicsSignature(frame: Frame): Promise<string> {
           .map((element) => {
             const disabled = element.matches(":disabled") ? "!" : "";
             if (element instanceof HTMLInputElement) {
-              // Password values are omitted exactly as in the snapshot rows;
+              // Passwords contribute only populated/empty state, never values;
               // everything else participates so a value change (typed text,
               // autofill) invalidates the frame cache even when the DOM
               // structure is unchanged.
-              const value = element.type === "password" ? "" : element.value;
+              const value = element.type === "password" ? element.value.length > 0 : element.value;
               return `${element.name}:${element.type}${disabled}=${value}`;
             }
             if (element instanceof HTMLSelectElement) {

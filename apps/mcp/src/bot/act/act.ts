@@ -1680,6 +1680,7 @@ export async function dispatchDriveAct(
   if (
     action.kind !== "click" &&
     action.kind !== "type" &&
+    action.kind !== "type_secret" &&
     action.kind !== "select" &&
     action.kind !== "scroll" &&
     action.kind !== "oauth_login"
