@@ -111,7 +111,7 @@ import {
 } from "./captcha.js";
 import type { CaptchaSolveResult } from "./captcha.js";
 import { findCredentialTokens, isMaskedDisplay } from "./credential-shape.js";
-import { extractCredentials, storableCredentials } from "./capture/capture.js";
+import { extractCredentials, storableCredentials, type ExtractResult } from "./capture/capture.js";
 import {
   DRIVE_FIXED_GO_BACK,
   DRIVE_FIXED_NONE_OF_THESE,
@@ -131,6 +131,7 @@ export interface DriveCallContext {
   notifyUser?: (message: string, data?: Record<string, unknown>) => Promise<void>;
   signal?: AbortSignal;
   consentInboxRead?: boolean;
+  persistCredentials?: (extracted: ExtractResult) => Promise<boolean>;
 }
 
 export type InjectCardFn = (
@@ -420,6 +421,7 @@ export function resetDriveGoalMemory(drive: SessionDriveState): void {
   drive.boundFingerprint = null;
   drive.lastFingerprint = null;
   drive.lastActionKey = null;
+  drive.pendingCopyCapture = null;
   drive.visitedSectionKeys = [];
   drive.seenDestinations = [];
   drive.awaitingDecideAfterExplore = false;
@@ -450,6 +452,7 @@ export function emptyDriveState(goal: string, facts: Record<string, string>): Se
     expiryLongAttemptedRefs: [],
     lastQuestion: null,
     lastActionKey: null,
+    pendingCopyCapture: null,
     lastFingerprint: null,
     jevCalls: 0,
     staleNonWait: 0,
@@ -1536,6 +1539,25 @@ export function pageShowsRevealedKey(rows: readonly WireRow[], _pageText: string
   return rows.some((row) => rowShowsSecretEvidence(row));
 }
 
+/**
+ * A revealed one-time key (or the Copy control just clicked beside one) is the
+ * result a key goal asks for. Capture otherwise runs only on DONE, and a goal
+ * that says "finish once the key is in the vault" argues the model out of DONE,
+ * so the drive attempts the DONE capture itself when this holds.
+ */
+export function revealedKeyCaptureDue(rows: readonly WireRow[], copyDispatched: boolean): boolean {
+  if (
+    rows.some(
+      (row) =>
+        row[0] === REVEALED_SECRET_REF ||
+        /(?:^|\|)secret=1(?:\||$)/.test(visibleCredentialFacts(row)),
+    )
+  ) {
+    return true;
+  }
+  return copyDispatched;
+}
+
 function pageShowsCredentialValue(rows: readonly WireRow[]): boolean {
   if (pageShowsRevealedKey(rows)) return true;
   // A labeled value can be a key even when it has no recognizable prefix or
@@ -1630,6 +1652,23 @@ export function recordDriveTrailEntry(
     drive.visitedPages[arrivedPath] = (drive.visitedPages[arrivedPath] ?? 0) + 1;
     drive.lastTrailPage = arrivedPath;
   }
+}
+
+export const DRIVE_INBOX_NO_MAIL_OUTCOME = "inbox read found no matching mail";
+
+/**
+ * An inbox read that found nothing is its own outcome. While it is still the
+ * latest outcome on this page, the emailed-code question would only send the
+ * drive back into the same empty inbox, so the next decision is asked without
+ * it and sees the miss in its trail. Any later action re-arms the question.
+ */
+export function inboxFoundNoMailHere(trail: readonly DriveTrailEntry[], pageUrl: string): boolean {
+  const last = trail.at(-1);
+  return (
+    last !== undefined &&
+    last.outcome === DRIVE_INBOX_NO_MAIL_OUTCOME &&
+    last.page === feedbackPagePath(pageUrl)
+  );
 }
 
 /** Mark a control as acted on for the current page+goal, so the state can
@@ -4338,12 +4377,12 @@ export function decideAfterJev(input: {
     const actionKey =
       choice === "SCROLL" && (DRIVE_SCROLL_DIRECTIONS as readonly string[]).includes(targetChoice)
         ? `scroll:${targetChoice}`
-        : (resolveActionChoice(targetChoice, [
+        : resolveActionChoice(targetChoice, [
             ...sets.CLICK,
             ...sets.TYPE_TEXT,
             ...sets.SELECT,
             ...sets.SCROLL,
-          ])?.ref ?? targetChoice);
+          ])?.ref ?? targetChoice;
 
     if (
       input.boundFingerprint === input.fingerprint &&
@@ -5741,6 +5780,9 @@ async function driveLoop(input: {
   // and spend every remaining step in the guard without a new decision.
   let decideAfterPreActChange = false;
   let automaticDecisionRefused = false;
+  // One capture attempt per page state: a page whose Copy writes nothing is
+  // left to the model's next decision, not re-clicked every iteration.
+  const revealedKeyCaptureAttempts = new Set<string>();
   let dispatchedActs = 0;
   let countedJevCalls = drive.jevCalls;
   let countedDispatchedActs = 0;
@@ -6108,12 +6150,15 @@ async function driveLoop(input: {
       // Try the known Copy source on every DONE, even if the value has no
       // recognizable shape or label in the observation. Page evidence only
       // decides whether a failed extraction must hand back for explicit capture.
+      drive.pendingCopyCapture = null;
       const extracted = await extractCredentials(sessionId).catch(() => null);
-      if (
-        storableCredentials(extracted?.credentials ?? {}) === null &&
-        pageShowsCredentialValue(rows)
-      ) {
-        drive.history.push("DONE refused: a visible credential has no captured source");
+      const hasCredential = storableCredentials(extracted?.credentials ?? {}) !== null;
+      const stored =
+        hasCredential && extracted !== null && context?.persistCredentials !== undefined
+          ? await context.persistCredentials(extracted).catch(() => false)
+          : false;
+      if ((hasCredential && !stored) || (!hasCredential && pageShowsCredentialValue(rows))) {
+        drive.history.push("DONE refused: a visible credential was not stored");
         drive.consumedActionKey = null;
         const stallKey = pageProgressKey(
           observation.url,
@@ -6124,8 +6169,7 @@ async function driveLoop(input: {
         drive.stallKeys ??= [];
         if (drive.stallKeys.includes(stallKey)) {
           return finish("stuck", {
-            reason:
-              "no key with a known source: read the page with operate_observe and point capture at the key",
+            reason: "key not stored: supply store or use operate_extract with explicit capture",
           });
         }
         drive.stallKeys.push(stallKey);
@@ -6580,6 +6624,12 @@ async function driveLoop(input: {
             url: observation.url,
           });
           drive.history.push(inboxPollMissReason(search));
+          recordDriveTrailEntry(drive, {
+            step: drive.trajectory.length,
+            page: feedbackPagePath(observation.url),
+            action: "INBOX",
+            outcome: DRIVE_INBOX_NO_MAIL_OUTCOME,
+          });
           return planKind === "otp"
             ? finish("needs_value", {
                 field: "verification_code",
@@ -6726,10 +6776,18 @@ async function driveLoop(input: {
     };
     const oauthPageBefore = decision.action.kind === "oauth_login" ? session.browser.page : null;
     if (oauthPageBefore !== null) session.browser.armOpenedTabAdoption();
+    drive.pendingCopyCapture =
+      decision.action.kind === "click" &&
+      clickedBefore !== undefined &&
+      isRevealOrCopyRow(clickedBefore) &&
+      /^copy\b/i.test(readableLabel(clickedBefore))
+        ? { url: urlBeforeClick, documentEpoch: beforeEpoch }
+        : null;
     let acted: DriveActResult;
     try {
       acted = await actDriveSafely(session, sessionId, decision.action, dependencies);
     } catch (error) {
+      drive.pendingCopyCapture = null;
       if (decision.action.kind === "oauth_login") {
         appendDriveTrace(session, {
           at: "oauth_dispatch",
@@ -6772,6 +6830,7 @@ async function driveLoop(input: {
       });
     }
     if (acted.kind === "stale") {
+      drive.pendingCopyCapture = null;
       if (decision.action.kind === "oauth_login") {
         appendDriveTrace(session, {
           at: "oauth_handoff",
@@ -6890,6 +6949,7 @@ async function driveLoop(input: {
         });
       }
       if (safe.dispatchFailure !== undefined) {
+        drive.pendingCopyCapture = null;
         actDispatched = false;
         drive.lastDispatchFailure = safe.dispatchFailure;
         drive.consumedActionKey = null;
@@ -7152,7 +7212,7 @@ async function driveLoop(input: {
           ? session.browser.page === null
             ? ""
             : await documentEpochOf(session.browser.page)
-          : (drive.lastDocumentEpoch ?? "");
+          : drive.lastDocumentEpoch ?? "";
       if (
         beforeEpoch.length > 0 &&
         completionEpoch.length > 0 &&
@@ -7391,6 +7451,42 @@ async function driveLoop(input: {
         return finish("stuck", { reason: "wallet sign-in prompt could not be dismissed" });
       }
       continue;
+    }
+    if (
+      drive.pendingCopyCapture != null &&
+      (drive.pendingCopyCapture.url !== observation.url ||
+        documentOriginOf(drive.pendingCopyCapture.documentEpoch) !==
+          documentOriginOf(drive.lastDocumentEpoch ?? ""))
+    ) {
+      drive.pendingCopyCapture = null;
+    }
+    if (
+      context?.persistCredentials !== undefined &&
+      revealedKeyCaptureDue(rows, drive.pendingCopyCapture != null)
+    ) {
+      const captureKey = pageProgressKey(
+        observation.url,
+        rows,
+        drive.filledRefs,
+        observation.semantic?.headings ?? [],
+      );
+      if (!revealedKeyCaptureAttempts.has(captureKey)) {
+        revealedKeyCaptureAttempts.add(captureKey);
+        drive.pendingCopyCapture = null;
+        const extracted = await extractCredentials(sessionId).catch(() => null);
+        if (
+          extracted !== null &&
+          storableCredentials(extracted.credentials) !== null &&
+          (await context.persistCredentials(extracted).catch(() => false))
+        ) {
+          drive.history.push("revealed key stored from its Copy source");
+          return finish("complete");
+        }
+        // Capture invalidated the snapshot; re-read before asking about this page.
+        const recapture = await snapshotOrTimeout(framesIfNeeded());
+        if (recapture !== "ok") return recapture;
+      }
+      drive.pendingCopyCapture = null;
     }
     const includePayment = drive.facts.card_ref !== undefined;
     drive.facts = ensureGeneratedFacts(
@@ -7888,6 +7984,9 @@ async function driveLoop(input: {
       delete questions.SELECT_target;
       delete questions.SCROLL_target;
       delete questions[DRIVE_VALUE_QUESTION];
+      delete questions[DRIVE_EMAIL_CODE_QUESTION];
+    }
+    if (inboxFoundNoMailHere(drive.outcomeTrail ?? [], observation.url)) {
       delete questions[DRIVE_EMAIL_CODE_QUESTION];
     }
     const stateSeenRefs = new Set<string>();

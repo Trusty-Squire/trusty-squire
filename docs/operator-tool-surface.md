@@ -87,6 +87,8 @@ SCROLL, WAIT, DONE, BLOCKED) plus a matching per-operation target; unused
 target heads cannot act. Identifying values come only from the facts bag. A
 search or query field may receive a phrase Jev assigns from the goal's own
 words or the facts; identity and payment fields still require a fact.
+For a key-provisioning goal, also pass `store` as described under
+[credential capture and retrieval](#credential-capture-and-retrieval).
 On a drive carrying `card_ref`, the released card supplies its own facts —
 `exp_month`, `exp_year`, `exp_year_short`, `card_expiry`, `card_expiry_long`,
 and `card_name` — and the drive types expiry and cardholder name from them
@@ -143,6 +145,10 @@ The model's INBOX rule prefers listed controls that send, request, or enter a
 verification code or link before reading mail. An emailed code or link is not
 human verification and is never itself a reason to choose BLOCKED: the drive
 can read the inbox.
+After an inbox read finds no matching mail, that miss remains in the outcome
+trail and suppresses the emailed-code question while it is the latest outcome
+on that page. A later action or a different page makes the question eligible
+again.
 
 WAIT and BLOCKED are offered only while no listed work remains: an enabled
 fill, select, choice, or non-OAuth submit that is actually offered keeps both
@@ -457,8 +463,8 @@ recognition and sealing, and the purchase's single human approval are unchanged.
 }
 ```
 
-`result` requires `summary` or `data`. To store credentials, call
-`operate_extract({session_id, store})` and inspect its storage result before
+`result` requires `summary` or `data`. Complete
+[credential capture and storage](#credential-capture-and-retrieval) before
 calling `operate_finish`. The accepted outcomes are `none` and `result`;
 the removed `credentials` outcome and `store` argument are rejected.
 Agent-supplied data is reported data, not proof that login, provisioning, or a
@@ -503,6 +509,23 @@ and returns storage metadata, not the secret. Without `store`, it returns the
 value. If extraction fails, the session stays open for another observation or
 capture. Observation and screenshot reads remain verbatim; extraction does not
 redact those surfaces.
+
+`operate_drive` accepts the same `store` destination as `operate_extract`.
+Supply it on each drive call that should vault a key, including resumed calls.
+With a destination and an authenticated vault client, a revealed-secret row
+(`@key-value` or `secret=1`) or a successfully dispatched Copy click triggers
+extraction and storage before the next model decision. The Copy evidence
+survives a button changing its label to “Copied!” on the same document and URL.
+Extraction still uses the Copy source described above; a revealed-secret row
+does not itself supply the credential value. Successful storage returns
+`complete` without waiting for the model to choose DONE. Each page state gets
+one automatic capture attempt per call; a failed extraction or storage attempt
+returns to ordinary decision-making after a fresh snapshot.
+
+DONE also attempts extraction and requires successful storage if a credential
+is extracted. It refuses completion when a visible credential cannot be
+captured or an extracted credential cannot be stored. Supply `store`, or use
+`operate_extract` with an explicit capture source to resolve the handoff.
 
 `operate_click` and `operate_extract` accept an optional `capture` field:
 

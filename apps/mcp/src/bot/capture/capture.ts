@@ -365,7 +365,7 @@ async function readCaptureElement(handle: ElementHandle<Node>) {
         .split(/\s+/)
         .map((id) =>
           root instanceof Document || root instanceof ShadowRoot
-            ? (root.getElementById(id)?.textContent ?? "")
+            ? root.getElementById(id)?.textContent ?? ""
             : "",
         )
         .join(" ")
@@ -702,7 +702,7 @@ async function copyCredentialFromDialog(
             ].join(" "),
           )
           .join(" ");
-        if (/copy|clipboard/i.test(cues)) return { dialogIndex, buttonIndex };
+        if (/cop(?:y|ied)|clipboard/i.test(cues)) return { dialogIndex, buttonIndex };
       }
     }
     return null;
@@ -767,7 +767,7 @@ async function copyCredentialFromDialog(
                 ].join(" "),
               )
               .join(" ");
-            if (/copy|clipboard/i.test(cues)) return buttons.indexOf(button);
+            if (/cop(?:y|ied)|clipboard/i.test(cues)) return buttons.indexOf(button);
           }
         }
         layer = layer.parentElement;
@@ -821,7 +821,7 @@ async function copyCredentialFromDialog(
               ].join(" "),
             )
             .join(" ");
-          if (/copy|clipboard/i.test(cues)) return candidate.selector;
+          if (/cop(?:y|ied)|clipboard/i.test(cues)) return candidate.selector;
         }
         return null;
       },

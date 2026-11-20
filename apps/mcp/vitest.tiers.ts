@@ -66,6 +66,8 @@ export const REAL_BROWSER_FILES = [
   "src/bot/__tests__/ref-reconcile-benchmark.test.ts",
   "src/bot/__tests__/drive-create-key-at-creation.test.ts",
   "src/bot/__tests__/drive-key-complete-refusal.test.ts",
+  "src/bot/__tests__/drive-revealed-key-capture.test.ts",
+  "src/bot/__tests__/drive-inbox-no-mail.test.ts",
   "src/bot/__tests__/drive-changing-controls-steps.test.ts",
   "src/bot/__tests__/drive-wait-reoffered.test.ts",
   "src/bot/__tests__/click-target-clipped.test.ts",
@@ -125,6 +127,7 @@ export function excludingRealBrowser(files: string[]): string[] {
 // REQUIRED_PAYMENT_SAFETY_FILES. The nightly
 // full suite still covers everything as a drift backstop.
 export const REQUIRED_BEHAVIOR_FILES = [
+  "src/__tests__/operate-drive-store.test.ts",
   "src/bot/__tests__/native-dialogs.test.ts",
   "src/bot/__tests__/native-dialogs-browser.test.ts",
   "src/__tests__/approval-decided-notify.test.ts",
