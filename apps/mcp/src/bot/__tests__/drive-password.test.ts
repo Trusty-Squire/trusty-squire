@@ -3,10 +3,12 @@ import {
   INVENTED_PASSWORD_DEFAULT_LENGTH,
   inventPassword,
   parsePasswordRequirements,
+  passwordMeetsRequirements,
 } from "../drive-password.js";
 import { newAccountPasswordTargets, type WireRow } from "../operate-drive.js";
 import { storeInventedLogin } from "../../tools/provision-drive.js";
 import type { ApiClient } from "../../api-client.js";
+import { withOperatorRequestContext } from "../request-cancellation.js";
 
 function classes(value: string): {
   lower: boolean;
@@ -159,6 +161,36 @@ describe("inventPassword", () => {
     }
   });
 
+  it.each([
+    ["Confirm password", 20, undefined, undefined, /^[\s\S]{12,20}$/],
+    ["Confirm password", undefined, undefined, 30, /^[\s\S]{30,64}$/],
+    ["Confirm password", undefined, "[A-Z0-9]{16}", undefined, /^[A-Z0-9]{16}$/],
+    ["At most 18 characters. No special characters", undefined, undefined, undefined, /^[A-Za-z0-9]{12,18}$/],
+  ] as const)("satisfies primary and confirmation constraints: %s", (text, max, pattern, min, oracle) => {
+    const primary = parsePasswordRequirements("Password", 64, undefined, 12);
+    const confirmation = parsePasswordRequirements(text, max, pattern, min);
+    const value = inventPassword(primary, confirmation)!;
+    expect(value).toMatch(oracle);
+    expect(passwordMeetsRequirements(value, primary)).toBe(true);
+    expect(passwordMeetsRequirements(value, confirmation)).toBe(true);
+  });
+
+  it("uses a confirmation's explicit symbols when the primary has no symbol restriction", () => {
+    const value = inventPassword(
+      parsePasswordRequirements("Password"),
+      parsePasswordRequirements("Allowed special characters: .?"),
+    )!;
+    expect(value.replace(/[A-Za-z0-9]/g, "")).toMatch(/^[.?]+$/);
+  });
+
+  it("refuses conflicting primary and confirmation constraints", () => {
+    expect(inventPassword(
+      parsePasswordRequirements("Password", undefined, undefined, 30),
+      parsePasswordRequirements("Confirm password", 20),
+    )).toBeUndefined();
+    expect(passwordMeetsRequirements("Mixed-password-23456789012", parsePasswordRequirements("Confirm password", 20))).toBe(false);
+  });
+
   it("refuses limits that cannot all hold", () => {
     expect(inventPassword(parsePasswordRequirements("at least 30 characters", 12))).toBeUndefined();
   });
@@ -267,6 +299,27 @@ describe("newAccountPasswordTargets", () => {
 });
 
 describe("storeInventedLogin", () => {
+  it("does not post an invented login after cancellation", async () => {
+    const controller = new AbortController();
+    const reason = new Error("cancelled before password storage");
+    controller.abort(reason);
+    const storeCredential = vi.fn(async () => ({ reference: "vault://test" }));
+    const api = { storeCredential } as unknown as ApiClient;
+    await expect(withOperatorRequestContext(controller.signal, () => storeInventedLogin(api, {
+      sessionId: "test", url: "https://example.test/signup", login: "ada@example.test", password: "new-password",
+    }))).rejects.toBe(reason);
+    expect(storeCredential).not.toHaveBeenCalled();
+  });
+
+  it("records mutation dispatch before posting an invented login", async () => {
+    const events: string[] = [];
+    const api = { storeCredential: async () => { events.push("post"); } } as unknown as ApiClient;
+    await withOperatorRequestContext(new AbortController().signal, () => storeInventedLogin(api, {
+      sessionId: "test", url: "https://example.test/signup", login: "ada@example.test", password: "new-password",
+    }), async (phase) => { events.push(phase); });
+    expect(events).toEqual(["dispatch_attempted", "post"]);
+  });
+
   it("uses independent create-only writes for concurrent attempts", async () => {
     const storeCredential = vi.fn(async () => ({ reference: "vault://test" }));
     const api = { storeCredential } as unknown as ApiClient;

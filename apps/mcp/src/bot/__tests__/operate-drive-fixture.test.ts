@@ -4144,6 +4144,50 @@ describe("operate_drive real-browser fixture", () => {
     60_000,
   );
 
+  it.each([
+    { name: "maximum", attributes: 'maxlength="20"', help: "", oracle: /^[\s\S]{12,20}$/ },
+    { name: "minimum", attributes: 'minlength="30"', help: "", oracle: /^[\s\S]{30,64}$/ },
+    { name: "pattern", attributes: 'pattern="[A-Za-z0-9]{12,20}"', help: "", oracle: /^[A-Za-z0-9]{12,20}$/ },
+    { name: "local text", attributes: "", help: "At most 18 characters. No special characters", oracle: /^[A-Za-z0-9]{12,18}$/ },
+  ].flatMap((test) => [true, false].map((visible) => ({ ...test, visible }))))(
+    "checks $name confirmation constraints (visible=$visible)",
+    async ({ attributes, help, oracle, visible }) => {
+      const html = `<!doctype html><form>
+        <label>Email<input type="email" value="ada@fixture.test" required></label>
+        <label>Password<input id="password" type="password" minlength="12" maxlength="64" required
+          oninput="document.getElementById('confirmation').hidden=false"></label>
+        <div id="confirmation" ${visible ? "" : "hidden"}>
+          <label>Confirm password<input id="confirm" type="password" ${attributes} required></label>
+          <small>${help}</small>
+        </div>
+        <button type="submit">Create account</button>
+      </form>`;
+      const { context, page, started } = await openFixture(html, "confirmation-limits.test", "standard", "/signup");
+      const persistLogin = vi.fn(async () => true);
+      try {
+        await runOperateDrive(
+          { session_id: started.session_id, goal: "create a new account", max_steps: 3 },
+          api(),
+          { persistLogin },
+          deps(async (_api, _state, questions) => jevChoose(questions, "DONE")),
+        );
+        const primary = await page.locator("#password").inputValue();
+        expect(persistLogin).toHaveBeenCalledOnce();
+        if (visible) {
+          expect(primary).toMatch(oracle);
+          expect(await page.locator("#confirm").inputValue()).toBe(primary);
+        } else {
+          expect(await page.locator("#confirm").inputValue()).toBe("");
+          expect(primary).not.toMatch(oracle);
+        }
+      } finally {
+        await finishProvisionSession(started.session_id);
+        await context.close();
+      }
+    },
+    60_000,
+  );
+
   it("invents a sign-up password, vaults the login first, and fills the confirm field", async () => {
     const { context, page, started } = await openFixture(
       NEW_ACCOUNT_PASSWORD_HTML,

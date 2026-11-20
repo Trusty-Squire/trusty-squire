@@ -20,6 +20,7 @@ export interface PasswordRequirements {
   maxLength?: number;
   /** Symbols the password may use; empty when the page forbids them. */
   symbols: string;
+  symbolsRestricted?: boolean;
   /** The control's own `pattern`, when it is complete and compiles. */
   pattern?: RegExp;
   allowedCharacters?: string;
@@ -98,7 +99,8 @@ export function parsePasswordRequirements(
       flat,
     ) ||
     /\bonly\s+(?:letters?\s+and\s+(?:numbers?|digits?)|alphanumeric)\b/i.test(flat);
-  const symbols = noSymbols ? "" : listedSymbols(text) ?? SYMBOL;
+  const listed = listedSymbols(text);
+  const symbols = noSymbols ? "" : listed ?? SYMBOL;
   let compiled: RegExp | undefined;
   let allowedCharacters: string | undefined;
   if (pattern !== undefined && pattern.length > 0) {
@@ -122,9 +124,19 @@ export function parsePasswordRequirements(
     minLength: minimums.length === 0 ? 0 : Math.max(...minimums),
     ...(maximums.length === 0 ? {} : { maxLength: Math.min(...maximums) }),
     symbols,
+    symbolsRestricted: noSymbols || listed !== undefined,
     ...(compiled === undefined ? {} : { pattern: compiled }),
     ...(allowedCharacters === undefined ? {} : { allowedCharacters }),
   };
+}
+
+export function passwordMeetsRequirements(value: string, requirements: PasswordRequirements): boolean {
+  return value.length >= requirements.minLength &&
+    (requirements.maxLength === undefined || value.length <= requirements.maxLength) &&
+    [...value].every((character) =>
+      (/[A-Za-z0-9]/.test(character) || requirements.symbolsRestricted === false || requirements.symbols.includes(character)) &&
+      (requirements.allowedCharacters === undefined || requirements.allowedCharacters.includes(character))) &&
+    (requirements.pattern === undefined || requirements.pattern.test(value));
 }
 
 function generate(length: number, classes: string[]): string {
@@ -144,7 +156,26 @@ function generate(length: number, classes: string[]): string {
  * forbidden) a symbol, at the default length or longer when the page asks.
  * Undefined when the page's limits cannot be met together.
  */
-export function inventPassword(requirements: PasswordRequirements): string | undefined {
+export function inventPassword(
+  requirements: PasswordRequirements,
+  ...additionalRequirements: PasswordRequirements[]
+): string | undefined {
+  const constraints = [requirements, ...additionalRequirements];
+  const symbolConstraints = constraints.filter((constraint) => constraint.symbolsRestricted !== false);
+  const symbols = [...(symbolConstraints[0]?.symbols ?? requirements.symbols)]
+    .filter((symbol) => symbolConstraints.every((constraint) => constraint.symbols.includes(symbol)))
+    .join("");
+  requirements = {
+    minLength: Math.max(...constraints.map((constraint) => constraint.minLength)),
+    maxLength: Math.min(...constraints.map((constraint) => constraint.maxLength ?? INVENTED_PASSWORD_CEILING)),
+    symbols,
+    ...(constraints.some((constraint) => constraint.allowedCharacters !== undefined)
+      ? { allowedCharacters: [...LOWER + UPPER + DIGIT + symbols]
+          .filter((character) => constraints.every((constraint) =>
+            constraint.allowedCharacters === undefined || constraint.allowedCharacters.includes(character)))
+          .join("") }
+      : {}),
+  };
   const classes = [LOWER, UPPER, DIGIT, requirements.symbols]
     .map((group) => requirements.allowedCharacters === undefined
       ? group
@@ -166,7 +197,7 @@ export function inventPassword(requirements: PasswordRequirements): string | und
       ? classes
       : classes.filter((group) => group !== requirements.symbols);
     const candidate = generate(length, candidateClasses);
-    if (requirements.pattern === undefined || requirements.pattern.test(candidate)) {
+    if (constraints.every((constraint) => passwordMeetsRequirements(candidate, constraint))) {
       return candidate;
     }
   }

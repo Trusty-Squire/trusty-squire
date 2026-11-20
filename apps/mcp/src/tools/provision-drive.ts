@@ -659,6 +659,7 @@ export async function storeInventedLogin(
   const writeId = randomUUID();
   const label = `${invented.login.slice(0, 23)} ${writeId}`;
   const observedHosts = observedHostsForSession(invented.sessionId);
+  await markOperatorMutationDispatchAttempted();
   await api.storeCredential({
     service,
     write_id: writeId,

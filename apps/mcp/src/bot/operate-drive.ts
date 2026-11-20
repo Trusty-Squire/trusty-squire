@@ -113,7 +113,7 @@ import {
 import type { CaptchaSolveResult } from "./captcha.js";
 import { findCredentialTokens, isMaskedDisplay } from "./credential-shape.js";
 import { extractCredentials, storableCredentials, type ExtractResult } from "./capture/capture.js";
-import { inventPassword, parsePasswordRequirements } from "./drive-password.js";
+import { inventPassword, parsePasswordRequirements, passwordMeetsRequirements } from "./drive-password.js";
 import {
   DRIVE_FIXED_GO_BACK,
   DRIVE_FIXED_NONE_OF_THESE,
@@ -6033,6 +6033,15 @@ async function driveLoop(input: {
   // Fill the drive's password slot for this sign-up form, vaulting the login
   // before anything is typed. A login that could not be saved is never typed:
   // an account whose password exists nowhere else is lost the moment it is made.
+  const passwordRequirementsFor = (row: WireRow) => {
+    const control = drivePasswordControls.get(session)?.get(row[0]);
+    return parsePasswordRequirements(
+      `${readableLabel(row)}\n${control?.placeholder ?? ""}\n${control?.description ?? ""}`,
+      control?.width,
+      control?.pattern,
+      control?.minLength,
+    );
+  };
   const inventSignupPassword = async (targets: NewAccountPasswordTargets): Promise<boolean> => {
     if (context?.persistLogin === undefined) return false;
     let host: string;
@@ -6046,6 +6055,7 @@ async function driveLoop(input: {
       ? targets.login ?? session.signupIdentifier ?? getSessionUserEmail(sessionId)
       : controls?.get(targets.identity[0])?.value;
     if (login == null || login.trim().length === 0) return false;
+    const requirements = [targets.password, ...targets.confirms].map(passwordRequirementsFor);
     const prior = drive.inventedLogin;
     if (
       prior !== undefined &&
@@ -6054,19 +6064,11 @@ async function driveLoop(input: {
       prior.login === login &&
       session.secretSlots.has(DRIVE_PASSWORD_SLOT)
     ) {
-      return true;
+      const password = session.secretSlots.get(DRIVE_PASSWORD_SLOT)!;
+      return requirements.every((requirement) => passwordMeetsRequirements(password, requirement));
     }
     if (isConfirmPasswordRow(targets.password)) return false;
-    const row = targets.password;
-    const control = controls?.get(row[0]);
-    const password = inventPassword(
-      parsePasswordRequirements(
-        `${readableLabel(row)}\n${control?.placeholder ?? ""}\n${control?.description ?? ""}`,
-        control?.width,
-        control?.pattern,
-        control?.minLength,
-      ),
-    );
+    const password = inventPassword(requirements[0]!, ...requirements.slice(1));
     if (password === undefined) return false;
     const stored = await context
       .persistLogin({ sessionId, url: observation.url, login, password })
@@ -7871,6 +7873,8 @@ async function driveLoop(input: {
           for (const target of [passwordTargets.password, ...passwordTargets.confirms]) {
             const current = rows.find((row) => row[0] === target[0]);
             if (current === undefined || isPopulatedPasswordRow(current)) continue;
+            const password = session.secretSlots.get(DRIVE_PASSWORD_SLOT);
+            if (password === undefined || !passwordMeetsRequirements(password, passwordRequirementsFor(current))) continue;
             drive.boundFingerprint = driveProgressFingerprint(observation, rows, drive, session);
             drive.consumedActionKey = null;
             const applied = await applyDecision({
