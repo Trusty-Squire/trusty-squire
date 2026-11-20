@@ -358,7 +358,9 @@ For login and approval call shapes, follow the
   opens an owned provider popup or navigates the product tab, the chooser,
   consent, and 2FA phase receives a fresh human deadline: five minutes by
   default, or the full positive value of
-  `TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS` when configured. At an active-phase
+  `TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS` when configured. Drive-dispatched OAuth
+  follows the [drive per-call budget contract](operator-tool-surface.md) instead
+  of receiving an independent allowance. At an active-phase
   deadline, it rechecks captured, attempt-local return evidence:
   an observed return completes the action rather than being reported as pending.
   Only when no such completion evidence exists does the call return a normal

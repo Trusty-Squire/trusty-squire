@@ -3851,6 +3851,74 @@ describe("BrowserController OAuth popup lifecycle", () => {
     }
   });
 
+  it.each([
+    ["direct", "recovery"],
+    ["prepared", "recovery"],
+    ["direct", "tracking"],
+    ["prepared", "tracking"],
+  ])("does not dispatch a %s OAuth click after %s exhausts the budget", async (mode, stage) => {
+    const context = await signedInGoogleContext();
+    const product = await context.newPage();
+    await context.route("https://product.test/**", async (route) => {
+      await route.fulfill({
+        contentType: "text/html",
+        body: '<button id="oauth" onclick="document.body.dataset.clicked = \'yes\'">Continue</button>',
+      });
+    });
+    await product.goto("https://product.test/login");
+    const controller = BrowserController.fromHarnessPage(product);
+    const dispatchAttempted = vi.fn();
+    const expiredAt = Date.now() + 10_000;
+    let restoreClock = () => {};
+    const expire = (): void => {
+      const clock = vi.spyOn(Date, "now").mockReturnValue(expiredAt);
+      restoreClock = () => clock.mockRestore();
+    };
+    const newPage = context.newPage.bind(context);
+    const recoverySetup = vi.spyOn(context, "newPage").mockImplementation(async () => {
+      const recovery = await newPage();
+      const goto = recovery.goto.bind(recovery);
+      vi.spyOn(recovery, "goto").mockImplementation(async (...args) => {
+        const result = await goto(...args);
+        if (stage === "recovery") expire();
+        return result;
+      });
+      return recovery;
+    });
+    const trackedClick = controller.clickWithDispatchTracking.bind(controller);
+    const tracking = vi
+      .spyOn(controller, "clickWithDispatchTracking")
+      .mockImplementation(async (...args) => {
+        if (stage === "tracking") expire();
+        return await trackedClick(...args);
+      });
+    const handle = await product.$("#oauth");
+    try {
+      await expect(
+        loginWithOAuth(
+          controller,
+          "#oauth",
+          2_000,
+          "google",
+          undefined,
+          undefined,
+          undefined,
+          mode === "prepared" ? async (dispatch) => dispatch(handle!, async () => {}) : undefined,
+          undefined,
+          dispatchAttempted,
+        ),
+      ).rejects.toThrow("budget elapsed before the OAuth control");
+      expect(dispatchAttempted).not.toHaveBeenCalled();
+      expect(await product.locator("body").getAttribute("data-clicked")).toBeNull();
+    } finally {
+      restoreClock();
+      recoverySetup.mockRestore();
+      tracking.mockRestore();
+      await handle?.dispose();
+      await context.close().catch(() => undefined);
+    }
+  });
+
   it("does not re-arm the human deadline when the OAuth control never hands off", async () => {
     const context = await signedInGoogleContext();
     const product = await context.newPage();
@@ -3866,11 +3934,24 @@ describe("BrowserController OAuth popup lifecycle", () => {
       throw new Error("unexpected human handoff");
     });
 
+    const dispatchAttempted = vi.fn();
     try {
       await expect(
-        loginWithOAuth(controller, "#oauth", 2_500, "google", undefined, undefined, handoff),
+        loginWithOAuth(
+          controller,
+          "#oauth",
+          2_500,
+          "google",
+          undefined,
+          undefined,
+          handoff,
+          undefined,
+          undefined,
+          dispatchAttempted,
+        ),
       ).rejects.toBeInstanceOf(OAuthAwaitingHumanError);
       expect(handoff).not.toHaveBeenCalled();
+      expect(dispatchAttempted).toHaveBeenCalledOnce();
     } finally {
       await context.close().catch(() => undefined);
     }

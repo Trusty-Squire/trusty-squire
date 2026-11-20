@@ -89,8 +89,16 @@ search or query field may receive a phrase Jev assigns from the goal's own
 words or the facts; identity and payment fields still require a fact.
 
 On a new-account form, omit the password fact to let the drive invent a random
-password. Initial invention requires explicit Create account, Sign up, or
-Register evidence; sign-in, reset, and existing-password forms are excluded.
+password. Password invention requires a control with `type="password"`,
+in any page language. Initial invention requires explicit Create
+account, Sign up, or Register evidence, or a new-account shape: an email or
+username field on the same form plus a password the page marks
+`autocomplete="new-password"`. Forms with any control annotated
+`autocomplete="current-password"` (including a revealed `type="text"` control)
+or three or more password fields, and the current page reached directly through an inbox
+link, are excluded. Later pages remain eligible. Textual sign-in, reset, and
+current-password exclusions use English labels; `new-password` alone does not
+distinguish a localized signup from a localized reset form.
 Populated password controls are preserved. Account identifiers and confirmation
 controls are scoped to the password's form and frame. The account identifier
 comes from the form's exact email/username value, or, on a password-only step,
@@ -106,7 +114,10 @@ Generation defaults to 24 characters, adjusted for the primary and currently
 visible confirmation controls' minimum/maximum lengths, compilable patterns,
 and password-local help text, with a 128-character ceiling. Empty confirmation
 fields reuse the saved password for the same host and login, including fields
-revealed later, only when it meets their requirements. The generated value is
+revealed later, only when it meets their requirements. When exactly two password
+controls both declare `new-password`, the second is a confirmation even if its
+label is localized or the first is already populated. It receives only a known
+invented password, never a newly generated replacement. The generated value is
 not returned in drive results, history, or traces.
 
 For a key-provisioning goal, also pass `store` as described under
@@ -286,7 +297,13 @@ option-ownership regressions live in
 [`operate-drive-fixture.test.ts`](../apps/mcp/src/bot/__tests__/operate-drive-fixture.test.ts).
 
 Calls default to 60 steps and 45 seconds; `max_steps` and `max_seconds` set
-the per-call allowances within the registered schema's limits.
+the per-call allowances within the registered schema's limits. A drive-dispatched
+OAuth step shares the call's remaining `max_seconds` across preflight checks,
+the human-handoff window, fallback dispatch, and post-action reads. OAuth phase
+changes do not extend that limit; exhaustion returns a `budget` handoff.
+If an OAuth deadline expires before dispatch is attempted, the control remains
+eligible for retry on the next call; after dispatch may have occurred, the drive
+preserves that uncertainty rather than treating the control as unclicked.
 A `budget` handoff preserves partial progress for another call on the same
 session. `jev_unavailable`, `no_progress`, and `evaluate_timeout` also return
 handoffs; the last indicates that an in-page evaluation exceeded its deadline.

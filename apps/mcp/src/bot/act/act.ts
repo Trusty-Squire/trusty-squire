@@ -29,6 +29,7 @@ import {
   settleAfterOAuth,
   withOAuthActionLease,
   withinOAuthActionDeadline,
+  withinOAuthCallerDeadline,
   type OAuthActionDeadline,
   OAuthAwaitingHumanError,
   OAuthFailedError,
@@ -117,6 +118,7 @@ import {
 // act issued while a drive session is open keeps tool behaviour.
 export type ActExecutorOptions = {
   drive?: boolean;
+  oauthDeadline?: OAuthActionDeadline;
 };
 
 const DRIVE_DISPATCH: ActExecutorOptions = { drive: true };
@@ -230,20 +232,24 @@ async function withOAuthActionBoundary(
   provider: OAuthProviderId | undefined,
   run: (deadline: OAuthActionDeadline) => Promise<InternalActResult>,
   outputFormat: "compact" | "full",
+  deadline = oauthActionDeadline(provider),
 ): Promise<InternalActResult> {
   if (provider === "google") {
-    const gate = await googleSessionGateForSession(session.id);
+    const gate = await withinOAuthActionDeadline(googleSessionGateForSession(session.id), deadline);
     if (!gate.ok) {
-      const observation = await observeSession(
-        session,
-        outputFormat,
-        undefined,
-        undefined,
-        false,
-        outputFormat,
-        false,
-        true,
-        true,
+      const observation = await withinOAuthActionDeadline(
+        observeSession(
+          session,
+          outputFormat,
+          undefined,
+          undefined,
+          false,
+          outputFormat,
+          false,
+          true,
+          true,
+        ),
+        deadline,
       );
       return {
         observation: { ...observation, needs_user: gate.needs_user },
@@ -251,7 +257,6 @@ async function withOAuthActionBoundary(
       };
     }
   }
-  const deadline = oauthActionDeadline(provider);
   const releaseCooldownMs = oauthLoginLeaseCooldownMs();
   // A deadline expiry must NOT terminalize the session: the in-flight OAuth
   // operation is budget-bounded (loginWithOAuth races its own completion
@@ -278,12 +283,20 @@ async function withOAuthActionBoundary(
         ) {
           // Browser timeout/navigation errors need the same evidence check as
           // request cancellation. A failed read cannot erase dispatched uncertainty.
-          const completion = await deadline.completionCheck?.().catch(() => null);
-          if (completion !== undefined && completion !== null) {
+          const completion =
+            deadline.completionCheck === undefined
+              ? null
+              : await withinOAuthCallerDeadline(deadline.completionCheck, deadline).catch(
+                  () => null,
+                );
+          if (completion !== null) {
             return {
               observation: completion.terminal
                 ? terminalOAuthCompletionObservation(session, completion.url!)
-                : await observeSession(session, "compact", undefined, completion.page).catch(() => {
+                : await withinOAuthCallerDeadline(
+                    () => observeSession(session, "compact", undefined, completion.page),
+                    deadline,
+                  ).catch(() => {
                     if (uncertain !== null) return uncertain;
                     throw error;
                   }),
@@ -436,6 +449,9 @@ async function runSerializedOAuthBoundary(
             composed.dispose();
           }
         },
+        () => {
+          deadline.dispatchAttempted = true;
+        },
       );
       // Human completion returns custody to bounded machine work. Give DOM
       // readiness its own short window instead of spending the human budget.
@@ -584,9 +600,22 @@ export async function actInternally(
         : await run();
     };
     return session !== undefined && (action.kind === "oauth_login" || action.kind === "oauth_click")
-      ? await withOAuthActionBoundary(session, oauthProvider, execute, "compact")
+      ? await withOAuthActionBoundary(
+          session,
+          oauthProvider,
+          execute,
+          "compact",
+          options?.oauthDeadline,
+        )
       : await execute(undefined);
   } catch (error) {
+    if (
+      error instanceof OAuthAwaitingHumanError &&
+      options?.oauthDeadline?.capAt !== undefined &&
+      options.oauthDeadline.dispatchAttempted !== true
+    ) {
+      throw error;
+    }
     if (session !== undefined && (action.kind === "oauth_login" || action.kind === "oauth_click")) {
       const progress = oauthErrorAfterDispatchAttempt(session, error);
       if (progress !== null) return { observation: progress, outcome: {} };
@@ -618,6 +647,7 @@ export async function act(
   detail: ObserveDetail = "compact",
   outputFormat: "compact" | "full" = "full",
   compactMapEmitted = true,
+  oauthDeadline?: OAuthActionDeadline,
 ): Promise<Observation> {
   const timing = new ActStepTiming(sessionId);
   const session = sessionForCall(sessionId);
@@ -674,16 +704,38 @@ export async function act(
     };
     const result =
       session !== undefined && (action.kind === "oauth_login" || action.kind === "oauth_click")
-        ? await withOAuthActionBoundary(session, oauthProvider, execute, outputFormat)
+        ? await withOAuthActionBoundary(
+            session,
+            oauthProvider,
+            execute,
+            outputFormat,
+            oauthDeadline,
+          )
         : await execute(undefined);
     timing.enter("reply");
     if (session !== undefined && nativeDialogObservation(session) !== undefined)
       return result.observation;
-    const threeDs = await observedThreeDsChallenge(sessionId);
+    if (oauthDeadline?.capAt !== undefined && Date.now() >= oauthDeadline.capAt) {
+      return result.observation;
+    }
+    const threeDs = await withinOAuthCallerDeadline(
+      () => observedThreeDsChallenge(sessionId),
+      oauthDeadline,
+    ).catch((error: unknown) => {
+      if (error instanceof OAuthAwaitingHumanError) return undefined;
+      throw error;
+    });
     return threeDs === undefined
       ? result.observation
       : { ...result.observation, three_ds: threeDs };
   } catch (error) {
+    if (
+      error instanceof OAuthAwaitingHumanError &&
+      oauthDeadline?.capAt !== undefined &&
+      oauthDeadline.dispatchAttempted !== true
+    ) {
+      throw error;
+    }
     timing.enter("reply");
     if ((action.kind === "click" || action.kind === "upload") && action.screenshot) {
       if (error instanceof ScreenshotClickError) throw error;
@@ -1673,6 +1725,7 @@ async function guardDriveOauthTarget(sessionId: string, target: string): Promise
 export async function dispatchDriveAct(
   sessionId: string,
   action: ProvisionAction,
+  deadline?: OAuthActionDeadline,
 ): Promise<DriveActResult> {
   // "unsupported" means the shared executor has no drive verb for this action
   // and the caller should fall back to the tools path. A DISPATCH failure is a
@@ -1687,28 +1740,27 @@ export async function dispatchDriveAct(
   ) {
     return { kind: "unsupported" };
   }
-  // An OAuth handoff is a drive action like any other. The drive guard proves
-  // the control is still the one it observed and refuses an occluded target
-  // BEFORE the OAuth deadline is spent, then the shared executor dispatches it
-  // by that identity — never by the tools' index, which a drive session never
-  // populated. A target with no drive identity record is the tools' to resolve.
-  if (action.kind === "oauth_login") {
-    const guard = await guardDriveOauthTarget(sessionId, action.target);
-    if (guard.kind !== "ok") return guard;
-  } else if (
-    action.kind !== "scroll" &&
-    sessionForCall(sessionId)?.drive?.identities?.get(action.target) === undefined
-  ) {
-    return { kind: "unsupported" };
-  }
+  if (action.kind === "oauth_login") deadline ??= oauthActionDeadline(action.provider);
   try {
+    if (action.kind === "oauth_login") {
+      const guard = await withinOAuthActionDeadline(
+        guardDriveOauthTarget(sessionId, action.target),
+        deadline!,
+      );
+      if (guard.kind !== "ok") return guard;
+    } else if (
+      action.kind !== "scroll" &&
+      sessionForCall(sessionId)?.drive?.identities?.get(action.target) === undefined
+    ) {
+      return { kind: "unsupported" };
+    }
     const result = await actInternally(
       sessionId,
       action,
       "none",
       undefined,
       undefined,
-      DRIVE_DISPATCH,
+      deadline === undefined ? DRIVE_DISPATCH : { ...DRIVE_DISPATCH, oauthDeadline: deadline },
     );
     // An OAuth act can end on a wall (no live provider session, a 2FA hand-off)
     // WITHOUT dispatching: the executor returns that as an observation. The
@@ -1723,6 +1775,21 @@ export async function dispatchDriveAct(
         : { needsUser: result.observation.needs_user }),
     };
   } catch (error) {
+    if (
+      error instanceof OAuthAwaitingHumanError &&
+      deadline?.capAt !== undefined &&
+      deadline.dispatchAttempted !== true
+    ) {
+      throw error;
+    }
+    const session = sessionForCall(sessionId);
+    if (error instanceof OAuthAwaitingHumanError && session !== undefined) {
+      return {
+        kind: "ok",
+        combobox: false,
+        oauth: oauthAwaitingHumanObservation(session, error).oauth,
+      };
+    }
     if (error instanceof CompactV2StaleRefError) return { kind: "stale", reason: "stale_ref" };
     if (error instanceof TargetStaleError) return { kind: "stale", reason: "stale" };
     const message = error instanceof Error ? error.message : String(error);

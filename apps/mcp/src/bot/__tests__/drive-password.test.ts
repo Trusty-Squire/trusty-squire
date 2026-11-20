@@ -97,7 +97,9 @@ describe("inventPassword", () => {
   it.each([undefined, "[A-Za-z0-9.?]{24}"])(
     "preserves explicitly allowed punctuation with pattern %s",
     (pattern) => {
-      const value = inventPassword(parsePasswordRequirements("Allowed special characters: .?", undefined, pattern))!;
+      const value = inventPassword(
+        parsePasswordRequirements("Allowed special characters: .?", undefined, pattern),
+      )!;
       expect(value.replace(/[A-Za-z0-9]/g, "")).toMatch(/^[.?]+$/);
     },
   );
@@ -106,7 +108,11 @@ describe("inventPassword", () => {
     "excludes delimiters from a separated symbol list: %s",
     (list) => {
       for (const pattern of [undefined, "[A-Za-z0-9!@#,;]{24}"]) {
-        const requirements = parsePasswordRequirements(`Allowed special characters: ${list}`, undefined, pattern);
+        const requirements = parsePasswordRequirements(
+          `Allowed special characters: ${list}`,
+          undefined,
+          pattern,
+        );
         expect(requirements.symbols).toBe("!@#");
         for (let attempt = 0; attempt < 10; attempt += 1) {
           const value = inventPassword(requirements)!;
@@ -120,7 +126,9 @@ describe("inventPassword", () => {
     const requirements = parsePasswordRequirements(`Allowed special characters: ${symbols}`);
     expect(requirements.symbols).toBe(symbols);
     const value = inventPassword(requirements)!;
-    expect([...value.replace(/[A-Za-z0-9]/g, "")].every((character) => symbols.includes(character))).toBe(true);
+    expect(
+      [...value.replace(/[A-Za-z0-9]/g, "")].every((character) => symbols.includes(character)),
+    ).toBe(true);
   });
 
   it("does not substitute the default alphabet for an empty explicit list", () => {
@@ -147,21 +155,17 @@ describe("inventPassword", () => {
     ["[A-Z0-9]{24}", /^[A-Z0-9]{24}$/],
     ["[a-z]{30,}", /^[a-z]{30,}$/],
     [".{12,20}", /^.{12,20}$/],
-    [
-      "(?=.*[A-Z])(?=.*[a-z])(?=.*[0-9]).{12,20}",
-      /^(?=.*[A-Z])(?=.*[a-z])(?=.*[0-9]).{12,20}$/,
-    ],
+    ["(?=.*[A-Z])(?=.*[a-z])(?=.*[0-9]).{12,20}", /^(?=.*[A-Z])(?=.*[a-z])(?=.*[0-9]).{12,20}$/],
     [
       "(?=.*[A-Z])(?=.*[a-z])(?=.*[0-9])[A-Za-z0-9]{12,20}",
       /^(?=.*[A-Z])(?=.*[a-z])(?=.*[0-9])[A-Za-z0-9]{12,20}$/,
     ],
-    [
-      "^(?=.*[A-Z])(?=.*[0-9])[A-Z0-9]{12,20}$",
-      /^(?=.*[A-Z])(?=.*[0-9])[A-Z0-9]{12,20}$/,
-    ],
+    ["^(?=.*[A-Z])(?=.*[0-9])[A-Z0-9]{12,20}$", /^(?=.*[A-Z])(?=.*[0-9])[A-Z0-9]{12,20}$/],
   ])("generates within the character and length space of %s", (pattern, oracle) => {
     for (let attempt = 0; attempt < 10; attempt += 1) {
-      const value = inventPassword(parsePasswordRequirements("Password", undefined, pattern as string));
+      const value = inventPassword(
+        parsePasswordRequirements("Password", undefined, pattern as string),
+      );
       expect(value).toBeDefined();
       expect(value).toMatch(oracle as RegExp);
     }
@@ -171,15 +175,24 @@ describe("inventPassword", () => {
     ["Confirm password", 20, undefined, undefined, /^[\s\S]{12,20}$/],
     ["Confirm password", undefined, undefined, 30, /^[\s\S]{30,64}$/],
     ["Confirm password", undefined, "[A-Z0-9]{16}", undefined, /^[A-Z0-9]{16}$/],
-    ["At most 18 characters. No special characters", undefined, undefined, undefined, /^[A-Za-z0-9]{12,18}$/],
-  ] as const)("satisfies primary and confirmation constraints: %s", (text, max, pattern, min, oracle) => {
-    const primary = parsePasswordRequirements("Password", 64, undefined, 12);
-    const confirmation = parsePasswordRequirements(text, max, pattern, min);
-    const value = inventPassword(primary, confirmation)!;
-    expect(value).toMatch(oracle);
-    expect(passwordMeetsRequirements(value, primary)).toBe(true);
-    expect(passwordMeetsRequirements(value, confirmation)).toBe(true);
-  });
+    [
+      "At most 18 characters. No special characters",
+      undefined,
+      undefined,
+      undefined,
+      /^[A-Za-z0-9]{12,18}$/,
+    ],
+  ] as const)(
+    "satisfies primary and confirmation constraints: %s",
+    (text, max, pattern, min, oracle) => {
+      const primary = parsePasswordRequirements("Password", 64, undefined, 12);
+      const confirmation = parsePasswordRequirements(text, max, pattern, min);
+      const value = inventPassword(primary, confirmation)!;
+      expect(value).toMatch(oracle);
+      expect(passwordMeetsRequirements(value, primary)).toBe(true);
+      expect(passwordMeetsRequirements(value, confirmation)).toBe(true);
+    },
+  );
 
   it("uses a confirmation's explicit symbols when the primary has no symbol restriction", () => {
     const value = inventPassword(
@@ -190,11 +203,18 @@ describe("inventPassword", () => {
   });
 
   it("refuses conflicting primary and confirmation constraints", () => {
-    expect(inventPassword(
-      parsePasswordRequirements("Password", undefined, undefined, 30),
-      parsePasswordRequirements("Confirm password", 20),
-    )).toBeUndefined();
-    expect(passwordMeetsRequirements("Mixed-password-23456789012", parsePasswordRequirements("Confirm password", 20))).toBe(false);
+    expect(
+      inventPassword(
+        parsePasswordRequirements("Password", undefined, undefined, 30),
+        parsePasswordRequirements("Confirm password", 20),
+      ),
+    ).toBeUndefined();
+    expect(
+      passwordMeetsRequirements(
+        "Mixed-password-23456789012",
+        parsePasswordRequirements("Confirm password", 20),
+      ),
+    ).toBe(false);
   });
 
   it("refuses limits that cannot all hold", () => {
@@ -205,8 +225,8 @@ describe("inventPassword", () => {
 describe("newAccountPasswordTargets", () => {
   const signup: WireRow[] = [
     ["@e:email", "t", "Email|f=email|s=r|n=ada@fixture.test|fm=1"],
-    ["@e:pw", "t", "Password (min 12 chars, required)|f=password|s=r|fm=1"],
-    ["@e:pw2", "t", "Confirm password|f=password|s=r|fm=1"],
+    ["@e:pw", "t", "Password (min 12 chars, required)|f=password|it=password|s=r|fm=1"],
+    ["@e:pw2", "t", "Confirm password|f=password|it=password|s=r|fm=1"],
     ["@e:age", "c", "I confirm that I am at least 18|s=ru|fm=1"],
     ["@e:create", "b", "Create account|a=submit|fm=1"],
   ];
@@ -231,7 +251,7 @@ describe("newAccountPasswordTargets", () => {
     expect(newAccountPasswordTargets(signup, {}, ["@e:pw"])).toBeUndefined();
     const signin: WireRow[] = [
       ["@e:email", "t", "Email|f=email|s=r|n=ada@fixture.test|fm=1"],
-      ["@e:pw", "t", "Password|f=password|s=r|fm=1"],
+      ["@e:pw", "t", "Password|f=password|it=password|s=r|fm=1"],
       ["@e:go", "b", "Sign in|a=submit|fm=1"],
       ["@e:tab", "b", "Sign up|fm=2"],
     ];
@@ -240,7 +260,13 @@ describe("newAccountPasswordTargets", () => {
 
   it("selects pending confirmations after the primary was filled or removed", () => {
     for (const rows of [signup, signup.filter((row) => row[0] !== "@e:pw")]) {
-      const targets = newAccountPasswordTargets(rows, {}, ["@e:pw"], () => [], () => true);
+      const targets = newAccountPasswordTargets(
+        rows,
+        {},
+        ["@e:pw"],
+        () => [],
+        () => true,
+      );
       expect(targets?.password[0]).toBe("@e:pw2");
       expect(targets?.confirms).toEqual([]);
     }
@@ -251,13 +277,21 @@ describe("newAccountPasswordTargets", () => {
       row[0] === "@e:create" ? [row[0], "b", "Reset password|a=submit|fm=1"] : row,
     );
     expect(newAccountPasswordTargets(reset, { email: "ada@fixture.test" }, [])).toBeUndefined();
-    expect(newAccountPasswordTargets(reset, {}, ["@e:pw"], () => [], () => true)).toBeUndefined();
+    expect(
+      newAccountPasswordTargets(
+        reset,
+        {},
+        ["@e:pw"],
+        () => [],
+        () => true,
+      ),
+    ).toBeUndefined();
   });
 
   it.each(["Get started", "Join"])("does not invent from a generic %s submit", (label) => {
-    const rows: WireRow[] = signup.map((row) =>
-      row[0] === "@e:create" ? [row[0], "b", `${label}|a=submit|fm=1`] : row,
-    );
+    const rows: WireRow[] = signup
+      .filter((row) => row[0] !== "@e:pw2")
+      .map((row) => (row[0] === "@e:create" ? [row[0], "b", `${label}|a=submit|fm=1`] : row));
     expect(newAccountPasswordTargets(rows, {}, [], () => ["Sign in"])).toBeUndefined();
     expect(newAccountPasswordTargets(rows, {}, [])).toBeUndefined();
     expect(newAccountPasswordTargets(rows, {}, [], () => ["Create account"])).toBeDefined();
@@ -267,16 +301,194 @@ describe("newAccountPasswordTargets", () => {
     "rejects explicit %s evidence even with a create-account submit",
     (heading) => {
       expect(newAccountPasswordTargets(signup, {}, [], () => [heading])).toBeUndefined();
-      expect(newAccountPasswordTargets(signup, {}, ["@e:pw"], () => [heading], () => true)).toBeUndefined();
+      expect(
+        newAccountPasswordTargets(
+          signup,
+          {},
+          ["@e:pw"],
+          () => [heading],
+          () => true,
+        ),
+      ).toBeUndefined();
     },
   );
 
   it("reuses confirmation on a neutral continuation only after invention", () => {
-    const rows: WireRow[] = signup.map((row) =>
-      row[0] === "@e:create" ? [row[0], "b", "Continue|a=submit|fm=1"] : row,
-    );
+    const rows: WireRow[] = signup
+      .filter((row) => row[0] !== "@e:email")
+      .map((row) => (row[0] === "@e:create" ? [row[0], "b", "Continue|a=submit|fm=1"] : row));
     expect(newAccountPasswordTargets(rows, {}, [])).toBeUndefined();
-    expect(newAccountPasswordTargets(rows, {}, ["@e:pw"], () => [], () => true)?.password[0]).toBe("@e:pw2");
+    expect(
+      newAccountPasswordTargets(
+        rows,
+        {},
+        ["@e:pw"],
+        () => [],
+        () => true,
+      )?.password[0],
+    ).toBe("@e:pw2");
+  });
+
+  // Kenari, 1.1.54 trace L6: an Indonesian sign-up form whose labels match no
+  // English pattern; the snapshot now names the field from type=password and
+  // its autocomplete token.
+  const kenariSignup: WireRow[] = [
+    ["@e:f0d13", "b", "Buat Akun|a=submit|fm=1"],
+    ["@e:f0d7", "b", "Masuk"],
+    [
+      "@e:f0d8",
+      "t",
+      "Email|f=email|s=r|n=methoxine+grunt-kenari-32@gmail.com|ph=kamu@contoh.com|fm=1",
+    ],
+    ["@e:f0d9", "t", "Sandi|f=password|it=password|ac=new-password|s=r|ph=Minimal 8 karakter|fm=1"],
+    ["@e:f0d10", "t", "Kode referral / promo (opsional)|ph=Contoh: TEMANKU|fm=1"],
+    ["@e:f0d14", "l", "Daftar dengan Google|u=https://kenari.id/api/auth/google"],
+  ];
+
+  it("does not invent or confirm a password into a visible text control", () => {
+    const visible = kenariSignup.map(
+      (row): WireRow =>
+        row[0] === "@e:f0d9" ? [row[0], row[1], row[2]!.replace("|it=password", "")] : row,
+    );
+    expect(newAccountPasswordTargets(visible, {}, [])).toBeUndefined();
+    const confirms: WireRow[] = [
+      ...kenariSignup,
+      ["@e:confirm", "t", "Confirm password|f=password|ac=new-password|s=r|fm=1"],
+    ];
+    expect(newAccountPasswordTargets(confirms, {}, [])?.confirms).toEqual([]);
+  });
+
+  it("invents for a non-English sign-up form the page declares new-password", () => {
+    const targets = newAccountPasswordTargets(kenariSignup, {}, ["@e:f0d8"], () => ["buat akun"]);
+    expect(targets?.password[0]).toBe("@e:f0d9");
+    expect(targets?.confirms).toEqual([]);
+    expect(targets?.identity?.[0]).toBe("@e:f0d8");
+  });
+
+  it("leaves a non-English sign-in form alone", () => {
+    // Kenari, 1.1.54 trace L2: the same page's sign-in tab.
+    const signin: WireRow[] = [
+      ["@e:f0d4", "b", "Masuk|a=submit|fm=1"],
+      ["@e:f0d1", "b", "Daftar gratis"],
+      ["@e:f0d2", "t", "Email|f=email|s=r|n=ada@fixture.test|ph=kamu@contoh.com|fm=1"],
+      [
+        "@e:f0d3",
+        "t",
+        "Sandi|f=password|it=password|ac=current-password|s=r|ph=Minimal 8 karakter|fm=1",
+      ],
+      ["@e:f0d5", "b", "Lupa sandi?"],
+    ];
+    expect(newAccountPasswordTargets(signin, {}, [], () => ["masuk"])).toBeUndefined();
+  });
+
+  it("does not infer signup from two unannotated Indonesian password controls", () => {
+    const rows: WireRow[] = [
+      ["@e:email", "t", "Surel|f=email|s=r|n=ada@fixture.test|fm=1"],
+      ["@e:pw", "t", "Kata sandi|f=password|it=password|s=r|fm=1"],
+      ["@e:pw2", "t", "Ulangi kata sandi|f=password|it=password|s=r|fm=1"],
+      ["@e:go", "b", "Lanjut|a=submit|fm=1"],
+    ];
+    expect(newAccountPasswordTargets(rows, {}, [])).toBeUndefined();
+  });
+
+  // Added controls belong to the same frame as the captured Kenari form.
+  const pairedSignup: WireRow[] = [
+    ...kenariSignup,
+    ["@e:f0d15", "t", "Ulangi sandi|f=password|it=password|ac=new-password|s=r|fm=1"],
+  ];
+
+  it("assigns primary and confirmation roles before filtering filled controls", () => {
+    const targets = newAccountPasswordTargets(pairedSignup, {}, []);
+    expect(targets?.password[0]).toBe("@e:f0d9");
+    expect(targets?.confirms.map((row) => row[0])).toEqual(["@e:f0d15"]);
+    expect(targets?.reuseOnly).toBe(false);
+    for (const populated of [true, false]) {
+      const rows: WireRow[] = pairedSignup.map((row) =>
+        row[0] === "@e:f0d9" && populated ? [row[0], row[1], row[2]!.replace("s=r", "s=rp")] : row,
+      );
+      const filled = populated ? [] : ["@e:f0d9"];
+      expect(newAccountPasswordTargets(rows, {}, filled)).toBeUndefined();
+      const confirmation = newAccountPasswordTargets(
+        rows,
+        {},
+        filled,
+        () => [],
+        () => true,
+      );
+      expect(confirmation?.password[0]).toBe("@e:f0d15");
+      expect(confirmation?.confirms).toEqual([]);
+      expect(confirmation?.reuseOnly).toBe(true);
+    }
+  });
+
+  it.each([false, true])("rejects an Indonesian inbox reset form with reuse=%s", (reuse) => {
+    const reset: WireRow[] = kenariSignup.map((row) =>
+      row[0] === "@e:f0d13" ? [row[0], row[1], "Atur ulang sandi|a=submit|fm=1"] : row,
+    );
+    expect(
+      newAccountPasswordTargets(
+        reset,
+        {},
+        [],
+        () => [],
+        () => reuse,
+        true,
+      ),
+    ).toBeUndefined();
+  });
+
+  it.each(["current", "third"])("excludes a %s password on Indonesian forms", (kind) => {
+    const rows: WireRow[] =
+      kind === "current"
+        ? [
+            ...pairedSignup,
+            ["@e:f0d16", "t", "Sandi lama|f=password|it=password|ac=current-password|s=rp|fm=1"],
+          ]
+        : [...pairedSignup, ["@e:f0d16", "t", "Sandi lama|f=password|it=password|s=rp|fm=1"]];
+    expect(newAccountPasswordTargets(rows, {}, [])).toBeUndefined();
+    expect(
+      newAccountPasswordTargets(
+        rows,
+        {},
+        [],
+        () => ["Create account"],
+        () => true,
+      ),
+    ).toBeUndefined();
+  });
+
+  it.each([
+    ["same form", "@e:f0d16", 1, false],
+    ["another form", "@e:f0d16", 2, true],
+    ["another frame", "@e:f1d16", 1, true],
+  ] as const)("scopes revealed current-password exclusion to %s", (_scope, ref, form, eligible) => {
+    const rows: WireRow[] = [
+      ...pairedSignup,
+      [ref, "t", `Sandi lama|ac=current-password|s=p|n=existing-secret|fm=${form}`],
+    ];
+    for (const reuse of [false, true]) {
+      const targets = newAccountPasswordTargets(
+        rows,
+        {},
+        reuse ? ["@e:f0d9"] : [],
+        () => ["Create account"],
+        () => reuse,
+      );
+      if (eligible) {
+        expect(targets?.password[0]).toBe(reuse ? "@e:f0d15" : "@e:f0d9");
+      } else {
+        expect(targets).toBeUndefined();
+      }
+    }
+  });
+
+  it("excludes current-password even on a single-field signup-labeled form", () => {
+    const rows: WireRow[] = kenariSignup.map((row) =>
+      row[0] === "@e:f0d9"
+        ? [row[0], row[1], row[2]!.replace("new-password", "current-password")]
+        : row,
+    );
+    expect(newAccountPasswordTargets(rows, {}, [], () => ["Create account"])).toBeUndefined();
   });
 
   it("excludes populated primary and confirmation controls", () => {
@@ -288,27 +500,40 @@ describe("newAccountPasswordTargets", () => {
       row[0] === "@e:pw2" ? [row[0], row[1], row[2]!.replace("s=r", "s=rp")] : row,
     );
     expect(newAccountPasswordTargets(confirm, {}, [])?.confirms).toEqual([]);
-    expect(newAccountPasswordTargets(confirm, {}, ["@e:pw"], () => [], () => true)).toBeUndefined();
+    expect(
+      newAccountPasswordTargets(
+        confirm,
+        {},
+        ["@e:pw"],
+        () => [],
+        () => true,
+      ),
+    ).toBeUndefined();
   });
 
-  it.each(["|fm=1", ""])("keeps signup selection inside its frame with form metadata %s", (form) => {
-    const rows: WireRow[] = [
-      ["@e:f0d1", "t", `Confirm password|f=password|s=r${form}`],
-      ["@e:f0d2", "t", `Email|f=email|n=merchant@fixture.test${form}`],
-      ["@e:f0d3", "b", `Sign in|a=submit${form}`],
-      ["@e:f1d1", "t", `Email|f=email|n=provider@fixture.test${form}`],
-      ["@e:f1d2", "t", `Password|f=password|s=r${form}`],
-      ["@e:f1d3", "t", `Confirm password|f=password|s=r${form}`],
-      ["@e:f1d4", "b", `Create account|a=submit${form}`],
-    ];
-    const headings = (row: WireRow) => row[0].startsWith("@e:f1") ? ["Create account"] : ["Sign in"];
-    const targets = newAccountPasswordTargets(rows, {}, [], headings);
-    expect(targets?.identity?.[0]).toBe("@e:f1d1");
-    expect(targets?.confirms.map((row) => row[0])).toEqual(["@e:f1d3"]);
-    const continued = newAccountPasswordTargets(rows, {}, ["@e:f1d2"], headings,
-      (row) => row[0].startsWith("@e:f1"));
-    expect(continued?.password[0]).toBe("@e:f1d3");
-  });
+  it.each(["|fm=1", ""])(
+    "keeps signup selection inside its frame with form metadata %s",
+    (form) => {
+      const rows: WireRow[] = [
+        ["@e:f0d1", "t", `Confirm password|f=password|it=password|s=r${form}`],
+        ["@e:f0d2", "t", `Email|f=email|n=merchant@fixture.test${form}`],
+        ["@e:f0d3", "b", `Sign in|a=submit${form}`],
+        ["@e:f1d1", "t", `Email|f=email|n=provider@fixture.test${form}`],
+        ["@e:f1d2", "t", `Password|f=password|it=password|s=r${form}`],
+        ["@e:f1d3", "t", `Confirm password|f=password|it=password|s=r${form}`],
+        ["@e:f1d4", "b", `Create account|a=submit${form}`],
+      ];
+      const headings = (row: WireRow) =>
+        row[0].startsWith("@e:f1") ? ["Create account"] : ["Sign in"];
+      const targets = newAccountPasswordTargets(rows, {}, [], headings);
+      expect(targets?.identity?.[0]).toBe("@e:f1d1");
+      expect(targets?.confirms.map((row) => row[0])).toEqual(["@e:f1d3"]);
+      const continued = newAccountPasswordTargets(rows, {}, ["@e:f1d2"], headings, (row) =>
+        row[0].startsWith("@e:f1"),
+      );
+      expect(continued?.password[0]).toBe("@e:f1d3");
+    },
+  );
 
   it.each([
     ["Sign in", "earlier@fixture.test"],
@@ -318,42 +543,53 @@ describe("newAccountPasswordTargets", () => {
   ])("skips an earlier ineligible %s form", (submit, login) => {
     const earlier: WireRow[] = [
       ["@e:f0d1", "t", `Email|f=email|n=${login}|fm=1`],
-      ["@e:f0d2", "t", "Password|f=password|s=r|fm=1"],
+      ["@e:f0d2", "t", "Password|f=password|it=password|s=r|fm=1"],
       ["@e:f0d3", "b", `${submit}|a=submit|fm=1`],
     ];
     const later: WireRow[] = [
       ["@e:f0d4", "t", "Email|f=email|n=later@fixture.test|fm=2"],
-      ["@e:f0d5", "t", "Password|f=password|s=r|fm=2"],
-      ["@e:f0d6", "t", "Confirm password|f=password|s=r|fm=2"],
+      ["@e:f0d5", "t", "Password|f=password|it=password|s=r|fm=2"],
+      ["@e:f0d6", "t", "Confirm password|f=password|it=password|s=r|fm=2"],
       ["@e:f0d7", "b", "Create account|a=submit|fm=2"],
     ];
     const rows = [...earlier, ...later];
     expect(newAccountPasswordTargets(rows, {}, [])?.password[0]).toBe("@e:f0d5");
-    expect(newAccountPasswordTargets(rows, {}, ["@e:f0d5"], () => [],
-      (row) => row[0] === "@e:f0d6")?.password[0]).toBe("@e:f0d6");
+    expect(
+      newAccountPasswordTargets(
+        rows,
+        {},
+        ["@e:f0d5"],
+        () => [],
+        (row) => row[0] === "@e:f0d6",
+      )?.password[0],
+    ).toBe("@e:f0d6");
   });
 
   it("skips an ineligible confirmation before an eligible saved-password confirmation", () => {
     const rows: WireRow[] = [
-      ["@e:f0d1", "t", "Confirm password|f=password|s=r|fm=1"],
+      ["@e:f0d1", "t", "Confirm password|f=password|it=password|s=r|fm=1"],
       ["@e:f0d2", "b", "Reset password|a=submit|fm=1"],
-      ["@e:f1d1", "t", "Confirm password|f=password|s=r|fm=1"],
+      ["@e:f1d1", "t", "Confirm password|f=password|it=password|s=r|fm=1"],
       ["@e:f1d2", "b", "Continue|a=submit|fm=1"],
     ];
-    const targets = newAccountPasswordTargets(rows, { email: "ada@fixture.test" }, [], () => [], () => true);
+    const targets = newAccountPasswordTargets(
+      rows,
+      { email: "ada@fixture.test" },
+      [],
+      () => [],
+      () => true,
+    );
     expect(targets?.password[0]).toBe("@e:f1d1");
   });
 
   it("never fills a change-password form", () => {
     const rows: WireRow[] = [
-      ["@e:old", "t", "Current password|f=password|s=r|fm=1"],
-      ["@e:new", "t", "New password|f=password|s=r|fm=1"],
-      ["@e:again", "t", "Confirm new password|f=password|s=r|fm=1"],
+      ["@e:old", "t", "Current password|f=password|it=password|s=r|fm=1"],
+      ["@e:new", "t", "New password|f=password|it=password|s=r|fm=1"],
+      ["@e:again", "t", "Confirm new password|f=password|it=password|s=r|fm=1"],
       ["@e:save", "b", "Save|a=submit|fm=1"],
     ];
-    expect(
-      newAccountPasswordTargets(rows, {}, []),
-    ).toBeUndefined();
+    expect(newAccountPasswordTargets(rows, {}, [])).toBeUndefined();
   });
 });
 
@@ -364,27 +600,55 @@ describe("storeInventedLogin", () => {
     controller.abort(reason);
     const storeCredential = vi.fn(async () => ({ reference: "vault://test" }));
     const api = { storeCredential } as unknown as ApiClient;
-    await expect(withOperatorRequestContext(controller.signal, () => storeInventedLogin(api, {
-      sessionId: "test", url: "https://example.test/signup", login: "ada@example.test", password: "new-password",
-    }))).rejects.toBe(reason);
+    await expect(
+      withOperatorRequestContext(controller.signal, () =>
+        storeInventedLogin(api, {
+          sessionId: "test",
+          url: "https://example.test/signup",
+          login: "ada@example.test",
+          password: "new-password",
+        }),
+      ),
+    ).rejects.toBe(reason);
     expect(storeCredential).not.toHaveBeenCalled();
   });
 
   it("records mutation dispatch before posting an invented login", async () => {
     const events: string[] = [];
-    const api = { storeCredential: async () => { events.push("post"); } } as unknown as ApiClient;
-    await withOperatorRequestContext(new AbortController().signal, () => storeInventedLogin(api, {
-      sessionId: "test", url: "https://example.test/signup", login: "ada@example.test", password: "new-password",
-    }), async (phase) => { events.push(phase); });
+    const api = {
+      storeCredential: async () => {
+        events.push("post");
+      },
+    } as unknown as ApiClient;
+    await withOperatorRequestContext(
+      new AbortController().signal,
+      () =>
+        storeInventedLogin(api, {
+          sessionId: "test",
+          url: "https://example.test/signup",
+          login: "ada@example.test",
+          password: "new-password",
+        }),
+      async (phase) => {
+        events.push(phase);
+      },
+    );
     expect(events).toEqual(["dispatch_attempted", "post"]);
   });
 
   it("uses independent create-only writes for concurrent attempts", async () => {
     const storeCredential = vi.fn(async () => ({ reference: "vault://test" }));
     const api = { storeCredential } as unknown as ApiClient;
-    const login = { sessionId: "test", url: "https://example.test/signup", login: "ada@example.test", password: "new-password" };
+    const login = {
+      sessionId: "test",
+      url: "https://example.test/signup",
+      login: "ada@example.test",
+      password: "new-password",
+    };
     await Promise.all([storeInventedLogin(api, login), storeInventedLogin(api, login)]);
-    const writes = storeCredential.mock.calls as unknown as Array<[{ label: string; write_id: string }]>;
+    const writes = storeCredential.mock.calls as unknown as Array<
+      [{ label: string; write_id: string }]
+    >;
     expect(writes).toHaveLength(2);
     expect(writes[0]![0].write_id).toMatch(/^[a-f0-9-]{36}$/);
     expect(writes[1]![0].write_id).not.toBe(writes[0]![0].write_id);
