@@ -440,10 +440,10 @@ function oauthActionDeadlineError(
   return new OAuthAwaitingHumanError(
     phase === "lease"
       ? "OAuth has not been attempted yet: it was still waiting behind a prior OAuth call " +
-        `on this browser after ${seconds} seconds. Retry oauth_login.`
+          `on this browser after ${seconds} seconds. Retry oauth_login.`
       : `OAuth action did not complete within ${seconds} seconds. ` +
-        "Call operate_observe to check whether the pending step has resolved, rather than " +
-        "treating this as a failure.",
+          "Call operate_observe to check whether the pending step has resolved, rather than " +
+          "treating this as a failure.",
     phase === "lease" ? "not_attempted" : "pending",
   );
 }
@@ -1706,7 +1706,8 @@ export async function advanceOAuthConsent(
             ),
           ).filter((el) => visible(el));
           const byHref = candidates.find((el) => {
-            const href = el instanceof HTMLAnchorElement ? el.href : el.getAttribute("href") ?? "";
+            const href =
+              el instanceof HTMLAnchorElement ? el.href : (el.getAttribute("href") ?? "");
             return /\/installations\/(?:new|permissions)\b/.test(href);
           });
           const target =

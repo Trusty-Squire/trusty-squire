@@ -4534,12 +4534,12 @@ export function decideAfterJev(input: {
     const actionKey =
       choice === "SCROLL" && (DRIVE_SCROLL_DIRECTIONS as readonly string[]).includes(targetChoice)
         ? `scroll:${targetChoice}`
-        : resolveActionChoice(targetChoice, [
+        : (resolveActionChoice(targetChoice, [
             ...sets.CLICK,
             ...sets.TYPE_TEXT,
             ...sets.SELECT,
             ...sets.SCROLL,
-          ])?.ref ?? targetChoice;
+          ])?.ref ?? targetChoice);
 
     if (
       input.boundFingerprint === input.fingerprint &&
@@ -6091,7 +6091,7 @@ async function driveLoop(input: {
     const controls = drivePasswordControls.get(session);
     const login =
       targets.identity === undefined
-        ? targets.login ?? session.signupIdentifier ?? getSessionUserEmail(sessionId)
+        ? (targets.login ?? session.signupIdentifier ?? getSessionUserEmail(sessionId))
         : controls?.get(targets.identity[0])?.value;
     if (login == null || login.trim().length === 0) return false;
     const requirements = [targets.password, ...targets.confirms].map(passwordRequirementsFor);
@@ -7523,7 +7523,7 @@ async function driveLoop(input: {
           ? session.browser.page === null
             ? ""
             : await documentEpochOf(session.browser.page)
-          : drive.lastDocumentEpoch ?? "";
+          : (drive.lastDocumentEpoch ?? "");
       if (
         beforeEpoch.length > 0 &&
         completionEpoch.length > 0 &&

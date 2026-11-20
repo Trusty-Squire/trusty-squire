@@ -1355,7 +1355,7 @@ async function executeAct(
         timing?.enter("browser_action");
         actedCombobox = actsThroughOverlay(el, driveIdentity?.picker === true);
         const ariaLabelAttribute =
-          driveIdentity === undefined ? el.ariaLabel ?? "" : driveIdentity.ariaLabel ?? "";
+          driveIdentity === undefined ? (el.ariaLabel ?? "") : (driveIdentity.ariaLabel ?? "");
         // Preserve frame identity (origin + path) for the frame-scoped fill.
         if (action.kind === "click" || action.kind === "js_click") {
           const clickPage = compactV2ActionPage ?? browser.page;

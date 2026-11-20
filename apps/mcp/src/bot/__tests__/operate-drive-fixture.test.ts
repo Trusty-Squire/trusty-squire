@@ -519,11 +519,11 @@ function jevFromQuestions(
       name === "operation"
         ? pickOp
         : name === "TYPE_TEXT_target"
-          ? typeKeys[0] ?? keys[0]!
+          ? (typeKeys[0] ?? keys[0]!)
           : name === "SELECT_target"
-            ? selectKeys[0] ?? keys[0]!
+            ? (selectKeys[0] ?? keys[0]!)
             : name === "CLICK_target"
-              ? clickKeys[0] ?? keys[0]!
+              ? (clickKeys[0] ?? keys[0]!)
               : name === "email_code_field"
                 ? DRIVE_FIXED_NONE
                 : keys[0]!;
