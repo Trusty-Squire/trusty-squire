@@ -3,7 +3,12 @@ import { chromium, type Browser } from "playwright";
 import type { ApiClient } from "../../api-client.js";
 import { BrowserController } from "../browser.js";
 import { OAUTH_PROVIDERS } from "../oauth-providers.js";
-import { peakedProbabilities, runOperateDrive, type DriveDependencies } from "../operate-drive.js";
+import {
+  DRIVE_EMAIL_CODE_QUESTION,
+  peakedProbabilities,
+  runOperateDrive,
+  type DriveDependencies,
+} from "../operate-drive.js";
 import {
   act,
   awaitVerification,
@@ -22,13 +27,15 @@ afterAll(async () => {
 
 describe("drive OAuth dispatch beside a required email form", () => {
   it.each([
-    ["separate form", false],
-    ["separate form", true],
-    ["outside a form", false],
-    ["outside a form", true],
+    ["separate form", false, "CLICK"],
+    ["separate form", true, "CLICK"],
+    ["separate form", true, "TYPE_TEXT"],
+    ["outside a form", false, "CLICK"],
+    ["outside a form", true, "CLICK"],
+    ["outside a form", true, "TYPE_TEXT"],
   ] as const)(
-    "votes for an identity control %s with supplied email %s",
-    async (placement, suppliedEmail) => {
+    "honors a vote beside a control %s with supplied email %s and operation %s",
+    async (placement, suppliedEmail, selectedOperation) => {
       const provider = Object.keys(OAUTH_PROVIDERS)[0]!;
       const label = `Sign up with ${provider}`;
       const control = `<button type="button">${label}</button>`;
@@ -46,35 +53,48 @@ describe("drive OAuth dispatch beside a required email form", () => {
         format: "compact",
         initialObservation: "drive",
       });
-      const dispatches: string[] = [];
+      const dispatches: Array<{ kind: string; text?: string }> = [];
       let votes = 0;
       try {
         const deps: DriveDependencies = {
           askJev: async (_api, _state, questions) => {
             votes += 1;
             const operation = questions.operation;
-            const click = questions.CLICK_target;
-            if (operation?.type !== "choice" || click?.type !== "choice") {
-              throw new Error("OAuth action was not offered");
+            const targetQuestion = questions[`${selectedOperation}_target`];
+            const emailCode = questions[DRIVE_EMAIL_CODE_QUESTION];
+            if (
+              operation?.type !== "choice" ||
+              targetQuestion?.type !== "choice" ||
+              emailCode?.type !== "choice"
+            ) {
+              throw new Error("Vote questions were not offered");
             }
-            const target = Object.entries(click.criteria).find(([, description]) =>
-              description.includes(label),
+            const target = Object.entries(targetQuestion.criteria).find(([, description]) =>
+              description.includes(selectedOperation === "CLICK" ? label : "Email address"),
             )?.[0];
-            if (target === undefined) throw new Error("OAuth target was not offered");
+            if (target === undefined) throw new Error("Selected target was not offered");
             return {
               attempts: 1,
               elapsedMs: 1,
               result: {
                 answers: {
                   operation: {
-                    choice: "CLICK",
+                    choice: selectedOperation,
                     confidence: 0.95,
-                    probabilities: peakedProbabilities(Object.keys(operation.criteria), "CLICK"),
+                    probabilities: peakedProbabilities(
+                      Object.keys(operation.criteria),
+                      selectedOperation,
+                    ),
                   },
-                  CLICK_target: {
+                  [DRIVE_EMAIL_CODE_QUESTION]: {
+                    choice: "none",
+                    confidence: 0.95,
+                    probabilities: peakedProbabilities(Object.keys(emailCode.criteria), "none"),
+                  },
+                  [`${selectedOperation}_target`]: {
                     choice: target,
                     confidence: 0.95,
-                    probabilities: peakedProbabilities(Object.keys(click.criteria), target),
+                    probabilities: peakedProbabilities(Object.keys(targetQuestion.criteria), target),
                   },
                 },
               },
@@ -88,7 +108,7 @@ describe("drive OAuth dispatch beside a required email form", () => {
           awaitVerification,
           injectCard: async () => ({ status: "unused" }),
           driveAct: async (_sessionId, action) => {
-            dispatches.push(action.kind);
+            dispatches.push(action);
             return { kind: "ok", combobox: false };
           },
         };
@@ -104,7 +124,12 @@ describe("drive OAuth dispatch beside a required email form", () => {
           deps,
         );
         expect(votes).toBe(1);
-        expect(dispatches).toEqual(["oauth_login"]);
+        expect(dispatches).toHaveLength(1);
+        expect(dispatches[0]).toMatchObject(
+          selectedOperation === "CLICK"
+            ? { kind: "oauth_login" }
+            : { kind: "type", text: "new-user@example.test" },
+        );
         expect(await page.locator('input[type="email"]').inputValue()).toBe("");
         expect(await page.locator('input[type="password"]').inputValue()).toBe("");
       } finally {

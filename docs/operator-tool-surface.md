@@ -215,11 +215,10 @@ steps re-deciding and finishes on the step or call budget.
 
 It returns a handoff (never a bare page): status, the current compact
 observation with the same stable refs, trajectory, and done/remaining.
-`needs_value` names the missing field's label; a country control already
-showing a value, and expiry or cardholder-name controls on a drive carrying
-`card_ref`, do not raise it. Empty required fields do not stop the drive before
-the step vote. `stuck` means no listed element advances the
-goal. Resume the same session with `answer` (a
+`needs_value` names the selected field's label when its value is unavailable.
+Empty required fields and a vote that the page is not asking for an emailed
+code do not override the selected operation. `stuck` means no listed element
+advances the goal. Resume the same session with `answer` (a
 readable action slug from the handoff options, `done`, or `stuck`) and/or
 added `facts`. Use the single-step primitives only for a handoff you are
 answering or a task that is not a goal.

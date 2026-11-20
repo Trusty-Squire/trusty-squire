@@ -4,7 +4,6 @@ import {
   decideAfterJev,
   driveTargetSets,
   peakedProbabilities,
-  requiredFillableMissingFact,
   type WireRow,
 } from "../operate-drive.js";
 
@@ -42,7 +41,6 @@ describe("goal values and target scope", () => {
     if (fieldQuestion?.type !== "choice") return;
     expect(fieldQuestion.criteria.desired_title).toContain("Squire Corpus Prod");
     expect(questions.form_value_2?.type).toBe("choice");
-    expect(requiredFillableMissingFact(rows, {}, [], pageUrl, goal)?.ref).toBe("@e:1");
     const target = sets.TYPE_TEXT.find((candidate) => candidate.ref === "@e:1");
     expect(target).toBeDefined();
     const decision = decideAfterJev({

@@ -3396,45 +3396,6 @@ export function requiredFactComboboxAction(
   return undefined;
 }
 
-export function requiredFillableMissingFact(
-  rows: readonly WireRow[],
-  facts: Record<string, string>,
-  filledRefs: readonly string[] = [],
-  _pageUrl: string = "",
-  goal: string = "",
-): DriveCandidate | undefined {
-  const filled = new Set(filledRefs);
-  for (const row of rows) {
-    if (!isFillableRow(row) || isDisabledRow(row) || isActedRow(row) || filled.has(row[0]))
-      continue;
-    if (isPaymentRow(row) || isCvvRow(row) || isOtpRow(row) || allowsGoalValueAssignment(row))
-      continue;
-    if (
-      isFormValueField(row, rows, goal) &&
-      Object.keys(formValueCriteria(goal, facts)).some((key) => key !== DRIVE_FIXED_NONE)
-    )
-      continue;
-    if (facts.card_ref !== undefined && (isExpiryRow(row) || isCardholderNameRow(row))) continue;
-    if (!isRequiredRow(row)) continue;
-    if (matchingFactKeys(facts, row).length > 0) continue;
-    // A country picker already sitting on the merchant's geo default answers
-    // itself, so handing the goal back for a country would stall a checkout
-    // that is fine. This is the country control alone: any other required row
-    // whose only value is a placeholder sentinel is still a missing value, and
-    // reporting it is what keeps the card gate shut until the host answers.
-    if (isCountryRow(row) && (rowCurrentValue(row) ?? "").length > 0) continue;
-    const role = ROLE_LETTERS[row[1]] ?? row[1];
-    return {
-      ref: row[0],
-      role,
-      slug: slugifyCriteriaKey(`${row[2] ?? readableLabel(row)}_${role}`),
-      description: actionDescription(row, rows),
-      row,
-    };
-  }
-  return undefined;
-}
-
 export function compactRowsText(
   url: string,
   stage: string | undefined,
@@ -8286,25 +8247,6 @@ async function driveLoop(input: {
       jevMs += retried.elapsedMs;
       answers = retried.result.answers;
       decision = decide(answers);
-    }
-    const missing = requiredFillableMissingFact(
-      rows,
-      drive.facts,
-      drive.filledRefs,
-      pageUrl,
-      drive.goal,
-    );
-    if (missing !== undefined && answers[DRIVE_EMAIL_CODE_QUESTION]?.choice === DRIVE_FIXED_NONE) {
-      const field = fieldLabelForRow(missing.row);
-      return finish("needs_value", {
-        field,
-        question: {
-          question: `Missing value for ${field}`,
-          options: Object.fromEntries(
-            Object.keys(drive.facts).map((key) => [key, `the provided ${key} value`]),
-          ),
-        },
-      });
     }
     appendDriveTrace(session, {
       at: "step",
