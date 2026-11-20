@@ -117,8 +117,7 @@ import {
 // act issued while a drive session is open keeps tool behaviour.
 export type ActExecutorOptions = {
   drive?: boolean;
-  /** The caller's remaining time budget; an OAuth wait never runs past it. */
-  budgetMs?: number;
+  oauthDeadline?: OAuthActionDeadline;
 };
 
 const DRIVE_DISPATCH: ActExecutorOptions = { drive: true };
@@ -232,21 +231,24 @@ async function withOAuthActionBoundary(
   provider: OAuthProviderId | undefined,
   run: (deadline: OAuthActionDeadline) => Promise<InternalActResult>,
   outputFormat: "compact" | "full",
-  budgetMs?: number,
+  deadline = oauthActionDeadline(provider),
 ): Promise<InternalActResult> {
   if (provider === "google") {
-    const gate = await googleSessionGateForSession(session.id);
+    const gate = await withinOAuthActionDeadline(googleSessionGateForSession(session.id), deadline);
     if (!gate.ok) {
-      const observation = await observeSession(
-        session,
-        outputFormat,
-        undefined,
-        undefined,
-        false,
-        outputFormat,
-        false,
-        true,
-        true,
+      const observation = await withinOAuthActionDeadline(
+        observeSession(
+          session,
+          outputFormat,
+          undefined,
+          undefined,
+          false,
+          outputFormat,
+          false,
+          true,
+          true,
+        ),
+        deadline,
       );
       return {
         observation: { ...observation, needs_user: gate.needs_user },
@@ -254,7 +256,6 @@ async function withOAuthActionBoundary(
       };
     }
   }
-  const deadline = oauthActionDeadline(provider, budgetMs);
   const releaseCooldownMs = oauthLoginLeaseCooldownMs();
   // A deadline expiry must NOT terminalize the session: the in-flight OAuth
   // operation is budget-bounded (loginWithOAuth races its own completion
@@ -587,7 +588,7 @@ export async function actInternally(
         : await run();
     };
     return session !== undefined && (action.kind === "oauth_login" || action.kind === "oauth_click")
-      ? await withOAuthActionBoundary(session, oauthProvider, execute, "compact", options?.budgetMs)
+      ? await withOAuthActionBoundary(session, oauthProvider, execute, "compact", options?.oauthDeadline)
       : await execute(undefined);
   } catch (error) {
     if (session !== undefined && (action.kind === "oauth_login" || action.kind === "oauth_click")) {
@@ -1691,28 +1692,28 @@ export async function dispatchDriveAct(
   ) {
     return { kind: "unsupported" };
   }
-  // An OAuth handoff is a drive action like any other. The drive guard proves
-  // the control is still the one it observed and refuses an occluded target
-  // BEFORE the OAuth deadline is spent, then the shared executor dispatches it
-  // by that identity — never by the tools' index, which a drive session never
-  // populated. A target with no drive identity record is the tools' to resolve.
-  if (action.kind === "oauth_login") {
-    const guard = await guardDriveOauthTarget(sessionId, action.target);
-    if (guard.kind !== "ok") return guard;
-  } else if (
-    action.kind !== "scroll" &&
-    sessionForCall(sessionId)?.drive?.identities?.get(action.target) === undefined
-  ) {
-    return { kind: "unsupported" };
-  }
+  const deadline =
+    action.kind === "oauth_login" ? oauthActionDeadline(action.provider, budgetMs) : undefined;
   try {
+    if (action.kind === "oauth_login") {
+      const guard = await withinOAuthActionDeadline(
+        guardDriveOauthTarget(sessionId, action.target),
+        deadline!,
+      );
+      if (guard.kind !== "ok") return guard;
+    } else if (
+      action.kind !== "scroll" &&
+      sessionForCall(sessionId)?.drive?.identities?.get(action.target) === undefined
+    ) {
+      return { kind: "unsupported" };
+    }
     const result = await actInternally(
       sessionId,
       action,
       "none",
       undefined,
       undefined,
-      budgetMs === undefined ? DRIVE_DISPATCH : { ...DRIVE_DISPATCH, budgetMs },
+      deadline === undefined ? DRIVE_DISPATCH : { ...DRIVE_DISPATCH, oauthDeadline: deadline },
     );
     // An OAuth act can end on a wall (no live provider session, a 2FA hand-off)
     // WITHOUT dispatching: the executor returns that as an observation. The
@@ -1727,6 +1728,14 @@ export async function dispatchDriveAct(
         : { needsUser: result.observation.needs_user }),
     };
   } catch (error) {
+    const session = sessionForCall(sessionId);
+    if (error instanceof OAuthAwaitingHumanError && session !== undefined) {
+      return {
+        kind: "ok",
+        combobox: false,
+        oauth: oauthAwaitingHumanObservation(session, error).oauth,
+      };
+    }
     if (error instanceof CompactV2StaleRefError) return { kind: "stale", reason: "stale_ref" };
     if (error instanceof TargetStaleError) return { kind: "stale", reason: "stale" };
     const message = error instanceof Error ? error.message : String(error);

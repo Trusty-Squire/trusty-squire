@@ -2577,6 +2577,7 @@ function isPopulatedPasswordRow(row: WireRow): boolean {
 export interface NewAccountPasswordTargets {
   password: WireRow;
   confirms: WireRow[];
+  reuseOnly: boolean;
   /** The account identifier already on the form, when the form has one. */
   login?: string;
   identity?: WireRow;
@@ -2595,7 +2596,9 @@ export function newAccountPasswordTargets(
   filledRefs: readonly string[],
   headingsFor: (row: WireRow) => readonly string[] = () => [],
   reuseInventedPasswordFor: (row: WireRow) => boolean = () => false,
+  openedInboxLink = false,
 ): NewAccountPasswordTargets | undefined {
+  if (openedInboxLink) return undefined;
   const filled = new Set(filledRefs);
   const open = (row: WireRow): boolean =>
     isFillableRow(row) &&
@@ -2619,13 +2622,22 @@ export function newAccountPasswordTargets(
         frameKey(row) === frameKey(password) && (formId === undefined || rowFormId(row) === formId),
     );
     const reuseInventedPassword = reuseInventedPasswordFor(password);
-    // Structure, not wording: with no sign-in secret on the form, the second
-    // of exactly two password fields repeats the new one.
     const passwords = scope.filter((row) => isFillableRow(row) && isPasswordRow(row));
-    const signInSecret = passwords.some((row) => passwordAutocomplete(row) === "current-password");
-    const pairedNew = !signInSecret && passwords.length === 2;
+    if (
+      passwords.length >= 3 ||
+      passwords.some((row) => passwordAutocomplete(row) === "current-password")
+    ) {
+      continue;
+    }
+    const pairedNew =
+      passwords.length === 2 &&
+      passwords.every((row) => passwordAutocomplete(row) === "new-password");
+    const isConfirmation = (row: WireRow): boolean =>
+      isConfirmPasswordRow(row) || (pairedNew && row === passwords[1]);
+    const reuseOnly = isConfirmation(password);
+    if (reuseOnly && !reuseInventedPassword) continue;
     const confirms = scope.filter(
-      (row) => row !== password && open(row) && (isConfirmPasswordRow(row) || pairedNew),
+      (row) => row !== password && open(row) && isConfirmation(row),
     );
     if (!isRequiredRow(password) && confirms.length === 0 && !reuseInventedPassword) continue;
     const buttons = scope.filter((row) => row[1] === "b" || row[1] === "button");
@@ -2646,25 +2658,23 @@ export function newAccountPasswordTargets(
         !isPasswordRow(row) &&
         ["email", "username"].includes(rowField(row) ?? ""),
     );
-    // A reset form also repeats a new password, but it names no account.
     const newAccountShape =
-      !signInSecret &&
-      identity !== undefined &&
-      (confirms.length > 0 || passwordAutocomplete(password) === "new-password");
+      identity !== undefined && passwordAutocomplete(password) === "new-password";
     const signup =
-      (reuseInventedPassword && isConfirmPasswordRow(password)) ||
+      (reuseInventedPassword && reuseOnly) ||
       newAccountShape ||
       evidence.some((label) => CREATE_ACCOUNT_LABEL.test(label));
     if (!signup) continue;
     if (identity !== undefined) {
       const login = rowCurrentValue(identity);
       if (login === undefined || login.trim().length === 0) continue;
-      return { password, confirms, identity };
+      return { password, confirms, identity, reuseOnly };
     }
     const supplied = facts.email ?? facts.username;
     return {
       password,
       confirms,
+      reuseOnly,
       ...(supplied === undefined || supplied.trim().length === 0 ? {} : { login: supplied.trim() }),
     };
   }
@@ -6076,7 +6086,7 @@ async function driveLoop(input: {
       const password = session.secretSlots.get(DRIVE_PASSWORD_SLOT)!;
       return requirements.every((requirement) => passwordMeetsRequirements(password, requirement));
     }
-    if (isConfirmPasswordRow(targets.password)) return false;
+    if (targets.reuseOnly) return false;
     const password = inventPassword(requirements[0]!, ...requirements.slice(1));
     if (password === undefined) return false;
     const stored = await context
@@ -6910,6 +6920,7 @@ async function driveLoop(input: {
         drive.lastDispatchFailure = safe.dispatchFailure ?? null;
         drive.lastOauthBounceReason = null;
         observation = safe.observation;
+        if (safe.dispatchFailure === undefined) drive.history.push("open verification link");
       } else {
         const wall = verification.needs_user;
         return wall !== undefined && wall.wall === "google_session"
@@ -6927,7 +6938,7 @@ async function driveLoop(input: {
         snapshot_wall_ms: inboxSnap.snapshotWallMs,
       };
       drive.trajectory.push({
-        action: verification.code !== null ? "type_otp" : "goto_verify",
+        action: inboxNext === "type_code" ? "type_otp" : "goto_verify",
         target: decision.actionKey,
         confidence: decision.confidence,
         url: observation.url,
@@ -6935,9 +6946,7 @@ async function driveLoop(input: {
         ...(jevMs === undefined ? {} : { jev_ms: jevMs }),
         ...takeActProfile(drive),
       });
-      drive.history.push(
-        verification.code !== null ? "type verification code" : "open verification link",
-      );
+      if (inboxNext === "type_code") drive.history.push("type verification code");
       const nextFingerprint = driveProgressFingerprint(observation, rows, drive, session);
       return await noteProgress(fingerprint, nextFingerprint, decision.actionKey);
     }
@@ -7848,6 +7857,7 @@ async function driveLoop(input: {
                 drive.inventedLogin != null &&
                 drive.inventedLogin.host === signupLocationFor(row)?.host &&
                 session.secretSlots.has(DRIVE_PASSWORD_SLOT),
+              drive.history.includes("open verification link"),
             );
       const passwordAttemptKey =
         passwordTargets === undefined

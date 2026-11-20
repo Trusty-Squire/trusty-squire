@@ -364,19 +364,63 @@ describe("newAccountPasswordTargets", () => {
     expect(newAccountPasswordTargets(signin, {}, [], () => ["masuk"])).toBeUndefined();
   });
 
-  it("treats a second unlabeled password field as the confirm by structure", () => {
+  it("does not infer signup from two unannotated Indonesian password controls", () => {
     const rows: WireRow[] = [
       ["@e:email", "t", "Surel|f=email|s=r|n=ada@fixture.test|fm=1"],
       ["@e:pw", "t", "Kata sandi|f=password|s=r|fm=1"],
       ["@e:pw2", "t", "Ulangi kata sandi|f=password|s=r|fm=1"],
       ["@e:go", "b", "Lanjut|a=submit|fm=1"],
     ];
-    const targets = newAccountPasswordTargets(rows, {}, []);
-    expect(targets?.password[0]).toBe("@e:pw");
+    expect(newAccountPasswordTargets(rows, {}, [])).toBeUndefined();
+  });
+
+  const pairedSignup: WireRow[] = [
+    ...kenariSignup,
+    ["@e:pw2", "t", "Ulangi sandi|f=password|ac=new-password|s=r|fm=1"],
+  ];
+
+  it("assigns primary and confirmation roles before filtering filled controls", () => {
+    const targets = newAccountPasswordTargets(pairedSignup, {}, []);
+    expect(targets?.password[0]).toBe("@e:f0d9");
     expect(targets?.confirms.map((row) => row[0])).toEqual(["@e:pw2"]);
-    // Three password fields are a change form, not a password and its repeat.
-    const change: WireRow[] = [...rows, ["@e:pw3", "t", "Sandi lama|f=password|s=r|fm=1"]];
-    expect(newAccountPasswordTargets(change, {}, [])).toBeUndefined();
+    expect(targets?.reuseOnly).toBe(false);
+    for (const populated of [true, false]) {
+      const rows: WireRow[] = pairedSignup.map((row) =>
+        row[0] === "@e:f0d9" && populated
+          ? [row[0], row[1], row[2]!.replace("s=r", "s=rp")]
+          : row,
+      );
+      const filled = populated ? [] : ["@e:f0d9"];
+      expect(newAccountPasswordTargets(rows, {}, filled)).toBeUndefined();
+      const confirmation = newAccountPasswordTargets(rows, {}, filled, () => [], () => true);
+      expect(confirmation?.password[0]).toBe("@e:pw2");
+      expect(confirmation?.confirms).toEqual([]);
+      expect(confirmation?.reuseOnly).toBe(true);
+    }
+  });
+
+  it.each([false, true])("rejects an Indonesian inbox reset form with reuse=%s", (reuse) => {
+    const reset: WireRow[] = kenariSignup.map((row) =>
+      row[0] === "@e:f0d13" ? [row[0], row[1], "Atur ulang sandi|a=submit|fm=1"] : row,
+    );
+    expect(newAccountPasswordTargets(reset, {}, [], () => [], () => reuse, true)).toBeUndefined();
+  });
+
+  it.each(["current", "third"])("excludes a %s password on Indonesian forms", (kind) => {
+    const rows: WireRow[] = kind === "current"
+      ? [...pairedSignup, ["@e:old", "t", "Sandi lama|f=password|ac=current-password|s=rp|fm=1"]]
+      : [...pairedSignup, ["@e:old", "t", "Sandi lama|f=password|s=rp|fm=1"]];
+    expect(newAccountPasswordTargets(rows, {}, [])).toBeUndefined();
+    expect(newAccountPasswordTargets(rows, {}, [], () => ["Create account"], () => true)).toBeUndefined();
+  });
+
+  it("excludes current-password even on a single-field signup-labeled form", () => {
+    const rows: WireRow[] = kenariSignup.map((row) =>
+      row[0] === "@e:f0d9"
+        ? [row[0], row[1], row[2]!.replace("new-password", "current-password")]
+        : row,
+    );
+    expect(newAccountPasswordTargets(rows, {}, [], () => ["Create account"])).toBeUndefined();
   });
 
   it("excludes populated primary and confirmation controls", () => {

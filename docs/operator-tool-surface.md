@@ -93,9 +93,9 @@ password. Password controls are recognized by input type or password
 autocomplete, in any page language. Initial invention requires explicit Create
 account, Sign up, or Register evidence, or a new-account shape: an email or
 username field on the same form plus a password the page marks
-`autocomplete="new-password"` or exactly two password fields, with no
-`current-password` field. Sign-in, reset, and existing-password forms are
-excluded.
+`autocomplete="new-password"`. Forms with a `current-password` field or three
+password fields, and pages reached through an inbox link, are excluded.
+Sign-in and explicit reset forms are excluded.
 Populated password controls are preserved. Account identifiers and confirmation
 controls are scoped to the password's form and frame. The account identifier
 comes from the form's exact email/username value, or, on a password-only step,
