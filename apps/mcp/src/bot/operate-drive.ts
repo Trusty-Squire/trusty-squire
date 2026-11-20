@@ -2532,8 +2532,9 @@ export function isPasswordRow(row: WireRow): boolean {
 const CONFIRM_PASSWORD_KEY =
   /(?:^|_)(?:confirm|confirmation|repeat|re_?enter|re_?type|retype|verify|again)(?:_|$)/;
 const CREATE_ACCOUNT_LABEL =
-  /create\s+(?:an?\s+|my\s+|your\s+)?account|sign\s*up|register|get\s+started|\bjoin\b/i;
-const LOGIN_LABEL = /\blog\s*in\b|\bsign\s*in\b/i;
+  /create\s+(?:an?\s+|my\s+|your\s+)?account|sign[\s-]*up|register/i;
+const LOGIN_LABEL = /\blog[\s-]*in\b|\bsign[\s-]*in\b/i;
+const RESET_PASSWORD_LABEL = /\b(?:reset|forgot|recover|change|update)\s+(?:(?:your|my)\s+)?password\b|\bpassword\s+(?:reset|recovery|change)\b/i;
 
 const CURRENT_PASSWORD_KEY = /(?:^|_)(?:current|old|existing)(?:_|$)/;
 
@@ -2569,7 +2570,6 @@ export function newAccountPasswordTargets(
   rows: readonly WireRow[],
   facts: Record<string, string>,
   filledRefs: readonly string[],
-  pageUrl: string,
   headings: readonly string[] = [],
   reuseInventedPassword = false,
 ): NewAccountPasswordTargets | undefined {
@@ -2593,22 +2593,19 @@ export function newAccountPasswordTargets(
   if (!isRequiredRow(password) && confirms.length === 0 && !reuseInventedPassword) return undefined;
   const buttons = scope.filter((row) => row[1] === "b" || row[1] === "button");
   const submits = buttons.filter((row) => /(?:^|\|)a=submit(?:\||$)/.test(row[2] ?? ""));
-  const creates = (list: readonly WireRow[]): boolean =>
-    list.some((row) => CREATE_ACCOUNT_LABEL.test(readableLabel(row)));
-  const logsIn = (list: readonly WireRow[]): boolean =>
-    list.some(
-      (row) =>
-        LOGIN_LABEL.test(readableLabel(row)) && !CREATE_ACCOUNT_LABEL.test(readableLabel(row)),
-    );
   // A changed password is the user's existing secret plus a new one; the
   // drive cannot know the existing one, so that form is never filled here.
   if (scope.some((row) => isPasswordRow(row) && CURRENT_PASSWORD_KEY.test(passwordKey(row)))) {
     return undefined;
   }
   const pool = submits.length > 0 ? submits : buttons;
+  const evidence = [...pool.map(readableLabel), ...headings];
+  if (evidence.some((label) => LOGIN_LABEL.test(label) || RESET_PASSWORD_LABEL.test(label))) {
+    return undefined;
+  }
   const signup =
     (reuseInventedPassword && isConfirmPasswordRow(password)) ||
-    (creates(pool) && (!logsIn(pool) || inferPagePhase(pageUrl, headings) === "signup"));
+    evidence.some((label) => CREATE_ACCOUNT_LABEL.test(label));
   if (!signup) return undefined;
   const identity = scope.find(
     (row) =>
@@ -7854,7 +7851,6 @@ async function driveLoop(input: {
               rows,
               drive.facts,
               drive.filledRefs,
-              pageUrl,
               observation.semantic?.headings ?? [],
               drive.inventedLogin != null &&
                 drive.inventedLogin.host === new URL(pageUrl).hostname.toLowerCase() &&

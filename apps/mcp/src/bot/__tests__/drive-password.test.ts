@@ -86,6 +86,19 @@ describe("inventPassword", () => {
     expect(listed.replace(/[A-Za-z0-9]/g, "")).toMatch(/^[!#]+$/);
   });
 
+  it.each([undefined, "[A-Za-z0-9.?]{24}"])(
+    "preserves explicitly allowed punctuation with pattern %s",
+    (pattern) => {
+      const value = inventPassword(parsePasswordRequirements("Allowed special characters: .?", undefined, pattern))!;
+      expect(value.replace(/[A-Za-z0-9]/g, "")).toMatch(/^[.?]+$/);
+    },
+  );
+
+  it("does not substitute the default alphabet for an empty explicit list", () => {
+    const value = inventPassword(parsePasswordRequirements("Symbols: none"))!;
+    expect(value).toMatch(/^[A-Za-z0-9]+$/);
+  });
+
   it("satisfies the control's pattern", () => {
     const value = inventPassword(
       parsePasswordRequirements("", undefined, "[A-Za-z0-9!@#$%^&*=+_]{24}"),
@@ -140,7 +153,7 @@ describe("newAccountPasswordTargets", () => {
   ];
 
   it("names the new password, its confirm field, and the login on the form", () => {
-    const targets = newAccountPasswordTargets(signup, {}, [], "https://example.test/login");
+    const targets = newAccountPasswordTargets(signup, {}, []);
     expect(targets?.password[0]).toBe("@e:pw");
     expect(targets?.confirms.map((row) => row[0])).toEqual(["@e:pw2"]);
     expect(targets?.identity?.[0]).toBe("@e:email");
@@ -151,24 +164,24 @@ describe("newAccountPasswordTargets", () => {
     const rows: WireRow[] = signup.map((row) =>
       row[0] === "@e:email" ? ["@e:email", "t", "Email|f=email|s=r|fm=1"] : row,
     );
-    expect(newAccountPasswordTargets(rows, {}, [], "https://example.test/signup")).toBeUndefined();
+    expect(newAccountPasswordTargets(rows, {}, [])).toBeUndefined();
   });
 
   it("leaves a supplied password, a filled field, and a sign-in form alone", () => {
-    expect(newAccountPasswordTargets(signup, { password: "given" }, [], "")).toBeUndefined();
-    expect(newAccountPasswordTargets(signup, {}, ["@e:pw"], "")).toBeUndefined();
+    expect(newAccountPasswordTargets(signup, { password: "given" }, [])).toBeUndefined();
+    expect(newAccountPasswordTargets(signup, {}, ["@e:pw"])).toBeUndefined();
     const signin: WireRow[] = [
       ["@e:email", "t", "Email|f=email|s=r|n=ada@fixture.test|fm=1"],
       ["@e:pw", "t", "Password|f=password|s=r|fm=1"],
       ["@e:go", "b", "Sign in|a=submit|fm=1"],
       ["@e:tab", "b", "Sign up|fm=2"],
     ];
-    expect(newAccountPasswordTargets(signin, {}, [], "https://example.test/login")).toBeUndefined();
+    expect(newAccountPasswordTargets(signin, {}, [])).toBeUndefined();
   });
 
   it("selects pending confirmations after the primary was filled or removed", () => {
     for (const rows of [signup, signup.filter((row) => row[0] !== "@e:pw")]) {
-      const targets = newAccountPasswordTargets(rows, {}, ["@e:pw"], "https://example.test/signup", [], true);
+      const targets = newAccountPasswordTargets(rows, {}, ["@e:pw"], [], true);
       expect(targets?.password[0]).toBe("@e:pw2");
       expect(targets?.confirms).toEqual([]);
     }
@@ -178,20 +191,45 @@ describe("newAccountPasswordTargets", () => {
     const reset: WireRow[] = signup.map((row) =>
       row[0] === "@e:create" ? [row[0], "b", "Reset password|a=submit|fm=1"] : row,
     );
-    expect(newAccountPasswordTargets(reset, { email: "ada@fixture.test" }, [], "https://example.test/reset")).toBeUndefined();
-    expect(newAccountPasswordTargets(reset, {}, ["@e:pw"], "https://example.test/reset", [], true)?.password[0]).toBe("@e:pw2");
+    expect(newAccountPasswordTargets(reset, { email: "ada@fixture.test" }, [])).toBeUndefined();
+    expect(newAccountPasswordTargets(reset, {}, ["@e:pw"], [], true)).toBeUndefined();
+  });
+
+  it.each(["Get started", "Join"])("does not invent from a generic %s submit", (label) => {
+    const rows: WireRow[] = signup.map((row) =>
+      row[0] === "@e:create" ? [row[0], "b", `${label}|a=submit|fm=1`] : row,
+    );
+    expect(newAccountPasswordTargets(rows, {}, [], ["Sign in"])).toBeUndefined();
+    expect(newAccountPasswordTargets(rows, {}, [])).toBeUndefined();
+    expect(newAccountPasswordTargets(rows, {}, [], ["Create account"])).toBeDefined();
+  });
+
+  it.each(["Sign in", "Sign-in", "Reset password", "Password reset"])(
+    "rejects explicit %s evidence even with a create-account submit",
+    (heading) => {
+      expect(newAccountPasswordTargets(signup, {}, [], [heading])).toBeUndefined();
+      expect(newAccountPasswordTargets(signup, {}, ["@e:pw"], [heading], true)).toBeUndefined();
+    },
+  );
+
+  it("reuses confirmation on a neutral continuation only after invention", () => {
+    const rows: WireRow[] = signup.map((row) =>
+      row[0] === "@e:create" ? [row[0], "b", "Continue|a=submit|fm=1"] : row,
+    );
+    expect(newAccountPasswordTargets(rows, {}, [])).toBeUndefined();
+    expect(newAccountPasswordTargets(rows, {}, ["@e:pw"], [], true)?.password[0]).toBe("@e:pw2");
   });
 
   it("excludes populated primary and confirmation controls", () => {
     const primary: WireRow[] = signup.map((row) =>
       row[0] === "@e:pw" ? [row[0], row[1], row[2]!.replace("s=r", "s=rp")] : row,
     );
-    expect(newAccountPasswordTargets(primary, {}, [], "https://example.test/signup")).toBeUndefined();
+    expect(newAccountPasswordTargets(primary, {}, [])).toBeUndefined();
     const confirm: WireRow[] = signup.map((row) =>
       row[0] === "@e:pw2" ? [row[0], row[1], row[2]!.replace("s=r", "s=rp")] : row,
     );
-    expect(newAccountPasswordTargets(confirm, {}, [], "https://example.test/signup")?.confirms).toEqual([]);
-    expect(newAccountPasswordTargets(confirm, {}, ["@e:pw"], "https://example.test/signup", [], true)).toBeUndefined();
+    expect(newAccountPasswordTargets(confirm, {}, [])?.confirms).toEqual([]);
+    expect(newAccountPasswordTargets(confirm, {}, ["@e:pw"], [], true)).toBeUndefined();
   });
 
   it("never fills a change-password form", () => {
@@ -202,7 +240,7 @@ describe("newAccountPasswordTargets", () => {
       ["@e:save", "b", "Save|a=submit|fm=1"],
     ];
     expect(
-      newAccountPasswordTargets(rows, {}, [], "https://example.test/settings"),
+      newAccountPasswordTargets(rows, {}, []),
     ).toBeUndefined();
   });
 });

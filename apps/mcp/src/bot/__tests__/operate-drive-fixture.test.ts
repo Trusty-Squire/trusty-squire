@@ -4002,6 +4002,9 @@ describe("operate_drive real-browser fixture", () => {
     '<div><small>At least 32 characters</small><label>Password<input id="password" type="password" required></label></div>',
     '<div><label>Password<input id="password" type="password" required></label><div><span>At least 32 characters</span></div></div>',
     '<label for="password">Password</label><input id="password" type="password" required><small>At least 32 characters</small>',
+    '<label for="password">Password</label><small>At least 32 characters</small><input id="password" type="password" required>',
+    '<label for="password">Password</label><small>At least 32 characters</small><button type="button">Show password</button><input id="password" type="password" required>',
+    '<label for="password">Password</label><div><small>At least 32 characters</small></div><input id="password" type="password" required>',
     '<div><label>Password<input id="password" type="password" required></label><button type="button">Show password</button><small>At least 32 characters</small></div>',
     '<label>Password<input id="password" type="password" required></label><button type="button" aria-label="Show password">Eye</button><small>At least 32 characters</small>',
   ])("honors adjacent password help without reading other fields: %s", async (passwordField) => {
@@ -4036,6 +4039,34 @@ describe("operate_drive real-browser fixture", () => {
       expect(password.length).toBeGreaterThanOrEqual(32);
       expect(password).toMatch(/[^A-Za-z0-9]/);
       expect(persistLogin).toHaveBeenCalledOnce();
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 60_000);
+
+  it.each([
+    ["Reset password", "Reset password"],
+    ["Sign in", "Get started"],
+  ])("never invents on a %s form with a %s submit", async (heading, submit) => {
+    const html = `<!doctype html><h1>${heading}</h1><form>
+      <label>Email<input type="email" value="ada@fixture.test" required></label>
+      <label>New password<input id="password" type="password" required></label>
+      <label>Confirm password<input id="confirm" type="password" required></label>
+      <button type="submit">${submit}</button>
+    </form>`;
+    const { context, page, started } = await openFixture(html, "non-signup-password.test", "standard", "/login");
+    const persistLogin = vi.fn(async () => true);
+    try {
+      await runOperateDrive(
+        { session_id: started.session_id, goal: "continue", facts: { email: "ada@fixture.test" }, max_steps: 3 },
+        api(),
+        { persistLogin },
+        deps(async (_api, _state, questions) => jevChoose(questions, "DONE")),
+      );
+      expect(persistLogin).not.toHaveBeenCalled();
+      expect(await page.locator("#password").inputValue()).toBe("");
+      expect(await page.locator("#confirm").inputValue()).toBe("");
     } finally {
       await finishProvisionSession(started.session_id);
       await context.close();

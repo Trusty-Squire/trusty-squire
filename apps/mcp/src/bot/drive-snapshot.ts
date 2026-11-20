@@ -828,15 +828,23 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
         container = container.parentElement;
       }
       if (container instanceof HTMLElement) localHelp.push(container.innerText);
-      for (
-        let sibling = container.nextElementSibling;
-        sibling !== null &&
+      const helpSibling = (sibling: Element): boolean =>
         (sibling.matches("small,p,span,div,ul,ol") || auxiliary(sibling)) &&
         (!sibling.matches(controls) || auxiliary(sibling)) &&
         !Array.from(sibling.querySelectorAll(controls)).some(foreignControl);
-        sibling = sibling.nextElementSibling
-      ) {
-        if (visible(sibling) && sibling instanceof HTMLElement) localHelp.push(sibling.innerText);
+      for (const direction of ["nextElementSibling", "previousElementSibling"] as const) {
+        const help: string[] = [];
+        let sibling = container[direction];
+        while (sibling !== null && helpSibling(sibling)) {
+          if (visible(sibling) && sibling instanceof HTMLElement) help.push(sibling.innerText);
+          sibling = sibling[direction];
+        }
+        if (
+          direction === "nextElementSibling" ||
+          (sibling instanceof HTMLLabelElement && sibling.control === element)
+        ) {
+          localHelp.push(...help);
+        }
       }
     }
     const description = [

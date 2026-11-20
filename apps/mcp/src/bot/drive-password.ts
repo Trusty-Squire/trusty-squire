@@ -41,14 +41,13 @@ function lengthNumbers(text: string, expressions: readonly RegExp[]): number[] {
 }
 
 /** Symbols a page lists right after naming "special characters" / "symbols". */
-function listedSymbols(text: string): string {
+function listedSymbols(text: string): string | undefined {
   const match =
     /(?:special\s+characters?|symbols?)[^\n(:]{0,20}[(:]\s*(?:e\.g\.,?\s*|such\s+as\s*|like\s*)?([^)\n]{1,40})/i.exec(
       text,
     );
-  if (match === null) return "";
-  const listed = new Set(match[1]!.replace(/[\sA-Za-z0-9,.]/g, ""));
-  return [...SYMBOL].filter((symbol) => listed.has(symbol)).join("");
+  if (match === null) return undefined;
+  return [...new Set(match[1]!.replace(/[\s\p{L}\p{N}]/gu, ""))].join("");
 }
 
 /**
@@ -94,7 +93,7 @@ export function parsePasswordRequirements(
       flat,
     ) ||
     /\bonly\s+(?:letters?\s+and\s+(?:numbers?|digits?)|alphanumeric)\b/i.test(flat);
-  const listed = noSymbols ? "" : listedSymbols(flat);
+  const symbols = noSymbols ? "" : listedSymbols(text) ?? SYMBOL;
   let compiled: RegExp | undefined;
   let allowedCharacters: string | undefined;
   if (pattern !== undefined && pattern.length > 0) {
@@ -106,7 +105,7 @@ export function parsePasswordRequirements(
         minimums.push(Number(repeatedClass[2]));
         if (repeatedClass[3] !== "") maximums.push(Number(repeatedClass[3] ?? repeatedClass[2]));
         const character = new RegExp(`^(?:${repeatedClass[1]})$`, "v");
-        allowedCharacters = [...LOWER + UPPER + DIGIT + SYMBOL]
+        allowedCharacters = [...LOWER + UPPER + DIGIT + symbols]
           .filter((value) => character.test(value))
           .join("");
       }
@@ -117,7 +116,7 @@ export function parsePasswordRequirements(
   return {
     minLength: minimums.length === 0 ? 0 : Math.max(...minimums),
     ...(maximums.length === 0 ? {} : { maxLength: Math.min(...maximums) }),
-    symbols: noSymbols ? "" : listed.length > 0 ? listed : SYMBOL,
+    symbols,
     ...(compiled === undefined ? {} : { pattern: compiled }),
     ...(allowedCharacters === undefined ? {} : { allowedCharacters }),
   };
