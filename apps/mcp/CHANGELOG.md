@@ -1,5 +1,10 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.54-rc.1 (2026-11-20)
+
+- fix(mcp): report stored keys explicitly in drive completion results (#1160)
+- fix(mcp): let drive votes choose signin actions before filling text (#1159)
+
 ## 1.1.53-rc.1 (2026-11-20)
 
 - feat(mcp): let operate_drive invent and vault signup passwords (#1157)
