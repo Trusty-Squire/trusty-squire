@@ -35,6 +35,7 @@ export interface DriveSnapshotElement {
   submit?: boolean;
   /** The control's own `maxlength`, when it declares one. */
   width?: number;
+  minLength?: number;
   placeholder?: string;
   /** The control's HTML `name`, when it has one. */
   name?: string;
@@ -793,6 +794,11 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
       element.maxLength > 0
         ? element.maxLength
         : undefined;
+    const minLength =
+      (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) &&
+      element.minLength > 0
+        ? element.minLength
+        : undefined;
     const href =
       element instanceof HTMLAnchorElement && element.href.length > 0 ? element.href : "";
     const placeholder = element.getAttribute("placeholder")?.trim() ?? "";
@@ -838,6 +844,7 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
       ...(picker ? { picker: true } : {}),
       ...(submit ? { submit: true } : {}),
       ...(width === undefined ? {} : { width }),
+      ...(minLength === undefined ? {} : { minLength }),
       ...(placeholder.length > 0 ? { placeholder } : {}),
       ...(ariaLabel.length > 0 ? { ariaLabel } : {}),
       ...(labelComparable ? { labelComparable: true } : {}),

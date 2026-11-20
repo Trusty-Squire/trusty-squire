@@ -106,8 +106,8 @@ const NEW_ACCOUNT_PASSWORD_HTML = `<!doctype html><meta charset="utf-8"><title>T
   <h1>Welcome</h1>
   <form id="f">
     <label>Email <input id="email" name="email" type="email" required></label>
-    <label>Password (min 30 chars, required) <input id="password" name="password" type="password" required></label>
-    <label>Confirm password <input id="confirm" name="confirm_password" type="password" required></label>
+    <label>Password <input id="password" name="password" type="password" minlength="30" required oninput="document.getElementById('confirmation').hidden = false"></label>
+    <label id="confirmation" hidden>Confirm password <input id="confirm" name="confirm_password" type="password" required></label>
     <label><input id="age" type="checkbox" required> I confirm that I am at least 18</label>
     <button id="create" type="submit">Create account</button>
   </form>
@@ -4006,6 +4006,7 @@ describe("operate_drive real-browser fixture", () => {
     const tracePath = join(traceDir, "trace.jsonl");
     const priorTrace = process.env.DRIVE_TRACE_PATH;
     process.env.DRIVE_TRACE_PATH = tracePath;
+    const identifier = `${"a".repeat(55)}|tag@${"b".repeat(30)}.test`;
     const stored: Array<Record<string, unknown>> = [];
     const vault = {
       listCredentials: vi.fn(async () => ({ credentials: [] })),
@@ -4021,7 +4022,7 @@ describe("operate_drive real-browser fixture", () => {
         {
           session_id: started.session_id,
           goal: "create a new account",
-          facts: { email: "ada@fixture.test" },
+          facts: { email: identifier },
           max_steps: 4,
         },
         api(),
@@ -4031,13 +4032,14 @@ describe("operate_drive real-browser fixture", () => {
       const password = await page.locator("#password").inputValue();
       expect(password.length).toBeGreaterThanOrEqual(30);
       expect(await page.locator("#confirm").inputValue()).toBe(password);
-      expect(await page.locator("#email").inputValue()).toBe("ada@fixture.test");
+      expect(await page.locator("#email").inputValue()).toBe(identifier);
 
       expect(stored).toHaveLength(1);
       expect(stored[0]).toMatchObject({
         service: "invent-password.test",
-        label: "ada@fixture.test",
-        fields: { login: "ada@fixture.test", password },
+        label: expect.stringMatching(/ [a-f0-9-]{36}$/),
+        write_id: expect.stringMatching(/^[a-f0-9-]{36}$/),
+        fields: { login: identifier, password },
         type: "username_password",
         auth_strategy: "username_password",
         login_hosts: ["invent-password.test"],

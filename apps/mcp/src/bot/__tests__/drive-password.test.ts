@@ -1,10 +1,12 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   INVENTED_PASSWORD_DEFAULT_LENGTH,
   inventPassword,
   parsePasswordRequirements,
 } from "../drive-password.js";
 import { newAccountPasswordTargets, type WireRow } from "../operate-drive.js";
+import { storeInventedLogin } from "../../tools/provision-drive.js";
+import type { ApiClient } from "../../api-client.js";
 
 function classes(value: string): {
   lower: boolean;
@@ -93,6 +95,23 @@ describe("inventPassword", () => {
     expect(plain).toMatch(/^[A-Za-z0-9]{24}$/);
   });
 
+  it("honors a native minimum without visible length instructions", () => {
+    const value = inventPassword(parsePasswordRequirements("Password", undefined, undefined, 30))!;
+    expect(value.length).toBeGreaterThanOrEqual(30);
+  });
+
+  it.each([
+    ["[A-Za-z0-9]{12,20}", /^[A-Za-z0-9]{12,20}$/],
+    ["[A-Z0-9]{24}", /^[A-Z0-9]{24}$/],
+    ["[a-z]{30,}", /^[a-z]{30,}$/],
+  ])("generates within the character and length space of %s", (pattern, oracle) => {
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      const value = inventPassword(parsePasswordRequirements("Password", undefined, pattern as string));
+      expect(value).toBeDefined();
+      expect(value).toMatch(oracle as RegExp);
+    }
+  });
+
   it("refuses limits that cannot all hold", () => {
     expect(inventPassword(parsePasswordRequirements("at least 30 characters", 12))).toBeUndefined();
   });
@@ -111,7 +130,8 @@ describe("newAccountPasswordTargets", () => {
     const targets = newAccountPasswordTargets(signup, {}, [], "https://example.test/login");
     expect(targets?.password[0]).toBe("@e:pw");
     expect(targets?.confirms.map((row) => row[0])).toEqual(["@e:pw2"]);
-    expect(targets?.login).toBe("ada@fixture.test");
+    expect(targets?.identity?.[0]).toBe("@e:email");
+    expect(targets?.login).toBeUndefined();
   });
 
   it("waits for the form's email before inventing", () => {
@@ -133,6 +153,14 @@ describe("newAccountPasswordTargets", () => {
     expect(newAccountPasswordTargets(signin, {}, [], "https://example.test/login")).toBeUndefined();
   });
 
+  it("selects pending confirmations after the primary was filled or removed", () => {
+    for (const rows of [signup, signup.filter((row) => row[0] !== "@e:pw")]) {
+      const targets = newAccountPasswordTargets(rows, {}, ["@e:pw"], "https://example.test/signup", [], true);
+      expect(targets?.password[0]).toBe("@e:pw2");
+      expect(targets?.confirms).toEqual([]);
+    }
+  });
+
   it("never fills a change-password form", () => {
     const rows: WireRow[] = [
       ["@e:old", "t", "Current password|f=password|s=r|fm=1"],
@@ -143,5 +171,20 @@ describe("newAccountPasswordTargets", () => {
     expect(
       newAccountPasswordTargets(rows, {}, [], "https://example.test/settings"),
     ).toBeUndefined();
+  });
+});
+
+describe("storeInventedLogin", () => {
+  it("uses independent create-only writes for concurrent attempts", async () => {
+    const storeCredential = vi.fn(async () => ({ reference: "vault://test" }));
+    const api = { storeCredential } as unknown as ApiClient;
+    const login = { sessionId: "test", url: "https://example.test/signup", login: "ada@example.test", password: "new-password" };
+    await Promise.all([storeInventedLogin(api, login), storeInventedLogin(api, login)]);
+    const writes = storeCredential.mock.calls as unknown as Array<[{ label: string; write_id: string }]>;
+    expect(writes).toHaveLength(2);
+    expect(writes[0]![0].write_id).toMatch(/^[a-f0-9-]{36}$/);
+    expect(writes[1]![0].write_id).not.toBe(writes[0]![0].write_id);
+    expect(writes[1]![0].label).not.toBe(writes[0]![0].label);
+    expect(writes.every(([write]) => write.label.length <= 60)).toBe(true);
   });
 });

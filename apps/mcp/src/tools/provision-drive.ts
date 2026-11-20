@@ -656,20 +656,12 @@ export async function storeInventedLogin(
 ): Promise<boolean> {
   const host = new URL(invented.url).hostname.toLowerCase().replace(/^www\./, "");
   const service = getDomain(invented.url, { allowPrivateDomains: true }) ?? host;
-  const listed = await api
-    .listCredentials()
-    .then((result) => result.credentials)
-    .catch(() => null);
-  const plain = invented.login.slice(0, 60);
-  const taken =
-    listed === null ||
-    listed.some((credential) => credential.service === service && credential.label === plain);
-  const label = taken
-    ? `${invented.login.slice(0, 43)} ${new Date().toISOString().slice(0, 16)}`
-    : plain;
+  const writeId = randomUUID();
+  const label = `${invented.login.slice(0, 23)} ${writeId}`;
   const observedHosts = observedHostsForSession(invented.sessionId);
   await api.storeCredential({
     service,
+    write_id: writeId,
     label,
     fields: { login: invented.login, password: invented.password },
     type: "username_password",

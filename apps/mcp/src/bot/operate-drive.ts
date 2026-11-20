@@ -76,6 +76,7 @@ import {
   snapshotSelectOptions,
   snapshotToObservation,
   type DriveSnapshot,
+  type DriveSnapshotElement,
 } from "./drive-snapshot.js";
 import { evaluateBound } from "./drive-evaluate.js";
 import { DriveRefBridge } from "./drive-ref-bridge.js";
@@ -2549,6 +2550,7 @@ export interface NewAccountPasswordTargets {
   confirms: WireRow[];
   /** The account identifier already on the form, when the form has one. */
   login?: string;
+  identity?: WireRow;
 }
 
 /**
@@ -2564,6 +2566,7 @@ export function newAccountPasswordTargets(
   filledRefs: readonly string[],
   pageUrl: string,
   headings: readonly string[] = [],
+  reuseInventedPassword = false,
 ): NewAccountPasswordTargets | undefined {
   const filled = new Set(filledRefs);
   const open = (row: WireRow): boolean =>
@@ -2572,14 +2575,16 @@ export function newAccountPasswordTargets(
     !isDisabledRow(row) &&
     !isActedRow(row) &&
     !filled.has(row[0]);
-  const password = rows.find((row) => open(row) && !isConfirmPasswordRow(row));
+  const password =
+    rows.find((row) => open(row) && !isConfirmPasswordRow(row)) ??
+    (reuseInventedPassword ? rows.find((row) => open(row) && isConfirmPasswordRow(row)) : undefined);
   if (password === undefined || matchingFactKeys(facts, password).length > 0) return undefined;
   const formId = rowFormId(password);
   const scope = formId === undefined ? rows : rows.filter((row) => rowFormId(row) === formId);
   const confirms = scope.filter(
     (row) => row !== password && open(row) && isConfirmPasswordRow(row),
   );
-  if (!isRequiredRow(password) && confirms.length === 0) return undefined;
+  if (!isRequiredRow(password) && confirms.length === 0 && !reuseInventedPassword) return undefined;
   const buttons = scope.filter((row) => row[1] === "b" || row[1] === "button");
   const submits = buttons.filter((row) => /(?:^|\|)a=submit(?:\||$)/.test(row[2] ?? ""));
   const creates = (list: readonly WireRow[]): boolean =>
@@ -2596,6 +2601,7 @@ export function newAccountPasswordTargets(
   }
   const pool = submits.length > 0 ? submits : buttons;
   const signup =
+    (reuseInventedPassword && isConfirmPasswordRow(password)) ||
     confirms.length > 0 ||
     (creates(pool) && (!logsIn(pool) || inferPagePhase(pageUrl, headings) === "signup"));
   if (!signup) return undefined;
@@ -2608,7 +2614,7 @@ export function newAccountPasswordTargets(
   if (identity !== undefined) {
     const login = rowCurrentValue(identity);
     if (login === undefined || login.trim().length === 0) return undefined;
-    return { password, confirms, login: login.trim() };
+    return { password, confirms, identity };
   }
   const supplied = facts.email ?? facts.username;
   return {
@@ -5001,6 +5007,7 @@ const driveFrameCache = new WeakMap<
   Session,
   Map<string, { frame: Frame; signature: string; snapshot: DriveSnapshot }>
 >();
+const drivePasswordControls = new WeakMap<Session, Map<string, DriveSnapshotElement>>();
 const driveFrameListeners = new WeakSet<Page>();
 const driveRefBridges = new WeakMap<Session, DriveRefBridge>();
 
@@ -5122,6 +5129,7 @@ async function captureDriveSession(
   // refresh them. Clearing first makes "unknown" distinguishable from "differs"
   // on every fallback return, so a fallback cannot abandon the next decision.
   drive.snapshotControlDigest = null;
+  drivePasswordControls.delete(session);
   const timed = (
     observation: Observation,
     rows: WireRow[],
@@ -5275,6 +5283,7 @@ async function captureDriveSession(
   bridge.reserve(compactV2EpochDoc(session, page), frameParts);
   rememberDriveIdentities(drive, snapshot.elements, snapshot.url);
   drive.snapshotControlDigest = await driveControlDigest(page);
+  drivePasswordControls.set(session, new Map(snapshot.elements.map((element) => [element.ref, element])));
   const rawRows = driveRowsFromSnapshot(snapshot);
   lastSelectOptions.set(session, snapshotSelectOptions(snapshot));
   const previousEpoch = drive.lastDocumentEpoch;
@@ -6030,8 +6039,11 @@ async function driveLoop(input: {
     } catch {
       return false;
     }
-    const login = targets.login ?? session.signupIdentifier ?? getSessionUserEmail(sessionId);
-    if (login === null || login.length === 0) return false;
+    const controls = drivePasswordControls.get(session);
+    const login = targets.identity === undefined
+      ? targets.login ?? session.signupIdentifier ?? getSessionUserEmail(sessionId)
+      : controls?.get(targets.identity[0])?.value;
+    if (login == null || login.trim().length === 0) return false;
     const prior = drive.inventedLogin;
     if (
       prior !== undefined &&
@@ -6042,15 +6054,15 @@ async function driveLoop(input: {
     ) {
       return true;
     }
+    if (isConfirmPasswordRow(targets.password)) return false;
     const row = targets.password;
-    const placeholder = /(?:^|\|)ph=([^|]+)/.exec(row[2] ?? "")?.[1] ?? "";
-    const width = /(?:^|\|)w=(\d+)/.exec(row[2] ?? "")?.[1];
-    const pattern = /(?:^|\|)pt=([^|]+)/.exec(row[2] ?? "")?.[1];
+    const control = controls?.get(row[0]);
     const password = inventPassword(
       parsePasswordRequirements(
-        `${readableLabel(row)}\n${placeholder}\n${observation.dom ?? ""}`,
-        width === undefined ? undefined : Number(width),
-        pattern,
+        `${readableLabel(row)}\n${control?.placeholder ?? ""}\n${observation.dom ?? ""}`,
+        control?.width,
+        control?.pattern,
+        control?.minLength,
       ),
     );
     if (password === undefined) return false;
@@ -7839,6 +7851,9 @@ async function driveLoop(input: {
               drive.filledRefs,
               pageUrl,
               observation.semantic?.headings ?? [],
+              drive.inventedLogin != null &&
+                drive.inventedLogin.host === new URL(pageUrl).hostname.toLowerCase() &&
+                session.secretSlots.has(DRIVE_PASSWORD_SLOT),
             );
       const passwordAttemptKey =
         passwordTargets === undefined

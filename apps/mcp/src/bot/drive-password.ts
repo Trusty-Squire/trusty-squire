@@ -22,6 +22,7 @@ export interface PasswordRequirements {
   symbols: string;
   /** The control's own `pattern`, when it is complete and compiles. */
   pattern?: RegExp;
+  allowedCharacters?: string;
 }
 
 const LENGTH_UNIT = "(?:characters?|chars?)";
@@ -59,6 +60,7 @@ export function parsePasswordRequirements(
   text: string,
   maxLengthAttr?: number,
   pattern?: string,
+  minLengthAttr?: number,
 ): PasswordRequirements {
   const flat = text.replace(/\s+/g, " ");
   const minimums = lengthNumbers(flat, [
@@ -82,6 +84,7 @@ export function parsePasswordRequirements(
     new RegExp(`\\bbetween\\s+\\d{1,3}\\s*(?:and|-|to)\\s*(\\d{1,3})\\s*${LENGTH_UNIT}`, "gi"),
     new RegExp(`\\b\\d{1,3}\\s*(?:-|–|to)\\s*(\\d{1,3})\\s*${LENGTH_UNIT}`, "gi"),
   ]);
+  if (minLengthAttr !== undefined && minLengthAttr > 0) minimums.push(minLengthAttr);
   if (maxLengthAttr !== undefined && maxLengthAttr > 0) maximums.push(maxLengthAttr);
   const noSymbols =
     /\b(?:no|without|must\s+not\s+(?:contain|include|use))\s+(?:special\s+characters?|symbols?|punctuation)\b/i.test(
@@ -93,11 +96,19 @@ export function parsePasswordRequirements(
     /\bonly\s+(?:letters?\s+and\s+(?:numbers?|digits?)|alphanumeric)\b/i.test(flat);
   const listed = noSymbols ? "" : listedSymbols(flat);
   let compiled: RegExp | undefined;
-  // The snapshot cuts a pattern at 40 characters; a cut pattern is not the
-  // control's real rule, so it is not enforced.
-  if (pattern !== undefined && pattern.length > 0 && pattern.length < 40) {
+  let allowedCharacters: string | undefined;
+  if (pattern !== undefined && pattern.length > 0) {
     try {
       compiled = new RegExp(`^(?:${pattern})$`, "v");
+      const repeatedClass = /^\^?(\[(?:\\.|[^\]])+\])\{(\d+)(?:,(\d*))?\}\$?$/.exec(pattern);
+      if (repeatedClass !== null) {
+        minimums.push(Number(repeatedClass[2]));
+        if (repeatedClass[3] !== "") maximums.push(Number(repeatedClass[3] ?? repeatedClass[2]));
+        const character = new RegExp(`^(?:${repeatedClass[1]})$`, "v");
+        allowedCharacters = [...LOWER + UPPER + DIGIT + SYMBOL]
+          .filter((value) => character.test(value))
+          .join("");
+      }
     } catch {
       compiled = undefined;
     }
@@ -107,11 +118,11 @@ export function parsePasswordRequirements(
     ...(maximums.length === 0 ? {} : { maxLength: Math.min(...maximums) }),
     symbols: noSymbols ? "" : listed.length > 0 ? listed : SYMBOL,
     ...(compiled === undefined ? {} : { pattern: compiled }),
+    ...(allowedCharacters === undefined ? {} : { allowedCharacters }),
   };
 }
 
-function generate(length: number, symbols: string): string {
-  const classes = [LOWER, UPPER, DIGIT, ...(symbols.length > 0 ? [symbols] : [])];
+function generate(length: number, classes: string[]): string {
   const all = classes.join("");
   const pick = (set: string): string => set[randomInt(set.length)]!;
   const chars = classes.map(pick);
@@ -129,7 +140,13 @@ function generate(length: number, symbols: string): string {
  * Undefined when the page's limits cannot be met together.
  */
 export function inventPassword(requirements: PasswordRequirements): string | undefined {
-  const classCount = requirements.symbols.length > 0 ? 4 : 3;
+  const classes = [LOWER, UPPER, DIGIT, requirements.symbols]
+    .map((group) => requirements.allowedCharacters === undefined
+      ? group
+      : [...group].filter((character) => requirements.allowedCharacters!.includes(character)).join(""))
+    .filter((group) => group.length > 0);
+  const classCount = classes.length;
+  if (classCount === 0) return undefined;
   const ceiling = Math.min(
     requirements.maxLength ?? INVENTED_PASSWORD_CEILING,
     INVENTED_PASSWORD_CEILING,
@@ -140,10 +157,10 @@ export function inventPassword(requirements: PasswordRequirements): string | und
   );
   if (length < Math.max(requirements.minLength, classCount)) return undefined;
   for (let attempt = 0; attempt < PATTERN_ATTEMPTS; attempt += 1) {
-    // A pattern may admit only letters and digits; alternate symbol-free
-    // candidates so such a control can still be satisfied.
-    const symbols = attempt % 2 === 0 ? requirements.symbols : "";
-    const candidate = generate(length, symbols);
+    const candidateClasses = attempt % 2 === 0 || requirements.allowedCharacters !== undefined
+      ? classes
+      : classes.filter((group) => group !== requirements.symbols);
+    const candidate = generate(length, candidateClasses);
     if (requirements.pattern === undefined || requirements.pattern.test(candidate)) {
       return candidate;
     }
