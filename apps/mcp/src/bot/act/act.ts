@@ -274,6 +274,7 @@ async function withOAuthActionBoundary(
     deadline,
     async () => {
       try {
+        deadline.executionStarted = true;
         return await withinOAuthActionDeadline(run(deadline), deadline);
       } catch (error) {
         const uncertain = oauthErrorAfterDispatchAttempt(session, error);

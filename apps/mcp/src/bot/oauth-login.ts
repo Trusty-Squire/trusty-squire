@@ -332,6 +332,7 @@ const DEFAULT_OAUTH_AUTOMATED_ACTION_TIMEOUT_MS = 30_000;
 const DEFAULT_OAUTH_HUMAN_HANDOFF_TIMEOUT_MS = 5 * 60_000;
 
 export interface OAuthActionDeadline {
+  executionStarted?: boolean;
   completionCheck?: () => Promise<OAuthCompletionEvidence | null>;
   expiresAt: number;
   timeoutMs: number;

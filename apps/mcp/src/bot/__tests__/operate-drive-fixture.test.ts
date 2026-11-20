@@ -50,6 +50,7 @@ import { waitForPageReady } from "../page-ready.js";
 import type { DriveSnapshot } from "../drive-snapshot.js";
 import { sessionForCall } from "../session/lifecycle.js";
 import { DriveEvaluateTimeout } from "../drive-evaluate.js";
+import { OAuthAwaitingHumanError } from "../oauth-login.js";
 
 const SIGNUP_HTML = `<!doctype html><meta charset="utf-8"><title>Signup fixture</title>
 <main>
@@ -1235,6 +1236,69 @@ describe("operate_drive real-browser fixture", () => {
       await context.close();
     }
   }, 30_000);
+
+  it.each(["preflight", "execution"])(
+    "preserves OAuth retry state when the budget expires during %s",
+    async (stage) => {
+      const { context, page, started } = await openFixture(
+        `<main><h1>Create account</h1><a href="/oauth/google">Continue with Google</a></main>`,
+        "oauth-retry-budget.test",
+      );
+      let restoreEvaluate = () => {};
+      let finishRead = () => {};
+      let armed = false;
+      const dependencies = deps(async (_api, _state, questions) => {
+        const answer = jevFromQuestions(questions);
+        if (stage === "preflight" && !armed) {
+          armed = true;
+          const evaluate = vi.spyOn(page, "evaluate").mockImplementation(
+            () =>
+              new Promise<never>((_resolve, reject) => {
+                finishRead = () => reject(new Error("preflight released"));
+              }),
+          );
+          restoreEvaluate = () => evaluate.mockRestore();
+        }
+        return answer;
+      });
+      const dispatch = vi.fn<NonNullable<DriveDependencies["driveAct"]>>(
+        async (_sessionId, _action, deadline) => {
+          deadline!.executionStarted = true;
+          if (stage === "preflight") throw new OAuthAwaitingHumanError("execution expired");
+          return await new Promise<never>((_resolve, reject) => {
+            finishRead = () => reject(new OAuthAwaitingHumanError("execution released"));
+          });
+        },
+      );
+      dependencies.driveAct = dispatch;
+      const input = {
+        session_id: started.session_id,
+        goal: "create an account",
+        max_seconds: 2,
+      };
+      try {
+        expect((await runOperateDrive(input, api(), undefined, dependencies)).status).toBe("budget");
+        const drive = sessionForCall(started.session_id)!.drive!;
+        if (stage === "preflight") {
+          expect(dispatch).not.toHaveBeenCalled();
+          expect(drive.consumedActionKey).toBeNull();
+          restoreEvaluate();
+          finishRead();
+          expect((await runOperateDrive(input, api(), undefined, dependencies)).status).toBe("budget");
+          expect(dispatch).toHaveBeenCalledOnce();
+        } else {
+          expect(dispatch).toHaveBeenCalledOnce();
+          expect(drive.consumedActionKey).not.toBeNull();
+        }
+      } finally {
+        restoreEvaluate();
+        finishRead();
+        await finishProvisionSession(started.session_id);
+        await context.close();
+      }
+    },
+    15_000,
+  );
 
   it.each(["fallback", "readiness", "snapshot"])(
     "ends OAuth within the call budget when %s stalls",
