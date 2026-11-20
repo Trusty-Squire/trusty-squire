@@ -1456,14 +1456,18 @@ export const operateDriveTool: Tool<z.infer<typeof driveSchema>> = {
         ...(args.store === undefined || api === null
           ? {}
           : {
-              persistCredentials: async (extracted: ExtractResult) =>
-                (await persistExtracted(
+              persistCredentials: async (extracted: ExtractResult) => {
+                const stored = await persistExtracted(
                   extracted.session_id,
                   extracted.url,
                   extracted.credentials,
                   args.store!,
                   api,
-                )) !== null,
+                );
+                return stored === null
+                  ? null
+                  : { reference: stored.reference, service: stored.service, label: stored.label };
+              },
             }),
       },
     );

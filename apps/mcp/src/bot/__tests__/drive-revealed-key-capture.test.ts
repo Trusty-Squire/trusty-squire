@@ -22,6 +22,7 @@ import { sessionForCall } from "../session/lifecycle.js";
 
 // Rows recorded by the 1.1.48-rc.1 BeatAPI drive (trace steps 5 and 6): the
 // one-time key was revealed and Copy was clicked, yet the drive kept asking.
+const STORED = { reference: "vault:example:default", service: "example", label: "default" };
 const beatApiRevealedRows: WireRow[] = [
   ["@e:f0d128", "b", "Copy key"],
   ["@e:f0d129", "b", "Done"],
@@ -96,7 +97,7 @@ const key = "sk-beat-0123456789abcdefghijklmnopqrstuvwxyzABCDEFG";
 
 async function drive(
   copyScript: string,
-  persistCredentials: DriveCallContext["persistCredentials"] | null = async () => true,
+  persistCredentials: DriveCallContext["persistCredentials"] | null = async () => STORED,
   layer: "dialog" | "inline" = "dialog",
 ) {
   const context = await browser.newContext();
@@ -148,7 +149,7 @@ async function drive(
 }
 
 it("finishes complete from a revealed key without asking the model", async () => {
-  const persistCredentials = vi.fn(async () => true);
+  const persistCredentials = vi.fn(async () => STORED);
   const { result, askJev } = await drive(
     `navigator.clipboard.writeText('${key}')`,
     persistCredentials,
@@ -158,12 +159,12 @@ it("finishes complete from a revealed key without asking the model", async () =>
       credentials: { api_key: key },
     }),
   );
-  expect(result.status).toBe("complete");
+  expect(result).toMatchObject({ status: "complete", stored: true, stored_credential: STORED });
   expect(askJev).not.toHaveBeenCalled();
 }, 15_000);
 
 it("stores a key revealed inline, outside any dialog, from its Copy control", async () => {
-  const persistCredentials = vi.fn(async () => true);
+  const persistCredentials = vi.fn(async () => STORED);
   const { result, askJev } = await drive(
     `navigator.clipboard.writeText('${key}')`,
     persistCredentials,
@@ -188,7 +189,7 @@ it.each(["missing", "rejected", "failed"])(
         ? undefined
         : async () => {
             if (mode === "failed") throw new Error("vault unavailable");
-            return false;
+            return null;
           };
     await expect(
       drive(`navigator.clipboard.writeText('${key}')`, persistCredentials ?? null),
@@ -250,7 +251,7 @@ it("stores an opaque key after Copy relabels itself without another model decisi
       },
     };
   });
-  const persistCredentials = vi.fn(async () => true);
+  const persistCredentials = vi.fn(async () => STORED);
   try {
     const result = await runOperateDrive(
       {
