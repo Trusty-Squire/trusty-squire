@@ -77,7 +77,7 @@ function dependencies(askJev: DriveDependencies["askJev"]): DriveDependencies {
   };
 }
 
-it("trusts DONE on a copy-capable page despite a binding from the previous page", async () => {
+it("captures a revealed key despite a binding from the previous page without asking", async () => {
   await withKeyPage(copyKeyPage, async (sessionId) => {
     const session = sessionForCall(sessionId)!;
     session.drive = emptyDriveState("extract an API key", {});
@@ -114,7 +114,7 @@ it("trusts DONE on a copy-capable page despite a binding from the previous page"
       dependencies(askJev),
     );
     expect(result.status).toBe("complete");
-    expect(askJev).toHaveBeenCalled();
+    expect(askJev).not.toHaveBeenCalled();
   });
 }, 15_000);
 

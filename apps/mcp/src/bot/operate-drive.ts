@@ -1536,6 +1536,31 @@ export function pageShowsRevealedKey(rows: readonly WireRow[], _pageText: string
   return rows.some((row) => rowShowsSecretEvidence(row));
 }
 
+/**
+ * A revealed one-time key (or the Copy control just clicked beside one) is the
+ * result a key goal asks for. Capture otherwise runs only on DONE, and a goal
+ * that says "finish once the key is in the vault" argues the model out of DONE,
+ * so the drive attempts the DONE capture itself when this holds.
+ */
+export function revealedKeyCaptureDue(
+  rows: readonly WireRow[],
+  lastActionKey: string | null,
+): boolean {
+  if (
+    rows.some(
+      (row) =>
+        row[0] === REVEALED_SECRET_REF ||
+        /(?:^|\|)secret=1(?:\||$)/.test(visibleCredentialFacts(row)),
+    )
+  ) {
+    return true;
+  }
+  return rows.some(
+    (row) =>
+      row[0] === lastActionKey && isRevealOrCopyRow(row) && /^copy\b/i.test(readableLabel(row)),
+  );
+}
+
 function pageShowsCredentialValue(rows: readonly WireRow[]): boolean {
   if (pageShowsRevealedKey(rows)) return true;
   // A labeled value can be a key even when it has no recognizable prefix or
@@ -1630,6 +1655,23 @@ export function recordDriveTrailEntry(
     drive.visitedPages[arrivedPath] = (drive.visitedPages[arrivedPath] ?? 0) + 1;
     drive.lastTrailPage = arrivedPath;
   }
+}
+
+export const DRIVE_INBOX_NO_MAIL_OUTCOME = "inbox read found no matching mail";
+
+/**
+ * An inbox read that found nothing is its own outcome. While it is still the
+ * latest outcome on this page, the emailed-code question would only send the
+ * drive back into the same empty inbox, so the next decision is asked without
+ * it and sees the miss in its trail. Any later action re-arms the question.
+ */
+export function inboxFoundNoMailHere(trail: readonly DriveTrailEntry[], pageUrl: string): boolean {
+  const last = trail.at(-1);
+  return (
+    last !== undefined &&
+    last.outcome === DRIVE_INBOX_NO_MAIL_OUTCOME &&
+    last.page === feedbackPagePath(pageUrl)
+  );
 }
 
 /** Mark a control as acted on for the current page+goal, so the state can
@@ -5741,6 +5783,9 @@ async function driveLoop(input: {
   // and spend every remaining step in the guard without a new decision.
   let decideAfterPreActChange = false;
   let automaticDecisionRefused = false;
+  // One capture attempt per page state: a page whose Copy writes nothing is
+  // left to the model's next decision, not re-clicked every iteration.
+  const revealedKeyCaptureAttempts = new Set<string>();
   let dispatchedActs = 0;
   let countedJevCalls = drive.jevCalls;
   let countedDispatchedActs = 0;
@@ -6580,6 +6625,12 @@ async function driveLoop(input: {
             url: observation.url,
           });
           drive.history.push(inboxPollMissReason(search));
+          recordDriveTrailEntry(drive, {
+            step: drive.trajectory.length,
+            page: feedbackPagePath(observation.url),
+            action: "INBOX",
+            outcome: DRIVE_INBOX_NO_MAIL_OUTCOME,
+          });
           return planKind === "otp"
             ? finish("needs_value", {
                 field: "verification_code",
@@ -7392,6 +7443,25 @@ async function driveLoop(input: {
       }
       continue;
     }
+    if (revealedKeyCaptureDue(rows, drive.lastActionKey)) {
+      const captureKey = pageProgressKey(
+        observation.url,
+        rows,
+        drive.filledRefs,
+        observation.semantic?.headings ?? [],
+      );
+      if (!revealedKeyCaptureAttempts.has(captureKey)) {
+        revealedKeyCaptureAttempts.add(captureKey);
+        const extracted = await extractCredentials(sessionId).catch(() => null);
+        if (storableCredentials(extracted?.credentials ?? {}) !== null) {
+          drive.history.push("revealed key captured from its Copy source");
+          return finish("complete");
+        }
+        // Capture invalidated the snapshot; re-read before asking about this page.
+        const recapture = await snapshotOrTimeout(framesIfNeeded());
+        if (recapture !== "ok") return recapture;
+      }
+    }
     const includePayment = drive.facts.card_ref !== undefined;
     drive.facts = ensureGeneratedFacts(
       rows,
@@ -7888,6 +7958,9 @@ async function driveLoop(input: {
       delete questions.SELECT_target;
       delete questions.SCROLL_target;
       delete questions[DRIVE_VALUE_QUESTION];
+      delete questions[DRIVE_EMAIL_CODE_QUESTION];
+    }
+    if (inboxFoundNoMailHere(drive.outcomeTrail ?? [], observation.url)) {
       delete questions[DRIVE_EMAIL_CODE_QUESTION];
     }
     const stateSeenRefs = new Set<string>();
