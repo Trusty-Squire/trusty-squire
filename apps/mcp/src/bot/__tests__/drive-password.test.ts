@@ -9,6 +9,12 @@ import { newAccountPasswordTargets, type WireRow } from "../operate-drive.js";
 import { storeInventedLogin } from "../../tools/provision-drive.js";
 import type { ApiClient } from "../../api-client.js";
 import { withOperatorRequestContext } from "../request-cancellation.js";
+import type * as provisionSession from "../provision-session.js";
+
+vi.mock("../provision-session.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof provisionSession>()),
+  observedHostsForSession: () => ["example.test"],
+}));
 
 function classes(value: string): {
   lower: boolean;
