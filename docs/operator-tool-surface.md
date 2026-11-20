@@ -163,10 +163,14 @@ page.
 The loop reads verification mail when a verification field is listed, and also
 when a click leaves the page waiting with no fill or live choice left and its
 wording or URL says mail is expected (check-your-email text, an Open Gmail
-control, a verify path). It polls that read for up to 45 seconds before handing
-back `needs_value` for `verification_code`, or `stuck` when a link rather than a
-code was expected. It does not gate on confidence. The drive loop takes its own
-in-page snapshot and dispatches click, type, select, and scroll on a control
+control, a verify path). It polls that read for up to 45 seconds. If that poll
+window expires without mail, it hands back `needs_value` for `verification_code`,
+or `stuck` when a link rather than a code was expected. If the per-call time
+budget cuts the poll window short, it returns `budget` without recording a
+no-mail outcome. Resume the same session without an `answer` to poll again,
+even if the verification page is unchanged. It does not gate on confidence.
+The drive loop takes its own in-page snapshot and dispatches click, type,
+select, and scroll on a control
 that snapshot recorded through the same shared act executor the single-step
 tools use, asking it for no observation and keeping the drive's own settling,
 pacing, occlusion guard, and cross-origin coordinate fallback; any other action
@@ -178,8 +182,8 @@ The model's INBOX rule prefers listed controls that send, request, or enter a
 verification code or link before reading mail. An emailed code or link is not
 human verification and is never itself a reason to choose BLOCKED: the drive
 can read the inbox.
-After an inbox read finds no matching mail, that miss remains in the outcome
-trail and suppresses the emailed-code question while it is the latest outcome
+After the inbox poll window expires with no matching mail, that miss remains
+in the outcome trail and suppresses the emailed-code question while it is the latest outcome
 on that page. A later action or a different page makes the question eligible
 again.
 
