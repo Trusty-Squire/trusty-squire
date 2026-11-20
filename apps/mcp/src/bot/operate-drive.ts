@@ -4248,7 +4248,9 @@ function isSessionIdentityAccountChoice(
 ): boolean {
   const identity = identityEmail?.trim().toLowerCase();
   if (!identity || votedChoice === undefined) return false;
-  if (!candidates.some((candidate) => /^use another account$/i.test(readableLabel(candidate.row)))) {
+  if (
+    !candidates.some((candidate) => /^use another account$/i.test(readableLabel(candidate.row)))
+  ) {
     return false;
   }
   const emailsOf = (candidate: DriveCandidate): string[] =>

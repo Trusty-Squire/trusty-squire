@@ -51,11 +51,7 @@ function clickSlugs(): { app: string; ada: string; bo: string; other: string } {
   };
 }
 
-function decide(
-  target: JevAnswer,
-  identityEmail: string | null,
-  pageRows: WireRow[] = rows,
-) {
+function decide(target: JevAnswer, identityEmail: string | null, pageRows: WireRow[] = rows) {
   return decideAfterJev({
     answers: {
       operation: {
@@ -91,9 +87,10 @@ describe("account-choice vote and the session identity", () => {
     confidence: 0.44,
     probabilities: {
       ...Object.fromEntries(
-        Object.keys(clickQuestion?.type === "choice" ? clickQuestion.criteria : {}).map(
-          (key) => [key, 0],
-        ),
+        Object.keys(clickQuestion?.type === "choice" ? clickQuestion.criteria : {}).map((key) => [
+          key,
+          0,
+        ]),
       ),
       [slugs.app]: 0.32,
       [slugs.ada]: 0.51,
@@ -114,25 +111,35 @@ describe("account-choice vote and the session identity", () => {
   });
 
   it("does not admit a different account's low-confidence vote", () => {
-    expect(decide({
-      ...split,
-      choice: slugs.bo,
-      probabilities: { ...split.probabilities, [slugs.ada]: 0.09, [slugs.bo]: 0.51 },
-    }, "ada@example.test")).toMatchObject({ kind: "low_confidence" });
+    expect(
+      decide(
+        {
+          ...split,
+          choice: slugs.bo,
+          probabilities: { ...split.probabilities, [slugs.ada]: 0.09, [slugs.bo]: 0.51 },
+        },
+        "ada@example.test",
+      ),
+    ).toMatchObject({ kind: "low_confidence" });
   });
 
   it("preserves an admitted vote for another account", () => {
-    expect(decide({
-      ...split,
-      choice: slugs.bo,
-      confidence: 0.9,
-      probabilities: {
-        ...split.probabilities,
-        [slugs.app]: 0.02,
-        [slugs.ada]: 0.09,
-        [slugs.bo]: 0.81,
-      },
-    }, "ada@example.test")).toMatchObject({
+    expect(
+      decide(
+        {
+          ...split,
+          choice: slugs.bo,
+          confidence: 0.9,
+          probabilities: {
+            ...split.probabilities,
+            [slugs.app]: 0.02,
+            [slugs.ada]: 0.09,
+            [slugs.bo]: 0.81,
+          },
+        },
+        "ada@example.test",
+      ),
+    ).toMatchObject({
       kind: "act",
       action: { kind: "click", target: "@e:f0d3" },
     });
@@ -148,26 +155,49 @@ describe("account-choice vote and the session identity", () => {
       question.criteria[key]!.startsWith("View contacts"),
     );
     if (contactSlug === undefined) throw new Error("no contact slug");
-    const probabilities = Object.fromEntries(Object.entries(split.probabilities).map(
-      ([key, value]) => [key === slugs.other ? contactSlug : key, value],
-    ));
-    expect(decide({ ...split, probabilities }, "ada@example.test", contacts))
-      .toMatchObject({ kind: "low_confidence" });
+    const probabilities = Object.fromEntries(
+      Object.entries(split.probabilities).map(([key, value]) => [
+        key === slugs.other ? contactSlug : key,
+        value,
+      ]),
+    );
+    expect(decide({ ...split, probabilities }, "ada@example.test", contacts)).toMatchObject({
+      kind: "low_confidence",
+    });
   });
 
   it.each([
     ["missing probabilities", { choice: slugs.ada, confidence: 0.44 }, "missing_probabilities"],
     ["ref alias", { ...split, choice: "@e:f0d2" }, "choice_not_offered"],
     ["missing keys", { ...split, probabilities: { [slugs.ada]: 1 } }, "probability_keys_mismatch"],
-    ["unoffered key", {
-      ...split,
-      probabilities: Object.fromEntries(Object.entries(split.probabilities).map(([key, value]) =>
-        [key === slugs.app ? "unoffered" : key, value],
-      )),
-    }, "probability_key_not_offered"],
-    ["invalid value", { ...split, probabilities: { ...split.probabilities, [slugs.app]: -0.1 } }, "probability_not_unit_interval"],
-    ["invalid sum", { ...split, probabilities: { ...split.probabilities, [slugs.app]: 0 } }, "probability_sum"],
-    ["non-argmax choice", { ...split, probabilities: { ...split.probabilities, [slugs.app]: 0.51, [slugs.ada]: 0.32 } }, "choice_not_argmax"],
+    [
+      "unoffered key",
+      {
+        ...split,
+        probabilities: Object.fromEntries(
+          Object.entries(split.probabilities).map(([key, value]) => [
+            key === slugs.app ? "unoffered" : key,
+            value,
+          ]),
+        ),
+      },
+      "probability_key_not_offered",
+    ],
+    [
+      "invalid value",
+      { ...split, probabilities: { ...split.probabilities, [slugs.app]: -0.1 } },
+      "probability_not_unit_interval",
+    ],
+    [
+      "invalid sum",
+      { ...split, probabilities: { ...split.probabilities, [slugs.app]: 0 } },
+      "probability_sum",
+    ],
+    [
+      "non-argmax choice",
+      { ...split, probabilities: { ...split.probabilities, [slugs.app]: 0.51, [slugs.ada]: 0.32 } },
+      "choice_not_argmax",
+    ],
   ] as const)("rejects %s even when the choice matches the identity", (_, target, reason) => {
     expect(decide(target, "ada@example.test")).toMatchObject({ kind: "invalid_answer", reason });
   });
