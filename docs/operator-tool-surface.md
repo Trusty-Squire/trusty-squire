@@ -215,6 +215,14 @@ steps re-deciding and finishes on the step or call budget.
 
 It returns a handoff (never a bare page): status, the current compact
 observation with the same stable refs, trajectory, and done/remaining.
+On `complete`, `message` states that the goal is finished and `stored` reports
+whether this call captured and stored a key through `store`. When `stored` is
+true, `stored_credential` carries the non-secret vault `reference`, `service`,
+and optional `label`, and the message names that destination. When false,
+`stored_credential` is absent; this does not report whether an invented signup
+login was saved. These completion fields are absent on other statuses.
+A complete result leaves the session open for further tasks; no additional
+key capture is needed when `stored` is true.
 `needs_value` names the selected field's label when its value is unavailable.
 Empty required fields and a vote that the page is not asking for an emailed
 code do not override the selected operation. `stuck` means no listed element
