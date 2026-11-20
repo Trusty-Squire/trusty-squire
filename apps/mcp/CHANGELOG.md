@@ -1,5 +1,10 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.52-rc.1 (2026-11-20)
+
+- fix(mcp): drop the drive's federated-login needs_value shims (#1155)
+- fix(mcp): admit account chooser votes matching session identity (#1154)
+
 ## Unreleased
 
 - Headless `connect` prints one named-tunnel live-view URL
