@@ -39,7 +39,11 @@ import {
   awaitVerification,
   injectCardIntoSessionTargets,
 } from "../provision-session.js";
-import { captureFrameSnapshot, driveRowsFromSnapshot, frameDynamicsSignature } from "../drive-snapshot.js";
+import {
+  captureFrameSnapshot,
+  driveRowsFromSnapshot,
+  frameDynamicsSignature,
+} from "../drive-snapshot.js";
 import { dispatchDriveAct } from "../act/act.js";
 import { rememberDriveIdentities } from "../act/identity.js";
 import { waitForPageReady } from "../page-ready.js";
@@ -515,11 +519,11 @@ function jevFromQuestions(
       name === "operation"
         ? pickOp
         : name === "TYPE_TEXT_target"
-          ? (typeKeys[0] ?? keys[0]!)
+          ? typeKeys[0] ?? keys[0]!
           : name === "SELECT_target"
-            ? (selectKeys[0] ?? keys[0]!)
+            ? selectKeys[0] ?? keys[0]!
             : name === "CLICK_target"
-              ? (clickKeys[0] ?? keys[0]!)
+              ? clickKeys[0] ?? keys[0]!
               : name === "email_code_field"
                 ? DRIVE_FIXED_NONE
                 : keys[0]!;
@@ -1250,9 +1254,9 @@ describe("operate_drive real-browser fixture", () => {
           dispatched = true;
           if (stage === "fallback") return { kind: "unsupported" };
           if (stage === "readiness") {
-            const evaluate = vi.spyOn(page, "evaluate").mockImplementation(
-              () => new Promise<never>(() => {}),
-            );
+            const evaluate = vi
+              .spyOn(page, "evaluate")
+              .mockImplementation(() => new Promise<never>(() => {}));
             restoreEvaluate = () => evaluate.mockRestore();
           }
           return { kind: "ok", combobox: false };
@@ -1266,13 +1270,17 @@ describe("operate_drive real-browser fixture", () => {
         dependencies.onSnapshot = async () => {
           snapshots += 1;
           if (stage === "snapshot" && dispatched) {
-            await new Promise<void>((resolve) => { finishRead = resolve; });
+            await new Promise<void>((resolve) => {
+              finishRead = resolve;
+            });
           }
         };
         const startedAt = Date.now();
         const result = await runOperateDrive(
           { session_id: started.session_id, goal: "create an account", max_seconds: 2 },
-          api(), undefined, dependencies,
+          api(),
+          undefined,
+          dependencies,
         );
         expect(result.status).toBe("budget");
         expect(dispatched).toBe(true);
@@ -4064,8 +4072,10 @@ describe("operate_drive real-browser fixture", () => {
     '<label for="password">Password</label><div><small>At least 32 characters</small></div><input id="password" type="password" required>',
     '<div><label>Password<input id="password" type="password" required></label><button type="button">Show password</button><small>At least 32 characters</small></div>',
     '<label>Password<input id="password" type="password" required></label><button type="button" aria-label="Show password">Eye</button><small>At least 32 characters</small>',
-  ])("honors adjacent password help without reading other fields: %s", async (passwordField) => {
-    const html = `<!doctype html><form>
+  ])(
+    "honors adjacent password help without reading other fields: %s",
+    async (passwordField) => {
+      const html = `<!doctype html><form>
       <label>Email<input id="email" type="email" required></label>
       <small>At most 16 characters. No special characters.</small>
       ${passwordField}
@@ -4073,69 +4083,90 @@ describe("operate_drive real-browser fixture", () => {
       <small>At most 8 characters. No special characters.</small>
       <button type="submit">Create account</button>
     </form>`;
-    const { context, page, started } = await openFixture(
-      html,
-      "password-help.test",
-      "standard",
-      "/signup",
-    );
-    const persistLogin = vi.fn(async () => true);
-    try {
-      await runOperateDrive(
-        {
-          session_id: started.session_id,
-          goal: "create a new account",
-          facts: { email: "ada@fixture.test" },
-          max_steps: 3,
-        },
-        api(),
-        { persistLogin },
-        deps(async (_api, _state, questions) => jevChoose(questions, "DONE")),
+      const { context, page, started } = await openFixture(
+        html,
+        "password-help.test",
+        "standard",
+        "/signup",
       );
-      const password = await page.locator("#password").inputValue();
-      expect(password.length).toBeGreaterThanOrEqual(32);
-      expect(password).toMatch(/[^A-Za-z0-9]/);
-      expect(persistLogin).toHaveBeenCalledOnce();
-    } finally {
-      await finishProvisionSession(started.session_id);
-      await context.close();
-    }
-  }, 60_000);
+      const persistLogin = vi.fn(async () => true);
+      try {
+        await runOperateDrive(
+          {
+            session_id: started.session_id,
+            goal: "create a new account",
+            facts: { email: "ada@fixture.test" },
+            max_steps: 3,
+          },
+          api(),
+          { persistLogin },
+          deps(async (_api, _state, questions) => jevChoose(questions, "DONE")),
+        );
+        const password = await page.locator("#password").inputValue();
+        expect(password.length).toBeGreaterThanOrEqual(32);
+        expect(password).toMatch(/[^A-Za-z0-9]/);
+        expect(persistLogin).toHaveBeenCalledOnce();
+      } finally {
+        await finishProvisionSession(started.session_id);
+        await context.close();
+      }
+    },
+    60_000,
+  );
 
   it.each([
     ["Reset password", "Reset password"],
     ["Sign in", "Get started"],
-  ])("never invents on a %s form with a %s submit", async (heading, submit) => {
-    const html = `<!doctype html><h1>${heading}</h1><form>
+  ])(
+    "never invents on a %s form with a %s submit",
+    async (heading, submit) => {
+      const html = `<!doctype html><h1>${heading}</h1><form>
       <label>Email<input type="email" value="ada@fixture.test" required></label>
       <label>New password<input id="password" type="password" required></label>
       <label>Confirm password<input id="confirm" type="password" required></label>
       <button type="submit">${submit}</button>
     </form>`;
-    const { context, page, started } = await openFixture(html, "non-signup-password.test", "standard", "/login");
-    const persistLogin = vi.fn(async () => true);
-    try {
-      await runOperateDrive(
-        { session_id: started.session_id, goal: "continue", facts: { email: "ada@fixture.test" }, max_steps: 3 },
-        api(),
-        { persistLogin },
-        deps(async (_api, _state, questions) => jevChoose(questions, "DONE")),
+      const { context, page, started } = await openFixture(
+        html,
+        "non-signup-password.test",
+        "standard",
+        "/login",
       );
-      expect(persistLogin).not.toHaveBeenCalled();
-      expect(await page.locator("#password").inputValue()).toBe("");
-      expect(await page.locator("#confirm").inputValue()).toBe("");
-    } finally {
-      await finishProvisionSession(started.session_id);
-      await context.close();
-    }
-  }, 60_000);
+      const persistLogin = vi.fn(async () => true);
+      try {
+        await runOperateDrive(
+          {
+            session_id: started.session_id,
+            goal: "continue",
+            facts: { email: "ada@fixture.test" },
+            max_steps: 3,
+          },
+          api(),
+          { persistLogin },
+          deps(async (_api, _state, questions) => jevChoose(questions, "DONE")),
+        );
+        expect(persistLogin).not.toHaveBeenCalled();
+        expect(await page.locator("#password").inputValue()).toBe("");
+        expect(await page.locator("#confirm").inputValue()).toBe("");
+      } finally {
+        await finishProvisionSession(started.session_id);
+        await context.close();
+      }
+    },
+    60_000,
+  );
 
   it("invalidates iframe signatures on password population without retaining values", async () => {
     const html = `<!doctype html><iframe srcdoc='<form>
       <label>Password<input id="password" name="password" type="password"></label>
       <label>Confirm password<input id="confirm" name="confirm_password" type="password"></label>
     </form>'></iframe>`;
-    const { context, page, started } = await openFixture(html, "password-cache.test", "standard", "/signup");
+    const { context, page, started } = await openFixture(
+      html,
+      "password-cache.test",
+      "standard",
+      "/signup",
+    );
     try {
       await page.frameLocator("iframe").locator("#confirm").waitFor();
       const frame = await (await page.locator("iframe").elementHandle())!.contentFrame();
@@ -4165,7 +4196,12 @@ describe("operate_drive real-browser fixture", () => {
         <label>Confirm password<input id="confirm" type="password" required></label>
         <button type="submit">Create account</button>
       </form>`;
-      const { context, page, started } = await openFixture(html, "populated-password.test", "standard", "/signup");
+      const { context, page, started } = await openFixture(
+        html,
+        "populated-password.test",
+        "standard",
+        "/signup",
+      );
       const persistLogin = vi.fn(async () => true);
       const existing = "Existing-password-867";
       try {
@@ -4201,12 +4237,24 @@ describe("operate_drive real-browser fixture", () => {
     60_000,
   );
 
-  it.each([
-    { name: "maximum", attributes: 'maxlength="20"', help: "", oracle: /^[\s\S]{12,20}$/ },
-    { name: "minimum", attributes: 'minlength="30"', help: "", oracle: /^[\s\S]{30,64}$/ },
-    { name: "pattern", attributes: 'pattern="[A-Za-z0-9]{12,20}"', help: "", oracle: /^[A-Za-z0-9]{12,20}$/ },
-    { name: "local text", attributes: "", help: "At most 18 characters. No special characters", oracle: /^[A-Za-z0-9]{12,18}$/ },
-  ].flatMap((test) => [true, false].map((visible) => ({ ...test, visible }))))(
+  it.each(
+    [
+      { name: "maximum", attributes: 'maxlength="20"', help: "", oracle: /^[\s\S]{12,20}$/ },
+      { name: "minimum", attributes: 'minlength="30"', help: "", oracle: /^[\s\S]{30,64}$/ },
+      {
+        name: "pattern",
+        attributes: 'pattern="[A-Za-z0-9]{12,20}"',
+        help: "",
+        oracle: /^[A-Za-z0-9]{12,20}$/,
+      },
+      {
+        name: "local text",
+        attributes: "",
+        help: "At most 18 characters. No special characters",
+        oracle: /^[A-Za-z0-9]{12,18}$/,
+      },
+    ].flatMap((test) => [true, false].map((visible) => ({ ...test, visible }))),
+  )(
     "checks $name confirmation constraints (visible=$visible)",
     async ({ attributes, help, oracle, visible }) => {
       const html = `<!doctype html><form>
@@ -4219,7 +4267,12 @@ describe("operate_drive real-browser fixture", () => {
         </div>
         <button type="submit">Create account</button>
       </form>`;
-      const { context, page, started } = await openFixture(html, "confirmation-limits.test", "standard", "/signup");
+      const { context, page, started } = await openFixture(
+        html,
+        "confirmation-limits.test",
+        "standard",
+        "/signup",
+      );
       const persistLogin = vi.fn(async () => true);
       try {
         await runOperateDrive(
@@ -4258,15 +4311,23 @@ describe("operate_drive real-browser fixture", () => {
       <label id="confirmation" hidden>Confirm password<input id="confirm" type="password" required></label>
       <button type="submit">Create account</button>
     </form>`;
-    const { context, page, started } = await openFixture(main, "merchant.test", "standard", "/checkout");
+    const { context, page, started } = await openFixture(
+      main,
+      "merchant.test",
+      "standard",
+      "/checkout",
+    );
     const stored: Array<Record<string, unknown>> = [];
-    const vault = { storeCredential: async (input: Record<string, unknown>) => {
-      stored.push(input);
-      return { reference: "vault://embedded", service: input.service, label: input.label };
-    } } as unknown as ApiClient;
+    const vault = {
+      storeCredential: async (input: Record<string, unknown>) => {
+        stored.push(input);
+        return { reference: "vault://embedded", service: input.service, label: input.label };
+      },
+    } as unknown as ApiClient;
     try {
       await page.route("https://accounts.provider.test/**", (route) =>
-        route.fulfill({ contentType: "text/html", body: embedded }));
+        route.fulfill({ contentType: "text/html", body: embedded }),
+      );
       await page.evaluate(() => {
         const frame = document.createElement("iframe");
         frame.src = "https://accounts.provider.test/signup";
@@ -4277,7 +4338,12 @@ describe("operate_drive real-browser fixture", () => {
       const frame = page.frameLocator("iframe");
       await frame.locator("#password").waitFor();
       await runOperateDrive(
-        { session_id: started.session_id, goal: "create a new account", facts: { card_ref: "fixture-card" }, max_steps: 4 },
+        {
+          session_id: started.session_id,
+          goal: "create a new account",
+          facts: { card_ref: "fixture-card" },
+          max_steps: 4,
+        },
         api(),
         { persistLogin: (login) => storeInventedLogin(vault, login) },
         deps(async (_api, _state, questions) => jevChoose(questions, "DONE")),
@@ -4292,7 +4358,9 @@ describe("operate_drive real-browser fixture", () => {
         login_hosts: ["accounts.provider.test", "provider.test"],
         fields: { login: "provider@fixture.test", password },
       });
-      expect(sessionForCall(started.session_id)?.drive?.inventedLogin?.host).toBe("accounts.provider.test");
+      expect(sessionForCall(started.session_id)?.drive?.inventedLogin?.host).toBe(
+        "accounts.provider.test",
+      );
     } finally {
       await finishProvisionSession(started.session_id);
       await context.close();
@@ -4370,31 +4438,51 @@ describe("operate_drive real-browser fixture", () => {
       <label>Email<input type="email" value="ada@fixture.test" required></label>
       <label>Sandi<input id="password" type="password" autocomplete="new-password" required></label>
       <button type="submit">Buat Akun</button></form>`;
-    const { context, page, started } = await openFixture(html, "inbox-password.test", "standard", "/reset");
+    const { context, page, started } = await openFixture(
+      html,
+      "inbox-password.test",
+      "standard",
+      "/reset",
+    );
     const persistLogin = vi.fn(async () => true);
     const dependencies = deps(async (_api, _state, questions) => jevChoose(questions, "DONE"));
     try {
       const drive = emptyDriveState("finish email verification", {});
       sessionForCall(started.session_id)!.drive = drive;
       drive.history.push("open verification link");
-      drive.trajectory.push({ action: "goto_verify", target: "inbox_link", confidence: 1, url: page.url() });
+      drive.trajectory.push({
+        action: "goto_verify",
+        target: "inbox_link",
+        confidence: 1,
+        url: page.url(),
+      });
       await runOperateDrive(
         { session_id: started.session_id, goal: drive.goal, max_steps: 1 },
-        api(), { persistLogin }, dependencies,
+        api(),
+        { persistLogin },
+        dependencies,
       );
       expect(persistLogin).not.toHaveBeenCalled();
       expect(await page.locator("#password").inputValue()).toBe("");
       await page.goto("https://inbox-password.test/signup");
       await runOperateDrive(
         { session_id: started.session_id, goal: "create another account", max_steps: 1 },
-        api(), { persistLogin }, dependencies,
+        api(),
+        { persistLogin },
+        dependencies,
       );
       expect(persistLogin).toHaveBeenCalledOnce();
       expect(await page.locator("#password").inputValue()).not.toBe("");
       await page.goto("https://inbox-password.test/reset");
       await runOperateDrive(
-        { session_id: started.session_id, goal: "create an account on this later visit", max_steps: 1 },
-        api(), { persistLogin }, dependencies,
+        {
+          session_id: started.session_id,
+          goal: "create an account on this later visit",
+          max_steps: 1,
+        },
+        api(),
+        { persistLogin },
+        dependencies,
       );
       expect(await page.locator("#password").inputValue()).not.toBe("");
     } finally {

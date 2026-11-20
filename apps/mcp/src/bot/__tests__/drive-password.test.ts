@@ -386,13 +386,17 @@ describe("newAccountPasswordTargets", () => {
     expect(targets?.reuseOnly).toBe(false);
     for (const populated of [true, false]) {
       const rows: WireRow[] = pairedSignup.map((row) =>
-        row[0] === "@e:f0d9" && populated
-          ? [row[0], row[1], row[2]!.replace("s=r", "s=rp")]
-          : row,
+        row[0] === "@e:f0d9" && populated ? [row[0], row[1], row[2]!.replace("s=r", "s=rp")] : row,
       );
       const filled = populated ? [] : ["@e:f0d9"];
       expect(newAccountPasswordTargets(rows, {}, filled)).toBeUndefined();
-      const confirmation = newAccountPasswordTargets(rows, {}, filled, () => [], () => true);
+      const confirmation = newAccountPasswordTargets(
+        rows,
+        {},
+        filled,
+        () => [],
+        () => true,
+      );
       expect(confirmation?.password[0]).toBe("@e:pw2");
       expect(confirmation?.confirms).toEqual([]);
       expect(confirmation?.reuseOnly).toBe(true);
@@ -403,15 +407,33 @@ describe("newAccountPasswordTargets", () => {
     const reset: WireRow[] = kenariSignup.map((row) =>
       row[0] === "@e:f0d13" ? [row[0], row[1], "Atur ulang sandi|a=submit|fm=1"] : row,
     );
-    expect(newAccountPasswordTargets(reset, {}, [], () => [], () => reuse, true)).toBeUndefined();
+    expect(
+      newAccountPasswordTargets(
+        reset,
+        {},
+        [],
+        () => [],
+        () => reuse,
+        true,
+      ),
+    ).toBeUndefined();
   });
 
   it.each(["current", "third"])("excludes a %s password on Indonesian forms", (kind) => {
-    const rows: WireRow[] = kind === "current"
-      ? [...pairedSignup, ["@e:old", "t", "Sandi lama|f=password|ac=current-password|s=rp|fm=1"]]
-      : [...pairedSignup, ["@e:old", "t", "Sandi lama|f=password|s=rp|fm=1"]];
+    const rows: WireRow[] =
+      kind === "current"
+        ? [...pairedSignup, ["@e:old", "t", "Sandi lama|f=password|ac=current-password|s=rp|fm=1"]]
+        : [...pairedSignup, ["@e:old", "t", "Sandi lama|f=password|s=rp|fm=1"]];
     expect(newAccountPasswordTargets(rows, {}, [])).toBeUndefined();
-    expect(newAccountPasswordTargets(rows, {}, [], () => ["Create account"], () => true)).toBeUndefined();
+    expect(
+      newAccountPasswordTargets(
+        rows,
+        {},
+        [],
+        () => ["Create account"],
+        () => true,
+      ),
+    ).toBeUndefined();
   });
 
   it("excludes current-password even on a single-field signup-labeled form", () => {

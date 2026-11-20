@@ -286,7 +286,9 @@ async function withOAuthActionBoundary(
           const completion =
             deadline.completionCheck === undefined
               ? null
-              : await withinOAuthCallerDeadline(deadline.completionCheck, deadline).catch(() => null);
+              : await withinOAuthCallerDeadline(deadline.completionCheck, deadline).catch(
+                  () => null,
+                );
           if (completion !== null) {
             return {
               observation: completion.terminal
@@ -595,7 +597,13 @@ export async function actInternally(
         : await run();
     };
     return session !== undefined && (action.kind === "oauth_login" || action.kind === "oauth_click")
-      ? await withOAuthActionBoundary(session, oauthProvider, execute, "compact", options?.oauthDeadline)
+      ? await withOAuthActionBoundary(
+          session,
+          oauthProvider,
+          execute,
+          "compact",
+          options?.oauthDeadline,
+        )
       : await execute(undefined);
   } catch (error) {
     if (session !== undefined && (action.kind === "oauth_login" || action.kind === "oauth_click")) {
@@ -686,7 +694,13 @@ export async function act(
     };
     const result =
       session !== undefined && (action.kind === "oauth_login" || action.kind === "oauth_click")
-        ? await withOAuthActionBoundary(session, oauthProvider, execute, outputFormat, oauthDeadline)
+        ? await withOAuthActionBoundary(
+            session,
+            oauthProvider,
+            execute,
+            outputFormat,
+            oauthDeadline,
+          )
         : await execute(undefined);
     timing.enter("reply");
     if (session !== undefined && nativeDialogObservation(session) !== undefined)
@@ -1341,7 +1355,7 @@ async function executeAct(
         timing?.enter("browser_action");
         actedCombobox = actsThroughOverlay(el, driveIdentity?.picker === true);
         const ariaLabelAttribute =
-          driveIdentity === undefined ? (el.ariaLabel ?? "") : (driveIdentity.ariaLabel ?? "");
+          driveIdentity === undefined ? el.ariaLabel ?? "" : driveIdentity.ariaLabel ?? "";
         // Preserve frame identity (origin + path) for the frame-scoped fill.
         if (action.kind === "click" || action.kind === "js_click") {
           const clickPage = compactV2ActionPage ?? browser.page;

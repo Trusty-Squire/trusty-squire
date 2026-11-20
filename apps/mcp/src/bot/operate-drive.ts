@@ -2647,9 +2647,7 @@ export function newAccountPasswordTargets(
       isConfirmPasswordRow(row) || (pairedNew && row === passwords[1]);
     const reuseOnly = isConfirmation(password);
     if (reuseOnly && !reuseInventedPassword) continue;
-    const confirms = scope.filter(
-      (row) => row !== password && open(row) && isConfirmation(row),
-    );
+    const confirms = scope.filter((row) => row !== password && open(row) && isConfirmation(row));
     if (!isRequiredRow(password) && confirms.length === 0 && !reuseInventedPassword) continue;
     const buttons = scope.filter((row) => row[1] === "b" || row[1] === "button");
     const submits = buttons.filter((row) => /(?:^|\|)a=submit(?:\||$)/.test(row[2] ?? ""));
@@ -4536,12 +4534,12 @@ export function decideAfterJev(input: {
     const actionKey =
       choice === "SCROLL" && (DRIVE_SCROLL_DIRECTIONS as readonly string[]).includes(targetChoice)
         ? `scroll:${targetChoice}`
-        : (resolveActionChoice(targetChoice, [
+        : resolveActionChoice(targetChoice, [
             ...sets.CLICK,
             ...sets.TYPE_TEXT,
             ...sets.SELECT,
             ...sets.SCROLL,
-          ])?.ref ?? targetChoice);
+          ])?.ref ?? targetChoice;
 
     if (
       input.boundFingerprint === input.fingerprint &&
@@ -5480,7 +5478,8 @@ async function actSafely(
     if (
       deadline !== undefined &&
       (error instanceof OAuthAwaitingHumanError ||
-        deadline.timedOut || oauthActionRemainingMs(deadline) <= 0)
+        deadline.timedOut ||
+        oauthActionRemainingMs(deadline) <= 0)
     ) {
       throw error;
     }
@@ -6092,7 +6091,7 @@ async function driveLoop(input: {
     const controls = drivePasswordControls.get(session);
     const login =
       targets.identity === undefined
-        ? (targets.login ?? session.signupIdentifier ?? getSessionUserEmail(sessionId))
+        ? targets.login ?? session.signupIdentifier ?? getSessionUserEmail(sessionId)
         : controls?.get(targets.identity[0])?.value;
     if (login == null || login.trim().length === 0) return false;
     const requirements = [targets.password, ...targets.confirms].map(passwordRequirementsFor);
@@ -7315,13 +7314,15 @@ async function driveLoop(input: {
       }
       if (page !== null) {
         const ready = await withinOAuthCallerDeadline(
-          () => waitForPageReady(page, {
-            kind: "drive-action",
-            combobox: acted.combobox,
-            beforeEpoch,
-            beforeFingerprint: beforePageFingerprint,
-            watchChange: decision.action.kind === "click" || decision.action.kind === "oauth_login",
-          }),
+          () =>
+            waitForPageReady(page, {
+              kind: "drive-action",
+              combobox: acted.combobox,
+              beforeEpoch,
+              beforeFingerprint: beforePageFingerprint,
+              watchChange:
+                decision.action.kind === "click" || decision.action.kind === "oauth_login",
+            }),
           deadline,
         );
         settleMs = ready.elapsedMs;
@@ -7522,7 +7523,7 @@ async function driveLoop(input: {
           ? session.browser.page === null
             ? ""
             : await documentEpochOf(session.browser.page)
-          : (drive.lastDocumentEpoch ?? "");
+          : drive.lastDocumentEpoch ?? "";
       if (
         beforeEpoch.length > 0 &&
         completionEpoch.length > 0 &&
@@ -7560,7 +7561,12 @@ async function driveLoop(input: {
       url_after: observation.url,
       fingerprint_after: nextFingerprint,
       ...(driveTraceEnabled()
-        ? { native_selects_after: await withinOAuthCallerDeadline(() => nativeSelectSnapshot(session), deadline) }
+        ? {
+            native_selects_after: await withinOAuthCallerDeadline(
+              () => nativeSelectSnapshot(session),
+              deadline,
+            ),
+          }
         : {}),
     });
     // A hand-off that came back to its start page owns its own reason, but it
@@ -7926,9 +7932,9 @@ async function driveLoop(input: {
       // A sign-up form's new password is invented rather than handed back:
       // saved to the vault first, then typed from a sealed slot, so the value
       // never reaches the model, the trace, or the handoff.
-      const pageArrival = [...drive.trajectory].reverse().find(
-        (step) => step.url !== observation.url || step.action === "goto_verify",
-      );
+      const pageArrival = [...drive.trajectory]
+        .reverse()
+        .find((step) => step.url !== observation.url || step.action === "goto_verify");
       const passwordTargets =
         context?.persistLogin === undefined
           ? undefined
