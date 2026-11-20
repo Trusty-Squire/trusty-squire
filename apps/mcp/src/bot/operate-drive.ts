@@ -4243,6 +4243,29 @@ function refuseAdmission(
   );
 }
 
+// An account chooser's vote is between controls that each show an account's
+// email. The session already knows its own identity, so when the voted control
+// is one of those and exactly one CLICK candidate shows the session's email,
+// that candidate is the account to choose, however the vote split.
+export function sessionIdentityClickCandidate(
+  candidates: readonly DriveCandidate[],
+  votedChoice: string | undefined,
+  identityEmail: string | null | undefined,
+): DriveCandidate | undefined {
+  const identity = identityEmail?.trim().toLowerCase();
+  if (identity === undefined || identity.length === 0 || votedChoice === undefined) {
+    return undefined;
+  }
+  const emailsOf = (candidate: DriveCandidate): string[] =>
+    (readableLabel(candidate.row).match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) ?? []).map(
+      (email) => email.toLowerCase(),
+    );
+  const voted = resolveActionChoice(votedChoice, candidates);
+  if (voted === undefined || emailsOf(voted).length === 0) return undefined;
+  const matches = candidates.filter((candidate) => emailsOf(candidate).includes(identity));
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
 export function decideAfterJev(input: {
   answers: Record<string, JevAnswer>;
   rows: readonly WireRow[];
@@ -4264,6 +4287,8 @@ export function decideAfterJev(input: {
    *  any page description so the reason reports the loop's own dispatch
    *  failure rather than describing an unchanged page. */
   dispatchFailure?: string | null;
+  /** The session's own account email, when known. */
+  identityEmail?: string | null;
 }): DriveDecision {
   const threshold = input.threshold ?? DRIVE_CONFIDENCE_THRESHOLD;
   const includePayment = input.cardRef !== undefined;
@@ -4400,10 +4425,14 @@ export function decideAfterJev(input: {
       { reversible: REVERSIBLE_OPERATIONS.has(choice as DriveOperation) },
       threshold,
     );
-    if (!("ok" in targetAdmission)) {
+    const identityChoice =
+      choice === "CLICK"
+        ? sessionIdentityClickCandidate(sets.CLICK, targetAnswer?.choice, input.identityEmail)
+        : undefined;
+    if (!("ok" in targetAdmission) && identityChoice === undefined) {
       return refuseAdmission(targetAdmission, targetInstructions, targetCriteria, targetAnswer);
     }
-    const targetChoice = targetAnswer!.choice!;
+    const targetChoice = identityChoice?.slug ?? targetAnswer!.choice!;
     const actionKey =
       choice === "SCROLL" && (DRIVE_SCROLL_DIRECTIONS as readonly string[]).includes(targetChoice)
         ? `scroll:${targetChoice}`
@@ -8080,6 +8109,7 @@ async function driveLoop(input: {
         boundFingerprint: drive.boundFingerprint,
         sets,
         questions,
+        identityEmail: session.userEmail,
         ...(drive.lastDispatchFailure === undefined
           ? {}
           : { dispatchFailure: drive.lastDispatchFailure }),
