@@ -8,6 +8,10 @@
   `/s/<token>/`. A failed live view stops with the cause and no fallback
   install URL.
 
+## 1.1.49-rc.1 (2026-11-20)
+
+- operate_drive key capture: given `store`, a drive that shows a revealed key or has just clicked Copy (even when the button then reads "Copied!") vaults the key through the operate_extract store path and finishes complete without waiting for a DONE vote; without `store`, or if storing fails, the drive goes on to its next decision. An inbox read that finds no matching mail is reported to the next decision instead of re-reading the same empty inbox ([PR](https://github.com/Trusty-Squire/trusty-squire/pull/1148)).
+
 ## 1.1.48-rc.1 (2026-11-20)
 
 - operate_drive signup fixes: the pre-click occlusion check scrolls a target clipped by its own scroll box into view before calling it covered (a genuinely covering layer is still refused); a submit that first changes nothing tells the next decision why (the form's invalid fields, or that the site did not respond); the BLOCKED rule says an emailed code or link is not human verification ([PR](https://github.com/Trusty-Squire/trusty-squire/pull/1146)).
