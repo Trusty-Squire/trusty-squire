@@ -139,11 +139,13 @@ falls back to the ordinary tool act, which does return one. Login, inbox, and
 card still use those primitives. The two-head Jev request, structured state,
 choice validation, WAIT, SELECT option targets, snapshot evaluate, and drive
 rules prose are adapted from browser-use/jev-ultrafast (MIT).
+The model's INBOX rule prefers listed controls that send, request, or enter a
+verification code or link before reading mail.
 
 WAIT and BLOCKED are offered only while no listed work remains: an enabled
 fill, select, choice, or non-OAuth submit that is actually offered keeps both
-out of the answer set, and a chosen WAIT that leaves a page still listing rows
-unchanged is withheld afterwards. When the snapshot is empty the loop takes up
+out of the answer set. A chosen WAIT remains available even when the page is
+unchanged. When the snapshot is empty the loop takes up
 to three automatic waits itself and then asks the ordinary question, which on
 zero rows offers exactly WAIT, DONE, and BLOCKED — an empty processor screen is
 not a no-op loop, so a payment keeps settling for as long as the budgets allow.
@@ -152,8 +154,8 @@ no fills left, the loop takes up to three automatic settle waits on that page
 and then offers only DONE and BLOCKED.
 
 An action that produced no observable change is not offered again while the
-page's URL, form surface, and filled fields stay the same; WAIT counts in that
-budget, and a stale or occluded click ref is withheld until the observation
+page's URL, form surface, and filled fields stay the same; WAIT is excluded from
+that budget, and a stale or occluded click ref is withheld until the observation
 fingerprint changes. After five such dead actions on one page, or when they
 leave no actionable operation, the drive ends with `no_progress` and a `reason`
 naming them.
@@ -191,6 +193,10 @@ and settling retry. Consent overlays remain ordinary controls for the drive
 loop to handle. The live Google-session admission gate still applies.
 Standalone `operate_start` retains its general initial observation in the
 requested format and best-effort consent-banner dismissal before that read.
+
+Before each drive read, readiness uses the same bounded network-idle and
+DOM-quiet settling as an observation. The wait caps are owned by
+`PAGE_READY_CAPS` in `apps/mcp/src/bot/page-ready.ts`.
 
 After a guarded drive action, settling waits for two animation frames or
 50 ms. If the document's time origin changed, the loop then polls for a
@@ -269,6 +275,8 @@ omitted siblings carry `options_elided` in planner state. The allocator reserves
 a usable goal-value choice alongside `none` when available. Omitted choices
 cannot be selected in that batch.
 
+Covered controls remain eligible for the drive's action menu alongside dialog
+and overlay dismiss controls; the action-time occlusion guard still applies.
 The drive snapshot retains offscreen form controls and controls in header,
 navigation, and footer regions. It retains offscreen buttons only on a checkout
 URL, where they become click candidates too — no label test, so a localized
