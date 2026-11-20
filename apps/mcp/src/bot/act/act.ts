@@ -779,7 +779,7 @@ function scopeForElement(page: Page, el: InteractiveElement): Page | Frame {
 // banner or sticky footer over the target swallows the click while the page
 // still reports a dispatch, so the caller records a step that never landed.
 // Absent a box (still loading) it says nothing and the actionability waits rule.
-async function clickTargetOccluded(scope: Page | Frame, selector: string): Promise<boolean> {
+export async function clickTargetOccluded(scope: Page | Frame, selector: string): Promise<boolean> {
   return await evaluateBound(
     scope,
     (sel: string) => {
@@ -806,9 +806,6 @@ async function clickTargetOccluded(scope: Page | Frame, selector: string): Promi
       if (!inView) {
         element.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
       }
-      const rect = element.getBoundingClientRect();
-      if (rect.width <= 0 || rect.height <= 0) return false;
-      const hit = document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2);
       const composedContains = (ancestor: Element, descendant: Element): boolean => {
         let current: Element | null = descendant;
         while (current !== null) {
@@ -818,7 +815,20 @@ async function clickTargetOccluded(scope: Page | Frame, selector: string): Promi
         }
         return false;
       };
-      return hit !== null && !composedContains(element, hit) && !composedContains(hit, element);
+      const covered = (): boolean => {
+        const rect = element.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) return false;
+        const hit = document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2);
+        return hit !== null && !composedContains(element, hit) && !composedContains(hit, element);
+      };
+      if (!covered()) return false;
+      // Inside the viewport is not inside every scroll box: an expanded
+      // section can push a dialog's footer button below the dialog's own
+      // scroll edge, where the hit lands on the backdrop. Scroll it into its
+      // scroll box, as the click itself would, and judge that point.
+      if (!inView) return true;
+      element.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
+      return covered();
     },
     selector,
   ).catch(() => false);
