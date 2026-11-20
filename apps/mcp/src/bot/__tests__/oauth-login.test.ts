@@ -3886,12 +3886,12 @@ describe("BrowserController OAuth popup lifecycle", () => {
       return recovery;
     });
     const trackedClick = controller.clickWithDispatchTracking.bind(controller);
-    const tracking = vi.spyOn(controller, "clickWithDispatchTracking").mockImplementation(
-      async (...args) => {
+    const tracking = vi
+      .spyOn(controller, "clickWithDispatchTracking")
+      .mockImplementation(async (...args) => {
         if (stage === "tracking") expire();
         return await trackedClick(...args);
-      },
-    );
+      });
     const handle = await product.$("#oauth");
     try {
       await expect(

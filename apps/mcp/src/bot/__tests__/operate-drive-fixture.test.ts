@@ -1277,14 +1277,18 @@ describe("operate_drive real-browser fixture", () => {
         max_seconds: 2,
       };
       try {
-        expect((await runOperateDrive(input, api(), undefined, dependencies)).status).toBe("budget");
+        expect((await runOperateDrive(input, api(), undefined, dependencies)).status).toBe(
+          "budget",
+        );
         const drive = sessionForCall(started.session_id)!.drive!;
         if (stage === "preflight") {
           expect(dispatch).not.toHaveBeenCalled();
           expect(drive.consumedActionKey).toBeNull();
           restoreEvaluate();
           finishRead();
-          expect((await runOperateDrive(input, api(), undefined, dependencies)).status).toBe("budget");
+          expect((await runOperateDrive(input, api(), undefined, dependencies)).status).toBe(
+            "budget",
+          );
           expect(dispatch).toHaveBeenCalledOnce();
         } else {
           expect(dispatch).toHaveBeenCalledOnce();

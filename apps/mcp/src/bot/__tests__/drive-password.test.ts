@@ -346,8 +346,9 @@ describe("newAccountPasswordTargets", () => {
   ];
 
   it("does not invent or confirm a password into a visible text control", () => {
-    const visible = kenariSignup.map((row): WireRow =>
-      row[0] === "@e:f0d9" ? [row[0], row[1], row[2]!.replace("|it=password", "")] : row,
+    const visible = kenariSignup.map(
+      (row): WireRow =>
+        row[0] === "@e:f0d9" ? [row[0], row[1], row[2]!.replace("|it=password", "")] : row,
     );
     expect(newAccountPasswordTargets(visible, {}, [])).toBeUndefined();
     const confirms: WireRow[] = [
@@ -370,7 +371,11 @@ describe("newAccountPasswordTargets", () => {
       ["@e:f0d4", "b", "Masuk|a=submit|fm=1"],
       ["@e:f0d1", "b", "Daftar gratis"],
       ["@e:f0d2", "t", "Email|f=email|s=r|n=ada@fixture.test|ph=kamu@contoh.com|fm=1"],
-      ["@e:f0d3", "t", "Sandi|f=password|it=password|ac=current-password|s=r|ph=Minimal 8 karakter|fm=1"],
+      [
+        "@e:f0d3",
+        "t",
+        "Sandi|f=password|it=password|ac=current-password|s=r|ph=Minimal 8 karakter|fm=1",
+      ],
       ["@e:f0d5", "b", "Lupa sandi?"],
     ];
     expect(newAccountPasswordTargets(signin, {}, [], () => ["masuk"])).toBeUndefined();
