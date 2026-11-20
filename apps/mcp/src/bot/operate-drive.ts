@@ -6896,6 +6896,7 @@ async function driveLoop(input: {
         // still arrive, so report budget (resume) and leave no "no mail" trail
         // entry that would stop the resumed call from reading the inbox again.
         if (clock() < deadline && remainingMs() < DRIVE_WAIT_MS) {
+          drive.consumedActionKey = null;
           return finish("budget", {
             reason: "drive budget ended while waiting for verification mail",
           });
