@@ -7,6 +7,7 @@ import type * as ObserveModule from "../observe/observe.js";
 import type { Observation } from "../provision-session.js";
 import { createSession } from "../session/model.js";
 import { act, actInternally, dispatchDriveAct } from "../act/act.js";
+import * as DriveIdentity from "../act/identity.js";
 import {
   OAuthAwaitingHumanError,
   oauthActionDeadline,
@@ -35,6 +36,7 @@ vi.mock("../observe/observe.js", async (importOriginal) => ({
 }));
 
 afterEach(() => {
+  vi.restoreAllMocks();
   boundary.session = undefined;
   boundary.gate.mockReset();
   boundary.observe.mockReset();
@@ -144,91 +146,105 @@ describe("OAuth preflight under a drive deadline", () => {
     },
   );
 
-  it.each([80, 45_000])("bounds the drive target guard with a %i ms caller budget", async (callerMs) => {
-    vi.useFakeTimers();
-    const page = {
-      url: () => "https://fixture.test/signup",
-      isClosed: () => false,
-      frames: (): unknown[] => [page],
-      evaluate: () => new Promise<never>(() => {}),
-    };
-    const browser = {
-      page,
-      currentUrl: page.url,
-      maskOperatorOutput: <T>(value: T): T => value,
-    } as unknown as BrowserController;
-    boundary.session = createSession({
-      id: "budget",
-      browser,
-      allowedHosts: [],
-      startUrl: page.url(),
-      consentInboxRead: false,
-      userEmail: null,
-    });
-    boundary.session.drive = {
-      identities: new Map([
-        [
-          "@e:go",
-          {
-            selector: "#go",
-            frameUrl: page.url(),
-            frameOrigin: "https://fixture.test",
-            role: "button",
-            label: "Google",
-          },
-        ],
-      ]),
-    } as Session["drive"];
-    const result = vi.fn();
-    const deadline = oauthActionDeadline("google", callerMs);
-    const pending = dispatchDriveAct(
-      "budget",
-      { kind: "oauth_login", target: "@e:go", provider: "google" },
-      deadline,
-    ).then(result, result);
-    await vi.advanceTimersByTimeAsync(Math.min(callerMs, 30_000));
-    expect(result).toHaveBeenCalledOnce();
-    expect(result.mock.calls[0]![0]).toBeInstanceOf(OAuthAwaitingHumanError);
-    expect(boundary.gate).not.toHaveBeenCalled();
-    expect(deadline.dispatchAttempted).not.toBe(true);
-    await pending;
-  });
+  it.each([80, 45_000])(
+    "bounds the drive target guard with a %i ms caller budget",
+    async (callerMs) => {
+      vi.useFakeTimers();
+      // Stall identity resolution itself: a page.evaluate stall has its own 4s
+      // timeout and would finish the guard before the OAuth phase deadline.
+      vi.spyOn(DriveIdentity, "resolveIdentityScope").mockImplementationOnce(
+        () => new Promise<never>(() => {}),
+      );
+      const page = {
+        url: () => "https://fixture.test/signup",
+        isClosed: () => false,
+      };
+      const browser = {
+        page,
+        currentUrl: page.url,
+        maskOperatorOutput: <T>(value: T): T => value,
+      } as unknown as BrowserController;
+      boundary.session = createSession({
+        id: "budget",
+        browser,
+        allowedHosts: [],
+        startUrl: page.url(),
+        consentInboxRead: false,
+        userEmail: null,
+      });
+      boundary.session.drive = {
+        identities: new Map([
+          [
+            "@e:go",
+            {
+              selector: "#go",
+              frameUrl: page.url(),
+              frameOrigin: "https://fixture.test",
+              role: "button",
+              label: "Google",
+            },
+          ],
+        ]),
+      } as Session["drive"];
+      const result = vi.fn();
+      const deadline = oauthActionDeadline("google", callerMs);
+      const pending = dispatchDriveAct(
+        "budget",
+        { kind: "oauth_login", target: "@e:go", provider: "google" },
+        deadline,
+      ).then(result, result);
+      await vi.advanceTimersByTimeAsync(Math.min(callerMs, 30_000) - 1);
+      expect(result).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(result).toHaveBeenCalledOnce();
+      expect(result.mock.calls[0]![0]).toBeInstanceOf(OAuthAwaitingHumanError);
+      expect(boundary.gate).not.toHaveBeenCalled();
+      expect(deadline.dispatchAttempted).not.toBe(true);
+      await pending;
+    },
+  );
 });
 
 describe("OAuth fallback caller deadline", () => {
-  it.each([20_000, 45_000])("keeps a %i ms deadline through public OAuth fallback", async (callerMs) => {
-    vi.useFakeTimers();
-    const browser = {
-      page: null,
-      activePage: () => null,
-      currentUrl: () => "https://fixture.test/signup",
-      maskOperatorOutput: <T>(value: T): T => value,
-    } as unknown as BrowserController;
-    boundary.session = createSession({
-      id: "fallback",
-      browser,
-      allowedHosts: [],
-      startUrl: "https://fixture.test/signup",
-      consentInboxRead: false,
-      userEmail: null,
-    });
-    boundary.gate.mockImplementation(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 60_000));
-      return { ok: true };
-    });
-    const deadline = oauthActionDeadline("google", callerMs);
-    const action = { kind: "oauth_login", target: "Google", provider: "google" } as const;
-    expect(await dispatchDriveAct("fallback", action, deadline)).toEqual({ kind: "unsupported" });
-    await vi.advanceTimersByTimeAsync(5_000);
-    const result = vi.fn();
-    const pending = act("fallback", action, "compact", "compact", true, deadline).then(result, result);
-    await vi.advanceTimersByTimeAsync(Math.min(callerMs, 30_000) - 5_000);
-    expect(result).toHaveBeenCalledOnce();
-    expect(result.mock.calls[0]![0]).toBeInstanceOf(OAuthAwaitingHumanError);
-    expect(deadline.dispatchAttempted).not.toBe(true);
-    await pending;
-    await vi.advanceTimersByTimeAsync(20_000);
-  });
+  it.each([20_000, 45_000])(
+    "keeps a %i ms deadline through public OAuth fallback",
+    async (callerMs) => {
+      vi.useFakeTimers();
+      const browser = {
+        page: null,
+        activePage: () => null,
+        currentUrl: () => "https://fixture.test/signup",
+        maskOperatorOutput: <T>(value: T): T => value,
+      } as unknown as BrowserController;
+      boundary.session = createSession({
+        id: "fallback",
+        browser,
+        allowedHosts: [],
+        startUrl: "https://fixture.test/signup",
+        consentInboxRead: false,
+        userEmail: null,
+      });
+      boundary.gate.mockImplementation(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 60_000));
+        return { ok: true };
+      });
+      const deadline = oauthActionDeadline("google", callerMs);
+      const action = { kind: "oauth_login", target: "Google", provider: "google" } as const;
+      expect(await dispatchDriveAct("fallback", action, deadline)).toEqual({ kind: "unsupported" });
+      await vi.advanceTimersByTimeAsync(5_000);
+      const result = vi.fn();
+      const pending = act("fallback", action, "compact", "compact", true, deadline).then(
+        result,
+        result,
+      );
+      await vi.advanceTimersByTimeAsync(Math.min(callerMs, 30_000) - 5_000);
+      expect(result).toHaveBeenCalledOnce();
+      expect(result.mock.calls[0]![0]).toBeInstanceOf(OAuthAwaitingHumanError);
+      expect(deadline.dispatchAttempted).not.toBe(true);
+      await pending;
+      await vi.advanceTimersByTimeAsync(20_000);
+    },
+  );
 
   it.each(["completion", "observation"])(
     "bounds stalled %s recovery after interrupted OAuth",
