@@ -32,7 +32,7 @@ import {
 } from "../operate-drive.js";
 import { storeInventedLogin } from "../../tools/provision-drive.js";
 import { finishProvisionSession, startHarnessProvisionSession } from "../provision-session.js";
-import type { ProvisionAction } from "../provision-session.js";
+import type { Observation, ProvisionAction } from "../provision-session.js";
 import {
   act,
   observe,
@@ -1179,9 +1179,9 @@ describe("operate_drive real-browser fixture", () => {
       // OAuth is the drive's own action now: it goes through the drive
       // executor, not the tools fallback. Record it and run the real dispatch
       // so the provider wall is produced by the real session gate.
-      dependencies.driveAct = async (sessionId, action) => {
+      dependencies.driveAct = async (sessionId, action, deadline) => {
         actions.push(action);
-        return await dispatchDriveAct(sessionId, action);
+        return await dispatchDriveAct(sessionId, action, deadline);
       };
       const result = await runOperateDrive(
         { session_id: started.session_id, goal: "sign in with Google" },
@@ -1212,9 +1212,9 @@ describe("operate_drive real-browser fixture", () => {
     try {
       const dependencies = deps(async (_api, _state, questions) => jevFromQuestions(questions));
       const actions: ProvisionAction[] = [];
-      dependencies.driveAct = async (sessionId, action) => {
+      dependencies.driveAct = async (sessionId, action, deadline) => {
         actions.push(action);
-        return await dispatchDriveAct(sessionId, action);
+        return await dispatchDriveAct(sessionId, action, deadline);
       };
       const result = await runOperateDrive(
         { session_id: started.session_id, goal: "create an account" },
@@ -1231,6 +1231,63 @@ describe("operate_drive real-browser fixture", () => {
       await context.close();
     }
   }, 30_000);
+
+  it.each(["fallback", "readiness", "snapshot"])(
+    "ends OAuth within the call budget when %s stalls",
+    async (stage) => {
+      const html = `<!doctype html><main><h1>Create account</h1>
+        <a href="/oauth/google">Continue with Google</a></main>`;
+      const { context, page, started } = await openFixture(html, "oauth-budget.test");
+      const dependencies = deps(async (_api, _state, questions) => jevFromQuestions(questions));
+      let snapshots = 0;
+      let dispatched = false;
+      let fallback = false;
+      let finishRead = () => {};
+      let restoreEvaluate = () => {};
+      try {
+        dependencies.driveAct = async (_sessionId, action) => {
+          expect(action.kind).toBe("oauth_login");
+          dispatched = true;
+          if (stage === "fallback") return { kind: "unsupported" };
+          if (stage === "readiness") {
+            const evaluate = vi.spyOn(page, "evaluate").mockImplementation(
+              () => new Promise<never>(() => {}),
+            );
+            restoreEvaluate = () => evaluate.mockRestore();
+          }
+          return { kind: "ok", combobox: false };
+        };
+        dependencies.act = async () => {
+          fallback = true;
+          return await new Promise<Observation>((resolve) => {
+            finishRead = () => resolve({ url: page.url() } as Observation);
+          });
+        };
+        dependencies.onSnapshot = async () => {
+          snapshots += 1;
+          if (stage === "snapshot" && dispatched) {
+            await new Promise<void>((resolve) => { finishRead = resolve; });
+          }
+        };
+        const startedAt = Date.now();
+        const result = await runOperateDrive(
+          { session_id: started.session_id, goal: "create an account", max_seconds: 2 },
+          api(), undefined, dependencies,
+        );
+        expect(result.status).toBe("budget");
+        expect(dispatched).toBe(true);
+        expect(fallback).toBe(stage === "fallback");
+        if (stage === "snapshot") expect(snapshots).toBeGreaterThan(1);
+        expect(Date.now() - startedAt).toBeLessThan(5_000);
+      } finally {
+        restoreEvaluate();
+        finishRead();
+        await finishProvisionSession(started.session_id);
+        await context.close();
+      }
+    },
+    15_000,
+  );
 
   it("lets the model block a third-party-only signup when the goal excludes those links", async () => {
     const html = `<!doctype html><meta charset="utf-8"><title>Signup</title>
@@ -1285,12 +1342,12 @@ describe("operate_drive real-browser fixture", () => {
       // Force the drive executor to hand the OAuth act back, so the tools
       // fallback runs and refuses. The refusal must be recorded as a failed
       // step, never confused with the unchanged page.
-      dependencies.driveAct = async (sessionId, action) => {
+      dependencies.driveAct = async (sessionId, action, deadline) => {
         if (action.kind === "oauth_login") {
           attempts += 1;
           return { kind: "unsupported" as const };
         }
-        return await dispatchDriveAct(sessionId, action);
+        return await dispatchDriveAct(sessionId, action, deadline);
       };
       dependencies.act = async () => {
         throw new Error(
@@ -4308,6 +4365,44 @@ describe("operate_drive real-browser fixture", () => {
     }
   }, 60_000);
 
+  it("excludes only the inbox arrival page, including after a goal change", async () => {
+    const html = `<!doctype html><form>
+      <label>Email<input type="email" value="ada@fixture.test" required></label>
+      <label>Sandi<input id="password" type="password" autocomplete="new-password" required></label>
+      <button type="submit">Buat Akun</button></form>`;
+    const { context, page, started } = await openFixture(html, "inbox-password.test", "standard", "/reset");
+    const persistLogin = vi.fn(async () => true);
+    const dependencies = deps(async (_api, _state, questions) => jevChoose(questions, "DONE"));
+    try {
+      const drive = emptyDriveState("finish email verification", {});
+      sessionForCall(started.session_id)!.drive = drive;
+      drive.history.push("open verification link");
+      drive.trajectory.push({ action: "goto_verify", target: "inbox_link", confidence: 1, url: page.url() });
+      await runOperateDrive(
+        { session_id: started.session_id, goal: drive.goal, max_steps: 1 },
+        api(), { persistLogin }, dependencies,
+      );
+      expect(persistLogin).not.toHaveBeenCalled();
+      expect(await page.locator("#password").inputValue()).toBe("");
+      await page.goto("https://inbox-password.test/signup");
+      await runOperateDrive(
+        { session_id: started.session_id, goal: "create another account", max_steps: 1 },
+        api(), { persistLogin }, dependencies,
+      );
+      expect(persistLogin).toHaveBeenCalledOnce();
+      expect(await page.locator("#password").inputValue()).not.toBe("");
+      await page.goto("https://inbox-password.test/reset");
+      await runOperateDrive(
+        { session_id: started.session_id, goal: "create an account on this later visit", max_steps: 1 },
+        api(), { persistLogin }, dependencies,
+      );
+      expect(await page.locator("#password").inputValue()).not.toBe("");
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 60_000);
+
   it("does not type an invented password whose login could not be saved", async () => {
     const { context, page, started } = await openFixture(
       NEW_ACCOUNT_PASSWORD_HTML,
@@ -5213,14 +5308,14 @@ describe("operate_drive real-browser fixture", () => {
           ? jevChoose(questions, "BLOCKED")
           : jevFromQuestions(questions),
       );
-      dependencies.driveAct = async (sessionId, action) => {
+      dependencies.driveAct = async (sessionId, action, deadline) => {
         if (action.kind === "oauth_login") {
           await page.evaluate(() => {
             history.replaceState({}, "", `/login?state=${Math.random().toString(36).slice(2)}`);
           });
           return { kind: "ok", combobox: false } as const;
         }
-        return await dispatchDriveAct(sessionId, action);
+        return await dispatchDriveAct(sessionId, action, deadline);
       };
       const result = await runOperateDrive(
         {
@@ -5881,13 +5976,13 @@ describe("operate_drive feedback loop", () => {
       const dependencies = deps(async (_api, _state, questions) =>
         bounce > 0 ? jevChoose(questions, "BLOCKED") : jevFromQuestions(questions),
       );
-      dependencies.driveAct = async (sessionId, action) => {
+      dependencies.driveAct = async (sessionId, action, deadline) => {
         if (action.kind === "oauth_login") {
           bounce += 1;
           await page.goto(`https://oauth-bounce-trail.test/login?state=s${bounce}`);
           return { kind: "ok", combobox: false } as const;
         }
-        return await dispatchDriveAct(sessionId, action);
+        return await dispatchDriveAct(sessionId, action, deadline);
       };
       const handoff = await runOperateDrive(
         { session_id: started.session_id, goal: "sign in", max_steps: 8 },

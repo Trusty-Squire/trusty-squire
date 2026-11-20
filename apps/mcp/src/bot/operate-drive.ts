@@ -43,6 +43,13 @@ import { liveProviderSessionsForSession, sessionForCall } from "./session/lifecy
 import { yieldOperateDriveToHuman } from "./live-share.js";
 import type { OAuthProviderId } from "./oauth-providers.js";
 import {
+  OAuthAwaitingHumanError,
+  oauthActionDeadline,
+  oauthActionRemainingMs,
+  withinOAuthCallerDeadline,
+  type OAuthActionDeadline,
+} from "./oauth-login.js";
+import {
   compactV2EpochDoc,
   compactV2RefAllocator,
   invalidateCompactV2Snapshot,
@@ -415,7 +422,11 @@ export interface DriveDependencies {
   // capture; it cannot stand IN for one, because the rows and the identities
   // their refs name have to come from the same capture.
   onSnapshot?: () => Promise<void> | void;
-  driveAct?: (sessionId: string, action: ProvisionAction) => Promise<DriveActResult>;
+  driveAct?: (
+    sessionId: string,
+    action: ProvisionAction,
+    deadline?: OAuthActionDeadline,
+  ) => Promise<DriveActResult>;
   startSession: typeof startProvisionSession;
   awaitVerification: typeof awaitVerification;
   injectCard: InjectCardFn;
@@ -5412,11 +5423,11 @@ async function actDriveSafely(
   sessionId: string,
   action: ProvisionAction,
   deps: DriveDependencies,
-  budgetMs: number,
+  deadline?: OAuthActionDeadline,
 ): Promise<DriveActResult> {
-  if (deps.driveAct !== undefined) return await deps.driveAct(sessionId, action);
+  if (deps.driveAct !== undefined) return await deps.driveAct(sessionId, action, deadline);
   if (session.browser.page === null) return { kind: "unsupported" };
-  return await dispatchDriveAct(sessionId, action, budgetMs);
+  return await dispatchDriveAct(sessionId, action, deadline);
 }
 
 /** The loop's own, page-independent account of a refused/undispatched act. */
@@ -5446,6 +5457,7 @@ async function actSafely(
   deps: DriveDependencies,
   sessionId: string,
   action: ProvisionAction,
+  deadline?: OAuthActionDeadline,
 ): Promise<SafeDriveActResult> {
   const session = sessionForCall(sessionId);
   // The drive's own dispatcher uses private registry keys. A fallback into the
@@ -5461,8 +5473,17 @@ async function actSafely(
         }
       : action;
   try {
-    return { observation: await deps.act(sessionId, publicAction, "compact", "compact", true) };
+    return {
+      observation: await deps.act(sessionId, publicAction, "compact", "compact", true, deadline),
+    };
   } catch (error) {
+    if (
+      deadline !== undefined &&
+      (error instanceof OAuthAwaitingHumanError ||
+        deadline.timedOut || oauthActionRemainingMs(deadline) <= 0)
+    ) {
+      throw error;
+    }
     if (error instanceof TargetStaleError) {
       return {
         observation: await deps.observe(sessionId, "compact"),
@@ -6202,13 +6223,20 @@ async function driveLoop(input: {
     nextFingerprint: string,
     actionKey: string,
     deadKeyBaseline?: string,
+    deadline?: OAuthActionDeadline,
   ): Promise<DriveHandoff | "continue"> => {
     let confirmed = nextFingerprint;
     if (confirmed === fingerprint) {
       if (session.browser.page !== null) {
-        await waitForPageReady(session.browser.page, { kind: "identical-resnap" });
+        await withinOAuthCallerDeadline(
+          () => waitForPageReady(session.browser.page!, { kind: "identical-resnap" }),
+          deadline,
+        );
       }
-      const snap = await snapshotOrTimeout(framesIfNeeded());
+      const snap = await withinOAuthCallerDeadline(
+        () => snapshotOrTimeout(framesIfNeeded()),
+        deadline,
+      );
       if (snap !== "ok") return snap;
       confirmed = driveProgressFingerprint(observation, rows, drive, session);
     }
@@ -6361,10 +6389,11 @@ async function driveLoop(input: {
   // wait, inbox read) have their own guards, so recording them here both
   // collapsed the settle budget to one wait and withdrew a probe the model
   // had never been offered.
-  const applyDecision = async (
+  const executeDecision = async (
     decision: DriveDecision,
     jevMs?: number,
     modelChosen = false,
+    deadline?: OAuthActionDeadline,
   ): Promise<DriveHandoff | "continue"> => {
     if (decision.kind === "defer") return "continue";
     if (decision.kind === "operator_handoff") {
@@ -6658,8 +6687,14 @@ async function driveLoop(input: {
     // The signal is the document epoch plus the controls' own state — page text
     // ticks on its own (countdown, live price) and would re-decide every step.
     if (session.browser.page !== null) {
-      const liveEpoch = await documentEpochOf(session.browser.page);
-      const liveControls = await driveControlDigest(session.browser.page);
+      const liveEpoch = await withinOAuthCallerDeadline(
+        () => documentEpochOf(session.browser.page!),
+        deadline,
+      );
+      const liveControls = await withinOAuthCallerDeadline(
+        () => driveControlDigest(session.browser.page!),
+        deadline,
+      );
       const documentChanged =
         typeof drive.lastDocumentEpoch === "string" &&
         drive.lastDocumentEpoch.length > 0 &&
@@ -6697,7 +6732,10 @@ async function driveLoop(input: {
         if (!documentChanged && targetBinding.length > 0) {
           drive.pendingAbsentBinding = targetBinding;
         }
-        const snap = await snapshotOrTimeout(framesIfNeeded());
+        const snap = await withinOAuthCallerDeadline(
+          () => snapshotOrTimeout(framesIfNeeded()),
+          deadline,
+        );
         if (snap !== "ok") return snap;
         automaticDecisionRefused = true;
         return "continue";
@@ -6898,7 +6936,7 @@ async function driveLoop(input: {
           target: decision.action.target,
           text: driveInboxValue(verification).code!,
         };
-        const acted = await actDriveSafely(session, sessionId, typed, dependencies, remainingMs());
+        const acted = await actDriveSafely(session, sessionId, typed, dependencies);
         if (acted.kind !== "ok") {
           const safe = await actSafely(dependencies, sessionId, typed);
           if (safe.dispatchFailure === undefined) dispatchedActs += 1;
@@ -6927,6 +6965,18 @@ async function driveLoop(input: {
           ? finishOnWall(wall)
           : finish("needs_value", { field: "verification_code" });
       }
+      const inboxStep: DriveTrajectoryStep = {
+        action: inboxNext === "type_code" ? "type_otp" : "goto_verify",
+        ...(inboxNext !== "goto_link" || drive.lastDispatchFailure == null
+          ? {}
+          : { reason: drive.lastDispatchFailure }),
+        target: decision.actionKey,
+        confidence: decision.confidence,
+        url: observation.url,
+        ...(observation.stage === undefined ? {} : { stage: observation.stage }),
+        ...(jevMs === undefined ? {} : { jev_ms: jevMs }),
+      };
+      drive.trajectory.push(inboxStep);
       const inboxSnap = await refreshSnapshot(framesIfNeeded());
       if (inboxSnap.timedOut)
         return finish("evaluate_timeout", { reason: "in-page evaluate exceeded budget" });
@@ -6937,13 +6987,9 @@ async function driveLoop(input: {
         snapshot_script_ms: inboxSnap.snapshotScriptMs,
         snapshot_wall_ms: inboxSnap.snapshotWallMs,
       };
-      drive.trajectory.push({
-        action: inboxNext === "type_code" ? "type_otp" : "goto_verify",
-        target: decision.actionKey,
-        confidence: decision.confidence,
+      Object.assign(inboxStep, {
         url: observation.url,
         ...(observation.stage === undefined ? {} : { stage: observation.stage }),
-        ...(jevMs === undefined ? {} : { jev_ms: jevMs }),
         ...takeActProfile(drive),
       });
       if (inboxNext === "type_code") drive.history.push("type verification code");
@@ -6958,9 +7004,13 @@ async function driveLoop(input: {
     );
     const beforeEpoch =
       drive.lastDocumentEpoch ??
-      (session.browser.page === null ? "" : await documentEpochOf(session.browser.page));
+      (session.browser.page === null
+        ? ""
+        : await withinOAuthCallerDeadline(() => documentEpochOf(session.browser.page!), deadline));
     const beforePageFingerprint =
-      session.browser.page === null ? "" : await pageFingerprintOf(session.browser.page);
+      session.browser.page === null
+        ? ""
+        : await withinOAuthCallerDeadline(() => pageFingerprintOf(session.browser.page!), deadline);
     const actStarted = Date.now();
     const beforeKey = pageProgressKey(
       observation.url,
@@ -7022,12 +7072,9 @@ async function driveLoop(input: {
         : null;
     let acted: DriveActResult;
     try {
-      acted = await actDriveSafely(
-        session,
-        sessionId,
-        decision.action,
-        dependencies,
-        remainingMs(),
+      acted = await withinOAuthCallerDeadline(
+        () => actDriveSafely(session, sessionId, decision.action, dependencies, deadline),
+        deadline,
       );
     } catch (error) {
       drive.pendingCopyCapture = null;
@@ -7057,7 +7104,7 @@ async function driveLoop(input: {
       acted.needsUser === undefined &&
       session.browser.page === oauthPageBefore
     ) {
-      await session.browser.adoptOpenedTab(300);
+      await withinOAuthCallerDeadline(() => session.browser.adoptOpenedTab(300), deadline);
     }
     if (decision.action.kind === "oauth_login") {
       appendDriveTrace(session, {
@@ -7116,7 +7163,10 @@ async function driveLoop(input: {
         }
         rememberFailedAction(drive, rows, decision.actionKey, observation.url);
       }
-      const staleSnap = await snapshotOrTimeout(framesIfNeeded());
+      const staleSnap = await withinOAuthCallerDeadline(
+        () => snapshotOrTimeout(framesIfNeeded()),
+        deadline,
+      );
       if (staleSnap !== "ok") return staleSnap;
       noteOutcome({
         beforeUrl: urlBeforeClick,
@@ -7166,7 +7216,10 @@ async function driveLoop(input: {
     // evidence that the page itself cannot advance the goal.
     let actDispatched = true;
     if (acted.kind === "unsupported") {
-      const safe = await actSafely(dependencies, sessionId, decision.action);
+      const safe = await withinOAuthCallerDeadline(
+        () => actSafely(dependencies, sessionId, decision.action, deadline),
+        deadline,
+      );
       observation = safe.observation;
       if (session.browser.nativeDialogs?.blocked) {
         observation = nativeDialogObservation(session)!;
@@ -7261,13 +7314,16 @@ async function driveLoop(input: {
         });
       }
       if (page !== null) {
-        const ready = await waitForPageReady(page, {
-          kind: "drive-action",
-          combobox: acted.combobox,
-          beforeEpoch,
-          beforeFingerprint: beforePageFingerprint,
-          watchChange: decision.action.kind === "click" || decision.action.kind === "oauth_login",
-        });
+        const ready = await withinOAuthCallerDeadline(
+          () => waitForPageReady(page, {
+            kind: "drive-action",
+            combobox: acted.combobox,
+            beforeEpoch,
+            beforeFingerprint: beforePageFingerprint,
+            watchChange: decision.action.kind === "click" || decision.action.kind === "oauth_login",
+          }),
+          deadline,
+        );
         settleMs = ready.elapsedMs;
       }
       if (decision.action.kind === "click") {
@@ -7280,7 +7336,10 @@ async function driveLoop(input: {
           drive.submitExcludeLabels = excludeBeforeClick;
         }
       }
-      const snap = await refreshSnapshot(framesIfNeeded());
+      const snap = await withinOAuthCallerDeadline(
+        () => refreshSnapshot(framesIfNeeded()),
+        deadline,
+      );
       if (snap.timedOut) {
         if (decision.action.kind === "oauth_login") {
           appendDriveTrace(session, {
@@ -7500,7 +7559,9 @@ async function driveLoop(input: {
       result: "ok",
       url_after: observation.url,
       fingerprint_after: nextFingerprint,
-      ...(driveTraceEnabled() ? { native_selects_after: await nativeSelectSnapshot(session) } : {}),
+      ...(driveTraceEnabled()
+        ? { native_selects_after: await withinOAuthCallerDeadline(() => nativeSelectSnapshot(session), deadline) }
+        : {}),
     });
     // A hand-off that came back to its start page owns its own reason, but it
     // still dispatched and changed the page: its bookkeeping (stale counters,
@@ -7511,7 +7572,27 @@ async function driveLoop(input: {
       nextFingerprint,
       decision.actionKey,
       modelChosen ? beforeKey : undefined,
+      deadline,
     );
+  };
+
+  const applyDecision = async (
+    decision: DriveDecision,
+    jevMs?: number,
+    modelChosen = false,
+  ): Promise<DriveHandoff | "continue"> => {
+    const deadline =
+      decision.kind === "act" && decision.action.kind === "oauth_login"
+        ? oauthActionDeadline(decision.action.provider, remainingMs())
+        : undefined;
+    try {
+      return await executeDecision(decision, jevMs, modelChosen, deadline);
+    } catch (error) {
+      if (deadline !== undefined && error instanceof OAuthAwaitingHumanError) {
+        return finish("budget", { reason: error.message });
+      }
+      throw error;
+    }
   };
 
   // Rule 1: a control the loop chose that left the page is a state to undo,
@@ -7845,6 +7926,9 @@ async function driveLoop(input: {
       // A sign-up form's new password is invented rather than handed back:
       // saved to the vault first, then typed from a sealed slot, so the value
       // never reaches the model, the trace, or the handoff.
+      const pageArrival = [...drive.trajectory].reverse().find(
+        (step) => step.url !== observation.url || step.action === "goto_verify",
+      );
       const passwordTargets =
         context?.persistLogin === undefined
           ? undefined
@@ -7857,7 +7941,9 @@ async function driveLoop(input: {
                 drive.inventedLogin != null &&
                 drive.inventedLogin.host === signupLocationFor(row)?.host &&
                 session.secretSlots.has(DRIVE_PASSWORD_SLOT),
-              drive.history.includes("open verification link"),
+              pageArrival?.action === "goto_verify" &&
+                pageArrival.url === observation.url &&
+                pageArrival.reason === undefined,
             );
       const passwordAttemptKey =
         passwordTargets === undefined

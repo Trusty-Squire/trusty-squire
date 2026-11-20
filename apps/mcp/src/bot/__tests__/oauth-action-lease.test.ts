@@ -2,20 +2,25 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Session } from "../session/model.js";
 import type * as SessionLifecycle from "../session/lifecycle.js";
 import type { BrowserController } from "../browser.js";
+import type { Page } from "playwright";
+import type * as ObserveModule from "../observe/observe.js";
+import type { Observation } from "../provision-session.js";
 import { createSession } from "../session/model.js";
-import { actInternally, dispatchDriveAct } from "../act/act.js";
+import { act, actInternally, dispatchDriveAct } from "../act/act.js";
 import {
   OAuthAwaitingHumanError,
   oauthActionDeadline,
   oauthHumanHandoffTimeoutMs,
   resetOAuthActionDeadline,
   withinOAuthActionDeadline,
+  withinOAuthCallerDeadline,
   withOAuthActionLease,
 } from "../oauth-login.js";
 
 const boundary = vi.hoisted(() => ({
   session: undefined as Session | undefined,
   gate: vi.fn(),
+  observe: vi.fn(),
 }));
 
 vi.mock("../session/lifecycle.js", async (importOriginal) => ({
@@ -24,9 +29,15 @@ vi.mock("../session/lifecycle.js", async (importOriginal) => ({
   googleSessionGateForSession: boundary.gate,
 }));
 
+vi.mock("../observe/observe.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof ObserveModule>()),
+  observeSession: boundary.observe,
+}));
+
 afterEach(() => {
   boundary.session = undefined;
   boundary.gate.mockReset();
+  boundary.observe.mockReset();
   vi.useRealTimers();
 });
 
@@ -162,12 +173,99 @@ describe("OAuth preflight under a drive deadline", () => {
     const pending = dispatchDriveAct(
       "budget",
       { kind: "oauth_login", target: "@e:go", provider: "google" },
-      80,
+      oauthActionDeadline("google", 80),
     ).then(result);
     await vi.advanceTimersByTimeAsync(80);
     expect(result).toHaveBeenCalledOnce();
     expect(result.mock.calls[0]![0]).toMatchObject({ kind: "ok", oauth: { state: "awaiting_human" } });
     expect(boundary.gate).not.toHaveBeenCalled();
     await pending;
+  });
+});
+
+describe("OAuth fallback caller deadline", () => {
+  it("keeps the original deadline when an unregistered drive target falls back to public act", async () => {
+    vi.useFakeTimers();
+    const browser = {
+      page: null,
+      activePage: () => null,
+      currentUrl: () => "https://fixture.test/signup",
+      maskOperatorOutput: <T>(value: T): T => value,
+    } as unknown as BrowserController;
+    boundary.session = createSession({
+      id: "fallback", browser, allowedHosts: [], startUrl: "https://fixture.test/signup",
+      consentInboxRead: false, userEmail: null,
+    });
+    boundary.gate.mockImplementation(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 30_000));
+      return { ok: true };
+    });
+    const deadline = oauthActionDeadline("google", 20_000);
+    const action = { kind: "oauth_login", target: "Google", provider: "google" } as const;
+    expect(await dispatchDriveAct("fallback", action, deadline)).toEqual({ kind: "unsupported" });
+    await vi.advanceTimersByTimeAsync(5_000);
+    const result = vi.fn();
+    const pending = act("fallback", action, "compact", "compact", true, deadline).then(result);
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(result).toHaveBeenCalledOnce();
+    expect(result.mock.calls[0]![0].oauth.state).toBe("awaiting_human");
+    await pending;
+    await vi.advanceTimersByTimeAsync(20_000);
+  });
+
+  it.each(["completion", "observation"])("bounds stalled %s recovery after interrupted OAuth", async (stage) => {
+    vi.useFakeTimers();
+    const deadline = oauthActionDeadline("google", 20_000);
+    let finishRecovery = () => {};
+    const recover = vi.fn(async () => {
+      if (stage === "observation") return { page: {} as Page };
+      return await new Promise<null>((resolve) => {
+        finishRecovery = () => resolve(null);
+      });
+    });
+    boundary.observe.mockImplementation(() => new Promise<Observation>((resolve) => {
+      finishRecovery = () => resolve({ url: "https://fixture.test/signup" } as Observation);
+    }));
+    deadline.completionCheck = recover;
+    const browser = {
+      activePage: () => null,
+      currentUrl: () => "https://fixture.test/signup",
+      maskOperatorOutput: <T>(value: T): T => value,
+      withDispatchPacing: async () => {
+        throw new OAuthAwaitingHumanError("OAuth interrupted");
+      },
+    } as unknown as BrowserController;
+    boundary.session = createSession({
+      id: "recovery", browser, allowedHosts: [], startUrl: "https://fixture.test/signup",
+      consentInboxRead: false, userEmail: null,
+    });
+    boundary.gate.mockResolvedValue({ ok: true });
+    const result = vi.fn();
+    const pending = actInternally(
+      "recovery", { kind: "oauth_login", target: "Google", provider: "google" },
+      "none", undefined, undefined, { drive: true, oauthDeadline: deadline },
+    ).then(result);
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(recover).toHaveBeenCalledOnce();
+    expect(boundary.observe).toHaveBeenCalledTimes(stage === "observation" ? 1 : 0);
+    expect(result).toHaveBeenCalledOnce();
+    expect(result.mock.calls[0]![0].observation.oauth.state).toBe("awaiting_human");
+    await pending;
+    finishRecovery();
+    await vi.advanceTimersByTimeAsync(10_000);
+  });
+});
+
+describe("OAuth recovery under the caller cap", () => {
+  it("allows completion evidence after a phase timeout but refuses reads after the caller cap", async () => {
+    vi.useFakeTimers();
+    const deadline = oauthActionDeadline("google", 20_000);
+    deadline.timedOut = true;
+    deadline.expiresAt = Date.now();
+    expect(await withinOAuthCallerDeadline(async () => "captured", deadline)).toBe("captured");
+    await vi.advanceTimersByTimeAsync(20_000);
+    const read = vi.fn(async () => "late evidence");
+    await expect(withinOAuthCallerDeadline(read, deadline)).rejects.toBeInstanceOf(OAuthAwaitingHumanError);
+    expect(read).not.toHaveBeenCalled();
   });
 });

@@ -484,6 +484,27 @@ export async function withinOAuthActionDeadline<T>(
   }
 }
 
+export async function withinOAuthCallerDeadline<T>(
+  operation: () => Promise<T>,
+  deadline?: OAuthActionDeadline,
+): Promise<T> {
+  if (deadline?.capAt === undefined) return await operation();
+  const remainingMs = deadline.capAt - Date.now();
+  const expired = new OAuthAwaitingHumanError("Drive OAuth action reached its call budget");
+  if (remainingMs <= 0) throw expired;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      trackOAuthActionPromise(deadline, operation()),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(expired), remainingMs);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
 export function oauthLoginLeaseCooldownMs(): number {
   const configured = Number(process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS);
   return Number.isFinite(configured) && configured >= 0
