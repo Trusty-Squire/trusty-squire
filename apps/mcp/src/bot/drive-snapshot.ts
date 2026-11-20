@@ -1250,7 +1250,7 @@ export async function frameDynamicsSignature(frame: Frame): Promise<string> {
           .map((element) => {
             const disabled = element.matches(":disabled") ? "!" : "";
             if (element instanceof HTMLInputElement) {
-              // Password values are omitted exactly as in the snapshot rows;
+              // Passwords contribute only populated/empty state, never values;
               // everything else participates so a value change (typed text,
               // autofill) invalidates the frame cache even when the DOM
               // structure is unchanged.

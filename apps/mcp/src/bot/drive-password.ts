@@ -58,8 +58,8 @@ function listedSymbols(text: string): string | undefined {
 
 /**
  * Read a new-password field's requirements from the page. `text` is the
- * field's label plus the page's visible text; `maxLengthAttr` and `pattern`
- * are the control's own attributes.
+ * field's label, placeholder, and scoped help text, excluding unrelated fields.
+ * Length bounds and `pattern` are the control's own attributes.
  */
 export function parsePasswordRequirements(
   text: string,

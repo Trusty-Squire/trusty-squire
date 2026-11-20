@@ -87,6 +87,26 @@ SCROLL, WAIT, DONE, BLOCKED) plus a matching per-operation target; unused
 target heads cannot act. Identifying values come only from the facts bag. A
 search or query field may receive a phrase Jev assigns from the goal's own
 words or the facts; identity and payment fields still require a fact.
+
+On a new-account form, omit the password fact to let the drive invent a random
+password. Initial invention requires explicit Create account, Sign up, or
+Register evidence; sign-in, reset, and existing-password forms are excluded.
+Populated password controls are preserved. The account identifier comes from
+the form's exact email/username value, or, on a password-only step, supplied
+facts or the session's signup identifier/account email. With an authenticated
+vault client, the drive saves a new `username_password` credential before typing
+from a sealed session slot. It does not overwrite an existing saved login or
+require `store`, which controls key capture separately. Saving the login does
+not establish that account creation succeeded. If generation or storage fails,
+the password stays unfilled and the ordinary handoff applies.
+
+Generation defaults to 24 characters, adjusted for the primary and currently
+visible confirmation controls' minimum/maximum lengths, compilable patterns,
+and password-local help text, with a 128-character ceiling. Empty confirmation
+fields reuse the saved password for the same host and login, including fields
+revealed later, only when it meets their requirements. The generated value is
+not returned in drive results, history, or traces.
+
 For a key-provisioning goal, also pass `store` as described under
 [credential capture and retrieval](#credential-capture-and-retrieval).
 On a drive carrying `card_ref`, the released card supplies its own facts —
@@ -505,7 +525,7 @@ inferred `already_closed`. Clients should feature-detect the output schema in
 
 ## Credential capture and retrieval
 
-Credentials are stored by source, never by shape. `operate_extract` without
+Extracted credentials are stored by source, never by shape. `operate_extract` without
 `capture` clicks the Copy button in an open key dialog and keeps only the value
 that click writes to the clipboard, as `api_key`; it never scans page text,
 labels or inputs. When no Copy click yields a value it stores nothing and returns
