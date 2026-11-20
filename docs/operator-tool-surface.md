@@ -195,12 +195,9 @@ It returns a handoff (never a bare page): status, the current compact
 observation with the same stable refs, trajectory, and done/remaining.
 `needs_value` names the missing field's label; a country control already
 showing a value, and expiry or cardholder-name controls on a drive carrying
-`card_ref`, do not raise it. When the page offers a federated-login control,
-even one disabled behind a challenge widget, empty email, username, login, and
-password fields also leave the login path to the step decision instead of
-raising `needs_value`; other required fields retain the normal handoff.
-`stuck` means no listed element advances the goal. Resume the same session with
-`answer` (a readable action slug from the handoff options, `done`, or `stuck`) and/or
+`card_ref`, do not raise it. `stuck` means no listed element advances the
+goal. Resume the same session with `answer` (a
+readable action slug from the handoff options, `done`, or `stuck`) and/or
 added `facts`. Use the single-step primitives only for a handoff you are
 answering or a task that is not a goal.
 

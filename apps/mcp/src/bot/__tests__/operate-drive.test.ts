@@ -1170,46 +1170,6 @@ describe("decideAfterJev stop reasons", () => {
     expect(requiredFillableMissingFact(ROWS, missingFacts)?.ref).toBe("@e:email");
   });
 
-  it("lets the step vote run on a sign-in page that offers a federated login", () => {
-    // BeatAPI /sign-in (bootstrap run 9): required credential fields beside
-    // Continue with Google. The goal names the Google identity.
-    const credentialRows: WireRow[] = [
-      ["@e:user", "t", "Username or email|s=r|f=username"],
-      ["@e:password", "t", "Password|s=r|f=password"],
-      ["@e:submit", "b", "Sign in|a=submit"],
-    ];
-    const google: WireRow = ["@e:google", "b", "Continue with Google|a=login"];
-    expect(requiredFillableMissingFact([...credentialRows, google], {})).toBeUndefined();
-    expect(
-      requiredFillableMissingFact(
-        [
-          ["@e:email", "t", "Email address|s=r|f=email"],
-          ["@e:google", "b", "Continue with Google"],
-        ],
-        {},
-      ),
-    ).toBeUndefined();
-    // A password form with no federated path keeps the needs_value handoff, and
-    // other required fields beside a federated login are still reported.
-    expect(requiredFillableMissingFact(credentialRows, {})?.ref).toBe("@e:user");
-    expect(
-      requiredFillableMissingFact([["@e:company", "t", "Company|s=r|f=company"], google], {})?.ref,
-    ).toBe("@e:company");
-  });
-
-  it("counts a federated login disabled behind a challenge widget", () => {
-    // BeatAPI /sign-in (bootstrap run 14): a Turnstile widget holds every
-    // login control disabled, so the disabled-submit path must get its turn.
-    const rows: WireRow[] = [
-      ["@e:user", "t", "Username or email|s=r|f=username"],
-      ["@e:password", "t", "Password|s=r|f=password"],
-      ["@e:sign-in", "b", "Sign in|a=submit|s=d"],
-      ["@e:continue-with-google", "b", "Continue with Google|s=d"],
-      ["@e:github", "b", "Continue with GitHub|s=d"],
-    ];
-    expect(requiredFillableMissingFact(rows, {})).toBeUndefined();
-  });
-
   it("does not generate a password fact on a create-account step", () => {
     const rows: WireRow[] = [
       ["@e:password", "t", "New password|f=password|s=r"],
