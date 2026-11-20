@@ -94,6 +94,27 @@ describe("inventPassword", () => {
     },
   );
 
+  it.each(["!, @, #", "!,@,#", "!; @; #"])(
+    "excludes delimiters from a separated symbol list: %s",
+    (list) => {
+      for (const pattern of [undefined, "[A-Za-z0-9!@#,;]{24}"]) {
+        const requirements = parsePasswordRequirements(`Allowed special characters: ${list}`, undefined, pattern);
+        expect(requirements.symbols).toBe("!@#");
+        for (let attempt = 0; attempt < 10; attempt += 1) {
+          const value = inventPassword(requirements)!;
+          expect(value.replace(/[A-Za-z0-9]/g, "")).toMatch(/^[!@#]+$/);
+        }
+      }
+    },
+  );
+
+  it.each([",", ";", ".?"])("preserves compact literal punctuation: %s", (symbols) => {
+    const requirements = parsePasswordRequirements(`Allowed special characters: ${symbols}`);
+    expect(requirements.symbols).toBe(symbols);
+    const value = inventPassword(requirements)!;
+    expect([...value.replace(/[A-Za-z0-9]/g, "")].every((character) => symbols.includes(character))).toBe(true);
+  });
+
   it("does not substitute the default alphabet for an empty explicit list", () => {
     const value = inventPassword(parsePasswordRequirements("Symbols: none"))!;
     expect(value).toMatch(/^[A-Za-z0-9]+$/);

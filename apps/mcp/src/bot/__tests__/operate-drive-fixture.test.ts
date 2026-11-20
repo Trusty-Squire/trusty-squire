@@ -39,7 +39,7 @@ import {
   awaitVerification,
   injectCardIntoSessionTargets,
 } from "../provision-session.js";
-import { captureFrameSnapshot, driveRowsFromSnapshot } from "../drive-snapshot.js";
+import { captureFrameSnapshot, driveRowsFromSnapshot, frameDynamicsSignature } from "../drive-snapshot.js";
 import { dispatchDriveAct } from "../act/act.js";
 import { rememberDriveIdentities } from "../act/identity.js";
 import { waitForPageReady } from "../page-ready.js";
@@ -4067,6 +4067,32 @@ describe("operate_drive real-browser fixture", () => {
       expect(persistLogin).not.toHaveBeenCalled();
       expect(await page.locator("#password").inputValue()).toBe("");
       expect(await page.locator("#confirm").inputValue()).toBe("");
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 60_000);
+
+  it("invalidates iframe signatures on password population without retaining values", async () => {
+    const html = `<!doctype html><iframe srcdoc='<form>
+      <label>Password<input id="password" name="password" type="password"></label>
+      <label>Confirm password<input id="confirm" name="confirm_password" type="password"></label>
+    </form>'></iframe>`;
+    const { context, page, started } = await openFixture(html, "password-cache.test", "standard", "/signup");
+    try {
+      await page.frameLocator("iframe").locator("#confirm").waitFor();
+      const frame = await (await page.locator("iframe").elementHandle())!.contentFrame();
+      expect(frame).not.toBeNull();
+      const empty = await frameDynamicsSignature(frame!);
+      for (const field of ["#password", "#confirm"]) {
+        await frame!.locator(field).fill("First-password-value");
+        const populated = await frameDynamicsSignature(frame!);
+        expect(populated).not.toBe(empty);
+        await frame!.locator(field).fill("Different-secret-of-another-length");
+        expect(await frameDynamicsSignature(frame!)).toBe(populated);
+        await frame!.locator(field).fill("");
+        expect(await frameDynamicsSignature(frame!)).toBe(empty);
+      }
     } finally {
       await finishProvisionSession(started.session_id);
       await context.close();

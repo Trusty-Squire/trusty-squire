@@ -47,7 +47,12 @@ function listedSymbols(text: string): string | undefined {
       text,
     );
   if (match === null) return undefined;
-  return [...new Set(match[1]!.replace(/[\s\p{L}\p{N}]/gu, ""))].join("");
+  const raw = match[1]!.trim();
+  const parts = raw.split(/[,;]/).map((part) => part.trim());
+  const listed = parts.length > 1 && parts.every((part) => part.length > 0)
+    ? parts.join("")
+    : raw;
+  return [...new Set(listed.replace(/[\s\p{L}\p{N}]/gu, ""))].join("");
 }
 
 /**

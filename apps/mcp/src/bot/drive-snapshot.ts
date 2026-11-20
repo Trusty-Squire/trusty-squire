@@ -1254,7 +1254,7 @@ export async function frameDynamicsSignature(frame: Frame): Promise<string> {
               // everything else participates so a value change (typed text,
               // autofill) invalidates the frame cache even when the DOM
               // structure is unchanged.
-              const value = element.type === "password" ? "" : element.value;
+              const value = element.type === "password" ? element.value.length > 0 : element.value;
               return `${element.name}:${element.type}${disabled}=${value}`;
             }
             if (element instanceof HTMLSelectElement) {
