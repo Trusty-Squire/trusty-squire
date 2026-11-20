@@ -2859,6 +2859,60 @@ describe("handoff shape", () => {
       reason: "choice_not_offered",
     });
   });
+
+  const completeInput = {
+    status: "complete" as const,
+    trajectory: [],
+    goal: "sign up and get an API key",
+    steps: 9,
+    seconds: 40,
+    jevCalls: 6,
+  };
+
+  it("states the stored vault credential on a complete handoff", () => {
+    const handoff = buildHandoff({
+      ...completeInput,
+      storedCredential: { reference: "vault:acme:prod", service: "acme", label: "prod" },
+    });
+    expect(handoff).toMatchObject({
+      status: "complete",
+      stored: true,
+      stored_credential: { reference: "vault:acme:prod", service: "acme", label: "prod" },
+      message:
+        "Key stored in the vault as acme/prod (reference vault:acme:prod); the goal is complete.",
+      remaining: "none",
+    });
+  });
+
+  it("names only the service when the stored credential has no label", () => {
+    expect(
+      buildHandoff({
+        ...completeInput,
+        storedCredential: { reference: "vault:acme", service: "acme", label: undefined },
+      }).message,
+    ).toBe("Key stored in the vault as acme (reference vault:acme); the goal is complete.");
+  });
+
+  it("does not claim a stored key on a complete handoff that stored nothing", () => {
+    const handoff = buildHandoff(completeInput);
+    expect(handoff).toMatchObject({
+      status: "complete",
+      stored: false,
+      message: "The goal is complete.",
+    });
+    expect(handoff).not.toHaveProperty("stored_credential");
+  });
+
+  it("adds no completion fields to a handoff that is not complete", () => {
+    const handoff = buildHandoff({
+      ...completeInput,
+      status: "budget",
+      storedCredential: { reference: "vault:acme", service: "acme", label: undefined },
+    });
+    expect(handoff).not.toHaveProperty("stored");
+    expect(handoff).not.toHaveProperty("stored_credential");
+    expect(handoff).not.toHaveProperty("message");
+  });
 });
 
 describe("resume answer", () => {

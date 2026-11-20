@@ -35,7 +35,7 @@ it("preserves the registered storage destination through parsing and vault persi
         url: "https://app.example.test/keys",
         credentials: { api_key: "one-time-key" },
       }),
-    ).toBe(true);
+    ).toEqual({ reference: "vault:example:test", service: "example", label: "bootstrap" });
     return { status: "complete" } as Awaited<ReturnType<typeof runOperateDrive>>;
   });
   const args = operateDriveTool.inputSchema.parse({

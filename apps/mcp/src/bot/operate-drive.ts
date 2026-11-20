@@ -137,9 +137,17 @@ export interface DriveCallContext {
   notifyUser?: (message: string, data?: Record<string, unknown>) => Promise<void>;
   signal?: AbortSignal;
   consentInboxRead?: boolean;
-  persistCredentials?: (extracted: ExtractResult) => Promise<boolean>;
+  /** Vault an extracted credential; null when nothing was stored. */
+  persistCredentials?: (extracted: ExtractResult) => Promise<DriveStoredCredential | null>;
   /** Vault an invented sign-up login; true only once it is stored. */
   persistLogin?: (login: InventedLogin) => Promise<boolean>;
+}
+
+/** Non-secret vault metadata for a credential the drive stored. */
+export interface DriveStoredCredential {
+  reference: string;
+  service: string;
+  label: string | undefined;
 }
 
 export interface InventedLogin {
@@ -392,6 +400,11 @@ export interface DriveHandoff {
   payment?: Record<string, unknown>;
   confidence?: number;
   reason?: string;
+  /** On complete: whether this call stored a credential in the vault. */
+  stored?: boolean;
+  stored_credential?: DriveStoredCredential;
+  /** On complete: a plain statement that the goal is finished. */
+  message?: string;
 }
 
 export interface DriveDependencies {
@@ -4730,6 +4743,7 @@ export function buildHandoff(input: {
   payment?: Record<string, unknown>;
   confidence?: number;
   reason?: string;
+  storedCredential?: DriveStoredCredential;
 }): DriveHandoff {
   const done =
     input.status === "complete"
@@ -4741,6 +4755,18 @@ export function buildHandoff(input: {
             .map((step) => `${step.action} ${step.target}`)
             .join("; ");
   const remaining = input.status === "complete" ? "none" : input.goal;
+  // A caller that cannot tell a stored key from an unfinished capture keeps
+  // trying to capture it, so a complete handoff says which one happened.
+  const completion =
+    input.status !== "complete"
+      ? {}
+      : input.storedCredential === undefined
+        ? { stored: false, message: "The goal is complete." }
+        : {
+            stored: true,
+            stored_credential: input.storedCredential,
+            message: `Key stored in the vault as ${storedCredentialName(input.storedCredential)}; the goal is complete.`,
+          };
   return {
     status: input.status,
     ...(input.sessionId === undefined ? {} : { session_id: input.sessionId }),
@@ -4767,7 +4793,13 @@ export function buildHandoff(input: {
     ...(input.payment === undefined ? {} : { payment: input.payment }),
     ...(input.confidence === undefined ? {} : { confidence: input.confidence }),
     ...(input.reason === undefined ? {} : { reason: input.reason }),
+    ...completion,
   };
+}
+
+function storedCredentialName(stored: DriveStoredCredential): string {
+  const name = stored.label === undefined ? stored.service : `${stored.service}/${stored.label}`;
+  return `${name} (reference ${stored.reference})`;
 }
 
 function handoffObservation(
@@ -6332,9 +6364,12 @@ async function driveLoop(input: {
       const hasCredential = storableCredentials(extracted?.credentials ?? {}) !== null;
       const stored =
         hasCredential && extracted !== null && context?.persistCredentials !== undefined
-          ? await context.persistCredentials(extracted).catch(() => false)
-          : false;
-      if ((hasCredential && !stored) || (!hasCredential && pageShowsCredentialValue(rows))) {
+          ? await context.persistCredentials(extracted).catch(() => null)
+          : null;
+      if (
+        (hasCredential && stored === null) ||
+        (!hasCredential && pageShowsCredentialValue(rows))
+      ) {
         drive.history.push("DONE refused: a visible credential was not stored");
         drive.consumedActionKey = null;
         const stallKey = pageProgressKey(
@@ -6353,7 +6388,7 @@ async function driveLoop(input: {
         automaticDecisionRefused = true;
         return "continue";
       }
-      return finish("complete");
+      return finish("complete", stored === null ? {} : { storedCredential: stored });
     }
     if (decision.kind === "wait") {
       const beforeKey = pageProgressKey(
@@ -7657,13 +7692,13 @@ async function driveLoop(input: {
         const copyRef = revealedSecretCopyRef(rows, drive.pendingCopyCapture?.ref);
         drive.pendingCopyCapture = null;
         const extracted = await extractCredentials(sessionId, copyRef).catch(() => null);
-        if (
-          extracted !== null &&
-          storableCredentials(extracted.credentials) !== null &&
-          (await context.persistCredentials(extracted).catch(() => false))
-        ) {
+        const stored =
+          extracted !== null && storableCredentials(extracted.credentials) !== null
+            ? await context.persistCredentials(extracted).catch(() => null)
+            : null;
+        if (stored !== null) {
           drive.history.push("revealed key stored from its Copy source");
-          return finish("complete");
+          return finish("complete", { storedCredential: stored });
         }
         // Capture invalidated the snapshot; re-read before asking about this page.
         const recapture = await snapshotOrTimeout(framesIfNeeded());

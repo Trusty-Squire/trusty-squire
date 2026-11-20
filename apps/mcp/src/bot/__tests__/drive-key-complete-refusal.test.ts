@@ -21,6 +21,7 @@ afterAll(async () => {
 });
 
 const api = { useCredential: vi.fn() } as unknown as ApiClient;
+const STORED = { reference: "vault:example:default", service: "example", label: "default" };
 const key = "re_abcdefGHIJKLmnop1234567";
 
 // The Copy click is the source the drive stores a key from.
@@ -107,7 +108,7 @@ it("captures a revealed key despite a binding from the previous page without ask
         ),
       },
     }));
-    const persistCredentials = vi.fn(async () => true);
+    const persistCredentials = vi.fn(async () => STORED);
     const result = await runOperateDrive(
       { session_id: sessionId, goal: "extract an API key", max_steps: 3, max_seconds: 10 },
       api,
@@ -119,7 +120,13 @@ it("captures a revealed key despite a binding from the previous page without ask
         credentials: { api_key: key },
       }),
     );
-    expect(result.status).toBe("complete");
+    expect(result).toMatchObject({
+      status: "complete",
+      stored: true,
+      stored_credential: STORED,
+      message:
+        "Key stored in the vault as example/default (reference vault:example:default); the goal is complete.",
+    });
     expect(askJev).not.toHaveBeenCalled();
   });
 }, 15_000);
@@ -157,7 +164,7 @@ it("captures a Copy source on DONE even when the value has no recognized shape",
           ),
         },
       }));
-      const persistCredentials = vi.fn(async () => true);
+      const persistCredentials = vi.fn(async () => STORED);
       const result = await runOperateDrive(
         { session_id: sessionId, goal: "extract an API key", max_steps: 3, max_seconds: 10 },
         api,
@@ -211,7 +218,7 @@ it.each(["missing", "rejected", "failed"])(
         }));
         const persistCredentials = vi.fn(async () => {
           if (mode === "failed") throw new Error("vault unavailable");
-          return false;
+          return null;
         });
         const result = await runOperateDrive(
           { session_id: sessionId, goal: "extract an API key", max_steps: 3, max_seconds: 10 },
@@ -269,7 +276,8 @@ it("trusts the model's DONE on a page without a key", async () => {
         dependencies(askJev),
       );
       expect(askJev).toHaveBeenCalledTimes(1);
-      expect(result.status).toBe("complete");
+      expect(result).toMatchObject({ status: "complete", stored: false });
+      expect(result).not.toHaveProperty("stored_credential");
     },
   );
 }, 15_000);
@@ -345,8 +353,8 @@ it.each([
                   name === "operation"
                     ? "CLICK"
                     : name === "CLICK_target"
-                      ? keys.find((candidate) => question.criteria[candidate]?.includes(label)) ??
-                        keys[0]!
+                      ? (keys.find((candidate) => question.criteria[candidate]?.includes(label)) ??
+                        keys[0]!)
                       : keys[0]!;
                 return [
                   [
