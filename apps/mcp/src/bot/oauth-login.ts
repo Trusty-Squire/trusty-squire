@@ -1584,9 +1584,9 @@ async function googleChooserListsAccounts(page: Page): Promise<boolean> {
 }
 
 // Advance a provider's consent / account-chooser screen by one click.
-// Returns false when no
-// approve control is present — the agent then aborts rather than
-// hang. Clicks only; never types (the critical guarantee holds here).
+// Returns false when no authorized control can be advanced; the caller decides
+// whether to keep waiting or hand the chooser back for an ordinary page action.
+// Clicks only; never types (the critical guarantee holds here).
 export async function advanceOAuthConsent(
   browser: BrowserController,
   provider: OAuthProviderId,

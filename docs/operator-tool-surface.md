@@ -198,9 +198,9 @@ showing a value, and expiry or cardholder-name controls on a drive carrying
 `card_ref`, do not raise it. When the page offers a federated-login control,
 even one disabled behind a challenge widget, empty email, username, login, and
 password fields also leave the login path to the step decision instead of
-raising `needs_value`; other required fields retain the normal handoff. `stuck` means no listed element advances the
-goal. Resume the same session with `answer` (a
-readable action slug from the handoff options, `done`, or `stuck`) and/or
+raising `needs_value`; other required fields retain the normal handoff.
+`stuck` means no listed element advances the goal. Resume the same session with
+`answer` (a readable action slug from the handoff options, `done`, or `stuck`) and/or
 added `facts`. Use the single-step primitives only for a handoff you are
 answering or a task that is not a goal.
 
@@ -664,7 +664,13 @@ job without exposing plaintext to the agent.
 
 - `operate_login` keeps OAuth and password lifecycle actions on the real
   profile using the [explicit action inputs](#explicit-action-inputs).
-  A chooser, challenge, return with uncertain authentication,
+  A Google account chooser that lists accounts but none the action can select
+  (several accounts and no known session account, or no tile matching it)
+  returns immediately with `oauth: {state: "account_choice", reason,
+  next_action: "operate_observe"}`. Observe the retained chooser and choose an
+  account through an ordinary page action; the drive resumes its step decision
+  instead of waiting for the OAuth deadline or requiring a human handoff.
+  A challenge, return with uncertain authentication,
   or other human step is an honest pending result; stop automation and observe
   the owned session rather than treating a page title or same-origin URL as
   success. A browser error after dispatch follows the same contract as request

@@ -369,13 +369,10 @@ For login and approval call shapes, follow the
   denial the provider actually reported (an OAuth `error=` code on the return
   URL) fails the action, with that code in the message. For interrupted clicks,
   retained popups, and pre-dispatch failures, follow the
-  [OAuth error and recovery contract](docs/operator-tool-surface.md#using-the-rest-of-the-surface).
+  [OAuth error and recovery contract](operator-tool-surface.md#using-the-rest-of-the-surface),
+  which also covers account-chooser handback to ordinary page actions.
   If an observation races the transition, it reports `oauth.state: "in_progress"`
-  and directs the host to observe again. A Google account chooser that lists
-  accounts but none the action can select (several accounts and no session
-  account, or no tile matching it) returns at once with
-  `oauth.state: "account_choice"`, leaving the chooser on the page for the host
-  to click the right account.
+  and directs the host to observe again.
 - Call `inject_card` with the exact observed refs for the card-entry fields.
   It fills only those refs under the existing purchase approval; the agent
   observes partial results and drives every later checkout action itself. Pick
