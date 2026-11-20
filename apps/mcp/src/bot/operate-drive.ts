@@ -6892,7 +6892,15 @@ async function driveLoop(input: {
       let verification = await dependencies.awaitVerification(sessionId, inboxArgs);
       let inboxNext = inboxVerificationDecision(verification, planKind);
       while (inboxNext === "retry") {
-        if (clock() >= deadline || remainingMs() < DRIVE_WAIT_MS) {
+        // The drive's own budget ending the poll is not a dead end: the mail may
+        // still arrive, so report budget (resume) and leave no "no mail" trail
+        // entry that would stop the resumed call from reading the inbox again.
+        if (clock() < deadline && remainingMs() < DRIVE_WAIT_MS) {
+          return finish("budget", {
+            reason: "drive budget ended while waiting for verification mail",
+          });
+        }
+        if (clock() >= deadline) {
           drive.trajectory.push({
             action: "inbox",
             target: "inbox_link",

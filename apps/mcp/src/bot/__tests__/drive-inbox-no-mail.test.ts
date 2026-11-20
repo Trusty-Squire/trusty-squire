@@ -157,3 +157,52 @@ it("reports an empty inbox to the next decision instead of re-reading it", async
     await context.close();
   }
 }, 20_000);
+
+// 1.1.55-rc.1 Kenari drive (run 37, trace L18): max_seconds 45 ran out while the
+// inbox poll was still inside its own window, and the drive reported stuck
+// though the verification mail arrived the same minute.
+it("reports budget, not stuck, when the drive budget ends the inbox poll", async () => {
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  await page.route("**/*", (route) => route.fulfill({ contentType: "text/html", body: pinPage }));
+  await page.goto(loginUrl);
+  const started = await startHarnessProvisionSession({
+    browser: BrowserController.fromHarnessPage(page),
+    serviceUrl: loginUrl,
+    format: "compact",
+    initialObservation: "drive",
+  });
+  const sessionId = started.session_id;
+  sessionForCall(sessionId)!.drive = emptyDriveState(goal, { email: "person@example.test" });
+  let offset = 0;
+  const awaitVerification = vi.fn<DriveDependencies["awaitVerification"]>(async () => {
+    // Less than the 45 s poll window passes, but the 30 s budget is gone.
+    offset += 29_000;
+    return { session_id: sessionId, found: false, code: null, link: null, messages: [] };
+  });
+  try {
+    const result = await runOperateDrive(
+      { session_id: sessionId, goal, max_steps: 3, max_seconds: 30 },
+      api,
+      undefined,
+      {
+        act,
+        observe,
+        startSession: async () => {
+          throw new Error("existing session");
+        },
+        awaitVerification,
+        injectCard: async () => ({ status: "unused" }),
+        now: () => Date.now() + offset,
+        askJev: answering((name) =>
+          name === DRIVE_EMAIL_CODE_QUESTION ? "code_field_1" : undefined,
+        ),
+      },
+    );
+    expect(awaitVerification).toHaveBeenCalledTimes(1);
+    expect(result.status).toBe("budget");
+  } finally {
+    await finishProvisionSession(sessionId);
+    await context.close();
+  }
+}, 20_000);
