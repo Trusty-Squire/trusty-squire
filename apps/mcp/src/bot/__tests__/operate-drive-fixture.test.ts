@@ -4002,6 +4002,8 @@ describe("operate_drive real-browser fixture", () => {
     '<div><small>At least 32 characters</small><label>Password<input id="password" type="password" required></label></div>',
     '<div><label>Password<input id="password" type="password" required></label><div><span>At least 32 characters</span></div></div>',
     '<label for="password">Password</label><input id="password" type="password" required><small>At least 32 characters</small>',
+    '<div><label>Password<input id="password" type="password" required></label><button type="button">Show password</button><small>At least 32 characters</small></div>',
+    '<label>Password<input id="password" type="password" required></label><button type="button" aria-label="Show password">Eye</button><small>At least 32 characters</small>',
   ])("honors adjacent password help without reading other fields: %s", async (passwordField) => {
     const html = `<!doctype html><form>
       <label>Email<input id="email" type="email" required></label>
@@ -4039,6 +4041,51 @@ describe("operate_drive real-browser fixture", () => {
       await context.close();
     }
   }, 60_000);
+
+  it.each(["primary", "confirmation", "autofilled confirmation"])(
+    "preserves a populated %s password control",
+    async (scenario) => {
+      const html = `<!doctype html><form>
+        <label>Email<input id="email" type="email" value="ada@fixture.test" required></label>
+        <label>Password<input id="password" type="password" required></label>
+        <label>Confirm password<input id="confirm" type="password" required></label>
+        <button type="submit">Create account</button>
+      </form>`;
+      const { context, page, started } = await openFixture(html, "populated-password.test", "standard", "/signup");
+      const persistLogin = vi.fn(async () => true);
+      const existing = "Existing-password-867";
+      try {
+        if (scenario === "autofilled confirmation") {
+          await page.locator("#password").evaluate((element, value) => {
+            element.addEventListener("input", () => {
+              (document.getElementById("confirm") as HTMLInputElement).value = value;
+            });
+          }, existing);
+        } else {
+          await page.locator(scenario === "primary" ? "#password" : "#confirm").fill(existing);
+        }
+        await runOperateDrive(
+          { session_id: started.session_id, goal: "create a new account", max_steps: 3 },
+          api(),
+          { persistLogin },
+          deps(async (_api, _state, questions) => jevChoose(questions, "DONE")),
+        );
+        if (scenario === "primary") {
+          expect(await page.locator("#password").inputValue()).toBe(existing);
+          expect(await page.locator("#confirm").inputValue()).toBe("");
+          expect(persistLogin).not.toHaveBeenCalled();
+        } else {
+          expect(await page.locator("#confirm").inputValue()).toBe(existing);
+          expect(await page.locator("#password").inputValue()).not.toBe("");
+          expect(persistLogin).toHaveBeenCalledOnce();
+        }
+      } finally {
+        await finishProvisionSession(started.session_id);
+        await context.close();
+      }
+    },
+    60_000,
+  );
 
   it("invents a sign-up password, vaults the login first, and fills the confirm field", async () => {
     const { context, page, started } = await openFixture(

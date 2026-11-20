@@ -101,7 +101,7 @@ export function parsePasswordRequirements(
     try {
       compiled = new RegExp(`^(?:${pattern})$`, "v");
       const repeatedClass =
-        /^\^?(?:\(\?=[^()]*\))*(\[(?:\\.|[^\]])+\])\{(\d+)(?:,(\d*))?\}\$?$/.exec(pattern);
+        /^\^?(?:\(\?=[^()]*\))*(\[(?:\\.|[^\]])+\]|\.)\{(\d+)(?:,(\d*))?\}\$?$/.exec(pattern);
       if (repeatedClass !== null) {
         minimums.push(Number(repeatedClass[2]));
         if (repeatedClass[3] !== "") maximums.push(Number(repeatedClass[3] ?? repeatedClass[2]));

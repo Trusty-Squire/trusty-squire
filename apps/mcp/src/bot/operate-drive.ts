@@ -2545,6 +2545,11 @@ export function isConfirmPasswordRow(row: WireRow): boolean {
   return isPasswordRow(row) && CONFIRM_PASSWORD_KEY.test(passwordKey(row));
 }
 
+function isPopulatedPasswordRow(row: WireRow): boolean {
+  return isPasswordRow(row) &&
+    (/(?:^|\|)s=[^|]*p/.test(row[2] ?? "") || (rowCurrentValue(row)?.length ?? 0) > 0);
+}
+
 export interface NewAccountPasswordTargets {
   password: WireRow;
   confirms: WireRow[];
@@ -2573,6 +2578,7 @@ export function newAccountPasswordTargets(
     isFillableRow(row) &&
     isPasswordRow(row) &&
     !isDisabledRow(row) &&
+    !isPopulatedPasswordRow(row) &&
     !isActedRow(row) &&
     !filled.has(row[0]);
   const password =
@@ -2602,7 +2608,6 @@ export function newAccountPasswordTargets(
   const pool = submits.length > 0 ? submits : buttons;
   const signup =
     (reuseInventedPassword && isConfirmPasswordRow(password)) ||
-    confirms.length > 0 ||
     (creates(pool) && (!logsIn(pool) || inferPagePhase(pageUrl, headings) === "signup"));
   if (!signup) return undefined;
   const identity = scope.find(
@@ -7868,6 +7873,8 @@ async function driveLoop(input: {
         const slotted = await inventSignupPassword(passwordTargets);
         if (slotted) {
           for (const target of [passwordTargets.password, ...passwordTargets.confirms]) {
+            const current = rows.find((row) => row[0] === target[0]);
+            if (current === undefined || isPopulatedPasswordRow(current)) continue;
             drive.boundFingerprint = driveProgressFingerprint(observation, rows, drive, session);
             drive.consumedActionKey = null;
             const applied = await applyDecision({

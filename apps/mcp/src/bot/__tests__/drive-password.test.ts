@@ -104,6 +104,11 @@ describe("inventPassword", () => {
     ["[A-Za-z0-9]{12,20}", /^[A-Za-z0-9]{12,20}$/],
     ["[A-Z0-9]{24}", /^[A-Z0-9]{24}$/],
     ["[a-z]{30,}", /^[a-z]{30,}$/],
+    [".{12,20}", /^.{12,20}$/],
+    [
+      "(?=.*[A-Z])(?=.*[a-z])(?=.*[0-9]).{12,20}",
+      /^(?=.*[A-Z])(?=.*[a-z])(?=.*[0-9]).{12,20}$/,
+    ],
     [
       "(?=.*[A-Z])(?=.*[a-z])(?=.*[0-9])[A-Za-z0-9]{12,20}",
       /^(?=.*[A-Z])(?=.*[a-z])(?=.*[0-9])[A-Za-z0-9]{12,20}$/,
@@ -167,6 +172,26 @@ describe("newAccountPasswordTargets", () => {
       expect(targets?.password[0]).toBe("@e:pw2");
       expect(targets?.confirms).toEqual([]);
     }
+  });
+
+  it("requires signup evidence even when password confirmation is present", () => {
+    const reset: WireRow[] = signup.map((row) =>
+      row[0] === "@e:create" ? [row[0], "b", "Reset password|a=submit|fm=1"] : row,
+    );
+    expect(newAccountPasswordTargets(reset, { email: "ada@fixture.test" }, [], "https://example.test/reset")).toBeUndefined();
+    expect(newAccountPasswordTargets(reset, {}, ["@e:pw"], "https://example.test/reset", [], true)?.password[0]).toBe("@e:pw2");
+  });
+
+  it("excludes populated primary and confirmation controls", () => {
+    const primary: WireRow[] = signup.map((row) =>
+      row[0] === "@e:pw" ? [row[0], row[1], row[2]!.replace("s=r", "s=rp")] : row,
+    );
+    expect(newAccountPasswordTargets(primary, {}, [], "https://example.test/signup")).toBeUndefined();
+    const confirm: WireRow[] = signup.map((row) =>
+      row[0] === "@e:pw2" ? [row[0], row[1], row[2]!.replace("s=r", "s=rp")] : row,
+    );
+    expect(newAccountPasswordTargets(confirm, {}, [], "https://example.test/signup")?.confirms).toEqual([]);
+    expect(newAccountPasswordTargets(confirm, {}, ["@e:pw"], "https://example.test/signup", [], true)).toBeUndefined();
   });
 
   it("never fills a change-password form", () => {

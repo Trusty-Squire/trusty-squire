@@ -24,6 +24,7 @@ export interface DriveSnapshotElement {
   role: string;
   label: string;
   value?: string;
+  populated?: boolean;
   checked?: boolean;
   selected?: boolean;
   expanded?: boolean;
@@ -208,6 +209,7 @@ export function driveRowsFromSnapshot(snapshot: DriveSnapshot): SnapshotRow[] {
     if (element.required === true) states.push("r");
     if (element.disabled === true) states.push("d");
     if (element.invalid === true) states.push("i");
+    if (element.populated === true) states.push("p");
     if (element.checked === true) states.push("c");
     if (element.checked === false && (element.role === "checkbox" || element.role === "radio")) {
       states.push("u");
@@ -808,12 +810,19 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
     if (element instanceof HTMLInputElement && element.type === "password") {
       const controls =
         'input,textarea,select,button,[contenteditable],[role="textbox"],[role="combobox"],[role="checkbox"],[role="radio"]';
+      const auxiliary = (control: Element): boolean =>
+        control instanceof HTMLButtonElement &&
+        control.type === "button" &&
+        /^(?:show|hide|toggle)(?:\s+password)?$/i.test(
+          (control.getAttribute("aria-label") ?? control.textContent ?? "").trim(),
+        );
+      const foreignControl = (control: Element): boolean => control !== element && !auxiliary(control);
       let container: Element = element;
       while (
         container.parentElement !== null &&
         !container.parentElement.matches("form,body,main,section,article,fieldset") &&
         Array.from(container.parentElement.querySelectorAll(controls)).every(
-          (control) => control === element,
+          (control) => !foreignControl(control),
         )
       ) {
         container = container.parentElement;
@@ -822,9 +831,9 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
       for (
         let sibling = container.nextElementSibling;
         sibling !== null &&
-        sibling.matches("small,p,span,div,ul,ol") &&
-        !sibling.matches(controls) &&
-        sibling.querySelector(controls) === null;
+        (sibling.matches("small,p,span,div,ul,ol") || auxiliary(sibling)) &&
+        (!sibling.matches(controls) || auxiliary(sibling)) &&
+        !Array.from(sibling.querySelectorAll(controls)).some(foreignControl);
         sibling = sibling.nextElementSibling
       ) {
         if (visible(sibling) && sibling instanceof HTMLElement) localHelp.push(sibling.innerText);
@@ -873,6 +882,9 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
       frameOrdinal,
       selector: selectorFor(element),
       ...(value === undefined ? {} : { value }),
+      ...(element instanceof HTMLInputElement && element.type === "password"
+        ? { populated: element.value.length > 0 }
+        : {}),
       ...(checked === undefined ? {} : { checked }),
       ...(selected === undefined ? {} : { selected }),
       ...(expanded === undefined ? {} : { expanded }),
