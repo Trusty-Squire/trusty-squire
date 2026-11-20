@@ -94,9 +94,10 @@ autocomplete, in any page language. Initial invention requires explicit Create
 account, Sign up, or Register evidence, or a new-account shape: an email or
 username field on the same form plus a password the page marks
 `autocomplete="new-password"`. Forms with a `current-password` field or three
-password fields, and the current page reached directly through an inbox link,
-are excluded. Later pages remain eligible.
-Sign-in and explicit reset forms are excluded.
+or more password fields, and the current page reached directly through an inbox
+link, are excluded. Later pages remain eligible. Textual sign-in, reset, and
+current-password exclusions use English labels; `new-password` alone does not
+distinguish a localized signup from a localized reset form.
 Populated password controls are preserved. Account identifiers and confirmation
 controls are scoped to the password's form and frame. The account identifier
 comes from the form's exact email/username value, or, on a password-only step,
@@ -112,7 +113,10 @@ Generation defaults to 24 characters, adjusted for the primary and currently
 visible confirmation controls' minimum/maximum lengths, compilable patterns,
 and password-local help text, with a 128-character ceiling. Empty confirmation
 fields reuse the saved password for the same host and login, including fields
-revealed later, only when it meets their requirements. The generated value is
+revealed later, only when it meets their requirements. When exactly two password
+controls both declare `new-password`, the second is a confirmation even if its
+label is localized or the first is already populated. It receives only a known
+invented password, never a newly generated replacement. The generated value is
 not returned in drive results, history, or traces.
 
 For a key-provisioning goal, also pass `store` as described under
@@ -293,8 +297,9 @@ option-ownership regressions live in
 
 Calls default to 60 steps and 45 seconds; `max_steps` and `max_seconds` set
 the per-call allowances within the registered schema's limits. A drive-dispatched
-OAuth wait, including its human-handoff window, ends within the call's remaining
-`max_seconds`.
+OAuth step shares the call's remaining `max_seconds` across preflight checks,
+the human-handoff window, fallback dispatch, and post-action reads. OAuth phase
+changes do not extend that limit; exhaustion returns a `budget` handoff.
 A `budget` handoff preserves partial progress for another call on the same
 session. `jev_unavailable`, `no_progress`, and `evaluate_timeout` also return
 handoffs; the last indicates that an in-page evaluation exceeded its deadline.
