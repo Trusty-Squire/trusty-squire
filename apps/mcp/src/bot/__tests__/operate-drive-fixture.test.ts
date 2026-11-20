@@ -4191,7 +4191,7 @@ describe("operate_drive real-browser fixture", () => {
   it("saves an embedded signup for its own frame host and form", async () => {
     const main = `<!doctype html><h1>Sign in</h1><form>
       <label>Email<input id="email" type="email" value="merchant@fixture.test"></label>
-      <label>Confirm password<input id="confirm" type="password" required></label>
+      <label>Password<input id="confirm" type="password" required></label>
       <button type="submit">Sign in</button>
     </form>`;
     const embedded = `<!doctype html><h1>Create account</h1><form>

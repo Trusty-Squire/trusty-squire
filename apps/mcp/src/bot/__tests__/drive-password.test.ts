@@ -304,6 +304,40 @@ describe("newAccountPasswordTargets", () => {
     expect(continued?.password[0]).toBe("@e:f1d3");
   });
 
+  it.each([
+    ["Sign in", "earlier@fixture.test"],
+    ["Reset password", "earlier@fixture.test"],
+    ["Continue", "earlier@fixture.test"],
+    ["Create account", ""],
+  ])("skips an earlier ineligible %s form", (submit, login) => {
+    const earlier: WireRow[] = [
+      ["@e:f0d1", "t", `Email|f=email|n=${login}|fm=1`],
+      ["@e:f0d2", "t", "Password|f=password|s=r|fm=1"],
+      ["@e:f0d3", "b", `${submit}|a=submit|fm=1`],
+    ];
+    const later: WireRow[] = [
+      ["@e:f0d4", "t", "Email|f=email|n=later@fixture.test|fm=2"],
+      ["@e:f0d5", "t", "Password|f=password|s=r|fm=2"],
+      ["@e:f0d6", "t", "Confirm password|f=password|s=r|fm=2"],
+      ["@e:f0d7", "b", "Create account|a=submit|fm=2"],
+    ];
+    const rows = [...earlier, ...later];
+    expect(newAccountPasswordTargets(rows, {}, [])?.password[0]).toBe("@e:f0d5");
+    expect(newAccountPasswordTargets(rows, {}, ["@e:f0d5"], () => [],
+      (row) => row[0] === "@e:f0d6")?.password[0]).toBe("@e:f0d6");
+  });
+
+  it("skips an ineligible confirmation before an eligible saved-password confirmation", () => {
+    const rows: WireRow[] = [
+      ["@e:f0d1", "t", "Confirm password|f=password|s=r|fm=1"],
+      ["@e:f0d2", "b", "Reset password|a=submit|fm=1"],
+      ["@e:f1d1", "t", "Confirm password|f=password|s=r|fm=1"],
+      ["@e:f1d2", "b", "Continue|a=submit|fm=1"],
+    ];
+    const targets = newAccountPasswordTargets(rows, { email: "ada@fixture.test" }, [], () => [], () => true);
+    expect(targets?.password[0]).toBe("@e:f1d1");
+  });
+
   it("never fills a change-password form", () => {
     const rows: WireRow[] = [
       ["@e:old", "t", "Current password|f=password|s=r|fm=1"],

@@ -2581,52 +2581,56 @@ export function newAccountPasswordTargets(
     !isPopulatedPasswordRow(row) &&
     !isActedRow(row) &&
     !filled.has(row[0]);
-  const password =
-    rows.find((row) => open(row) && !isConfirmPasswordRow(row)) ??
-    rows.find((row) => open(row) && isConfirmPasswordRow(row) && reuseInventedPasswordFor(row));
-  if (password === undefined || matchingFactKeys(facts, password).length > 0) return undefined;
-  const formId = rowFormId(password);
+  const candidates = [
+    ...rows.filter((row) => open(row) && !isConfirmPasswordRow(row)),
+    ...rows.filter((row) => open(row) && isConfirmPasswordRow(row) && reuseInventedPasswordFor(row)),
+  ];
   const frameKey = (row: WireRow): string | undefined => /^@e:f\d+d/.exec(row[0])?.[0];
-  const scope = rows.filter((row) =>
-    frameKey(row) === frameKey(password) && (formId === undefined || rowFormId(row) === formId));
-  const reuseInventedPassword = reuseInventedPasswordFor(password);
-  const confirms = scope.filter(
-    (row) => row !== password && open(row) && isConfirmPasswordRow(row),
-  );
-  if (!isRequiredRow(password) && confirms.length === 0 && !reuseInventedPassword) return undefined;
-  const buttons = scope.filter((row) => row[1] === "b" || row[1] === "button");
-  const submits = buttons.filter((row) => /(?:^|\|)a=submit(?:\||$)/.test(row[2] ?? ""));
-  // A changed password is the user's existing secret plus a new one; the
-  // drive cannot know the existing one, so that form is never filled here.
-  if (scope.some((row) => isPasswordRow(row) && CURRENT_PASSWORD_KEY.test(passwordKey(row)))) {
-    return undefined;
+  for (const password of candidates) {
+    if (matchingFactKeys(facts, password).length > 0) continue;
+    const formId = rowFormId(password);
+    const scope = rows.filter((row) =>
+      frameKey(row) === frameKey(password) && (formId === undefined || rowFormId(row) === formId));
+    const reuseInventedPassword = reuseInventedPasswordFor(password);
+    const confirms = scope.filter(
+      (row) => row !== password && open(row) && isConfirmPasswordRow(row),
+    );
+    if (!isRequiredRow(password) && confirms.length === 0 && !reuseInventedPassword) continue;
+    const buttons = scope.filter((row) => row[1] === "b" || row[1] === "button");
+    const submits = buttons.filter((row) => /(?:^|\|)a=submit(?:\||$)/.test(row[2] ?? ""));
+    // A changed password is the user's existing secret plus a new one; the
+    // drive cannot know the existing one, so that form is never filled here.
+    if (scope.some((row) => isPasswordRow(row) && CURRENT_PASSWORD_KEY.test(passwordKey(row)))) {
+      continue;
+    }
+    const pool = submits.length > 0 ? submits : buttons;
+    const evidence = [...pool.map(readableLabel), ...headingsFor(password)];
+    if (evidence.some((label) => LOGIN_LABEL.test(label) || RESET_PASSWORD_LABEL.test(label))) {
+      continue;
+    }
+    const signup =
+      (reuseInventedPassword && isConfirmPasswordRow(password)) ||
+      evidence.some((label) => CREATE_ACCOUNT_LABEL.test(label));
+    if (!signup) continue;
+    const identity = scope.find(
+      (row) =>
+        isFillableRow(row) &&
+        !isPasswordRow(row) &&
+        ["email", "username"].includes(rowField(row) ?? ""),
+    );
+    if (identity !== undefined) {
+      const login = rowCurrentValue(identity);
+      if (login === undefined || login.trim().length === 0) continue;
+      return { password, confirms, identity };
+    }
+    const supplied = facts.email ?? facts.username;
+    return {
+      password,
+      confirms,
+      ...(supplied === undefined || supplied.trim().length === 0 ? {} : { login: supplied.trim() }),
+    };
   }
-  const pool = submits.length > 0 ? submits : buttons;
-  const evidence = [...pool.map(readableLabel), ...headingsFor(password)];
-  if (evidence.some((label) => LOGIN_LABEL.test(label) || RESET_PASSWORD_LABEL.test(label))) {
-    return undefined;
-  }
-  const signup =
-    (reuseInventedPassword && isConfirmPasswordRow(password)) ||
-    evidence.some((label) => CREATE_ACCOUNT_LABEL.test(label));
-  if (!signup) return undefined;
-  const identity = scope.find(
-    (row) =>
-      isFillableRow(row) &&
-      !isPasswordRow(row) &&
-      ["email", "username"].includes(rowField(row) ?? ""),
-  );
-  if (identity !== undefined) {
-    const login = rowCurrentValue(identity);
-    if (login === undefined || login.trim().length === 0) return undefined;
-    return { password, confirms, identity };
-  }
-  const supplied = facts.email ?? facts.username;
-  return {
-    password,
-    confirms,
-    ...(supplied === undefined || supplied.trim().length === 0 ? {} : { login: supplied.trim() }),
-  };
+  return undefined;
 }
 
 export function applyReleasedCardFacts(
