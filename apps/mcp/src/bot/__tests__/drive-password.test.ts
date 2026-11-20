@@ -104,6 +104,14 @@ describe("inventPassword", () => {
     ["[A-Za-z0-9]{12,20}", /^[A-Za-z0-9]{12,20}$/],
     ["[A-Z0-9]{24}", /^[A-Z0-9]{24}$/],
     ["[a-z]{30,}", /^[a-z]{30,}$/],
+    [
+      "(?=.*[A-Z])(?=.*[a-z])(?=.*[0-9])[A-Za-z0-9]{12,20}",
+      /^(?=.*[A-Z])(?=.*[a-z])(?=.*[0-9])[A-Za-z0-9]{12,20}$/,
+    ],
+    [
+      "^(?=.*[A-Z])(?=.*[0-9])[A-Z0-9]{12,20}$",
+      /^(?=.*[A-Z])(?=.*[0-9])[A-Z0-9]{12,20}$/,
+    ],
   ])("generates within the character and length space of %s", (pattern, oracle) => {
     for (let attempt = 0; attempt < 10; attempt += 1) {
       const value = inventPassword(parsePasswordRequirements("Password", undefined, pattern as string));

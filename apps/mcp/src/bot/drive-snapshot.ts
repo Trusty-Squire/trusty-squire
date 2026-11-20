@@ -37,6 +37,7 @@ export interface DriveSnapshotElement {
   width?: number;
   minLength?: number;
   placeholder?: string;
+  description?: string;
   /** The control's HTML `name`, when it has one. */
   name?: string;
   /** The `aria-label` ATTRIBUTE, not the resolved accessible name. */
@@ -802,6 +803,16 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
     const href =
       element instanceof HTMLAnchorElement && element.href.length > 0 ? element.href : "";
     const placeholder = element.getAttribute("placeholder")?.trim() ?? "";
+    const ownerRoot = element.getRootNode();
+    const description = [
+      element.getAttribute("aria-description") ?? "",
+      ...(element.getAttribute("aria-describedby") ?? "").split(/\s+/).flatMap((id) => {
+        const described = ownerRoot instanceof Document || ownerRoot instanceof ShadowRoot
+          ? ownerRoot.getElementById(id)
+          : null;
+        return described === null ? [] : [described.textContent ?? ""];
+      }),
+    ].join(" ").trim();
     const ariaLabel = element.getAttribute("aria-label")?.trim() ?? "";
     const inputName =
       element instanceof HTMLInputElement ||
@@ -846,6 +857,7 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
       ...(width === undefined ? {} : { width }),
       ...(minLength === undefined ? {} : { minLength }),
       ...(placeholder.length > 0 ? { placeholder } : {}),
+      ...(description.length > 0 ? { description } : {}),
       ...(ariaLabel.length > 0 ? { ariaLabel } : {}),
       ...(labelComparable ? { labelComparable: true } : {}),
       ...(href.length > 0 ? { href } : {}),

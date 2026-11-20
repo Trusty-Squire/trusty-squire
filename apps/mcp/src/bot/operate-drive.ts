@@ -6059,7 +6059,7 @@ async function driveLoop(input: {
     const control = controls?.get(row[0]);
     const password = inventPassword(
       parsePasswordRequirements(
-        `${readableLabel(row)}\n${control?.placeholder ?? ""}\n${observation.dom ?? ""}`,
+        `${readableLabel(row)}\n${control?.placeholder ?? ""}\n${control?.description ?? ""}`,
         control?.width,
         control?.pattern,
         control?.minLength,

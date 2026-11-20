@@ -106,7 +106,9 @@ const NEW_ACCOUNT_PASSWORD_HTML = `<!doctype html><meta charset="utf-8"><title>T
   <h1>Welcome</h1>
   <form id="f">
     <label>Email <input id="email" name="email" type="email" required></label>
-    <label>Password <input id="password" name="password" type="password" minlength="30" required oninput="document.getElementById('confirmation').hidden = false"></label>
+    <p>Username: at most 16 characters. No special characters.</p>
+    <p id="password-help">At least 32 characters. Include a special character (!@#).</p>
+    <label>Password <input id="password" name="password" type="password" minlength="30" aria-describedby="password-help" required oninput="document.getElementById('confirmation').hidden = false"></label>
     <label id="confirmation" hidden>Confirm password <input id="confirm" name="confirm_password" type="password" required></label>
     <label><input id="age" type="checkbox" required> I confirm that I am at least 18</label>
     <button id="create" type="submit">Create account</button>
@@ -4030,7 +4032,8 @@ describe("operate_drive real-browser fixture", () => {
         deps(async (_api, _state, questions) => jevChoose(questions, "DONE")),
       );
       const password = await page.locator("#password").inputValue();
-      expect(password.length).toBeGreaterThanOrEqual(30);
+      expect(password.length).toBeGreaterThanOrEqual(32);
+      expect(password).toMatch(/[!@#]/);
       expect(await page.locator("#confirm").inputValue()).toBe(password);
       expect(await page.locator("#email").inputValue()).toBe(identifier);
 
