@@ -8,6 +8,10 @@
   `/s/<token>/`. A failed live view stops with the cause and no fallback
   install URL.
 
+## 1.1.51-rc.1 (2026-11-20)
+
+- OAuth login: a Google account chooser that lists accounts but none the action can select (several accounts and no session account, or none matching it) now returns at once with `oauth.state: "account_choice"` instead of waiting out the budget and returning `awaiting_human`; operate_drive continues and its step vote picks the account on the page. On a sign-in page whose federated-login controls are disabled behind a challenge widget, an empty username or email field no longer ends the drive `needs_value`, so the drive reaches its existing widget wait ([PR](https://github.com/Trusty-Squire/trusty-squire/pull/1152)).
+
 ## 1.1.50-rc.1 (2026-11-20)
 
 - operate_drive key capture: a key revealed inline on the page (not in a dialog) is now captured from its own Copy control, either the one the drive just clicked (even after it reads "Copied") or the page's only clickable Copy control, and stored as before; the drive completes only after the vault write. On a sign-in page that offers a federated login (Continue with Google/GitHub/SSO), an empty email, username or password field no longer ends the drive `needs_value` before the step vote, so the drive can take the sign-in path the goal names; a password-only form keeps the handoff ([PR](https://github.com/Trusty-Squire/trusty-squire/pull/1150)).
