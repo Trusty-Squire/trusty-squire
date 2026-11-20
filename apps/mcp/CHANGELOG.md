@@ -1,5 +1,9 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.53-rc.1 (2026-11-20)
+
+- feat(mcp): let operate_drive invent and vault signup passwords (#1157)
+
 ## 1.1.52-rc.1 (2026-11-20)
 
 - fix(mcp): drop the drive's federated-login needs_value shims (#1155)
