@@ -10,7 +10,7 @@
 
 ## 1.1.49-rc.1 (2026-11-20)
 
-- operate_drive key capture: given `store`, a drive that shows a revealed key or has just clicked Copy (even when the button then reads "Copied!") vaults the key through the operate_extract store path and finishes complete without waiting for a DONE vote; without `store`, or if storing fails, the drive goes on to its next decision. An inbox read that finds no matching mail is reported to the next decision instead of re-reading the same empty inbox ([PR](https://github.com/Trusty-Squire/trusty-squire/pull/1148)).
+- operate_drive key capture: given `store`, a drive that shows a revealed key or has just clicked Copy (even when the button then reads "Copied!") vaults the key through the operate_extract store path and finishes complete without waiting for a DONE vote; without `store`, or if storing fails, it goes on to its next decision. DONE on a page with a captured or visible key now also completes only after the key is stored; otherwise it ends `stuck` ("key not stored"), so drive callers that want completion on a key page must pass `store`. An inbox read that finds no matching mail is reported to the next decision instead of re-reading the same empty inbox ([PR](https://github.com/Trusty-Squire/trusty-squire/pull/1148)).
 
 ## 1.1.48-rc.1 (2026-11-20)
 
