@@ -1,7 +1,9 @@
 import { beforeEach, expect, it, vi } from "vitest";
 import type { ApiClient } from "../api-client.js";
 import { runOperateDrive } from "../bot/operate-drive.js";
-import { operateDriveTool } from "../tools/provision-drive.js";
+import { findTool } from "../tools/index.js";
+
+const operateDriveTool = findTool("operate_drive")!;
 
 vi.mock("../bot/operate-drive.js", () => ({ runOperateDrive: vi.fn() }));
 vi.mock("../bot/session/lifecycle.js", async (importOriginal) => ({
@@ -15,7 +17,7 @@ vi.mock("../bot/provision-session.js", async (importOriginal) => ({
 
 beforeEach(() => vi.clearAllMocks());
 
-it("passes the captured value and destination through the existing vault store", async () => {
+it("preserves the registered storage destination through parsing and vault persistence", async () => {
   const storeCredential = vi.fn(async () => ({
     reference: "vault:example:test", service: "example", label: "bootstrap",
     field_names: ["api_key"], allowed_hosts: ["api.example.test"], updated: false,
@@ -51,4 +53,27 @@ it("supplies no automatic persistence without a destination", async () => {
     operateDriveTool.inputSchema.parse({ session_id: "session", goal: "Browse" }),
     {} as ApiClient,
   );
+});
+
+it.each([
+  { session_id: "session" },
+  { url: "https://app.example.test/keys" },
+])("preserves store for the registered drive entry %j", (entry) => {
+  const store = { service: "example", label: "bootstrap" };
+  const parsed = operateDriveTool.inputSchema.safeParse({
+    ...entry, goal: "Get a key and store it", store,
+  });
+  expect(parsed.success).toBe(true);
+  if (parsed.success) expect(parsed.data.store).toEqual(store);
+});
+
+it.each([
+  { label: "bootstrap" },
+  { service: "" },
+  { service: "example", auth_shape: "invalid" },
+  { service: "example", api_hosts: "api.example.test" },
+])("rejects invalid store destinations at the registered boundary: %j", (store) => {
+  expect(operateDriveTool.inputSchema.safeParse({
+    session_id: "session", goal: "Get a key and store it", store,
+  }).success).toBe(false);
 });
