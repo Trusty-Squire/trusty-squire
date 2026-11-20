@@ -215,10 +215,10 @@ steps re-deciding and finishes on the step or call budget.
 
 It returns a handoff (never a bare page): status, the current compact
 observation with the same stable refs, trajectory, and done/remaining.
-`needs_value` names the missing field's label; a country control already
-showing a value, and expiry or cardholder-name controls on a drive carrying
-`card_ref`, do not raise it. `stuck` means no listed element advances the
-goal. Resume the same session with `answer` (a
+`needs_value` names the selected field's label when its value is unavailable.
+Empty required fields and a vote that the page is not asking for an emailed
+code do not override the selected operation. `stuck` means no listed element
+advances the goal. Resume the same session with `answer` (a
 readable action slug from the handoff options, `done`, or `stuck`) and/or
 added `facts`. Use the single-step primitives only for a handoff you are
 answering or a task that is not a goal.
@@ -267,9 +267,10 @@ automatically when a supplied fact matches its field, including `ticket_type`,
 observation fingerprint. A stale, occluded, or offscreen click yields the next
 decision to Jev even if the recovery observation changes. A matching page-wide
 option also yields to Jev: the dispatcher cannot establish custom option
-ownership and does not select it or mark the field filled. A native select or
-a typeable control whose field matches a supplied fact is filled by the drive
-itself before Jev is asked, once per target per observation fingerprint. A
+ownership and does not select it or mark the field filled. A native select whose
+field matches a supplied fact is filled by the drive itself before Jev is asked,
+once per target per observation fingerprint. Ordinary typeable fields go through
+the step vote, which can choose TYPE_TEXT with a supplied fact. A
 checkout page's offscreen fillables stay eligible, because the act path
 scrolls a target into view before it measures; a control already displaying
 that fact is not offered again. Recovery and

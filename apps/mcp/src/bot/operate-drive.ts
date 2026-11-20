@@ -113,7 +113,11 @@ import {
 import type { CaptchaSolveResult } from "./captcha.js";
 import { findCredentialTokens, isMaskedDisplay } from "./credential-shape.js";
 import { extractCredentials, storableCredentials, type ExtractResult } from "./capture/capture.js";
-import { inventPassword, parsePasswordRequirements, passwordMeetsRequirements } from "./drive-password.js";
+import {
+  inventPassword,
+  parsePasswordRequirements,
+  passwordMeetsRequirements,
+} from "./drive-password.js";
 import {
   DRIVE_FIXED_GO_BACK,
   DRIVE_FIXED_NONE_OF_THESE,
@@ -2531,10 +2535,10 @@ export function isPasswordRow(row: WireRow): boolean {
 
 const CONFIRM_PASSWORD_KEY =
   /(?:^|_)(?:confirm|confirmation|repeat|re_?enter|re_?type|retype|verify|again)(?:_|$)/;
-const CREATE_ACCOUNT_LABEL =
-  /create\s+(?:an?\s+|my\s+|your\s+)?account|sign[\s-]*up|register/i;
+const CREATE_ACCOUNT_LABEL = /create\s+(?:an?\s+|my\s+|your\s+)?account|sign[\s-]*up|register/i;
 const LOGIN_LABEL = /\blog[\s-]*in\b|\bsign[\s-]*in\b/i;
-const RESET_PASSWORD_LABEL = /\b(?:reset|forgot|recover|change|update)\s+(?:(?:your|my)\s+)?password\b|\bpassword\s+(?:reset|recovery|change)\b/i;
+const RESET_PASSWORD_LABEL =
+  /\b(?:reset|forgot|recover|change|update)\s+(?:(?:your|my)\s+)?password\b|\bpassword\s+(?:reset|recovery|change)\b/i;
 
 const CURRENT_PASSWORD_KEY = /(?:^|_)(?:current|old|existing)(?:_|$)/;
 
@@ -2547,8 +2551,10 @@ export function isConfirmPasswordRow(row: WireRow): boolean {
 }
 
 function isPopulatedPasswordRow(row: WireRow): boolean {
-  return isPasswordRow(row) &&
-    (/(?:^|\|)s=[^|]*p/.test(row[2] ?? "") || (rowCurrentValue(row)?.length ?? 0) > 0);
+  return (
+    isPasswordRow(row) &&
+    (/(?:^|\|)s=[^|]*p/.test(row[2] ?? "") || (rowCurrentValue(row)?.length ?? 0) > 0)
+  );
 }
 
 export interface NewAccountPasswordTargets {
@@ -2583,14 +2589,18 @@ export function newAccountPasswordTargets(
     !filled.has(row[0]);
   const candidates = [
     ...rows.filter((row) => open(row) && !isConfirmPasswordRow(row)),
-    ...rows.filter((row) => open(row) && isConfirmPasswordRow(row) && reuseInventedPasswordFor(row)),
+    ...rows.filter(
+      (row) => open(row) && isConfirmPasswordRow(row) && reuseInventedPasswordFor(row),
+    ),
   ];
   const frameKey = (row: WireRow): string | undefined => /^@e:f\d+d/.exec(row[0])?.[0];
   for (const password of candidates) {
     if (matchingFactKeys(facts, password).length > 0) continue;
     const formId = rowFormId(password);
-    const scope = rows.filter((row) =>
-      frameKey(row) === frameKey(password) && (formId === undefined || rowFormId(row) === formId));
+    const scope = rows.filter(
+      (row) =>
+        frameKey(row) === frameKey(password) && (formId === undefined || rowFormId(row) === formId),
+    );
     const reuseInventedPassword = reuseInventedPasswordFor(password);
     const confirms = scope.filter(
       (row) => row !== password && open(row) && isConfirmPasswordRow(row),
@@ -2681,8 +2691,6 @@ export function ensureGeneratedFacts(
   if (next.name === undefined && first.length > 0 && last.length > 0) {
     next.name = `${first} ${last}`;
   }
-  // Password creation belongs to operate_login's sealed signup path. A required
-  // password without a fact reaches the drive's needs_value handoff.
   return next;
 }
 
@@ -3351,31 +3359,6 @@ function autoFillFormScope(
   return ranked[0]![0];
 }
 
-/** The typeable fact the drive must write itself before asking the model.
- *
- * Offscreen rows stay eligible: the act path scrolls them into view before
- * typing, so a host phone fact is no longer a burned attempt.
- */
-export function requiredFactTypeAction(
-  rows: readonly WireRow[],
-  facts: Record<string, string>,
-  filledRefs: readonly string[] = [],
-  pageUrl: string = "",
-  _goal?: string,
-): { target: string; text: string } | undefined {
-  const includePayment = facts.card_ref !== undefined;
-  const formScope = autoFillFormScope(rows, facts, pageUrl);
-  if (formScope === null) return undefined;
-  for (const candidate of fillableCandidates(rows, facts, includePayment, filledRefs, pageUrl)) {
-    if (isSelectRow(candidate.row)) continue;
-    if (formScope !== undefined && rowFormId(candidate.row) !== formScope) continue;
-    const fact = firstFactValue(facts, matchingFactKeys(facts, candidate.row));
-    if (fact === undefined) continue;
-    return { target: candidate.ref, text: fact };
-  }
-  return undefined;
-}
-
 export function requiredFactComboboxAction(
   rows: readonly WireRow[],
   facts: Record<string, string>,
@@ -3407,45 +3390,6 @@ export function requiredFactComboboxAction(
       return undefined;
     }
     return { target: row[0] };
-  }
-  return undefined;
-}
-
-export function requiredFillableMissingFact(
-  rows: readonly WireRow[],
-  facts: Record<string, string>,
-  filledRefs: readonly string[] = [],
-  _pageUrl: string = "",
-  goal: string = "",
-): DriveCandidate | undefined {
-  const filled = new Set(filledRefs);
-  for (const row of rows) {
-    if (!isFillableRow(row) || isDisabledRow(row) || isActedRow(row) || filled.has(row[0]))
-      continue;
-    if (isPaymentRow(row) || isCvvRow(row) || isOtpRow(row) || allowsGoalValueAssignment(row))
-      continue;
-    if (
-      isFormValueField(row, rows, goal) &&
-      Object.keys(formValueCriteria(goal, facts)).some((key) => key !== DRIVE_FIXED_NONE)
-    )
-      continue;
-    if (facts.card_ref !== undefined && (isExpiryRow(row) || isCardholderNameRow(row))) continue;
-    if (!isRequiredRow(row)) continue;
-    if (matchingFactKeys(facts, row).length > 0) continue;
-    // A country picker already sitting on the merchant's geo default answers
-    // itself, so handing the goal back for a country would stall a checkout
-    // that is fine. This is the country control alone: any other required row
-    // whose only value is a placeholder sentinel is still a missing value, and
-    // reporting it is what keeps the card gate shut until the host answers.
-    if (isCountryRow(row) && (rowCurrentValue(row) ?? "").length > 0) continue;
-    const role = ROLE_LETTERS[row[1]] ?? row[1];
-    return {
-      ref: row[0],
-      role,
-      slug: slugifyCriteriaKey(`${row[2] ?? readableLabel(row)}_${role}`),
-      description: actionDescription(row, rows),
-      row,
-    };
   }
   return undefined;
 }
@@ -5292,7 +5236,10 @@ async function captureDriveSession(
   bridge.reserve(compactV2EpochDoc(session, page), frameParts);
   rememberDriveIdentities(drive, snapshot.elements, snapshot.url);
   drive.snapshotControlDigest = await driveControlDigest(page);
-  drivePasswordControls.set(session, new Map(snapshot.elements.map((element) => [element.ref, element])));
+  drivePasswordControls.set(
+    session,
+    new Map(snapshot.elements.map((element) => [element.ref, element])),
+  );
   const rawRows = driveRowsFromSnapshot(snapshot);
   lastSelectOptions.set(session, snapshotSelectOptions(snapshot));
   const previousEpoch = drive.lastDocumentEpoch;
@@ -5935,7 +5882,6 @@ async function driveLoop(input: {
   let comboboxMustYield = false;
   const selectAttempts = new Set<string>();
   let selectMustYield = false;
-  const typeAttempts = new Set<string>();
   const passwordAttempts = new Set<string>();
   const expiryRewriteAttempts = new Set<string>();
   let typeMustYield = false;
@@ -6065,9 +6011,10 @@ async function driveLoop(input: {
     if (location === undefined) return false;
     const { url, host } = location;
     const controls = drivePasswordControls.get(session);
-    const login = targets.identity === undefined
-      ? targets.login ?? session.signupIdentifier ?? getSessionUserEmail(sessionId)
-      : controls?.get(targets.identity[0])?.value;
+    const login =
+      targets.identity === undefined
+        ? (targets.login ?? session.signupIdentifier ?? getSessionUserEmail(sessionId))
+        : controls?.get(targets.identity[0])?.value;
     if (login == null || login.trim().length === 0) return false;
     const requirements = [targets.password, ...targets.confirms].map(passwordRequirementsFor);
     const prior = drive.inventedLogin;
@@ -7735,13 +7682,6 @@ async function driveLoop(input: {
       },
     );
     let pageUrl = observation.url;
-    let missing = requiredFillableMissingFact(
-      rows,
-      drive.facts,
-      drive.filledRefs,
-      pageUrl,
-      drive.goal,
-    );
     let pageOptions =
       lastSelectOptions.get(session) ?? selectOptionsFromElements(session.lastElements);
     const remainingFills = fillableCandidates(
@@ -7808,9 +7748,6 @@ async function driveLoop(input: {
       const expiryRewrite = typeMustYield
         ? undefined
         : requiredExpiryLongRewriteAction(rows, drive.facts, drive.expiryShortWrittenRefs);
-      const typeFill = typeMustYield
-        ? undefined
-        : requiredFactTypeAction(rows, drive.facts, drive.filledRefs, pageUrl, drive.goal);
       typeMustYield = false;
       const rewriteTarget = expiryRewrite?.target;
       const rewriteAttemptKey =
@@ -7836,27 +7773,6 @@ async function driveLoop(input: {
         spendStep("expiry_rewrite");
         continue;
       }
-      const typeAttemptKey =
-        typeFill === undefined ? undefined : `${comboboxObservation}\t${typeFill.target}`;
-      if (
-        typeFill !== undefined &&
-        typeAttemptKey !== undefined &&
-        !typeAttempts.has(typeAttemptKey)
-      ) {
-        typeAttempts.add(typeAttemptKey);
-        drive.boundFingerprint = driveProgressFingerprint(observation, rows, drive, session);
-        drive.consumedActionKey = null;
-        const applied = await applyDecision({
-          kind: "act",
-          action: { kind: "type", target: typeFill.target, text: typeFill.text },
-          actionKey: typeFill.target,
-          confidence: 1,
-        });
-        if (applied !== "continue") return applied;
-        if (automaticDecisionRefused) break automaticDecisions;
-        spendStep("type");
-        continue;
-      }
       // A sign-up form's new password is invented rather than handed back:
       // saved to the vault first, then typed from a sealed slot, so the value
       // never reaches the model, the trace, or the handoff.
@@ -7868,7 +7784,8 @@ async function driveLoop(input: {
               drive.facts,
               drive.filledRefs,
               (row) => drivePasswordControls.get(session)?.get(row[0])?.frameHeadings ?? [],
-              (row) => drive.inventedLogin != null &&
+              (row) =>
+                drive.inventedLogin != null &&
                 drive.inventedLogin.host === signupLocationFor(row)?.host &&
                 session.secretSlots.has(DRIVE_PASSWORD_SLOT),
             );
@@ -7888,7 +7805,11 @@ async function driveLoop(input: {
             const current = rows.find((row) => row[0] === target[0]);
             if (current === undefined || isPopulatedPasswordRow(current)) continue;
             const password = session.secretSlots.get(DRIVE_PASSWORD_SLOT);
-            if (password === undefined || !passwordMeetsRequirements(password, passwordRequirementsFor(current))) continue;
+            if (
+              password === undefined ||
+              !passwordMeetsRequirements(password, passwordRequirementsFor(current))
+            )
+              continue;
             drive.boundFingerprint = driveProgressFingerprint(observation, rows, drive, session);
             drive.consumedActionKey = null;
             const applied = await applyDecision({
@@ -7904,26 +7825,6 @@ async function driveLoop(input: {
           continue;
         }
       }
-      // A required code field may have no recognizable label. Give the model
-      // the page context before treating that field as a missing supplied fact.
-      if (
-        missing !== undefined &&
-        !emailCodeCandidates(rows, drive.filledRefs).some(
-          (candidate) => candidate.ref === missing?.ref,
-        )
-      ) {
-        const field = fieldLabelForRow(missing.row);
-        return finish("needs_value", {
-          field,
-          question: {
-            question: `Missing value for ${field}`,
-            options: Object.fromEntries(
-              Object.keys(drive.facts).map((key) => [key, `the provided ${key} value`]),
-            ),
-          },
-        });
-      }
-
       // A rendered page can legitimately have no controls (including DONE).
       // The readiness result, rather than row count, decides whether to wait.
       // Per page, and read before the settle branch below: dead actions recorded
@@ -8177,13 +8078,6 @@ async function driveLoop(input: {
     // branch on the same iteration.
     if (automaticDecisionRefused) {
       pageUrl = observation.url;
-      missing = requiredFillableMissingFact(
-        rows,
-        drive.facts,
-        drive.filledRefs,
-        pageUrl,
-        drive.goal,
-      );
       pageOptions =
         lastSelectOptions.get(session) ?? selectOptionsFromElements(session.lastElements);
       terminalOnly = false;
@@ -8351,18 +8245,6 @@ async function driveLoop(input: {
       jevMs += retried.elapsedMs;
       answers = retried.result.answers;
       decision = decide(answers);
-    }
-    if (missing !== undefined && answers[DRIVE_EMAIL_CODE_QUESTION]?.choice === DRIVE_FIXED_NONE) {
-      const field = fieldLabelForRow(missing.row);
-      return finish("needs_value", {
-        field,
-        question: {
-          question: `Missing value for ${field}`,
-          options: Object.fromEntries(
-            Object.keys(drive.facts).map((key) => [key, `the provided ${key} value`]),
-          ),
-        },
-      });
     }
     appendDriveTrace(session, {
       at: "step",

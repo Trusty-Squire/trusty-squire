@@ -89,10 +89,8 @@ import {
   peakedProbabilities,
   requiredFactComboboxAction,
   requiredFactSelectAction,
-  requiredFactTypeAction,
   requiredExpiryLongRewriteAction,
   isRequiredRow,
-  requiredFillableMissingFact,
   applyReleasedCardFacts,
   ensureGeneratedFacts,
   isExpiryRow,
@@ -1165,11 +1163,6 @@ describe("decideAfterJev stop reasons", () => {
     });
   });
 
-  it("returns needs_value naming the field label when a required fillable has no matching fact", () => {
-    const missingFacts = { first_name: "Ada" };
-    expect(requiredFillableMissingFact(ROWS, missingFacts)?.ref).toBe("@e:email");
-  });
-
   it("does not generate a password fact on a create-account step", () => {
     const rows: WireRow[] = [
       ["@e:password", "t", "New password|f=password|s=r"],
@@ -1181,36 +1174,6 @@ describe("decideAfterJev stop reasons", () => {
       { pageUrl: "https://kagi.com/signup", headings: ["Secure your account"] },
     );
     expect(facts.password).toBeUndefined();
-    expect(requiredFillableMissingFact(rows, facts)?.ref).toBe("@e:password");
-  });
-
-  it("defers a card expiry control only while a card is in play", () => {
-    const expiry: WireRow = ["@e:exp", "t", "Expiration date (MM / YY)|s=r"];
-    expect(isExpiryRow(expiry)).toBe(true);
-    // With a card, the control is the card path's business and is filled after
-    // release, so reporting it missing would halt the purchase early.
-    expect(
-      requiredFillableMissingFact([expiry, PAYMENT, EMAIL], {
-        email: "a@b.test",
-        card_ref: "card-1",
-      })?.ref,
-    ).toBeUndefined();
-    // Without a card there is no release to wait for. A trial signup that asks
-    // for one must still be told which field it needs.
-    expect(requiredFillableMissingFact([expiry, PAYMENT], {})?.ref).toBe("@e:exp");
-  });
-
-  it("defers a name-on-card control only while a card is in play", () => {
-    const cardName: WireRow = ["@e:ncard", "t", "Name on card|s=r"];
-    expect(isCardholderNameRow(cardName)).toBe(true);
-    expect(
-      requiredFillableMissingFact([cardName, EMAIL], { email: "a@b.test", card_ref: "card-1" })
-        ?.ref,
-    ).toBeUndefined();
-    // "Name on card" matches no ordinary alias, so a no-card drive can only
-    // fill it if the host is told the field's name and resumes with a fact.
-    expect(requiredFillableMissingFact([cardName], {})?.ref).toBe("@e:ncard");
-    expect(requiredFillableMissingFact([cardName], { name_on_card: "Ada" })?.ref).toBeUndefined();
   });
 
   it("fills a cardholder-name control from the shipping name when the drive has no card", () => {
@@ -1227,7 +1190,6 @@ describe("decideAfterJev stop reasons", () => {
     // through the ordinary name alias and carries on.
     expect(matchingFactKeys(facts, cardholder)).toEqual(["name"]);
     expect(fillableCandidates(rows, facts, false).map((row) => row.ref)).toContain("@e:ch");
-    expect(requiredFillableMissingFact(rows, facts)?.ref).toBeUndefined();
   });
 
   it("still gives a cardholder-name control the released card name on a payment drive", () => {
@@ -1379,23 +1341,6 @@ describe("decideAfterJev stop reasons", () => {
     expect(fillableCandidates([phone], facts, true, [], checkout).map((row) => row.ref)).toEqual([
       "@e:phone",
     ]);
-    expect(requiredFactTypeAction([phone], facts, [], checkout)).toEqual({
-      target: "@e:phone",
-      text: "2125550100",
-    });
-  });
-
-  it("leaves a second form to the model after the first form is filled", () => {
-    const rows: WireRow[] = [
-      ["@e:email", "t", "Email|f=email|fm=1|n=buyer@example.test"],
-      ["@e:phone", "t", "Phone|f=phone|fm=2"],
-    ];
-    expect(
-      requiredFactTypeAction(rows, {
-        email: "buyer@example.test",
-        phone: "2125551234",
-      }),
-    ).toBeUndefined();
   });
 
   it("does not spill into other checkout forms after delivery is filled", () => {
@@ -1414,36 +1359,7 @@ describe("decideAfterJev stop reasons", () => {
       ["@e:newsletter", "t", "Email|f=email|fm=newsletter"],
       ["@e:other-state", "s", "State|f=state|fm=other"],
     ];
-    expect(requiredFactTypeAction(rows, facts, [], checkout)).toBeUndefined();
     expect(requiredFactSelectAction(rows, facts, [], checkout)).toBeUndefined();
-  });
-
-  it("does not treat a remaining checkout footer as the next form", () => {
-    const rows: WireRow[] = [
-      ["@e:newsletter", "t", "Email|f=email|fm=newsletter|v=offscreen"],
-      ["@e:subscribe", "b", "Subscribe|fm=newsletter"],
-      ["@e:discount", "t", "Discount code|f=discount_code|fm=discount"],
-      ["@e:apply", "b", "Apply|fm=discount"],
-    ];
-    const facts = { email: "buyer@example.test", discount_code: "WELCOME" };
-    expect(
-      requiredFactTypeAction(rows, facts, [], "https://shop.example/checkout"),
-    ).toBeUndefined();
-  });
-
-  it("waits for the product action before filling a lone newsletter form", () => {
-    const rows: WireRow[] = [
-      ["@e:add", "b", "Add to cart"],
-      ["@e:newsletter", "t", "Email|f=email|fm=newsletter"],
-    ];
-    expect(
-      requiredFactTypeAction(
-        rows,
-        { email: "buyer@example.test" },
-        [],
-        "https://shop.example/products/serum",
-      ),
-    ).toBeUndefined();
   });
 
   it("holds the card for an optional offscreen phone until the fact is typed", () => {
@@ -1459,10 +1375,6 @@ describe("decideAfterJev stop reasons", () => {
     expect(fillableCandidates(rows, facts, true, [], checkout).map((row) => row.ref)).toEqual([
       "@e:phone",
     ]);
-    expect(requiredFactTypeAction(rows, facts, [], checkout)).toEqual({
-      target: "@e:phone",
-      text: "2125550100",
-    });
     // Once typed the row leaves the set and the card may be released.
     expect(fillableCandidates(rows, facts, true, ["@e:phone"], checkout)).toEqual([]);
   });
@@ -1474,27 +1386,7 @@ describe("decideAfterJev stop reasons", () => {
     // the state fact, and it is not a missing value either — the merchant's
     // default is already correct, so the drive keeps moving.
     expect(matchingFactKeys(facts, country)).toEqual([]);
-    expect(requiredFillableMissingFact([country], facts)?.ref).toBeUndefined();
     expect(requiredFactSelectAction([country], facts)).toBeUndefined();
-  });
-
-  it("still reports a required empty control with no matching fact", () => {
-    const empty: WireRow = ["@e:country", "s", "Country/Region|f=state|s=r|a=picker"];
-    const facts = { state: "NY", card_ref: "card-1" };
-    expect(requiredFillableMissingFact([empty], facts)?.ref).toBe("@e:country");
-  });
-
-  it("reports a required dropdown sitting on a placeholder sentinel", () => {
-    // `<select required><option value="0">Choose a delivery window</option>…`
-    // serializes as a non-empty current value, but nothing is chosen. It is
-    // not a fill either (no fact matches), so the model is never offered it —
-    // needs_value is the only thing that keeps the card gate shut until the
-    // host answers.
-    const window: WireRow = ["@e:win", "s", "Delivery window|s=r|n=0"];
-    const facts = { state: "NY", card_ref: "card-1" };
-    expect(matchingFactKeys(facts, window)).toEqual([]);
-    expect(fillableCandidates([window], facts, true)).toEqual([]);
-    expect(requiredFillableMissingFact([window], facts)?.ref).toBe("@e:win");
   });
 
   it("gives a country picker the country fact when one is supplied", () => {
@@ -1527,7 +1419,6 @@ describe("decideAfterJev stop reasons", () => {
     const phone: WireRow = ["@e:phone", "t", "Phone (optional)|f=phone|n=2125550100"];
     const facts = { phone: "2125550100" };
     expect(fillableCandidates([phone], facts, false)).toEqual([]);
-    expect(requiredFactTypeAction([phone], facts)).toBeUndefined();
   });
 
   it("never writes the state fact into a country picker that has no country fact", () => {
@@ -1770,12 +1661,10 @@ describe("decideAfterJev stop reasons", () => {
     expect(matchingFactKeys(facts, licence)).toEqual([]);
     expect(matchingFactKeys(facts, passport)).toEqual([]);
     expect(matchingFactKeys(facts, cardExpiry)).toEqual(["card_expiry"]);
-    // Only the card control is offered the card value, and the licence field
-    // is still surfaced as a missing required fact rather than silently filled.
+    // Only the card control is offered the card value.
     expect(
       fillableCandidates([pan, licence, passport, cardExpiry], facts, true).map((row) => row.ref),
     ).toEqual(["@e:exp"]);
-    expect(requiredFillableMissingFact([pan, licence, cardExpiry], facts)?.ref).toBe("@e:dl");
   });
 
   it("keeps released card values out of the goal-value criteria", () => {
@@ -1822,8 +1711,6 @@ describe("decideAfterJev stop reasons", () => {
     );
     expect(isExpiryRow(passport)).toBe(false);
     expect(matchingFactKeys(facts, passport)).toEqual([]);
-    // Not a deferred payment control, so it stays a reportable required field.
-    expect(requiredFillableMissingFact([passport], { card_ref: "card-1" })?.ref).toBe("@e:pp");
   });
 
   it("gives the card expiry control the card value even when a travel date fact exists", () => {
@@ -2213,12 +2100,6 @@ describe("form-fill assignment helpers", () => {
     expect(isOtpRow(["@e:co", "s", "@country|f=country"])).toBe(false);
     expect(isOtpRow(["@e:go", "b", "@verify-email|a=submit"])).toBe(false);
     expect(isOtpRow(["@e:zip", "t", "@postal-code|f=zip"])).toBe(false);
-  });
-
-  it("names a required fillable with no matching fact as needs_value", () => {
-    const missing = requiredFillableMissingFact(ROWS, { first_name: "Ada" });
-    expect(missing?.ref).toBe("@e:email");
-    expect(missing ? missing.row : undefined).toBe(EMAIL);
   });
 
   it("treats a click as the last action for the email-check fallback", () => {
@@ -3026,7 +2907,6 @@ describe("facts, fingerprint, compact merge", () => {
       username: "lb2gauntlet0926a",
     };
     expect(matchingFactKeys(facts, username)).toEqual(["username"]);
-    expect(requiredFactTypeAction([username], facts)).toBeUndefined();
     expect(matchingFactKeys({ email: facts.email }, username)).toEqual([]);
   });
 
@@ -3432,7 +3312,6 @@ describe("facts, fingerprint, compact merge", () => {
     expect(Object.values(goalValueCriteria(goal, {}))).toEqual(
       expect.arrayContaining(["Ada", "Lovelace"]),
     );
-    expect(requiredFillableMissingFact([email, SUBMIT], {})?.ref).toBe("@e:email");
   });
 
   it("merges a compact delta into the retained full map", () => {
