@@ -804,7 +804,34 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
       element instanceof HTMLAnchorElement && element.href.length > 0 ? element.href : "";
     const placeholder = element.getAttribute("placeholder")?.trim() ?? "";
     const ownerRoot = element.getRootNode();
+    const localHelp: string[] = [];
+    if (element instanceof HTMLInputElement && element.type === "password") {
+      const controls =
+        'input,textarea,select,button,[contenteditable],[role="textbox"],[role="combobox"],[role="checkbox"],[role="radio"]';
+      let container: Element = element;
+      while (
+        container.parentElement !== null &&
+        !container.parentElement.matches("form,body,main,section,article,fieldset") &&
+        Array.from(container.parentElement.querySelectorAll(controls)).every(
+          (control) => control === element,
+        )
+      ) {
+        container = container.parentElement;
+      }
+      if (container instanceof HTMLElement) localHelp.push(container.innerText);
+      for (
+        let sibling = container.nextElementSibling;
+        sibling !== null &&
+        sibling.matches("small,p,span,div,ul,ol") &&
+        !sibling.matches(controls) &&
+        sibling.querySelector(controls) === null;
+        sibling = sibling.nextElementSibling
+      ) {
+        if (visible(sibling) && sibling instanceof HTMLElement) localHelp.push(sibling.innerText);
+      }
+    }
     const description = [
+      ...localHelp,
       element.getAttribute("aria-description") ?? "",
       ...(element.getAttribute("aria-describedby") ?? "").split(/\s+/).flatMap((id) => {
         const described = ownerRoot instanceof Document || ownerRoot instanceof ShadowRoot

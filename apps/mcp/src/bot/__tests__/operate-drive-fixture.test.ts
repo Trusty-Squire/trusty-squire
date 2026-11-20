@@ -3997,6 +3997,49 @@ describe("operate_drive real-browser fixture", () => {
     }
   }, 60_000);
 
+  it.each([
+    '<label>Password<input id="password" type="password" required></label><small>At least 32 characters</small>',
+    '<div><small>At least 32 characters</small><label>Password<input id="password" type="password" required></label></div>',
+    '<div><label>Password<input id="password" type="password" required></label><div><span>At least 32 characters</span></div></div>',
+    '<label for="password">Password</label><input id="password" type="password" required><small>At least 32 characters</small>',
+  ])("honors adjacent password help without reading other fields: %s", async (passwordField) => {
+    const html = `<!doctype html><form>
+      <label>Email<input id="email" type="email" required></label>
+      <small>At most 16 characters. No special characters.</small>
+      ${passwordField}
+      <label>Display name<input id="display-name" type="text"></label>
+      <small>At most 8 characters. No special characters.</small>
+      <button type="submit">Create account</button>
+    </form>`;
+    const { context, page, started } = await openFixture(
+      html,
+      "password-help.test",
+      "standard",
+      "/signup",
+    );
+    const persistLogin = vi.fn(async () => true);
+    try {
+      await runOperateDrive(
+        {
+          session_id: started.session_id,
+          goal: "create a new account",
+          facts: { email: "ada@fixture.test" },
+          max_steps: 3,
+        },
+        api(),
+        { persistLogin },
+        deps(async (_api, _state, questions) => jevChoose(questions, "DONE")),
+      );
+      const password = await page.locator("#password").inputValue();
+      expect(password.length).toBeGreaterThanOrEqual(32);
+      expect(password).toMatch(/[^A-Za-z0-9]/);
+      expect(persistLogin).toHaveBeenCalledOnce();
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 60_000);
+
   it("invents a sign-up password, vaults the login first, and fills the confirm field", async () => {
     const { context, page, started } = await openFixture(
       NEW_ACCOUNT_PASSWORD_HTML,
