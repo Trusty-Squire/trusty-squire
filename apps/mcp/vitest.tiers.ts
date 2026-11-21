@@ -127,8 +127,6 @@ export function excludingRealBrowser(files: string[]): string[] {
 // REQUIRED_PAYMENT_SAFETY_FILES. The nightly
 // full suite still covers everything as a drift backstop.
 export const REQUIRED_BEHAVIOR_FILES = [
-  "src/bot/__tests__/drive-session-email.test.ts",
-  "src/bot/__tests__/drive-save-choice.test.ts",
   "src/bot/__tests__/drive-oauth-pending-human.test.ts",
   "src/__tests__/operate-drive-store.test.ts",
   "src/bot/__tests__/native-dialogs.test.ts",

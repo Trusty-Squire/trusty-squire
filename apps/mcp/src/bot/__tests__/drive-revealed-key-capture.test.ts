@@ -1,15 +1,14 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { join } from "node:path";
-import { afterAll, beforeAll, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { chromium, type Browser } from "playwright";
 import type { ApiClient } from "../../api-client.js";
 import { BrowserController } from "../browser.js";
-import { captureFrameSnapshot, driveRowsFromSnapshot } from "../drive-snapshot.js";
 import {
-  buildDriveQuestions,
-  driveTargetSets,
+  emptyDriveState,
+  revealedKeyCaptureDue,
+  revealedSecretCopyRef,
   runOperateDrive,
   type DriveDependencies,
+  type DriveCallContext,
   type WireRow,
 } from "../operate-drive.js";
 import {
@@ -19,6 +18,71 @@ import {
   observe,
   startHarnessProvisionSession,
 } from "../provision-session.js";
+import { sessionForCall } from "../session/lifecycle.js";
+
+// Rows recorded by the 1.1.48-rc.1 BeatAPI drive (trace steps 5 and 6): the
+// one-time key was revealed and Copy was clicked, yet the drive kept asking.
+const STORED = { reference: "vault:example:default", service: "example", label: "default" };
+const beatApiRevealedRows: WireRow[] = [
+  ["@e:f0d128", "b", "Copy key"],
+  ["@e:f0d129", "b", "Done"],
+  ["@e:f0d26", "b", "Close"],
+  ["@key-value", "h1", "@key-value|secret=1|len=51"],
+];
+const withoutMarker = beatApiRevealedRows.slice(0, 3);
+
+describe("revealedKeyCaptureDue", () => {
+  it("is due when the page shows a revealed secret row (trace step 5)", () => {
+    expect(revealedKeyCaptureDue(beatApiRevealedRows, false)).toBe(true);
+  });
+
+  it("is due after the recorded Copy click (trace step 6)", () => {
+    expect(revealedKeyCaptureDue(beatApiRevealedRows, true)).toBe(true);
+    expect(revealedKeyCaptureDue(withoutMarker, true)).toBe(true);
+    expect(revealedKeyCaptureDue([["@e:f0d128", "b", "Copied!"]], true)).toBe(true);
+  });
+
+  it("is not due without a revealed key or a clicked Copy control", () => {
+    expect(revealedKeyCaptureDue(withoutMarker, false)).toBe(false);
+  });
+});
+
+// Rows recorded by the 1.1.49-rc.1 Zro drive (run 7, trace steps 4 and 5): the
+// new key was revealed inline on the page, not in a dialog, before and after
+// its Copy click.
+const zroInlineRows = (copyLabel: string): WireRow[] => [
+  ["@e:f0d11", "b", "Open account settings. Current workspace: Personal"],
+  ["@e:f0d19", "b", "Create key"],
+  ["@e:f0d43", "b", "Dismiss"],
+  ["@e:f0d44", "b", copyLabel],
+  ["@e:f0d20", "b", "Done"],
+  ["@e:f0d45", "b", "DeepSeek V4.1 Flash deepseek-v4.1-flash"],
+  ["@e:f0d46", "b", "Copy setup"],
+  ["@e:f0d47", "b", "Revoke grunt-7|v=offscreen"],
+  ["@key-value", "h1", "@key-value|secret=1|len=36|count=2"],
+];
+
+describe("revealedSecretCopyRef", () => {
+  it("names the inline key's Copy control before it is clicked (trace step 4)", () => {
+    expect(revealedSecretCopyRef(zroInlineRows("Copy key"), undefined)).toBe("@e:f0d44");
+  });
+
+  it("names the clicked Copy control after it relabels itself (trace step 5)", () => {
+    expect(revealedSecretCopyRef(zroInlineRows("Copied"), "@e:f0d44")).toBe("@e:f0d44");
+    expect(revealedSecretCopyRef(zroInlineRows("Copied"), undefined)).toBeUndefined();
+  });
+
+  it("names no control when several Copy controls are clickable or the only one is covered", () => {
+    const rows = zroInlineRows("Copy key");
+    expect(revealedSecretCopyRef([...rows, ["@e:f0d48", "b", "Copy"]], undefined)).toBeUndefined();
+    expect(
+      revealedSecretCopyRef(
+        rows.map((row) => (row[0] === "@e:f0d44" ? ["@e:f0d44", "b", "Copy key|oc=overlay"] : row)),
+        undefined,
+      ),
+    ).toBeUndefined();
+  });
+});
 
 let browser: Browser;
 beforeAll(async () => {
@@ -27,210 +91,151 @@ beforeAll(async () => {
 afterAll(async () => {
   await browser?.close();
 });
-const STORED = { reference: "vault:kenari:free", service: "kenari", label: "Grunt Free" };
 
-// A real snapshot must enumerate the value itself, including prefixless values
-// and exact long input values, rather than relying on English Copy controls.
-it.each([
-  ["Salin", "sk-kenari-0123456789abcdefghijklmnopqrstuvwxyzABCDEFG", false],
-  ["Salin", "0123456789abcdef".repeat(4), false],
-  ["⧉", "opaque|value_".repeat(12), true],
-] as const)(
-  "stores a selected visible value beside %s (%s)",
-  async (label, key, input) => {
-    const context = await browser.newContext();
-    const page = await context.newPage();
-    const url = "https://kenari.example.test/keys";
-    await page.route("**/*", (route) =>
-      route.fulfill({
-        contentType: "text/html",
-        body: `<main><h1>Kunci API</h1>${input ? `<input readonly value="${key}">` : `<div>${key}</div>`}
-      <button onclick="throw new Error('Copy must not be clicked')">${label}</button>
-      <code>export KENARI_API_KEY=your-key</code><p hidden>hidden-value</p>
-      <input type="password" value="password-must-not-be-offered"></main>`,
-      }),
-    );
-    await page.goto(url);
-    const started = await startHarnessProvisionSession({
-      browser: BrowserController.fromHarnessPage(page),
-      serviceUrl: url,
-      format: "compact",
-      initialObservation: "drive",
-    });
-    const persistCredentials = vi.fn(async () => STORED);
-    const askJev = vi.fn<DriveDependencies["askJev"]>(async (_api, _state, questions) => {
-      expect(persistCredentials).not.toHaveBeenCalled();
-      const save = questions.SAVE_target;
-      expect(save?.type).toBe("choice");
-      if (save?.type !== "choice") throw new Error("SAVE not offered");
-      expect(Object.values(save.criteria)).not.toContain("hidden-value");
-      expect(Object.values(save.criteria)).not.toContain("password-must-not-be-offered");
-      const selected = Object.keys(save.criteria).find((choice) => save.criteria[choice] === key);
-      expect(selected).toBeDefined();
-      return {
-        attempts: 1,
-        elapsedMs: 1,
-        result: {
-          answers: Object.fromEntries(
-            Object.entries(questions).map(([name, question]) => {
-              if (question.type !== "choice") return [name, { noul: name === "dead_end" ? 0 : 1 }];
-              const keys = Object.keys(question.criteria);
-              const choice =
-                name === "operation" ? "SAVE" : name === "SAVE_target" ? selected! : keys[0]!;
-              return [
-                name,
-                {
-                  choice,
-                  confidence: 1,
-                  probabilities: Object.fromEntries(
-                    keys.map((key) => [key, key === choice ? 1 : 0]),
-                  ),
-                },
-              ];
-            }),
-          ),
-        },
-      };
-    });
-    try {
-      const result = await runOperateDrive(
-        {
-          session_id: started.session_id,
-          goal: "Store the new API key",
-          max_steps: 3,
-          max_seconds: 10,
-        },
-        {} as ApiClient,
-        { persistCredentials },
-        { askJev, act, observe, awaitVerification, startSession: vi.fn(), injectCard: vi.fn() },
-      );
-      expect(askJev).toHaveBeenCalledOnce();
-      expect(persistCredentials).toHaveBeenCalledOnce();
-      expect(persistCredentials).toHaveBeenCalledWith(
-        expect.objectContaining({ credentials: { api_key: key } }),
-      );
-      expect(result).toMatchObject({ status: "complete", stored: true });
-    } finally {
-      await finishProvisionSession(started.session_id);
-      await context.close();
-    }
-  },
-  15_000,
-);
+const api = { useCredential: vi.fn() } as unknown as ApiClient;
+const key = "sk-beat-0123456789abcdefghijklmnopqrstuvwxyzABCDEFG";
 
-it.each([
-  ["dialog", false],
-  ["dialog", true],
-  ["shadow-dialog", false],
-  ["shadow-dialog", true],
-  ["shadow-cover", false],
-  ["shadow-cover", true],
-] as const)("retains a %s value before background truncation (input=%s)", async (layer, input) => {
-  const page = await browser.newPage();
-  const key = "opaque|credential-value";
-  try {
-    await page.setContent(
-      `<main>${Array.from(
-        { length: 300 },
-        (_, index) =>
-          `<span style="position:absolute;top:0;left:0">background ${index}</span><input style="position:absolute;top:0;left:0" value="background ${index}">`,
-      ).join("")}</main>`,
-    );
-    await page.evaluate(
-      ({ layer, input, key }) => {
-        const host = document.createElement("div");
-        document.body.append(host);
-        const root = layer === "dialog" ? host : host.attachShadow({ mode: "open" });
-        root.innerHTML = `<section ${layer === "shadow-cover" ? "" : 'role="dialog"'} style="position:fixed;inset:10px;background:white;z-index:1000">${input ? `<input readonly value="${key}">` : `<code>${key}</code>`}<button>Salin</button></section>`;
-      },
-      { layer, input, key },
-    );
-    const snapshot = await captureFrameSnapshot(page, [], 0, false, true);
-    expect(snapshot).not.toBeNull();
-    if (snapshot === null) throw new Error("No snapshot");
-    expect(snapshot.saveValues?.filter((value) => value.value === key)).toHaveLength(1);
-    const rows = driveRowsFromSnapshot(snapshot);
-    const sets = driveTargetSets(rows, {}, false, [], "", new Map(), (text) => text, [], {
-      canSave: true,
-    });
-    const questions = buildDriveQuestions(
-      rows,
-      {},
-      "Store the key",
-      false,
-      [],
-      "",
-      new Map(),
-      sets,
-    );
-    const save = questions.SAVE_target;
-    if (save?.type !== "choice") throw new Error("SAVE not offered");
-    expect(Object.values(save.criteria)).toContain(key);
-    expect(sets.SAVE?.find((candidate) => candidate.description === key)?.ref).toBe(
-      snapshot.saveValues?.find((value) => value.value === key)?.ref,
-    );
-  } finally {
-    await page.close();
-  }
-});
-
-it("masks remounted textbox SAVE values in drive choices, observations, and traces", async () => {
+async function drive(
+  copyScript: string,
+  persistCredentials: DriveCallContext["persistCredentials"] | null = async () => STORED,
+  layer: "dialog" | "inline" = "dialog",
+) {
   const context = await browser.newContext();
   const page = await context.newPage();
-  const url = "https://mask.example.test/keys";
-  await page.route("**/*", (route) =>
-    route.fulfill({
-      contentType: "text/html",
-      body: '<main><input id="field"><textarea id="area"></textarea><p>739</p><input value="321"><button>Salin</button></main>',
-    }),
-  );
+  const url = "https://app.example.test/dashboard/apikeys";
+  const panel = `<h1>${key}</h1>
+    <button type="button" onclick="${copyScript}">Copy key</button>
+    <button type="button">Done</button>
+    <button type="button" aria-label="Close">x</button>`;
+  const body =
+    layer === "dialog"
+      ? `<main><div role="dialog" aria-label="Create API key">${panel}</div></main>`
+      : `<main><h2>API keys</h2><section>${panel}</section>
+    <button type="button" onclick="navigator.clipboard.writeText('setup')">Copy setup</button></main>`;
+  await page.route("**/*", (route) => route.fulfill({ contentType: "text/html", body }));
   await page.goto(url);
-  const controller = BrowserController.fromHarnessPage(page);
   const started = await startHarnessProvisionSession({
-    browser: controller,
+    browser: BrowserController.fromHarnessPage(page),
     serviceUrl: url,
     format: "compact",
     initialObservation: "drive",
   });
-  const dir = mkdtempSync(join(process.cwd(), ".drive-save-mask-"));
-  const tracePath = join(dir, "trace.jsonl");
-  const previousTrace = process.env.DRIVE_TRACE_PATH;
-  process.env.DRIVE_TRACE_PATH = tracePath;
+  const goal = "Get one API key. Finish as soon as that key is in the vault.";
+  sessionForCall(started.session_id)!.drive = emptyDriveState(goal, {});
+  const askJev = vi.fn<DriveDependencies["askJev"]>(async () => {
+    throw new Error("model asked");
+  });
   try {
-    controller.registerCardValueOutputMask({ pan: "4111111111111111", cvv: "739" });
-    await page.evaluate(() => {
-      for (const id of ["field", "area"]) {
-        const old = document.getElementById(id)!;
-        const replacement = document.createElement(old.tagName) as
-          | HTMLInputElement
-          | HTMLTextAreaElement;
-        replacement.value = "739";
-        old.replaceWith(replacement);
-      }
-    });
-    const snapshot = await captureFrameSnapshot(page, [], 0, false, true);
-    expect(
-      snapshot?.saveValues?.filter((source) => source.value === "739" && source.textbox),
-    ).toHaveLength(2);
-    let criteria: Record<string, string> = {};
-    const askJev = vi.fn<DriveDependencies["askJev"]>(async (_api, _state, questions) => {
-      const save = questions.SAVE_target;
-      if (save?.type !== "choice") throw new Error("SAVE not offered");
-      criteria = save.criteria;
-      expect(Object.values(criteria).filter((value) => value === "[security code]")).toHaveLength(
-        2,
-      );
-      expect(Object.values(criteria)).toEqual(expect.arrayContaining(["739", "321"]));
-      return {
-        attempts: 1,
-        elapsedMs: 1,
-        result: {
-          answers: Object.fromEntries(
-            Object.entries(questions).map(([name, question]) => {
-              if (question.type !== "choice") return [name, { noul: 0 }];
-              const keys = Object.keys(question.criteria);
-              const choice = name === "operation" ? "BLOCKED" : keys[0]!;
-              return [
+    const result = await runOperateDrive(
+      { session_id: started.session_id, goal, max_steps: 3, max_seconds: 10 },
+      api,
+      { ...(persistCredentials == null ? {} : { persistCredentials }) },
+      {
+        askJev,
+        act,
+        observe,
+        startSession: async () => {
+          throw new Error("existing session");
+        },
+        awaitVerification,
+        injectCard: async () => ({ status: "unused" }),
+      },
+    );
+    return { result, askJev };
+  } finally {
+    await finishProvisionSession(started.session_id);
+    await context.close();
+  }
+}
+
+it("finishes complete from a revealed key without asking the model", async () => {
+  const persistCredentials = vi.fn(async () => STORED);
+  const { result, askJev } = await drive(
+    `navigator.clipboard.writeText('${key}')`,
+    persistCredentials,
+  );
+  expect(persistCredentials).toHaveBeenCalledWith(
+    expect.objectContaining({
+      credentials: { api_key: key },
+    }),
+  );
+  expect(result).toMatchObject({ status: "complete", stored: true, stored_credential: STORED });
+  expect(askJev).not.toHaveBeenCalled();
+}, 15_000);
+
+it("stores a key revealed inline, outside any dialog, from its Copy control", async () => {
+  const persistCredentials = vi.fn(async () => STORED);
+  const { result, askJev } = await drive(
+    `navigator.clipboard.writeText('${key}')`,
+    persistCredentials,
+    "inline",
+  );
+  expect(persistCredentials).toHaveBeenCalledWith(
+    expect.objectContaining({ credentials: { api_key: key } }),
+  );
+  expect(result.status).toBe("complete");
+  expect(askJev).not.toHaveBeenCalled();
+}, 15_000);
+
+it("asks the model when the Copy control writes nothing", async () => {
+  await expect(drive("")).rejects.toThrow("model asked");
+}, 15_000);
+
+it.each(["missing", "rejected", "failed"])(
+  "asks the model when storage is %s",
+  async (mode) => {
+    const persistCredentials =
+      mode === "missing"
+        ? undefined
+        : async () => {
+            if (mode === "failed") throw new Error("vault unavailable");
+            return null;
+          };
+    await expect(
+      drive(`navigator.clipboard.writeText('${key}')`, persistCredentials ?? null),
+    ).rejects.toThrow("model asked");
+  },
+  15_000,
+);
+
+it("stores an opaque key after Copy relabels itself without another model decision", async () => {
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  const url = "https://app.example.test/keys";
+  const opaqueKey = "Ab3kZ9";
+  await page.route("**/*", (route) =>
+    route.fulfill({
+      contentType: "text/html",
+      body: `<main><dialog open aria-label="API key created"><p>${opaqueKey}</p>
+      <button onclick="navigator.clipboard.writeText('${opaqueKey}');this.textContent='Copied!'">Copy</button>
+      </dialog></main>`,
+    }),
+  );
+  await page.goto(url);
+  const started = await startHarnessProvisionSession({
+    browser: BrowserController.fromHarnessPage(page),
+    serviceUrl: url,
+    format: "compact",
+    initialObservation: "drive",
+  });
+  const askJev = vi.fn<DriveDependencies["askJev"]>(async (_api, _state, questions) => {
+    if (askJev.mock.calls.length > 1) throw new Error("model asked after Copy");
+    return {
+      attempts: 1,
+      elapsedMs: 1,
+      result: {
+        answers: Object.fromEntries(
+          Object.entries(questions).flatMap(([name, question]) => {
+            if (question.type !== "choice") return [];
+            const keys = Object.keys(question.criteria);
+            const choice =
+              name === "operation"
+                ? "CLICK"
+                : name === "CLICK_target"
+                  ? keys.find((key) => /copy/i.test(question.criteria[key]!))!
+                  : keys[0]!;
+            return [
+              [
                 name,
                 {
                   choice,
@@ -239,40 +244,45 @@ it("masks remounted textbox SAVE values in drive choices, observations, and trac
                     keys.map((key) => [key, key === choice ? 1 : 0]),
                   ),
                 },
-              ];
-            }),
-          ),
-        },
-      };
-    });
-    const persistCredentials = vi.fn(async () => STORED);
+              ],
+            ];
+          }),
+        ),
+      },
+    };
+  });
+  const persistCredentials = vi.fn(async () => STORED);
+  try {
     const result = await runOperateDrive(
-      { session_id: started.session_id, goal: "Store the key", max_steps: 1 },
-      {} as ApiClient,
+      {
+        session_id: started.session_id,
+        goal: "Get an API key and store it in the vault",
+        max_steps: 3,
+        max_seconds: 10,
+      },
+      api,
       { persistCredentials },
-      { askJev, act, observe, awaitVerification, startSession: vi.fn(), injectCard: vi.fn() },
+      {
+        askJev,
+        act,
+        observe,
+        awaitVerification,
+        startSession: async () => {
+          throw new Error("existing session");
+        },
+        injectCard: async () => ({ status: "unused" }),
+      },
     );
-    expect(askJev).toHaveBeenCalledOnce();
-    expect(persistCredentials).not.toHaveBeenCalled();
-    const publicRows = (result.observation?.safe_table ?? []) as unknown as WireRow[];
-    const saveRows = publicRows.filter((row) => row[1] === "save");
-    expect(saveRows.filter((row) => row[2] === "[security code]")).toHaveLength(2);
-    expect(saveRows.map((row) => row[2])).toEqual(expect.arrayContaining(["739", "321"]));
-    const trace = readFileSync(tracePath, "utf8")
-      .trim()
-      .split("\n")
-      .map((line) => JSON.parse(line));
-    const step = trace.find((entry) => entry.at === "step");
-    expect(step?.SAVE_target).toEqual(criteria);
-    expect(
-      step?.rows.filter((row: WireRow) => row[1] === "save" && row[2] === "[security code]"),
-    ).toHaveLength(2);
-    expect(await page.locator("main > input").first().inputValue()).toBe("739");
-    expect(await page.locator("textarea").inputValue()).toBe("739");
+    expect(await page.getByRole("button").textContent()).toBe("Copied!");
+    expect(persistCredentials).toHaveBeenCalledTimes(1);
+    expect(persistCredentials).toHaveBeenCalledWith(
+      expect.objectContaining({
+        credentials: { api_key: opaqueKey },
+      }),
+    );
+    expect(askJev).toHaveBeenCalledTimes(1);
+    expect(result.status).toBe("complete");
   } finally {
-    if (previousTrace === undefined) delete process.env.DRIVE_TRACE_PATH;
-    else process.env.DRIVE_TRACE_PATH = previousTrace;
-    rmSync(dir, { recursive: true, force: true });
     await finishProvisionSession(started.session_id);
     await context.close();
   }
