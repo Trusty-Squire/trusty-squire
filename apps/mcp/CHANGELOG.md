@@ -1,5 +1,9 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.58-rc.1 (2026-11-21)
+
+- fix(mcp): hand off pending OAuth attempts for observation (#1168)
+
 ## 1.1.57-rc.1 (2026-11-21)
 
 - fix(mcp): prevent repeated dispatch of failed OAuth controls (#1166)
