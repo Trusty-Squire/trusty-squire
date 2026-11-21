@@ -80,13 +80,10 @@ overrides the path, for example a forwarded socket) and checks the sha256.
 for one download completes after the first download it starts finishes.
 
 For a signup, checkout, or other goal-shaped website task, call `operate_drive`
-with the goal and a `facts` bag (email, name, address, `card_ref`, …). When
-`facts.email` is absent, the session account email supplies the default; explicit
-caller or retained email facts take precedence. No email is invented when the
-session has none. Pass
+with the goal and a `facts` bag (email, name, address, `card_ref`, …). Pass
 `session_id` of an open session, or `url` to open the page and drive in one
 call; provide exactly one. Model-directed steps ask Jev for one operation (CLICK, TYPE_TEXT, SELECT,
-SCROLL, SAVE, WAIT, DONE, BLOCKED) plus a matching per-operation target; unused
+SCROLL, WAIT, DONE, BLOCKED) plus a matching per-operation target; unused
 target heads cannot act. Identifying values come only from the facts bag. A
 search or query field may receive a phrase Jev assigns from the goal's own
 words or the facts; identity and payment fields still require a fact.
@@ -370,10 +367,8 @@ The drive considers up to 250 candidates and caps each decision batch at 128
 total choice criteria, including operation and goal-value choices. Truncation
 is disclosed in the question instructions; retained dropdown choices with
 omitted siblings carry `options_elided` in planner state. The allocator reserves
-a usable goal-value choice alongside `none` when available, keeps all offered
-operations, and distributes remaining capacity across choice heads so SAVE
-cannot consume the ordinary action choices. Omitted choices cannot be selected
-in that batch.
+a usable goal-value choice alongside `none` when available. Omitted choices
+cannot be selected in that batch.
 
 Covered controls remain eligible for the drive's action menu alongside dialog
 and overlay dismiss controls; the action-time occlusion guard still applies.
@@ -595,23 +590,19 @@ redact those surfaces.
 
 `operate_drive` accepts the same `store` destination as `operate_extract`.
 Supply it on each drive call that should vault a key, including resumed calls.
-With a destination and an authenticated vault client, the decision includes a
-SAVE operation and a SAVE_target choice over visible text and control values.
-Each candidate carries an exact snapshot value and a stable source ref. Jev
-chooses the credential requested by the goal; no credential shape, English
-label, or Copy button is required. The synthetic `secret=1` marker is page
-context, not a value source. Prefixless keys are selectable too. Candidates are
-bounded by the decision budget above; visible dialog and covering
-shadow-layer values take priority over background values before truncation.
-
-SAVE re-snapshots before storing. If the selected source, value, document, or
-URL changed, the drive asks again rather than saving a replacement value. It
-sends the selected value through the existing vault store path and returns
-`complete` with storage metadata. Storage failure returns `stuck`. SAVE itself
-does not click a Copy control or track copy-button relabeling. A revealed value
-or Copy click no longer triggers automatic capture before the next decision.
-An offered SAVE target can also be selected through a resumed call's `answer`.
-Calls without `store` do not offer SAVE.
+With a destination and an authenticated vault client, a revealed-secret row
+(`@key-value` or `secret=1`) or a successfully dispatched Copy click triggers
+extraction and storage before the next model decision. The Copy evidence
+survives a button changing its label to “Copied!” on the same document and URL.
+If no modal Copy control is found, automatic capture uses the just-clicked Copy
+ref while it remains in the snapshot, even after its label changes. Otherwise
+it uses the sole eligible clickable Copy row; multiple candidates leave the
+inline source unresolved. Extraction keeps only the value that capture's Copy
+click writes to the clipboard; a revealed-secret row does not itself supply
+the credential value. Successful storage returns
+`complete` without waiting for the model to choose DONE. Each page state gets
+one automatic capture attempt per call; a failed extraction or storage attempt
+returns to ordinary decision-making after a fresh snapshot.
 
 DONE also attempts extraction and requires successful storage if a credential
 is extracted. It refuses completion when a visible credential cannot be

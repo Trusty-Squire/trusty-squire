@@ -234,8 +234,6 @@ rerenders, navigation, partial fills, or cleared controls.
 - `operate_drive` uses this same session mask for snapshot rows, page text,
   headings, URLs, and outbound dropdown labels and choice keys before planner
   state and traces are constructed. Raw dropdown selection text stays internal.
-  SAVE sources retain textbox provenance so the textbox CVV value-equality rule
-  below applies before SAVE rows, choices, resume options, and traces are built.
 - `operate_screenshot` composites masks over value-bearing pixels of injected
   controls and identified ordinary displayed copies. It preserves their borders,
   labels, validation errors, and surrounding pixels. An active mask is never

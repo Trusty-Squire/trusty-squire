@@ -253,14 +253,6 @@ export class CardValueOutputMask {
     });
   }
 
-  maskDriveSaveValue(value: string, textbox: boolean): string {
-    const digits = value.replace(/\D/g, "");
-    if (textbox && this.records.some((record) => digits === record.cvv)) {
-      return SECURITY_CODE_MASK;
-    }
-    return this.maskText(value);
-  }
-
   /** Raw values for the internal, pre-output screenshot rectangle finder only. */
   screenshotNeedles(): { pans: string[]; cvvs: string[]; cvvNameSource: string } {
     return {
