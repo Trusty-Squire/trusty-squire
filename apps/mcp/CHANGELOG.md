@@ -1,5 +1,10 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.60-rc.1 (2026-11-21)
+
+- Roll back provider-specific `operate_drive` tuning: the in-viewport scroll-box occlusion re-check, invalid-field silent-submit notices, the emailed-code BLOCKED rule, inline Copy-control key capture, the Google account-chooser `account_choice` hand-back, and localized password detection by input type/autocomplete. The drive's OAuth wait stays capped by the call's remaining `max_seconds` ([PR](https://github.com/Trusty-Squire/trusty-squire/pull/1173)).
+- Revert the explicit visible-credential save choices and session-email signup default shipped in 1.1.59-rc.1 ([PR](https://github.com/Trusty-Squire/trusty-squire/pull/1172)).
+
 ## 1.1.58-rc.1 (2026-11-21)
 
 - fix(mcp): hand off pending OAuth attempts for observation (#1168)
