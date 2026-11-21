@@ -1238,7 +1238,7 @@ describe("operate_drive real-browser fixture", () => {
   }, 30_000);
 
   it.each(["preflight", "execution"])(
-    "preserves OAuth retry state when the budget expires during %s",
+    "preserves OAuth retry state when handing back during %s",
     async (stage) => {
       const { context, page, started } = await openFixture(
         `<main><h1>Create account</h1><a href="/oauth/google">Continue with Google</a></main>`,
@@ -1278,7 +1278,7 @@ describe("operate_drive real-browser fixture", () => {
       };
       try {
         expect((await runOperateDrive(input, api(), undefined, dependencies)).status).toBe(
-          "budget",
+          "awaiting_human",
         );
         const drive = sessionForCall(started.session_id)!.drive!;
         if (stage === "preflight") {
@@ -1287,7 +1287,7 @@ describe("operate_drive real-browser fixture", () => {
           restoreEvaluate();
           finishRead();
           expect((await runOperateDrive(input, api(), undefined, dependencies)).status).toBe(
-            "budget",
+            "awaiting_human",
           );
           expect(dispatch).toHaveBeenCalledOnce();
         } else {
@@ -1350,7 +1350,7 @@ describe("operate_drive real-browser fixture", () => {
           undefined,
           dependencies,
         );
-        expect(result.status).toBe("budget");
+        expect(result.status).toBe("awaiting_human");
         expect(dispatched).toBe(true);
         expect(fallback).toBe(stage === "fallback");
         if (stage === "snapshot") expect(snapshots).toBeGreaterThan(1);

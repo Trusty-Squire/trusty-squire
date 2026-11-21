@@ -284,12 +284,12 @@ describe("drive OAuth trace", () => {
             undefined,
             deps,
           );
-        expect((await call()).status).toBe("budget");
+        expect((await call()).status).toBe("awaiting_human");
         expect(dispatches).toBe(1);
         const drive = sessionForCall(started.session_id)!.drive!;
         expect(drive.failedActionKeys).toEqual([]);
         expect(drive.exhaustedActionKeys).toEqual([]);
-        expect((await call()).status).toBe("budget");
+        expect((await call()).status).toBe("awaiting_human");
         expect(dispatches).toBe(2);
       } finally {
         await finishProvisionSession(started.session_id);
