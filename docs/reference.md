@@ -371,8 +371,7 @@ For login and approval call shapes, follow the
   denial the provider actually reported (an OAuth `error=` code on the return
   URL) fails the action, with that code in the message. For interrupted clicks,
   retained popups, and pre-dispatch failures, follow the
-  [OAuth error and recovery contract](operator-tool-surface.md#using-the-rest-of-the-surface),
-  which also covers account-chooser handback to ordinary page actions.
+  [OAuth error and recovery contract](operator-tool-surface.md#using-the-rest-of-the-surface).
   If an observation races the transition, it reports `oauth.state: "in_progress"`
   and directs the host to observe again.
 - Call `inject_card` with the exact observed refs for the card-entry fields.

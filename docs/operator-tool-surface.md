@@ -89,16 +89,8 @@ search or query field may receive a phrase Jev assigns from the goal's own
 words or the facts; identity and payment fields still require a fact.
 
 On a new-account form, omit the password fact to let the drive invent a random
-password. Password invention requires a control with `type="password"`,
-in any page language. Initial invention requires explicit Create
-account, Sign up, or Register evidence, or a new-account shape: an email or
-username field on the same form plus a password the page marks
-`autocomplete="new-password"`. Forms with any control annotated
-`autocomplete="current-password"` (including a revealed `type="text"` control)
-or three or more password fields, and the current page reached directly through an inbox
-link, are excluded. Later pages remain eligible. Textual sign-in, reset, and
-current-password exclusions use English labels; `new-password` alone does not
-distinguish a localized signup from a localized reset form.
+password. Initial invention requires explicit Create account, Sign up, or
+Register evidence; sign-in, reset, and existing-password forms are excluded.
 Populated password controls are preserved. Account identifiers and confirmation
 controls are scoped to the password's form and frame. The account identifier
 comes from the form's exact email/username value, or, on a password-only step,
@@ -114,10 +106,7 @@ Generation defaults to 24 characters, adjusted for the primary and currently
 visible confirmation controls' minimum/maximum lengths, compilable patterns,
 and password-local help text, with a 128-character ceiling. Empty confirmation
 fields reuse the saved password for the same host and login, including fields
-revealed later, only when it meets their requirements. When exactly two password
-controls both declare `new-password`, the second is a confirmation even if its
-label is localized or the first is already populated. It receives only a known
-invented password, never a newly generated replacement. The generated value is
+revealed later, only when it meets their requirements. The generated value is
 not returned in drive results, history, or traces.
 
 For a key-provisioning goal, also pass `store` as described under
@@ -179,9 +168,7 @@ card still use those primitives. The two-head Jev request, structured state,
 choice validation, WAIT, SELECT option targets, snapshot evaluate, and drive
 rules prose are adapted from browser-use/jev-ultrafast (MIT).
 The model's INBOX rule prefers listed controls that send, request, or enter a
-verification code or link before reading mail. An emailed code or link is not
-human verification and is never itself a reason to choose BLOCKED: the drive
-can read the inbox.
+verification code or link before reading mail.
 After the inbox poll window expires with no matching mail, that miss remains
 in the outcome trail and suppresses the emailed-code question while it is the latest outcome
 on that page. A later action or a different page makes the question eligible
@@ -204,12 +191,6 @@ that budget, and a stale or occluded click ref is withheld until the observation
 fingerprint changes. After five such dead actions on one page, or when they
 leave no actionable operation, the drive ends with `no_progress` and a `reason`
 naming them.
-
-When a submit first produces no response, the drive adds a notice to its
-observation and history naming the submitted form's fields that fail native
-browser constraint validation, with their labels and validation messages. If
-none can be read, the notice says the site did not respond to that control on
-that page.
 
 A drive snapshot ref names the control that snapshot recorded — its selector,
 frame, role, label, and a link's destination — not a position within it. Every
@@ -266,10 +247,7 @@ that also ends polling when animation frames are suspended. It detects
 content movement, not complete page readiness; later asynchronous content
 may still require another observation or WAIT. A guarded action whose target
 sits outside the viewport scrolls it into view instantly before the occlusion
-measurement, so an offscreen control does not burn the attempt. If a target
-inside the viewport appears covered, the guard also scrolls it into its
-containing scroll boxes and checks again; a target that remains covered is
-still refused.
+measurement, so an offscreen control does not burn the attempt.
 
 A snapshot with no controls — a same-document checkout stage swap, or a page
 still hydrating — is re-observed after up to three automatic waits per blank
@@ -594,12 +572,8 @@ With a destination and an authenticated vault client, a revealed-secret row
 (`@key-value` or `secret=1`) or a successfully dispatched Copy click triggers
 extraction and storage before the next model decision. The Copy evidence
 survives a button changing its label to “Copied!” on the same document and URL.
-If no modal Copy control is found, automatic capture uses the just-clicked Copy
-ref while it remains in the snapshot, even after its label changes. Otherwise
-it uses the sole eligible clickable Copy row; multiple candidates leave the
-inline source unresolved. Extraction keeps only the value that capture's Copy
-click writes to the clipboard; a revealed-secret row does not itself supply
-the credential value. Successful storage returns
+Extraction still uses the Copy source described above; a revealed-secret row
+does not itself supply the credential value. Successful storage returns
 `complete` without waiting for the model to choose DONE. Each page state gets
 one automatic capture attempt per call; a failed extraction or storage attempt
 returns to ordinary decision-making after a fresh snapshot.
@@ -739,13 +713,7 @@ job without exposing plaintext to the agent.
 
 - `operate_login` keeps OAuth and password lifecycle actions on the real
   profile using the [explicit action inputs](#explicit-action-inputs).
-  A Google account chooser that lists accounts but none the action can select
-  (several accounts and no known session account, or no tile matching it)
-  returns immediately with `oauth: {state: "account_choice", reason,
-  next_action: "operate_observe"}`. Observe the retained chooser and choose an
-  account through an ordinary page action; the drive resumes its step decision
-  instead of waiting for the OAuth deadline or requiring a human handoff.
-  A challenge, return with uncertain authentication,
+  A chooser, challenge, return with uncertain authentication,
   or other human step is an honest pending result; stop automation and observe
   the owned session rather than treating a page title or same-origin URL as
   success. A browser error after dispatch follows the same contract as request

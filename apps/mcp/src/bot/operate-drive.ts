@@ -98,7 +98,6 @@ import {
   driveControlDigest,
   pageFingerprintOf,
   reenterDriveField,
-  submitFormInvalidFields,
 } from "./drive-act.js";
 import { PAGE_READY_CAPS, waitForPageReady, type PageReadyResult } from "./page-ready.js";
 import { rememberDriveIdentities, resolveIdentityScope } from "./act/identity.js";
@@ -274,7 +273,7 @@ export const DRIVE_RULES: readonly string[] = [
   "WAIT only when the needed control is absent or disabled, or submitted results are still loading.",
   "Recent WAIT actions are not evidence of loading. Prefer a useful visible control over WAIT.",
   "DONE requires visible evidence that ALL requirements are satisfied. If asked to open a result, a matching link is not enough.",
-  "BLOCKED means no supported operation can make progress, including reading the inbox. A code or link sent by email is not human verification: the drive reads the inbox itself, so it is never a reason for BLOCKED.",
+  "BLOCKED means no supported operation can make progress, including reading the inbox.",
   "Pick INBOX only when no listed control sends, requests, or enters the verification code or link.",
   "Do not choose a field that already contains the requested value.",
   "Identifying values come only from the provided facts; never invent them.",
@@ -1154,19 +1153,6 @@ export function silentSubmitReason(label: string, url: string): string {
   return `site did not respond to ${label} on ${pagePathKey(url)}`;
 }
 
-/** What the next decision is told after a submit first changes nothing:
- *  the form's own invalid fields when the browser blocked it, otherwise that
- *  the site did not respond. */
-export function silentSubmitNotice(
-  label: string,
-  url: string,
-  invalidFields: readonly string[],
-): string {
-  return invalidFields.length > 0
-    ? `${label} had no effect: ${invalidFields.join("; ")}`
-    : silentSubmitReason(label, url);
-}
-
 export function filledFormIds(
   rows: readonly WireRow[],
   filledRefs: readonly string[],
@@ -1602,24 +1588,6 @@ export function revealedKeyCaptureDue(rows: readonly WireRow[], copyDispatched: 
     return true;
   }
   return copyDispatched;
-}
-
-/** The Copy control of a key revealed inline (not in a dialog): the one the
- * drive just clicked while it is still rowed (its label may now read
- * "Copied"), else the page's only clickable Copy row. Several candidates name
- * no source, so none is chosen. */
-export function revealedSecretCopyRef(
-  rows: readonly WireRow[],
-  clickedRef: string | undefined,
-): string | undefined {
-  if (clickedRef !== undefined && rows.some((row) => row[0] === clickedRef)) return clickedRef;
-  const copies = rows.filter(
-    (row) =>
-      isRevealOrCopyRow(row) &&
-      /^copy\b/i.test(readableLabel(row)) &&
-      !/\|(?:oc=|s=d(?:\||$))/.test(row[2] ?? ""),
-  );
-  return copies.length === 1 ? copies[0]![0] : undefined;
 }
 
 function pageShowsCredentialValue(rows: readonly WireRow[]): boolean {
@@ -2569,10 +2537,6 @@ const RESET_PASSWORD_LABEL =
 
 const CURRENT_PASSWORD_KEY = /(?:^|_)(?:current|old|existing)(?:_|$)/;
 
-function passwordAutocomplete(row: WireRow): string | undefined {
-  return /(?:^|\|)ac=([^|]+)/.exec(row[2] ?? "")?.[1];
-}
-
 function passwordKey(row: WireRow): string {
   return `${normalizeKey(fieldNameForRow(row))}_${normalizeKey(readableLabel(row))}`;
 }
@@ -2591,7 +2555,6 @@ function isPopulatedPasswordRow(row: WireRow): boolean {
 export interface NewAccountPasswordTargets {
   password: WireRow;
   confirms: WireRow[];
-  reuseOnly: boolean;
   /** The account identifier already on the form, when the form has one. */
   login?: string;
   identity?: WireRow;
@@ -2610,14 +2573,11 @@ export function newAccountPasswordTargets(
   filledRefs: readonly string[],
   headingsFor: (row: WireRow) => readonly string[] = () => [],
   reuseInventedPasswordFor: (row: WireRow) => boolean = () => false,
-  openedInboxLink = false,
 ): NewAccountPasswordTargets | undefined {
-  if (openedInboxLink) return undefined;
   const filled = new Set(filledRefs);
   const open = (row: WireRow): boolean =>
     isFillableRow(row) &&
     isPasswordRow(row) &&
-    /(?:^|\|)it=password(?:\||$)/.test(row[2] ?? "") &&
     !isDisabledRow(row) &&
     !isPopulatedPasswordRow(row) &&
     !isActedRow(row) &&
@@ -2637,21 +2597,9 @@ export function newAccountPasswordTargets(
         frameKey(row) === frameKey(password) && (formId === undefined || rowFormId(row) === formId),
     );
     const reuseInventedPassword = reuseInventedPasswordFor(password);
-    const passwords = scope.filter((row) => isFillableRow(row) && isPasswordRow(row));
-    if (
-      passwords.length >= 3 ||
-      scope.some((row) => passwordAutocomplete(row) === "current-password")
-    ) {
-      continue;
-    }
-    const pairedNew =
-      passwords.length === 2 &&
-      passwords.every((row) => passwordAutocomplete(row) === "new-password");
-    const isConfirmation = (row: WireRow): boolean =>
-      isConfirmPasswordRow(row) || (pairedNew && row === passwords[1]);
-    const reuseOnly = isConfirmation(password);
-    if (reuseOnly && !reuseInventedPassword) continue;
-    const confirms = scope.filter((row) => row !== password && open(row) && isConfirmation(row));
+    const confirms = scope.filter(
+      (row) => row !== password && open(row) && isConfirmPasswordRow(row),
+    );
     if (!isRequiredRow(password) && confirms.length === 0 && !reuseInventedPassword) continue;
     const buttons = scope.filter((row) => row[1] === "b" || row[1] === "button");
     const submits = buttons.filter((row) => /(?:^|\|)a=submit(?:\||$)/.test(row[2] ?? ""));
@@ -2665,29 +2613,25 @@ export function newAccountPasswordTargets(
     if (evidence.some((label) => LOGIN_LABEL.test(label) || RESET_PASSWORD_LABEL.test(label))) {
       continue;
     }
+    const signup =
+      (reuseInventedPassword && isConfirmPasswordRow(password)) ||
+      evidence.some((label) => CREATE_ACCOUNT_LABEL.test(label));
+    if (!signup) continue;
     const identity = scope.find(
       (row) =>
         isFillableRow(row) &&
         !isPasswordRow(row) &&
         ["email", "username"].includes(rowField(row) ?? ""),
     );
-    const newAccountShape =
-      identity !== undefined && passwordAutocomplete(password) === "new-password";
-    const signup =
-      (reuseInventedPassword && reuseOnly) ||
-      newAccountShape ||
-      evidence.some((label) => CREATE_ACCOUNT_LABEL.test(label));
-    if (!signup) continue;
     if (identity !== undefined) {
       const login = rowCurrentValue(identity);
       if (login === undefined || login.trim().length === 0) continue;
-      return { password, confirms, identity, reuseOnly };
+      return { password, confirms, identity };
     }
     const supplied = facts.email ?? facts.username;
     return {
       password,
       confirms,
-      reuseOnly,
       ...(supplied === undefined || supplied.trim().length === 0 ? {} : { login: supplied.trim() }),
     };
   }
@@ -6112,7 +6056,7 @@ async function driveLoop(input: {
       const password = session.secretSlots.get(DRIVE_PASSWORD_SLOT)!;
       return requirements.every((requirement) => passwordMeetsRequirements(password, requirement));
     }
-    if (targets.reuseOnly) return false;
+    if (isConfirmPasswordRow(targets.password)) return false;
     const password = inventPassword(requirements[0]!, ...requirements.slice(1));
     if (password === undefined) return false;
     const stored = await context
@@ -6972,25 +6916,12 @@ async function driveLoop(input: {
         drive.lastDispatchFailure = safe.dispatchFailure ?? null;
         drive.lastOauthBounceReason = null;
         observation = safe.observation;
-        if (safe.dispatchFailure === undefined) drive.history.push("open verification link");
       } else {
         const wall = verification.needs_user;
         return wall !== undefined && wall.wall === "google_session"
           ? finishOnWall(wall)
           : finish("needs_value", { field: "verification_code" });
       }
-      const inboxStep: DriveTrajectoryStep = {
-        action: inboxNext === "type_code" ? "type_otp" : "goto_verify",
-        ...(inboxNext !== "goto_link" || drive.lastDispatchFailure == null
-          ? {}
-          : { reason: drive.lastDispatchFailure }),
-        target: decision.actionKey,
-        confidence: decision.confidence,
-        url: observation.url,
-        ...(observation.stage === undefined ? {} : { stage: observation.stage }),
-        ...(jevMs === undefined ? {} : { jev_ms: jevMs }),
-      };
-      drive.trajectory.push(inboxStep);
       const inboxSnap = await refreshSnapshot(framesIfNeeded());
       if (inboxSnap.timedOut)
         return finish("evaluate_timeout", { reason: "in-page evaluate exceeded budget" });
@@ -7001,12 +6932,18 @@ async function driveLoop(input: {
         snapshot_script_ms: inboxSnap.snapshotScriptMs,
         snapshot_wall_ms: inboxSnap.snapshotWallMs,
       };
-      Object.assign(inboxStep, {
+      drive.trajectory.push({
+        action: verification.code !== null ? "type_otp" : "goto_verify",
+        target: decision.actionKey,
+        confidence: decision.confidence,
         url: observation.url,
         ...(observation.stage === undefined ? {} : { stage: observation.stage }),
+        ...(jevMs === undefined ? {} : { jev_ms: jevMs }),
         ...takeActProfile(drive),
       });
-      if (inboxNext === "type_code") drive.history.push("type verification code");
+      drive.history.push(
+        verification.code !== null ? "type verification code" : "open verification link",
+      );
       const nextFingerprint = driveProgressFingerprint(observation, rows, drive, session);
       return await noteProgress(fingerprint, nextFingerprint, decision.actionKey);
     }
@@ -7082,7 +7019,7 @@ async function driveLoop(input: {
       clickedBefore !== undefined &&
       isRevealOrCopyRow(clickedBefore) &&
       /^copy\b/i.test(readableLabel(clickedBefore))
-        ? { url: urlBeforeClick, documentEpoch: beforeEpoch, ref: clickedBefore[0] }
+        ? { url: urlBeforeClick, documentEpoch: beforeEpoch }
         : null;
     let acted: DriveActResult;
     try {
@@ -7450,23 +7387,6 @@ async function driveLoop(input: {
             });
           }
           drive.silentSubmitKeys.push(stable);
-          // Name why it did nothing before the control is retired, so the
-          // next decision can fill what is missing.
-          const identity = drive.identities?.get(decision.actionKey);
-          const livePage = session.browser.page;
-          const scope =
-            identity === undefined || livePage === null
-              ? null
-              : await resolveIdentityScope(livePage, decision.actionKey, identity);
-          const notice = silentSubmitNotice(
-            readableLabel(clickedBefore),
-            urlBeforeClick,
-            identity === undefined || scope === null
-              ? []
-              : await submitFormInvalidFields(scope, identity.selector),
-          );
-          drive.history.push(notice);
-          observation = attachObservationNotice(observation, notice);
         }
       }
       drive.lastActProfile = {
@@ -7854,9 +7774,8 @@ async function driveLoop(input: {
       );
       if (!revealedKeyCaptureAttempts.has(captureKey)) {
         revealedKeyCaptureAttempts.add(captureKey);
-        const copyRef = revealedSecretCopyRef(rows, drive.pendingCopyCapture?.ref);
         drive.pendingCopyCapture = null;
-        const extracted = await extractCredentials(sessionId, copyRef).catch(() => null);
+        const extracted = await extractCredentials(sessionId).catch(() => null);
         const stored =
           extracted !== null && storableCredentials(extracted.credentials) !== null
             ? await context.persistCredentials(extracted).catch(() => null)
@@ -7976,9 +7895,6 @@ async function driveLoop(input: {
       // A sign-up form's new password is invented rather than handed back:
       // saved to the vault first, then typed from a sealed slot, so the value
       // never reaches the model, the trace, or the handoff.
-      const pageArrival = [...drive.trajectory]
-        .reverse()
-        .find((step) => step.url !== observation.url || step.action === "goto_verify");
       const passwordTargets =
         context?.persistLogin === undefined
           ? undefined
@@ -7991,9 +7907,6 @@ async function driveLoop(input: {
                 drive.inventedLogin != null &&
                 drive.inventedLogin.host === signupLocationFor(row)?.host &&
                 session.secretSlots.has(DRIVE_PASSWORD_SLOT),
-              pageArrival?.action === "goto_verify" &&
-                pageArrival.url === observation.url &&
-                pageArrival.reason === undefined,
             );
       const passwordAttemptKey =
         passwordTargets === undefined

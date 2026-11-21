@@ -70,8 +70,6 @@ export const REAL_BROWSER_FILES = [
   "src/bot/__tests__/drive-inbox-no-mail.test.ts",
   "src/bot/__tests__/drive-changing-controls-steps.test.ts",
   "src/bot/__tests__/drive-wait-reoffered.test.ts",
-  "src/bot/__tests__/click-target-clipped.test.ts",
-  "src/bot/__tests__/drive-silent-submit-cause.test.ts",
   "src/bot/__tests__/drive-redirect-redecide.test.ts",
   "src/bot/__tests__/drive-shadow-overlay.test.ts",
   "src/bot/__tests__/drive-oauth-handoff-dispatch.test.ts",

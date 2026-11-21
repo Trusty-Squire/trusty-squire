@@ -27,8 +27,6 @@ import {
   recordProgressCycle,
   cycleReason,
   submitHadNoResponse,
-  readableLabel,
-  silentSubmitNotice,
   silentSubmitReason,
   inboxPollMissReason,
   recordDeadAction,
@@ -486,56 +484,6 @@ describe("history threading", () => {
     expect(state.instructions.rules).toContain(
       "Pick INBOX only when no listed control sends, requests, or enters the verification code or link.",
     );
-  });
-
-  it("tells the model an emailed code is not human verification (Token Harbor L14)", () => {
-    // 1.1.47-rc.1 drive-trace L14: the reveal dialog's email verification,
-    // with a goal that says to stop on required human verification. BLOCKED
-    // (.36) narrowly beat CLICK (.34) to Send code (target .62).
-    const goal =
-      "Get one API key for the existing Token Harbor account. Stop on provider refusal or required human verification.";
-    const rows: WireRow[] = [
-      ["@e:f0d39", "b", "Show plaintext key|s=d|oc=dialog"],
-      ["@e:f0d40", "b", "Send code"],
-      ["@e:f0d41", "b", "Cancel"],
-      ["@e:f0d42", "b", "Verify|s=d"],
-    ];
-    const pageUrl = "https://tokenharbor.ai/dashboard/api-keys";
-    const questions = buildDriveQuestions(rows, {}, goal, false, [], pageUrl);
-    const operations =
-      questions.operation?.type === "choice" ? Object.keys(questions.operation.criteria) : [];
-    expect(operations).toEqual(expect.arrayContaining(["CLICK", "INBOX", "BLOCKED"]));
-    const state = buildJevState(
-      goal,
-      [],
-      [],
-      pageUrl,
-      "API keys",
-      driveCandidates(rows, false),
-      "",
-      {
-        rows,
-      },
-    );
-    expect(state.instructions.rules).toContain(
-      "BLOCKED means no supported operation can make progress, including reading the inbox. A code or link sent by email is not human verification: the drive reads the inbox itself, so it is never a reason for BLOCKED.",
-    );
-  });
-
-  it("names why a submit changed nothing (Zro create-key dialog, L7-L9)", () => {
-    // 1.1.47-rc.1 drive-trace L7: Create in the create-key dialog was clicked,
-    // the dialog stayed identical, and the drive retired Create without saying
-    // why, so step 4 chose between Cancel and Close.
-    const create: WireRow = ["@e:f0d41", "b", "Create|a=submit|fm=1"];
-    const url = "https://zro.moonmath.ai/api-keys";
-    expect(silentSubmitNotice(readableLabel(create), url, [])).toBe(
-      "site did not respond to Create on https://zro.moonmath.ai/api-keys",
-    );
-    expect(
-      silentSubmitNotice(readableLabel(create), url, [
-        "Expiration date: Please select an item in the list.",
-      ]),
-    ).toBe("Create had no effect: Expiration date: Please select an item in the list.");
   });
 
   it("puts goal, facts, recent actions, and element operations in structured state", () => {
