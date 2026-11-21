@@ -68,6 +68,11 @@ export interface DriveSnapshotElement {
   frameOrdinal: number;
 }
 
+export interface DriveSaveValue {
+  ref: string;
+  value: string;
+}
+
 export interface DriveSnapshot {
   url: string;
   title: string;
@@ -77,6 +82,7 @@ export interface DriveSnapshot {
   notices?: string[];
   fingerprint: string;
   documentEpoch: string;
+  saveValues?: DriveSaveValue[];
   elements: DriveSnapshotElement[];
   omittedValues: number;
   scriptMs: number;
@@ -92,6 +98,7 @@ interface DriveSnapshotArg {
   maxWalkNodes: number;
   maxNameVisits: number;
   keepOffscreenButtons: boolean;
+  captureSaveValues: boolean;
 }
 
 type DriveInPageSnapshot = {
@@ -102,6 +109,7 @@ type DriveInPageSnapshot = {
   notices: string[];
   fingerprint: string;
   documentEpoch: string;
+  saveValues?: DriveSaveValue[];
   elements: DriveSnapshotElement[];
   omittedValues: number;
   scriptMs: number;
@@ -281,6 +289,7 @@ export function driveRowsFromSnapshot(snapshot: DriveSnapshot): SnapshotRow[] {
       facts.length === 0 ? [element.ref, roleLetter] : [element.ref, roleLetter, facts.join("|")],
     );
   }
+  for (const source of snapshot.saveValues ?? []) rows.push([source.ref, "save", source.value]);
   return rows;
 }
 
@@ -343,6 +352,7 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
   type ControlDescription = { role: string; label: string; href: string };
   type DriveCache = {
     ids: WeakMap<Element, number>;
+    saveIds?: WeakMap<Node, number>;
     nodes: Map<string, Element>;
     next: number;
     describe?: (element: Element) => ControlDescription | null;
@@ -356,6 +366,7 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
     next: 1,
   };
   root.__tsDriveRegistry = cache;
+  cache.saveIds ??= new WeakMap<Node, number>();
   const omit = new Set(arg.omitValueRefs);
   const frameOrdinal = arg.frameOrdinal;
   const identity = (element: Element): string => {
@@ -992,6 +1003,31 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
     const text = (heading.textContent ?? "").replace(/\s+/g, " ").trim();
     if (text.length > 0) headings.push(text);
   }
+  const saveValues: DriveSaveValue[] = [];
+  const saveValue = (node: Node, value: string): void => {
+    if (
+      !arg.captureSaveValues ||
+      value.length === 0 ||
+      value.length > 6000 ||
+      saveValues.length >= arg.maxElements
+    )
+      return;
+    let id = cache.saveIds!.get(node);
+    if (id === undefined) {
+      id = cache.next++;
+      cache.saveIds!.set(node, id);
+    }
+    saveValues.push({ ref: `@save:f${frameOrdinal}s${id}`, value });
+  };
+  // Values are offered for model selection without guessing a credential's
+  // language, label, or format. Text uses its exact snapshot text-node value.
+  if (arg.captureSaveValues) {
+    for (const element of elements) {
+      if (element.offscreen || element.occludedBy || omit.has(element.ref)) continue;
+      const node = cache.nodes.get(element.ref);
+      if (node !== undefined && element.value !== undefined) saveValue(node, element.value);
+    }
+  }
   const words: string[] = [];
   const range = document.createRange();
   let length = 0;
@@ -1031,6 +1067,7 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
           rect.left < innerWidth
         ) {
           words.push(value);
+          if (arg.captureSaveValues && !omit.has(identity(parent))) saveValue(node, value);
           length += value.length;
         }
       }
@@ -1120,6 +1157,7 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
     fingerprint,
     documentEpoch: `${performance.timeOrigin}|${location.href}`,
     elements,
+    ...(arg.captureSaveValues ? { saveValues } : {}),
     omittedValues,
     scriptMs: performance.now() - scriptStarted,
   };
@@ -1130,6 +1168,7 @@ export async function captureFrameSnapshot(
   omitValueRefs: readonly string[],
   frameOrdinal: number,
   keepOffscreenButtons = false,
+  captureSaveValues = false,
 ): Promise<DriveSnapshot | null> {
   const wallStarted = Date.now();
   try {
@@ -1141,6 +1180,7 @@ export async function captureFrameSnapshot(
       maxWalkNodes: DRIVE_SNAPSHOT_MAX_WALK_NODES,
       maxNameVisits: DRIVE_SNAPSHOT_MAX_NAME_VISITS,
       keepOffscreenButtons,
+      captureSaveValues,
     });
     const wallMs = Date.now() - wallStarted;
     if (raw === null) return null;
@@ -1253,6 +1293,7 @@ export function mergeSnapshots(parts: readonly DriveSnapshot[]): DriveSnapshot {
     fingerprint,
     documentEpoch: main.documentEpoch,
     elements,
+    saveValues: parts.flatMap((part) => part.saveValues ?? []),
     omittedValues: parts.reduce((sum, part) => sum + part.omittedValues, 0),
     scriptMs: parts.reduce((sum, part) => sum + part.scriptMs, 0),
     wallMs: parts.reduce((sum, part) => sum + part.wallMs, 0),

@@ -249,6 +249,7 @@ export const DRIVE_OPERATIONS = [
   "TYPE_TEXT",
   "SELECT",
   "SCROLL",
+  "SAVE",
   "INBOX",
   "WAIT",
   "DONE",
@@ -467,7 +468,6 @@ export function resetDriveGoalMemory(drive: SessionDriveState): void {
   drive.boundFingerprint = null;
   drive.lastFingerprint = null;
   drive.lastActionKey = null;
-  drive.pendingCopyCapture = null;
   drive.visitedSectionKeys = [];
   drive.seenDestinations = [];
   drive.awaitingDecideAfterExplore = false;
@@ -498,7 +498,6 @@ export function emptyDriveState(goal: string, facts: Record<string, string>): Se
     expiryLongAttemptedRefs: [],
     lastQuestion: null,
     lastActionKey: null,
-    pendingCopyCapture: null,
     lastFingerprint: null,
     jevCalls: 0,
     staleNonWait: 0,
@@ -965,6 +964,7 @@ export interface DriveAimContext {
   submittedThisDrive?: boolean;
   visitedSectionKeys?: readonly string[];
   liveProviders?: readonly OAuthProviderId[];
+  canSave?: boolean;
 }
 
 export function rowFormId(row: WireRow): string | undefined {
@@ -1583,43 +1583,6 @@ export function rowShowsSecretEvidence(row: WireRow): boolean {
 
 export function pageShowsRevealedKey(rows: readonly WireRow[], _pageText: string = ""): boolean {
   return rows.some((row) => rowShowsSecretEvidence(row));
-}
-
-/**
- * A revealed one-time key (or the Copy control just clicked beside one) is the
- * result a key goal asks for. Capture otherwise runs only on DONE, and a goal
- * that says "finish once the key is in the vault" argues the model out of DONE,
- * so the drive attempts the DONE capture itself when this holds.
- */
-export function revealedKeyCaptureDue(rows: readonly WireRow[], copyDispatched: boolean): boolean {
-  if (
-    rows.some(
-      (row) =>
-        row[0] === REVEALED_SECRET_REF ||
-        /(?:^|\|)secret=1(?:\||$)/.test(visibleCredentialFacts(row)),
-    )
-  ) {
-    return true;
-  }
-  return copyDispatched;
-}
-
-/** The Copy control of a key revealed inline (not in a dialog): the one the
- * drive just clicked while it is still rowed (its label may now read
- * "Copied"), else the page's only clickable Copy row. Several candidates name
- * no source, so none is chosen. */
-export function revealedSecretCopyRef(
-  rows: readonly WireRow[],
-  clickedRef: string | undefined,
-): string | undefined {
-  if (clickedRef !== undefined && rows.some((row) => row[0] === clickedRef)) return clickedRef;
-  const copies = rows.filter(
-    (row) =>
-      isRevealOrCopyRow(row) &&
-      /^copy\b/i.test(readableLabel(row)) &&
-      !/\|(?:oc=|s=d(?:\||$))/.test(row[2] ?? ""),
-  );
-  return copies.length === 1 ? copies[0]![0] : undefined;
 }
 
 function pageShowsCredentialValue(rows: readonly WireRow[]): boolean {
@@ -2834,6 +2797,7 @@ export function rowChecked(row: WireRow): boolean | undefined {
 
 export function operationsForRow(row: WireRow): DriveOperation[] {
   const operations: DriveOperation[] = [];
+  if (row[1] === "save") operations.push("SAVE");
   if (isFillableRow(row) && isSelectRow(row)) operations.push("SELECT");
   else if (isFillableRow(row)) operations.push("TYPE_TEXT");
   if (isClickableRow(row)) operations.push("CLICK");
@@ -3757,6 +3721,7 @@ export function operationCriteria(operations: readonly DriveOperation[]): Record
     else if (operation === "TYPE_TEXT") criteria.TYPE_TEXT = "type a provided fact into a field";
     else if (operation === "SELECT") criteria.SELECT = "choose an option in a dropdown";
     else if (operation === "SCROLL") criteria.SCROLL = "scroll to reveal an offscreen control";
+    else if (operation === "SAVE") criteria.SAVE = "save a visible credential value to the vault";
     else if (operation === "INBOX")
       criteria.INBOX = "read the inbox for a verification link or code";
     else if (operation === "WAIT")
@@ -3794,6 +3759,7 @@ export interface DriveTargetSets {
   SELECT: DriveCandidate[];
   CLICK: DriveCandidate[];
   SCROLL: DriveCandidate[];
+  SAVE?: DriveCandidate[];
 }
 
 export function selectOptionsFromElements(
@@ -3880,7 +3846,23 @@ export function driveTargetSets(
     candidateBudget(),
   );
   const scroll = takeCapped(rankDriveCandidates(scrollTargets(rows), aimInput), candidateBudget());
+  const save =
+    aim.canSave === true
+      ? rows
+          .filter((row) => row[1] === "save" && (row[2]?.length ?? 0) > 0)
+          .slice(0, DRIVE_MAX_CANDIDATES)
+          .map(
+            (row, index): DriveCandidate => ({
+              ref: row[0],
+              role: "text",
+              row,
+              slug: `save_${index + 1}`,
+              description: row[2]!,
+            }),
+          )
+      : [];
   const operations: DriveOperation[] = [];
+  if (save.length > 0) operations.push("SAVE");
   if (click.length > 0) operations.push("CLICK");
   if (typeText.length > 0) operations.push("TYPE_TEXT");
   if (select.length > 0) operations.push("SELECT");
@@ -3889,7 +3871,14 @@ export function driveTargetSets(
   operations.push("WAIT");
   operations.push("DONE");
   operations.push("BLOCKED");
-  return { operations, TYPE_TEXT: typeText, SELECT: select, CLICK: click, SCROLL: scroll };
+  return {
+    operations,
+    TYPE_TEXT: typeText,
+    SELECT: select,
+    CLICK: click,
+    SCROLL: scroll,
+    SAVE: save,
+  };
 }
 
 function criteriaFromCandidates(
@@ -3999,6 +3988,16 @@ export function buildDriveQuestions(
       },
     };
   }
+  if ((sets.SAVE?.length ?? 0) > 0) {
+    questions.SAVE_target = {
+      type: "choice",
+      instructions:
+        "Which exact visible value is the credential requested by the goal? Save only that value, not surrounding instructions or setup commands.",
+      criteria: Object.fromEntries(
+        sets.SAVE!.map((candidate) => [candidate.slug, candidate.description]),
+      ),
+    };
+  }
   if (sets.CLICK.length > 0) {
     questions.CLICK_target = {
       type: "choice",
@@ -4104,6 +4103,8 @@ export function buildDriveQuestions(
           return { ...candidate, optionsElided: true };
         },
       );
+    } else if (name === "SAVE_target") {
+      sets.SAVE = (sets.SAVE ?? []).filter((candidate) => candidate.slug in question.criteria);
     } else if (name === "CLICK_target" || name === "TYPE_TEXT_target" || name === "SCROLL_target") {
       const operation = name.slice(0, -7) as "CLICK" | "TYPE_TEXT" | "SCROLL";
       sets[operation] = sets[operation].filter((candidate) => candidate.slug in question.criteria);
@@ -4120,6 +4121,7 @@ export function confidenceOf(answer: JevAnswer | undefined): number {
 }
 
 export type DriveDecision =
+  | { kind: "save"; ref: string; confidence: number }
   | { kind: "complete"; confidence: number }
   | { kind: "stuck"; confidence: number }
   | { kind: "operator_handoff"; confidence: number }
@@ -4535,6 +4537,18 @@ export function decideAfterJev(input: {
       return refuseAdmission(targetAdmission, targetInstructions, targetCriteria, targetAnswer);
     }
     const targetChoice = targetAnswer!.choice!;
+    if (choice === "SAVE") {
+      const candidate = resolveActionChoice(targetChoice, sets.SAVE ?? []);
+      if (candidate === undefined)
+        return refusalQuestion(
+          "invalid_answer",
+          targetInstructions,
+          targetCriteria,
+          targetAnswer,
+          "target_not_resolved",
+        );
+      return { kind: "save", ref: candidate.ref, confidence };
+    }
     const actionKey =
       choice === "SCROLL" && (DRIVE_SCROLL_DIRECTIONS as readonly string[]).includes(targetChoice)
         ? `scroll:${targetChoice}`
@@ -5140,6 +5154,7 @@ async function captureDriveSession(
   drive: SessionDriveState,
   deps: DriveDependencies,
   needFrames: boolean,
+  captureSaveValues = false,
 ): Promise<{
   observation: Observation;
   rows: WireRow[];
@@ -5230,7 +5245,7 @@ async function captureDriveSession(
   // The act path scrolls a chosen control into view. Storefront product
   // submits need the same visibility rule as checkout submits.
   const keepOffscreenButtons = true;
-  const main = await captureFrameSnapshot(page, omit, 0, keepOffscreenButtons);
+  const main = await captureFrameSnapshot(page, omit, 0, keepOffscreenButtons, captureSaveValues);
   if (main === null) {
     const observation = await deps.observe(sessionId, "compact");
     const compactRows = mergeCompactTable([], observation);
@@ -5280,11 +5295,12 @@ async function captureDriveSession(
       const captchaFrame = isCaptchaFrameUrl(frame.url());
       if (!needFrames && !coveredByLayer && !captchaFrame && !googleButtonFrame(frame)) continue;
       const signature = captchaFrame ? "" : await frameDynamicsSignature(frame);
-      const key = `${index}:${frame.url()}:${keepOffscreenButtons}`;
+      const key = `${index}:${frame.url()}:${keepOffscreenButtons}:${captureSaveValues}`;
       const cached = cache.get(key);
       // A layer can reveal a one-time value without changing any input. Do
       // not reuse a frame snapshot while the main page is covered.
       if (
+        !captureSaveValues &&
         !coveredByLayer &&
         !captchaFrame &&
         cached !== undefined &&
@@ -5295,7 +5311,13 @@ async function captureDriveSession(
         frameParts.push({ frame, snapshot: cached.snapshot });
         continue;
       }
-      const child = await captureFrameSnapshot(frame, omit, index, keepOffscreenButtons);
+      const child = await captureFrameSnapshot(
+        frame,
+        omit,
+        index,
+        keepOffscreenButtons,
+        captureSaveValues,
+      );
       if (child === null) continue;
       cache.set(key, { frame, signature, snapshot: child });
       parts.push(child);
@@ -5367,10 +5389,18 @@ async function snapshotDriveSession(
   drive: SessionDriveState,
   deps: DriveDependencies,
   needFrames: boolean,
+  captureSaveValues = false,
 ): Promise<Awaited<ReturnType<typeof captureDriveSession>>> {
   // The capture checks readiness before it performs the lease-held token
   // injection and the fast in-page read.
-  const snap = await captureDriveSession(session, sessionId, drive, deps, needFrames);
+  const snap = await captureDriveSession(
+    session,
+    sessionId,
+    drive,
+    deps,
+    needFrames,
+    captureSaveValues,
+  );
   if (deps.onSnapshot !== undefined) await deps.onSnapshot();
   return snap;
 }
@@ -5392,12 +5422,14 @@ export function resolveResumeAnswer(
     const candidates = (rows: readonly WireRow[]) => {
       const sets = resumeTargetSets(rows, facts, goal, includePayment, pageUrl);
       buildDriveQuestions(rows, facts, goal, includePayment, [], pageUrl, new Map(), sets);
-      return [...sets.CLICK, ...sets.TYPE_TEXT, ...sets.SELECT];
+      return [...sets.CLICK, ...sets.TYPE_TEXT, ...sets.SELECT, ...(sets.SAVE ?? [])];
     };
     const prior = candidates(compactRows).find((candidate) => candidate.slug === answer);
     if (prior !== undefined) {
       const current = candidates(snapshotRows);
       const sameControl = (candidate: DriveCandidate) =>
+        (prior.row[1] !== "save" ||
+          (candidate.ref === prior.ref && candidate.row[2] === prior.row[2])) &&
         candidate.row[1] === prior.row[1] &&
         readableLabel(candidate.row) === readableLabel(prior.row) &&
         candidate.option === prior.option;
@@ -5557,6 +5589,7 @@ function resumeTargetSets(
     [],
     {
       goal,
+      canSave: rows.some((row) => row[1] === "save"),
       ...(liveProviders === undefined ? {} : { liveProviders }),
     },
   );
@@ -5591,6 +5624,9 @@ export function resumeAnswerOptions(
     ...criteriaFromCandidates(sets.CLICK, "CLICK"),
     ...criteriaFromCandidates(sets.TYPE_TEXT),
     ...criteriaFromCandidates(sets.SELECT),
+    ...Object.fromEntries(
+      (sets.SAVE ?? []).map((candidate) => [candidate.slug, `Save ${candidate.description}`]),
+    ),
     DONE: "The goal is complete",
     BLOCKED: "No control can advance the goal",
     NONE_OF_THESE: "I am taking over because none of the current controls can advance the goal",
@@ -5637,7 +5673,7 @@ export function resumeAction(
   const validKeys = Object.keys(
     resumeAnswerOptions(rows, facts, goal, includePayment, pageUrl, liveProviders),
   );
-  const offered = [...sets.CLICK, ...sets.TYPE_TEXT, ...sets.SELECT].find(
+  const offered = [...sets.CLICK, ...sets.TYPE_TEXT, ...sets.SELECT, ...(sets.SAVE ?? [])].find(
     (entry) => entry.slug === answer || entry.ref === answer,
   );
   const fallbackRow = findRow(rows, answer, pageUrl);
@@ -5657,13 +5693,22 @@ export function resumeAction(
       confidence: 0,
     };
   }
-  const operation: DriveOperation = isSelectRow(row)
-    ? "SELECT"
-    : isFillableRow(row)
-      ? "TYPE_TEXT"
-      : "CLICK";
+  const operation: DriveOperation =
+    row[1] === "save"
+      ? "SAVE"
+      : isSelectRow(row)
+        ? "SELECT"
+        : isFillableRow(row)
+          ? "TYPE_TEXT"
+          : "CLICK";
   const pool =
-    operation === "SELECT" ? sets.SELECT : operation === "TYPE_TEXT" ? sets.TYPE_TEXT : sets.CLICK;
+    operation === "SAVE"
+      ? (sets.SAVE ?? [])
+      : operation === "SELECT"
+        ? sets.SELECT
+        : operation === "TYPE_TEXT"
+          ? sets.TYPE_TEXT
+          : sets.CLICK;
   const candidate = pool.find((entry) => entry.ref === row[0] || entry.slug === answer);
   const targetChoice = candidate?.slug ?? row[0];
   if (operation === "TYPE_TEXT" && matchingFactKeys(facts, row).length === 0) {
@@ -5932,6 +5977,7 @@ async function driveLoop(input: {
     drive,
     dependencies,
     includePaymentAtStart,
+    context?.persistCredentials !== undefined,
   );
   let observation: Observation = firstSnap.observation;
   let rows = firstSnap.rows;
@@ -5980,9 +6026,6 @@ async function driveLoop(input: {
   // and spend every remaining step in the guard without a new decision.
   let decideAfterPreActChange = false;
   let automaticDecisionRefused = false;
-  // One capture attempt per page state: a page whose Copy writes nothing is
-  // left to the model's next decision, not re-clicked every iteration.
-  const revealedKeyCaptureAttempts = new Set<string>();
   let dispatchedActs = 0;
   let countedJevCalls = drive.jevCalls;
   let countedDispatchedActs = 0;
@@ -6178,7 +6221,14 @@ async function driveLoop(input: {
       deliveredOutcome = outcome;
     }
     const priorPath = pagePathKey(observation.url);
-    const snap = await snapshotDriveSession(session, sessionId, drive, dependencies, needFrames);
+    const snap = await snapshotDriveSession(
+      session,
+      sessionId,
+      drive,
+      dependencies,
+      needFrames,
+      context?.persistCredentials !== undefined,
+    );
     observation = snap.observation;
     rows = snap.rows;
     pageReadiness = snap.readiness;
@@ -6407,6 +6457,35 @@ async function driveLoop(input: {
         reason: "Operator reported the drive blocked and is taking over from this observation",
       });
     }
+    if (decision.kind === "save") {
+      if (context?.persistCredentials === undefined)
+        return finish("stuck", { reason: "SAVE requires store" });
+      const chosen = rows.find((row) => row[0] === decision.ref && row[1] === "save");
+      const beforeUrl = observation.url;
+      const beforeEpoch = drive.lastDocumentEpoch;
+      const fresh = await snapshotOrTimeout(framesIfNeeded());
+      if (fresh !== "ok") return fresh;
+      const current = rows.find((row) => row[0] === decision.ref && row[1] === "save");
+      if (
+        chosen?.[2] === undefined ||
+        current?.[2] !== chosen[2] ||
+        observation.url !== beforeUrl ||
+        drive.lastDocumentEpoch !== beforeEpoch
+      ) {
+        drive.consumedActionKey = null;
+        automaticDecisionRefused = true;
+        return "continue";
+      }
+      const extracted: ExtractResult = {
+        session_id: sessionId,
+        url: observation.url,
+        credentials: { api_key: current[2]! },
+      };
+      const stored = await context.persistCredentials(extracted).catch(() => null);
+      if (stored === null) return finish("stuck", { reason: "selected credential was not stored" });
+      drive.history.push("selected visible credential stored");
+      return finish("complete", { storedCredential: stored });
+    }
     if (decision.kind === "complete") {
       const completeSnap = await snapshotOrTimeout(framesIfNeeded());
       if (completeSnap !== "ok") return completeSnap;
@@ -6419,7 +6498,6 @@ async function driveLoop(input: {
       // Try the known Copy source on every DONE, even if the value has no
       // recognizable shape or label in the observation. Page evidence only
       // decides whether a failed extraction must hand back for explicit capture.
-      drive.pendingCopyCapture = null;
       const extracted = await extractCredentials(sessionId).catch(() => null);
       const hasCredential = storableCredentials(extracted?.credentials ?? {}) !== null;
       const stored =
@@ -7077,13 +7155,6 @@ async function driveLoop(input: {
     };
     const oauthPageBefore = decision.action.kind === "oauth_login" ? session.browser.page : null;
     if (oauthPageBefore !== null) session.browser.armOpenedTabAdoption();
-    drive.pendingCopyCapture =
-      decision.action.kind === "click" &&
-      clickedBefore !== undefined &&
-      isRevealOrCopyRow(clickedBefore) &&
-      /^copy\b/i.test(readableLabel(clickedBefore))
-        ? { url: urlBeforeClick, documentEpoch: beforeEpoch, ref: clickedBefore[0] }
-        : null;
     let acted: DriveActResult;
     try {
       acted = await withinOAuthCallerDeadline(
@@ -7091,7 +7162,6 @@ async function driveLoop(input: {
         deadline,
       );
     } catch (error) {
-      drive.pendingCopyCapture = null;
       if (decision.action.kind === "oauth_login") {
         appendDriveTrace(session, {
           at: "oauth_dispatch",
@@ -7150,7 +7220,6 @@ async function driveLoop(input: {
       });
     }
     if (acted.kind === "stale") {
-      drive.pendingCopyCapture = null;
       if (decision.action.kind === "oauth_login") {
         appendDriveTrace(session, {
           at: "oauth_handoff",
@@ -7275,7 +7344,6 @@ async function driveLoop(input: {
         });
       }
       if (safe.dispatchFailure !== undefined) {
-        drive.pendingCopyCapture = null;
         actDispatched = false;
         drive.lastDispatchFailure = safe.dispatchFailure;
         drive.consumedActionKey = null;
@@ -7834,43 +7902,6 @@ async function driveLoop(input: {
       }
       continue;
     }
-    if (
-      drive.pendingCopyCapture != null &&
-      (drive.pendingCopyCapture.url !== observation.url ||
-        documentOriginOf(drive.pendingCopyCapture.documentEpoch) !==
-          documentOriginOf(drive.lastDocumentEpoch ?? ""))
-    ) {
-      drive.pendingCopyCapture = null;
-    }
-    if (
-      context?.persistCredentials !== undefined &&
-      revealedKeyCaptureDue(rows, drive.pendingCopyCapture != null)
-    ) {
-      const captureKey = pageProgressKey(
-        observation.url,
-        rows,
-        drive.filledRefs,
-        observation.semantic?.headings ?? [],
-      );
-      if (!revealedKeyCaptureAttempts.has(captureKey)) {
-        revealedKeyCaptureAttempts.add(captureKey);
-        const copyRef = revealedSecretCopyRef(rows, drive.pendingCopyCapture?.ref);
-        drive.pendingCopyCapture = null;
-        const extracted = await extractCredentials(sessionId, copyRef).catch(() => null);
-        const stored =
-          extracted !== null && storableCredentials(extracted.credentials) !== null
-            ? await context.persistCredentials(extracted).catch(() => null)
-            : null;
-        if (stored !== null) {
-          drive.history.push("revealed key stored from its Copy source");
-          return finish("complete", { storedCredential: stored });
-        }
-        // Capture invalidated the snapshot; re-read before asking about this page.
-        const recapture = await snapshotOrTimeout(framesIfNeeded());
-        if (recapture !== "ok") return recapture;
-      }
-      drive.pendingCopyCapture = null;
-    }
     const includePayment = drive.facts.card_ref !== undefined;
     drive.facts = ensureGeneratedFacts(
       rows,
@@ -8320,6 +8351,7 @@ async function driveLoop(input: {
         headings: observation.semantic?.headings ?? [],
         failedKeys: drive.failedActionKeys ?? [],
         goal: drive.goal,
+        canSave: context?.persistCredentials !== undefined,
         submittedThisDrive: drive.submittedThisDrive === true,
         visitedSectionKeys: drive.visitedSectionKeys ?? [],
         ...(liveProviders === undefined ? {} : { liveProviders }),
@@ -8362,6 +8394,7 @@ async function driveLoop(input: {
         instructions: nextActionInstructions(drive.goal),
         criteria: operationCriteria(DRIVE_TERMINAL_OPERATIONS),
       };
+      delete questions.SAVE_target;
       delete questions.CLICK_target;
       delete questions.TYPE_TEXT_target;
       delete questions.SELECT_target;
@@ -8384,6 +8417,7 @@ async function driveLoop(input: {
         ...sets.TYPE_TEXT,
         ...sets.SELECT,
         ...sets.CLICK,
+        ...(sets.SAVE ?? []),
       ].filter((candidate) => {
         if (isOffscreenRow(candidate.row) && !offscreenRowStaysOffered(candidate.row, pageUrl))
           return false;
@@ -8462,6 +8496,7 @@ async function driveLoop(input: {
       state_bytes: stateBytes,
       operation_criteria:
         questions.operation?.type === "choice" ? questions.operation.criteria : {},
+      SAVE_target: questions.SAVE_target?.type === "choice" ? questions.SAVE_target.criteria : {},
       CLICK_target:
         questions.CLICK_target?.type === "choice" ? questions.CLICK_target.criteria : {},
       SELECT_target:
@@ -8475,6 +8510,7 @@ async function driveLoop(input: {
       answers,
       decision,
       candidates: {
+        SAVE: candidateDump(sets.SAVE ?? []),
         CLICK: candidateDump(sets.CLICK),
         SELECT: candidateDump(sets.SELECT),
         TYPE_TEXT: candidateDump(sets.TYPE_TEXT),

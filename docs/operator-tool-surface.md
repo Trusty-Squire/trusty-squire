@@ -83,7 +83,7 @@ For a signup, checkout, or other goal-shaped website task, call `operate_drive`
 with the goal and a `facts` bag (email, name, address, `card_ref`, …). Pass
 `session_id` of an open session, or `url` to open the page and drive in one
 call; provide exactly one. Model-directed steps ask Jev for one operation (CLICK, TYPE_TEXT, SELECT,
-SCROLL, WAIT, DONE, BLOCKED) plus a matching per-operation target; unused
+SCROLL, SAVE, WAIT, DONE, BLOCKED) plus a matching per-operation target; unused
 target heads cannot act. Identifying values come only from the facts bag. A
 search or query field may receive a phrase Jev assigns from the goal's own
 words or the facts; identity and payment fields still require a fact.
@@ -590,19 +590,19 @@ redact those surfaces.
 
 `operate_drive` accepts the same `store` destination as `operate_extract`.
 Supply it on each drive call that should vault a key, including resumed calls.
-With a destination and an authenticated vault client, a revealed-secret row
-(`@key-value` or `secret=1`) or a successfully dispatched Copy click triggers
-extraction and storage before the next model decision. The Copy evidence
-survives a button changing its label to “Copied!” on the same document and URL.
-If no modal Copy control is found, automatic capture uses the just-clicked Copy
-ref while it remains in the snapshot, even after its label changes. Otherwise
-it uses the sole eligible clickable Copy row; multiple candidates leave the
-inline source unresolved. Extraction keeps only the value that capture's Copy
-click writes to the clipboard; a revealed-secret row does not itself supply
-the credential value. Successful storage returns
-`complete` without waiting for the model to choose DONE. Each page state gets
-one automatic capture attempt per call; a failed extraction or storage attempt
-returns to ordinary decision-making after a fresh snapshot.
+With a destination and an authenticated vault client, the decision includes a
+SAVE operation and a SAVE_target choice over visible text and control values.
+Each candidate carries an exact snapshot value and a stable source ref. Jev
+chooses the credential requested by the goal; no credential shape, English
+label, or Copy button is required. The synthetic `secret=1` marker is page
+context, not a value source. Prefixless keys are selectable too.
+
+SAVE re-snapshots before storing. If the selected source, value, document, or
+URL changed, the drive asks again rather than saving a replacement value. It
+sends the selected value through the existing vault store path and returns
+`complete` with storage metadata. Storage failure returns `stuck`. It does not
+click a Copy control, track copy-button relabeling, or save a value before Jev
+chooses SAVE. Calls without `store` do not offer SAVE.
 
 DONE also attempts extraction and requires successful storage if a credential
 is extracted. It refuses completion when a visible credential cannot be
