@@ -5725,6 +5725,9 @@ export async function runOperateDrive(
   }
 
   const facts = mergeFacts(session.drive?.facts ?? {}, args.facts);
+  // The connected account is the default signup identity. Explicit caller or
+  // retained facts still name the identity the drive was asked to use.
+  if (facts.email === undefined && session.userEmail) facts.email = session.userEmail;
   const drive = session.drive ?? emptyDriveState(args.goal, facts);
   if (!Array.isArray(drive.filledRefs)) drive.filledRefs = [];
   if (!Array.isArray(drive.expiryShortWrittenRefs)) drive.expiryShortWrittenRefs = [];
