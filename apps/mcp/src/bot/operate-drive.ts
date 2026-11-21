@@ -7101,6 +7101,22 @@ async function driveLoop(input: {
           url_after: session.browser.currentUrl(),
           outcome: "error",
         });
+        if (!(error instanceof OAuthAwaitingHumanError)) {
+          rememberFailedAction(drive, rows, decision.actionKey, observation.url);
+          const thrownRow = findRow(rows, decision.actionKey, observation.url);
+          recordDeadAction(
+            drive,
+            pageProgressKey(
+              observation.url,
+              rows,
+              drive.filledRefs,
+              observation.semantic?.headings ?? [],
+            ),
+            thrownRow === undefined
+              ? decision.actionKey
+              : stableControlKey(thrownRow, observation.url),
+          );
+        }
       }
       throw error;
     }

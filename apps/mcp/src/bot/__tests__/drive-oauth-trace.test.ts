@@ -6,7 +6,17 @@ import { chromium, type Browser } from "playwright";
 import type { ApiClient } from "../../api-client.js";
 import { BrowserController } from "../browser.js";
 import { OAUTH_PROVIDERS } from "../oauth-providers.js";
-import { ensureGeneratedFacts, peakedProbabilities, resumeAction, resumeAnswerOptions, runOperateDrive, type DriveDependencies, type WireRow } from "../operate-drive.js";
+import { OAuthAwaitingHumanError } from "../oauth-login.js";
+import { sessionForCall } from "../session/lifecycle.js";
+import {
+  ensureGeneratedFacts,
+  peakedProbabilities,
+  resumeAction,
+  resumeAnswerOptions,
+  runOperateDrive,
+  type DriveDependencies,
+  type WireRow,
+} from "../operate-drive.js";
 import {
   act,
   awaitVerification,
@@ -63,16 +73,43 @@ describe("drive OAuth trace", () => {
       ["@microsoft", "b", "Continue with Microsoft"],
       ["@hasura", "b", "Continue with Hasura"],
     ];
-    const options = resumeAnswerOptions(rows, {}, "Sign in to Neon", false, "https://console.neon.tech/login", ["google"]);
+    const options = resumeAnswerOptions(
+      rows,
+      {},
+      "Sign in to Neon",
+      false,
+      "https://console.neon.tech/login",
+      ["google"],
+    );
     expect(Object.values(options)).toContain("Continue with Google");
     expect(Object.values(options)).not.toContain("Continue with GitHub");
     expect(Object.values(options)).not.toContain("Continue with Microsoft");
     expect(Object.values(options)).not.toContain("Continue with Hasura");
-    expect(resumeAction("@github", rows, {}, "Sign in to Neon", undefined, "https://console.neon.tech/login", ["google"])).toMatchObject({
+    expect(
+      resumeAction(
+        "@github",
+        rows,
+        {},
+        "Sign in to Neon",
+        undefined,
+        "https://console.neon.tech/login",
+        ["google"],
+      ),
+    ).toMatchObject({
       kind: "invalid_answer",
       reason: "resume_not_current_option",
     });
-    expect(resumeAction("@microsoft", rows, {}, "Sign in to Neon", undefined, "https://console.neon.tech/login", ["google"]).kind).toBe("invalid_answer");
+    expect(
+      resumeAction(
+        "@microsoft",
+        rows,
+        {},
+        "Sign in to Neon",
+        undefined,
+        "https://console.neon.tech/login",
+        ["google"],
+      ).kind,
+    ).toBe("invalid_answer");
   });
 
   it("shows all providers to Jev while allowing it to choose the live Google provider", async () => {
@@ -100,7 +137,8 @@ describe("drive OAuth trace", () => {
         askJev: async (_api, _state, questions) => {
           const click = questions.CLICK_target;
           const operation = questions.operation;
-          if (click?.type !== "choice" || operation?.type !== "choice") throw new Error("No OAuth choices");
+          if (click?.type !== "choice" || operation?.type !== "choice")
+            throw new Error("No OAuth choices");
           offered.push(Object.values(click.criteria));
           const google = Object.entries(click.criteria).find(([, label]) =>
             label.includes("Continue with Google"),
@@ -127,11 +165,15 @@ describe("drive OAuth trace", () => {
         },
         act,
         observe,
-        startSession: async () => { throw new Error("existing session"); },
+        startSession: async () => {
+          throw new Error("existing session");
+        },
         awaitVerification,
         injectCard: async () => ({ status: "unused" }),
         driveAct: async (_sessionId, action) => {
-          actions.push(action.kind === "oauth_login" ? action.provider ?? "unknown" : action.kind);
+          actions.push(
+            action.kind === "oauth_login" ? (action.provider ?? "unknown") : action.kind,
+          );
           return {
             kind: "ok",
             combobox: false,
@@ -139,7 +181,12 @@ describe("drive OAuth trace", () => {
           };
         },
       };
-      await runOperateDrive({ session_id: started.session_id, goal: "Sign in to Neon", max_steps: 2 }, {} as ApiClient, undefined, deps);
+      await runOperateDrive(
+        { session_id: started.session_id, goal: "Sign in to Neon", max_steps: 2 },
+        {} as ApiClient,
+        undefined,
+        deps,
+      );
       expect(offered[0]).toContain("Continue with Google");
       expect(offered[0]).toContain("Continue with GitHub");
       expect(actions).toEqual(["google"]);
@@ -149,6 +196,108 @@ describe("drive OAuth trace", () => {
       await context.close();
     }
   }, 30_000);
+
+  it("does not re-pick an OAuth control whose dispatch threw on the next drive call", async () => {
+    const provider = Object.keys(OAUTH_PROVIDERS)[0]!;
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    const label = `Sign up with ${provider}`;
+    await page.goto(
+      `data:text/html,${encodeURIComponent(`<main><h1>Create account</h1><label><input type="checkbox"> I agree to the Terms</label><button>${label}</button><button>Continue with GitHub</button></main>`)}`,
+    );
+    const started = await startHarnessProvisionSession({
+      browser: BrowserController.fromHarnessPage(page),
+      serviceUrl: page.url(),
+      format: "compact",
+      initialObservation: "drive",
+    });
+    try {
+      let dispatches = 0;
+      const deps: DriveDependencies = {
+        askJev: chooseOauth(label),
+        act,
+        observe,
+        startSession: async () => {
+          throw new Error("fixture uses an existing session");
+        },
+        awaitVerification,
+        injectCard: async () => ({ status: "unused" }),
+        driveAct: async () => {
+          dispatches += 1;
+          throw new Error("oauth executor failed");
+        },
+      };
+      const call = () =>
+        runOperateDrive(
+          { session_id: started.session_id, goal: `Sign up with ${provider}`, max_steps: 2 },
+          {} as ApiClient,
+          undefined,
+          deps,
+        );
+      await expect(call()).rejects.toThrow("oauth executor failed");
+      expect(dispatches).toBe(1);
+      // The caller changes the page between calls (the trace ticks the terms
+      // checkbox), which resets the consumed-action fence the next call relies on.
+      await page.check("input[type=checkbox]");
+      await call().catch(() => undefined);
+      expect(dispatches).toBe(1);
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
+  it.each(["not_attempted", "pending"] as const)(
+    "keeps an OAuth control retryable after a recoverable %s budget exception",
+    async (phase) => {
+      const provider = Object.keys(OAUTH_PROVIDERS)[0]!;
+      const context = await browser.newContext();
+      const page = await context.newPage();
+      const label = `Sign up with ${provider}`;
+      await page.goto(`data:text/html,${encodeURIComponent(`<button>${label}</button>`)}`);
+      const started = await startHarnessProvisionSession({
+        browser: BrowserController.fromHarnessPage(page),
+        serviceUrl: page.url(),
+        format: "compact",
+        initialObservation: "drive",
+      });
+      try {
+        let dispatches = 0;
+        const deps: DriveDependencies = {
+          askJev: chooseOauth(label),
+          act,
+          observe,
+          startSession: async () => {
+            throw new Error("fixture uses an existing session");
+          },
+          awaitVerification,
+          injectCard: async () => ({ status: "unused" }),
+          driveAct: async () => {
+            dispatches += 1;
+            throw new OAuthAwaitingHumanError("OAuth call budget exhausted", phase);
+          },
+        };
+        const call = () =>
+          runOperateDrive(
+            { session_id: started.session_id, goal: `Sign up with ${provider}`, max_steps: 2 },
+            {} as ApiClient,
+            undefined,
+            deps,
+          );
+        expect((await call()).status).toBe("budget");
+        expect(dispatches).toBe(1);
+        const drive = sessionForCall(started.session_id)!.drive!;
+        expect(drive.failedActionKeys).toEqual([]);
+        expect(drive.exhaustedActionKeys).toEqual([]);
+        expect((await call()).status).toBe("budget");
+        expect(dispatches).toBe(2);
+      } finally {
+        await finishProvisionSession(started.session_id);
+        await context.close();
+      }
+    },
+    30_000,
+  );
 
   it("records dispatch and handoff when identity admission returns before a click", async () => {
     const provider = Object.keys(OAUTH_PROVIDERS)[0]!;
@@ -215,7 +364,9 @@ describe("drive OAuth trace", () => {
       route.fulfill({ contentType: "text/html", body: "<main>Sign in to GitHub</main>" }),
     );
     const page = await context.newPage();
-    await page.goto(`data:text/html,${encodeURIComponent("<button>Continue with GitHub</button>")}`);
+    await page.goto(
+      `data:text/html,${encodeURIComponent("<button>Continue with GitHub</button>")}`,
+    );
     const started = await startHarnessProvisionSession({
       browser: BrowserController.fromHarnessPage(page),
       serviceUrl: page.url(),
@@ -227,7 +378,9 @@ describe("drive OAuth trace", () => {
         askJev: chooseOauth("Continue with GitHub"),
         act,
         observe,
-        startSession: async () => { throw new Error("existing session"); },
+        startSession: async () => {
+          throw new Error("existing session");
+        },
         awaitVerification,
         injectCard: async () => ({ status: "unused" }),
         driveAct: async () => {
@@ -260,7 +413,9 @@ describe("drive OAuth trace", () => {
   it("does not type a generated password into a login page with no caller facts", async () => {
     const context = await browser.newContext();
     const page = await context.newPage();
-    await page.goto(`data:text/html,${encodeURIComponent('<main><h1>Sign in</h1><label>Password <input type="password" name="password" required></label><button>Sign in</button></main>')}`);
+    await page.goto(
+      `data:text/html,${encodeURIComponent('<main><h1>Sign in</h1><label>Password <input type="password" name="password" required></label><button>Sign in</button></main>')}`,
+    );
     const started = await startHarnessProvisionSession({
       browser: BrowserController.fromHarnessPage(page),
       serviceUrl: page.url(),
@@ -274,7 +429,10 @@ describe("drive OAuth trace", () => {
           if (operation?.type !== "choice") throw new Error("No operation choices");
           const type = questions.TYPE_TEXT_target;
           const choice = type?.type === "choice" ? "TYPE_TEXT" : "BLOCKED";
-          const answers: Record<string, { choice: string; confidence: number; probabilities: Record<string, number> }> = {
+          const answers: Record<
+            string,
+            { choice: string; confidence: number; probabilities: Record<string, number> }
+          > = {
             operation: {
               choice,
               confidence: 0.95,
@@ -293,7 +451,9 @@ describe("drive OAuth trace", () => {
         },
         act,
         observe,
-        startSession: async () => { throw new Error("existing session"); },
+        startSession: async () => {
+          throw new Error("existing session");
+        },
         awaitVerification,
         injectCard: async () => ({ status: "unused" }),
       };
@@ -313,7 +473,9 @@ describe("drive OAuth trace", () => {
   it("hands back a new-account password when no password fact was supplied", async () => {
     const context = await browser.newContext();
     const page = await context.newPage();
-    await page.goto(`data:text/html,${encodeURIComponent('<main><h1>Create an account</h1><label>Password <input type="password" name="password" required></label><button>Create account</button></main>')}`);
+    await page.goto(
+      `data:text/html,${encodeURIComponent('<main><h1>Create an account</h1><label>Password <input type="password" name="password" required></label><button>Create account</button></main>')}`,
+    );
     const started = await startHarnessProvisionSession({
       browser: BrowserController.fromHarnessPage(page),
       serviceUrl: page.url(),
@@ -325,7 +487,8 @@ describe("drive OAuth trace", () => {
         askJev: async (_api, _state, questions) => {
           const operation = questions.operation;
           const type = questions.TYPE_TEXT_target;
-          if (operation?.type !== "choice" || type?.type !== "choice") throw new Error("No password choice");
+          if (operation?.type !== "choice" || type?.type !== "choice")
+            throw new Error("No password choice");
           const target = Object.keys(type.criteria)[0]!;
           return {
             attempts: 1,
@@ -348,7 +511,9 @@ describe("drive OAuth trace", () => {
         },
         act,
         observe,
-        startSession: async () => { throw new Error("existing session"); },
+        startSession: async () => {
+          throw new Error("existing session");
+        },
         awaitVerification,
         injectCard: async () => ({ status: "unused" }),
       };
@@ -366,10 +531,16 @@ describe("drive OAuth trace", () => {
         ["@signup", "l", "Sign up for an account"],
         ["@login", "b", "Log in"],
       ];
-      expect(ensureGeneratedFacts(loginRows, {}, {
-        pageUrl: "https://console.neon.tech/login",
-        goal: "Sign up for Neon",
-      }).password).toBeUndefined();
+      expect(
+        ensureGeneratedFacts(
+          loginRows,
+          {},
+          {
+            pageUrl: "https://console.neon.tech/login",
+            goal: "Sign up for Neon",
+          },
+        ).password,
+      ).toBeUndefined();
     } finally {
       await finishProvisionSession(started.session_id);
       await context.close();

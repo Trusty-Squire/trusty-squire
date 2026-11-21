@@ -308,6 +308,12 @@ changes do not extend that limit; exhaustion returns a `budget` handoff.
 If an OAuth deadline expires before dispatch is attempted, the control remains
 eligible for retry on the next call; after dispatch may have occurred, the drive
 preserves that uncertainty rather than treating the control as unclicked.
+If the OAuth executor throws an error other than recoverable budget exhaustion,
+the error still propagates, but the drive first records the selected control as
+failed and dead. Later calls on the same session withhold that control on that
+page even if other page controls change. Recoverable OAuth budget exceptions
+record neither failure nor a dead action. These cases are covered by
+[`drive-oauth-trace.test.ts`](../apps/mcp/src/bot/__tests__/drive-oauth-trace.test.ts).
 A `budget` handoff preserves partial progress for another call on the same
 session. `jev_unavailable`, `no_progress`, and `evaluate_timeout` also return
 handoffs; the last indicates that an in-page evaluation exceeded its deadline.
