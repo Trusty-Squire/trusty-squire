@@ -50,7 +50,7 @@ import { waitForPageReady } from "../page-ready.js";
 import type { DriveSnapshot } from "../drive-snapshot.js";
 import { sessionForCall } from "../session/lifecycle.js";
 import { DriveEvaluateTimeout } from "../drive-evaluate.js";
-import { OAuthAwaitingHumanError } from "../oauth-login.js";
+import { OAuthAwaitingHumanError, OAuthCallerDeadlineError } from "../oauth-login.js";
 
 const SIGNUP_HTML = `<!doctype html><meta charset="utf-8"><title>Signup fixture</title>
 <main>
@@ -1264,7 +1264,7 @@ describe("operate_drive real-browser fixture", () => {
       const dispatch = vi.fn<NonNullable<DriveDependencies["driveAct"]>>(
         async (_sessionId, _action, deadline) => {
           deadline!.dispatchAttempted = true;
-          if (stage === "preflight") throw new OAuthAwaitingHumanError("execution expired");
+          if (stage === "preflight") throw new OAuthCallerDeadlineError("execution expired");
           return await new Promise<never>((_resolve, reject) => {
             finishRead = () => reject(new OAuthAwaitingHumanError("execution released"));
           });

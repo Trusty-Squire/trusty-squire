@@ -44,6 +44,7 @@ import { yieldOperateDriveToHuman } from "./live-share.js";
 import type { OAuthProviderId } from "./oauth-providers.js";
 import {
   OAuthAwaitingHumanError,
+  OAuthCallerDeadlineError,
   oauthActionDeadline,
   oauthActionRemainingMs,
   withinOAuthCallerDeadline,
@@ -362,6 +363,7 @@ export type DriveStatus =
   | "invalid_answer"
   | "no_progress"
   | "budget"
+  | "awaiting_human"
   | "jev_unavailable"
   | "evaluate_timeout"
   | "pending_approval"
@@ -383,6 +385,7 @@ export interface DriveArgs {
 
 export interface DriveHandoff {
   status: DriveStatus;
+  oauth?: Observation["oauth"];
   session_id?: string;
   question?: string;
   options?: Record<string, string>;
@@ -4763,6 +4766,7 @@ function takeActProfile(
 
 export function buildHandoff(input: {
   status: DriveStatus;
+  oauth?: Observation["oauth"];
   sessionId?: string;
   observation?: Observation;
   trajectory: readonly DriveTrajectoryStep[];
@@ -4804,6 +4808,7 @@ export function buildHandoff(input: {
           };
   return {
     status: input.status,
+    ...(input.oauth === undefined ? {} : { oauth: input.oauth }),
     ...(input.sessionId === undefined ? {} : { session_id: input.sessionId }),
     ...(input.question === undefined
       ? {}
@@ -7622,7 +7627,19 @@ async function driveLoop(input: {
     } catch (error) {
       if (deadline !== undefined && error instanceof OAuthAwaitingHumanError) {
         if (deadline.dispatchAttempted !== true) drive.consumedActionKey = null;
-        return finish("budget", { reason: error.message });
+        if (error instanceof OAuthCallerDeadlineError || error.phase === "not_attempted") {
+          return finish("budget", { reason: error.message });
+        }
+        return finish("awaiting_human", {
+          reason: error.message,
+          oauth: {
+            state: "awaiting_human",
+            reason: error.message,
+            ...(error.challenge === undefined ? {} : { challenge: error.challenge }),
+            ...(error.notification === undefined ? {} : { notification: error.notification }),
+            next_action: "operate_observe",
+          },
+        });
       }
       throw error;
     }
