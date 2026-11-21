@@ -80,7 +80,10 @@ overrides the path, for example a forwarded socket) and checks the sha256.
 for one download completes after the first download it starts finishes.
 
 For a signup, checkout, or other goal-shaped website task, call `operate_drive`
-with the goal and a `facts` bag (email, name, address, `card_ref`, …). Pass
+with the goal and a `facts` bag (email, name, address, `card_ref`, …). When
+`facts.email` is absent, the session account email supplies the default; explicit
+caller or retained email facts take precedence. No email is invented when the
+session has none. Pass
 `session_id` of an open session, or `url` to open the page and drive in one
 call; provide exactly one. Model-directed steps ask Jev for one operation (CLICK, TYPE_TEXT, SELECT,
 SCROLL, WAIT, DONE, BLOCKED) plus a matching per-operation target; unused
