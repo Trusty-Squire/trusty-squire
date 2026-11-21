@@ -1578,9 +1578,9 @@ async function oauthHumanChallengeError(
 }
 
 // Advance a provider's consent / account-chooser screen by one click.
-// Returns false when no
-// approve control is present — the agent then aborts rather than
-// hang. Clicks only; never types (the critical guarantee holds here).
+// Returns false when no authorized control can be advanced; the caller retries
+// within the OAuth deadline, then hands off an unresolved attempt as pending.
+// Clicks only; never types (the critical guarantee holds here).
 export async function advanceOAuthConsent(
   browser: BrowserController,
   provider: OAuthProviderId,

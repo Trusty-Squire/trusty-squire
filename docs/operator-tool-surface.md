@@ -89,8 +89,10 @@ search or query field may receive a phrase Jev assigns from the goal's own
 words or the facts; identity and payment fields still require a fact.
 
 On a new-account form, omit the password fact to let the drive invent a random
-password. Initial invention requires explicit Create account, Sign up, or
-Register evidence; sign-in, reset, and existing-password forms are excluded.
+password. Password fields and confirmation controls are recognized from English
+field names or labels, not from input type or autocomplete annotations. Initial
+invention requires explicit Create account, Sign up, or Register evidence;
+English sign-in, reset, and current/old/existing-password cues exclude the form.
 Populated password controls are preserved. Account identifiers and confirmation
 controls are scoped to the password's form and frame. The account identifier
 comes from the form's exact email/username value, or, on a password-only step,
