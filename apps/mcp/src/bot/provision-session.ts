@@ -155,13 +155,6 @@ export interface Observation {
         state: "onboarding_required";
         reason: string;
         next_action: "operate_observe";
-      }
-    // The provider's account chooser lists no account the OAuth action could
-    // select; the chooser is left on the page for an ordinary click.
-    | {
-        state: "account_choice";
-        reason: string;
-        next_action: "operate_observe";
       };
   // Fail-closed identity hand-back: set only when a Google-dependent operation
   // requires a live Google session that is absent. The session stays live, but

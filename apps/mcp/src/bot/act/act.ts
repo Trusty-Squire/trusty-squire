@@ -34,7 +34,6 @@ import {
   OAuthAwaitingHumanError,
   OAuthFailedError,
   OAuthOnboardingRequiredError,
-  OAuthAccountChoiceRequiredError,
 } from "../oauth-login.js";
 import type { ClickMethod, DriverTarget } from "../driver/types.js";
 import { compactV2AuditUrl, safeStageV2 } from "../compact-observation-v2.js";
@@ -506,8 +505,7 @@ function oauthErrorAfterDispatchAttempt(session: Session, error: unknown): Obser
     clickDispatchStatusForError(error) === "not_dispatched" ||
     error instanceof OAuthFailedError ||
     error instanceof OAuthAwaitingHumanError ||
-    error instanceof OAuthOnboardingRequiredError ||
-    error instanceof OAuthAccountChoiceRequiredError
+    error instanceof OAuthOnboardingRequiredError
   ) {
     return null;
   }
@@ -538,22 +536,6 @@ function oauthOnboardingRequiredObservation(
     next_action: "operate_observe",
   };
   return compactV2PublicObservation(session, { stage: "form", guidance, oauth, url });
-}
-
-function oauthAccountChoiceObservation(
-  session: Session,
-  error: OAuthAccountChoiceRequiredError,
-): Observation {
-  invalidateCompactV2Snapshot(session);
-  const url = session.browser.currentUrl();
-  const guidance =
-    "The provider's account chooser lists no account the OAuth action could select. Choose the account on the current page.";
-  const oauth: NonNullable<Observation["oauth"]> = {
-    state: "account_choice",
-    reason: error.message,
-    next_action: "operate_observe",
-  };
-  return compactV2PublicObservation(session, { stage: "auth", guidance, oauth, url });
 }
 
 export async function actInternally(
@@ -627,9 +609,6 @@ export async function actInternally(
     }
     if (error instanceof OAuthOnboardingRequiredError && session !== undefined) {
       return { observation: oauthOnboardingRequiredObservation(session, error), outcome: {} };
-    }
-    if (error instanceof OAuthAccountChoiceRequiredError && session !== undefined) {
-      return { observation: oauthAccountChoiceObservation(session, error), outcome: {} };
     }
     if (session?.compactV2Active === true && !(error instanceof ProvisionTargetMissingError)) {
       throw new CompactV2ActionFailureError(
@@ -762,9 +741,6 @@ export async function act(
     if (error instanceof OAuthOnboardingRequiredError && session !== undefined) {
       return oauthOnboardingRequiredObservation(session, error);
     }
-    if (error instanceof OAuthAccountChoiceRequiredError && session !== undefined) {
-      return oauthAccountChoiceObservation(session, error);
-    }
     if (
       ["oauth_login", "click", "js_click", "type", "type_secret", "select"].includes(action.kind) &&
       operatorMutationDispatchPhase() !== "dispatch_attempted"
@@ -855,7 +831,7 @@ function scopeForElement(page: Page, el: InteractiveElement): Page | Frame {
 // banner or sticky footer over the target swallows the click while the page
 // still reports a dispatch, so the caller records a step that never landed.
 // Absent a box (still loading) it says nothing and the actionability waits rule.
-export async function clickTargetOccluded(scope: Page | Frame, selector: string): Promise<boolean> {
+async function clickTargetOccluded(scope: Page | Frame, selector: string): Promise<boolean> {
   return await evaluateBound(
     scope,
     (sel: string) => {
@@ -882,6 +858,9 @@ export async function clickTargetOccluded(scope: Page | Frame, selector: string)
       if (!inView) {
         element.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
       }
+      const rect = element.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return false;
+      const hit = document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2);
       const composedContains = (ancestor: Element, descendant: Element): boolean => {
         let current: Element | null = descendant;
         while (current !== null) {
@@ -891,20 +870,7 @@ export async function clickTargetOccluded(scope: Page | Frame, selector: string)
         }
         return false;
       };
-      const covered = (): boolean => {
-        const rect = element.getBoundingClientRect();
-        if (rect.width <= 0 || rect.height <= 0) return false;
-        const hit = document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2);
-        return hit !== null && !composedContains(element, hit) && !composedContains(hit, element);
-      };
-      if (!covered()) return false;
-      // Inside the viewport is not inside every scroll box: an expanded
-      // section can push a dialog's footer button below the dialog's own
-      // scroll edge, where the hit lands on the backdrop. Scroll it into its
-      // scroll box, as the click itself would, and judge that point.
-      if (!inView) return true;
-      element.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
-      return covered();
+      return hit !== null && !composedContains(element, hit) && !composedContains(hit, element);
     },
     selector,
   ).catch(() => false);

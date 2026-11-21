@@ -5,7 +5,6 @@ import { BrowserController } from "../browser.js";
 import {
   emptyDriveState,
   revealedKeyCaptureDue,
-  revealedSecretCopyRef,
   runOperateDrive,
   type DriveDependencies,
   type DriveCallContext,
@@ -47,43 +46,6 @@ describe("revealedKeyCaptureDue", () => {
   });
 });
 
-// Rows recorded by the 1.1.49-rc.1 Zro drive (run 7, trace steps 4 and 5): the
-// new key was revealed inline on the page, not in a dialog, before and after
-// its Copy click.
-const zroInlineRows = (copyLabel: string): WireRow[] => [
-  ["@e:f0d11", "b", "Open account settings. Current workspace: Personal"],
-  ["@e:f0d19", "b", "Create key"],
-  ["@e:f0d43", "b", "Dismiss"],
-  ["@e:f0d44", "b", copyLabel],
-  ["@e:f0d20", "b", "Done"],
-  ["@e:f0d45", "b", "DeepSeek V4.1 Flash deepseek-v4.1-flash"],
-  ["@e:f0d46", "b", "Copy setup"],
-  ["@e:f0d47", "b", "Revoke grunt-7|v=offscreen"],
-  ["@key-value", "h1", "@key-value|secret=1|len=36|count=2"],
-];
-
-describe("revealedSecretCopyRef", () => {
-  it("names the inline key's Copy control before it is clicked (trace step 4)", () => {
-    expect(revealedSecretCopyRef(zroInlineRows("Copy key"), undefined)).toBe("@e:f0d44");
-  });
-
-  it("names the clicked Copy control after it relabels itself (trace step 5)", () => {
-    expect(revealedSecretCopyRef(zroInlineRows("Copied"), "@e:f0d44")).toBe("@e:f0d44");
-    expect(revealedSecretCopyRef(zroInlineRows("Copied"), undefined)).toBeUndefined();
-  });
-
-  it("names no control when several Copy controls are clickable or the only one is covered", () => {
-    const rows = zroInlineRows("Copy key");
-    expect(revealedSecretCopyRef([...rows, ["@e:f0d48", "b", "Copy"]], undefined)).toBeUndefined();
-    expect(
-      revealedSecretCopyRef(
-        rows.map((row) => (row[0] === "@e:f0d44" ? ["@e:f0d44", "b", "Copy key|oc=overlay"] : row)),
-        undefined,
-      ),
-    ).toBeUndefined();
-  });
-});
-
 let browser: Browser;
 beforeAll(async () => {
   browser = await chromium.launch({ headless: true, args: ["--no-sandbox"] });
@@ -98,20 +60,16 @@ const key = "sk-beat-0123456789abcdefghijklmnopqrstuvwxyzABCDEFG";
 async function drive(
   copyScript: string,
   persistCredentials: DriveCallContext["persistCredentials"] | null = async () => STORED,
-  layer: "dialog" | "inline" = "dialog",
 ) {
   const context = await browser.newContext();
   const page = await context.newPage();
   const url = "https://app.example.test/dashboard/apikeys";
-  const panel = `<h1>${key}</h1>
+  const body = `<main><div role="dialog" aria-label="Create API key">
+    <h1>${key}</h1>
     <button type="button" onclick="${copyScript}">Copy key</button>
     <button type="button">Done</button>
-    <button type="button" aria-label="Close">x</button>`;
-  const body =
-    layer === "dialog"
-      ? `<main><div role="dialog" aria-label="Create API key">${panel}</div></main>`
-      : `<main><h2>API keys</h2><section>${panel}</section>
-    <button type="button" onclick="navigator.clipboard.writeText('setup')">Copy setup</button></main>`;
+    <button type="button" aria-label="Close">x</button>
+  </div></main>`;
   await page.route("**/*", (route) => route.fulfill({ contentType: "text/html", body }));
   await page.goto(url);
   const started = await startHarnessProvisionSession({
@@ -160,20 +118,6 @@ it("finishes complete from a revealed key without asking the model", async () =>
     }),
   );
   expect(result).toMatchObject({ status: "complete", stored: true, stored_credential: STORED });
-  expect(askJev).not.toHaveBeenCalled();
-}, 15_000);
-
-it("stores a key revealed inline, outside any dialog, from its Copy control", async () => {
-  const persistCredentials = vi.fn(async () => STORED);
-  const { result, askJev } = await drive(
-    `navigator.clipboard.writeText('${key}')`,
-    persistCredentials,
-    "inline",
-  );
-  expect(persistCredentials).toHaveBeenCalledWith(
-    expect.objectContaining({ credentials: { api_key: key } }),
-  );
-  expect(result.status).toBe("complete");
   expect(askJev).not.toHaveBeenCalled();
 }, 15_000);
 

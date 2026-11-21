@@ -96,17 +96,6 @@ export class OAuthOnboardingRequiredError extends Error {
   }
 }
 
-// The provider's account chooser lists accounts, but none is the one this
-// session expects (or several are listed and no expected account is known).
-// Picking among them is an ordinary page decision, so the OAuth action hands
-// the chooser back to its caller at once instead of waiting out its budget.
-export class OAuthAccountChoiceRequiredError extends Error {
-  constructor(readonly origin: string) {
-    super(`OAuth reached an account chooser on ${origin} that lists no account it can select`);
-    this.name = "OAuthAccountChoiceRequiredError";
-  }
-}
-
 // The one observed denial/error signal OAuth defines: the provider redirects
 // back to the relying party carrying `error=<code>` (RFC 6749 §4.1.2.1 in the
 // query; §4.2.2.1 in the fragment for implicit flows). The code is reported
@@ -1094,7 +1083,6 @@ export async function loginWithOAuth(
           browser.activeOAuthAttempt.providerDocumentId = providerDocumentId;
           browser.activeOAuthAttempt.provider = consentProvider;
         }
-        let onGoogleChooser = false;
         if (consentProvider === "google") {
           const bodyText = await transient
             .locator("body")
@@ -1125,7 +1113,6 @@ export async function loginWithOAuth(
               throw await oauthHumanChallengeError(browser, challenge);
             }
           }
-          onGoogleChooser = googleState === "chooser";
           if (googleState !== "chooser" && googleState !== "consent") {
             pendingOnProvider = true;
             await browser.sleep(Math.min(250, remainingBudgetMs()));
@@ -1139,10 +1126,6 @@ export async function loginWithOAuth(
           consentBudgetMs,
           expectedGoogleAccountEmail,
         ).catch(() => false);
-        if (!advanced && onGoogleChooser && (await googleChooserListsAccounts(transient))) {
-          pendingOnProvider = true;
-          throw new OAuthAccountChoiceRequiredError(safeOrigin(transient.url()));
-        }
         if (!advanced) await browser.sleep(Math.min(250, remainingBudgetMs()));
       }
     }
@@ -1594,38 +1577,9 @@ async function oauthHumanChallengeError(
   );
 }
 
-// True when a Google chooser page renders at least one selectable account:
-// a visible data-identifier tile, or a visible button/link carrying an email
-// that is not an account-management alternative.
-async function googleChooserListsAccounts(page: Page): Promise<boolean> {
-  return await page
-    .evaluate(() => {
-      const EXCLUDED = /(?:\buse another account|\bremove an account|\bmanage accounts?\b)/i;
-      const EMAIL = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
-      const visible = (element: Element): boolean => {
-        const rect = element.getBoundingClientRect();
-        const style = window.getComputedStyle(element);
-        return (
-          rect.width >= 2 &&
-          rect.height >= 2 &&
-          style.display !== "none" &&
-          style.visibility !== "hidden"
-        );
-      };
-      if (Array.from(document.querySelectorAll("[data-identifier]")).some(visible)) return true;
-      return Array.from(
-        document.querySelectorAll('button, [role="button"], [role="link"], a[href]'),
-      ).some((element) => {
-        const text = `${element.getAttribute("aria-label") ?? ""} ${element.textContent ?? ""}`;
-        return visible(element) && EMAIL.test(text) && !EXCLUDED.test(text);
-      });
-    })
-    .catch(() => false);
-}
-
 // Advance a provider's consent / account-chooser screen by one click.
-// Returns false when no authorized control can be advanced; the caller decides
-// whether to keep waiting or hand the chooser back for an ordinary page action.
+// Returns false when no authorized control can be advanced; the caller retries
+// within the OAuth deadline, then hands off an unresolved attempt as pending.
 // Clicks only; never types (the critical guarantee holds here).
 export async function advanceOAuthConsent(
   browser: BrowserController,

@@ -191,7 +191,7 @@ export interface SessionDriveState {
   expiryLongAttemptedRefs: string[];
   lastQuestion: DriveHandoffQuestion | null;
   lastActionKey: string | null;
-  pendingCopyCapture?: { url: string; documentEpoch: string; ref: string } | null;
+  pendingCopyCapture?: { url: string; documentEpoch: string } | null;
   lastFingerprint: string | null;
   jevCalls: number;
   staleNonWait: number;

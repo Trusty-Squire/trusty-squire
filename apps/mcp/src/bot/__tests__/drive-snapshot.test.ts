@@ -125,61 +125,6 @@ describe("drive snapshot conversion", () => {
     expect(suggestion[0]?.[2]).toContain("Zurich Largest city in Switzerland");
   });
 
-  it("names a password field from its input type and autocomplete, in any language", () => {
-    // Kenari, 1.1.54 trace L3: "Sandi" carries no English word for password.
-    const rows = driveRowsFromSnapshot(
-      snapshot({
-        elements: [
-          {
-            ref: "@e:f0d9",
-            role: "textbox",
-            label: "Sandi",
-            placeholder: "Minimal 8 karakter",
-            inputType: "password",
-            passwordAutocomplete: "new-password",
-            required: true,
-            formId: 1,
-            operations: ["fill", "click"],
-            frameOrdinal: 0,
-          },
-        ],
-      }),
-    );
-    expect(rows[0]?.[2]).toBe(
-      "Sandi|f=password|ac=new-password|it=password|s=r|ph=Minimal 8 karakter|fm=1",
-    );
-    expect(inferFieldFromControl({ label: "Sandi", role: "textbox", inputType: "password" })).toBe(
-      "password",
-    );
-    expect(
-      inferFieldFromControl({
-        label: "Sandi",
-        role: "textbox",
-        inputType: "text",
-      }),
-    ).toBeUndefined();
-  });
-
-  it("does not admit autocomplete-only text controls for password invention", () => {
-    const rows = driveRowsFromSnapshot(
-      snapshot({
-        elements: [
-          {
-            ref: "@e:f0d9",
-            role: "textbox",
-            label: "Sandi",
-            inputType: "text",
-            passwordAutocomplete: "new-password",
-            required: true,
-            operations: ["fill"],
-            frameOrdinal: 0,
-          },
-        ],
-      }),
-    );
-    expect(rows[0]?.[2]).toBe("Sandi|ac=new-password|s=r");
-  });
-
   it("omits marked card values and keeps select option text", () => {
     const rows = driveRowsFromSnapshot(
       snapshot({

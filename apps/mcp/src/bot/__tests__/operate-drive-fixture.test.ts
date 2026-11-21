@@ -4501,64 +4501,6 @@ describe("operate_drive real-browser fixture", () => {
     }
   }, 60_000);
 
-  it("excludes only the inbox arrival page, including after a goal change", async () => {
-    const html = `<!doctype html><form>
-      <label>Email<input type="email" value="ada@fixture.test" required></label>
-      <label>Sandi<input id="password" type="password" autocomplete="new-password" required></label>
-      <button type="submit">Buat Akun</button></form>`;
-    const { context, page, started } = await openFixture(
-      html,
-      "inbox-password.test",
-      "standard",
-      "/reset",
-    );
-    const persistLogin = vi.fn(async () => true);
-    const dependencies = deps(async (_api, _state, questions) => jevChoose(questions, "DONE"));
-    try {
-      const drive = emptyDriveState("finish email verification", {});
-      sessionForCall(started.session_id)!.drive = drive;
-      drive.history.push("open verification link");
-      drive.trajectory.push({
-        action: "goto_verify",
-        target: "inbox_link",
-        confidence: 1,
-        url: page.url(),
-      });
-      await runOperateDrive(
-        { session_id: started.session_id, goal: drive.goal, max_steps: 1 },
-        api(),
-        { persistLogin },
-        dependencies,
-      );
-      expect(persistLogin).not.toHaveBeenCalled();
-      expect(await page.locator("#password").inputValue()).toBe("");
-      await page.goto("https://inbox-password.test/signup");
-      await runOperateDrive(
-        { session_id: started.session_id, goal: "create another account", max_steps: 1 },
-        api(),
-        { persistLogin },
-        dependencies,
-      );
-      expect(persistLogin).toHaveBeenCalledOnce();
-      expect(await page.locator("#password").inputValue()).not.toBe("");
-      await page.goto("https://inbox-password.test/reset");
-      await runOperateDrive(
-        {
-          session_id: started.session_id,
-          goal: "create an account on this later visit",
-          max_steps: 1,
-        },
-        api(),
-        { persistLogin },
-        dependencies,
-      );
-      expect(await page.locator("#password").inputValue()).not.toBe("");
-    } finally {
-      await finishProvisionSession(started.session_id);
-      await context.close();
-    }
-  }, 60_000);
-
   it("does not type an invented password whose login could not be saved", async () => {
     const { context, page, started } = await openFixture(
       NEW_ACCOUNT_PASSWORD_HTML,

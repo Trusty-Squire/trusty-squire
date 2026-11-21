@@ -225,8 +225,8 @@ describe("inventPassword", () => {
 describe("newAccountPasswordTargets", () => {
   const signup: WireRow[] = [
     ["@e:email", "t", "Email|f=email|s=r|n=ada@fixture.test|fm=1"],
-    ["@e:pw", "t", "Password (min 12 chars, required)|f=password|it=password|s=r|fm=1"],
-    ["@e:pw2", "t", "Confirm password|f=password|it=password|s=r|fm=1"],
+    ["@e:pw", "t", "Password (min 12 chars, required)|f=password|s=r|fm=1"],
+    ["@e:pw2", "t", "Confirm password|f=password|s=r|fm=1"],
     ["@e:age", "c", "I confirm that I am at least 18|s=ru|fm=1"],
     ["@e:create", "b", "Create account|a=submit|fm=1"],
   ];
@@ -251,7 +251,7 @@ describe("newAccountPasswordTargets", () => {
     expect(newAccountPasswordTargets(signup, {}, ["@e:pw"])).toBeUndefined();
     const signin: WireRow[] = [
       ["@e:email", "t", "Email|f=email|s=r|n=ada@fixture.test|fm=1"],
-      ["@e:pw", "t", "Password|f=password|it=password|s=r|fm=1"],
+      ["@e:pw", "t", "Password|f=password|s=r|fm=1"],
       ["@e:go", "b", "Sign in|a=submit|fm=1"],
       ["@e:tab", "b", "Sign up|fm=2"],
     ];
@@ -289,9 +289,9 @@ describe("newAccountPasswordTargets", () => {
   });
 
   it.each(["Get started", "Join"])("does not invent from a generic %s submit", (label) => {
-    const rows: WireRow[] = signup
-      .filter((row) => row[0] !== "@e:pw2")
-      .map((row) => (row[0] === "@e:create" ? [row[0], "b", `${label}|a=submit|fm=1`] : row));
+    const rows: WireRow[] = signup.map((row) =>
+      row[0] === "@e:create" ? [row[0], "b", `${label}|a=submit|fm=1`] : row,
+    );
     expect(newAccountPasswordTargets(rows, {}, [], () => ["Sign in"])).toBeUndefined();
     expect(newAccountPasswordTargets(rows, {}, [])).toBeUndefined();
     expect(newAccountPasswordTargets(rows, {}, [], () => ["Create account"])).toBeDefined();
@@ -314,9 +314,9 @@ describe("newAccountPasswordTargets", () => {
   );
 
   it("reuses confirmation on a neutral continuation only after invention", () => {
-    const rows: WireRow[] = signup
-      .filter((row) => row[0] !== "@e:email")
-      .map((row) => (row[0] === "@e:create" ? [row[0], "b", "Continue|a=submit|fm=1"] : row));
+    const rows: WireRow[] = signup.map((row) =>
+      row[0] === "@e:create" ? [row[0], "b", "Continue|a=submit|fm=1"] : row,
+    );
     expect(newAccountPasswordTargets(rows, {}, [])).toBeUndefined();
     expect(
       newAccountPasswordTargets(
@@ -327,168 +327,6 @@ describe("newAccountPasswordTargets", () => {
         () => true,
       )?.password[0],
     ).toBe("@e:pw2");
-  });
-
-  // Kenari, 1.1.54 trace L6: an Indonesian sign-up form whose labels match no
-  // English pattern; the snapshot now names the field from type=password and
-  // its autocomplete token.
-  const kenariSignup: WireRow[] = [
-    ["@e:f0d13", "b", "Buat Akun|a=submit|fm=1"],
-    ["@e:f0d7", "b", "Masuk"],
-    [
-      "@e:f0d8",
-      "t",
-      "Email|f=email|s=r|n=methoxine+grunt-kenari-32@gmail.com|ph=kamu@contoh.com|fm=1",
-    ],
-    ["@e:f0d9", "t", "Sandi|f=password|it=password|ac=new-password|s=r|ph=Minimal 8 karakter|fm=1"],
-    ["@e:f0d10", "t", "Kode referral / promo (opsional)|ph=Contoh: TEMANKU|fm=1"],
-    ["@e:f0d14", "l", "Daftar dengan Google|u=https://kenari.id/api/auth/google"],
-  ];
-
-  it("does not invent or confirm a password into a visible text control", () => {
-    const visible = kenariSignup.map(
-      (row): WireRow =>
-        row[0] === "@e:f0d9" ? [row[0], row[1], row[2]!.replace("|it=password", "")] : row,
-    );
-    expect(newAccountPasswordTargets(visible, {}, [])).toBeUndefined();
-    const confirms: WireRow[] = [
-      ...kenariSignup,
-      ["@e:confirm", "t", "Confirm password|f=password|ac=new-password|s=r|fm=1"],
-    ];
-    expect(newAccountPasswordTargets(confirms, {}, [])?.confirms).toEqual([]);
-  });
-
-  it("invents for a non-English sign-up form the page declares new-password", () => {
-    const targets = newAccountPasswordTargets(kenariSignup, {}, ["@e:f0d8"], () => ["buat akun"]);
-    expect(targets?.password[0]).toBe("@e:f0d9");
-    expect(targets?.confirms).toEqual([]);
-    expect(targets?.identity?.[0]).toBe("@e:f0d8");
-  });
-
-  it("leaves a non-English sign-in form alone", () => {
-    // Kenari, 1.1.54 trace L2: the same page's sign-in tab.
-    const signin: WireRow[] = [
-      ["@e:f0d4", "b", "Masuk|a=submit|fm=1"],
-      ["@e:f0d1", "b", "Daftar gratis"],
-      ["@e:f0d2", "t", "Email|f=email|s=r|n=ada@fixture.test|ph=kamu@contoh.com|fm=1"],
-      [
-        "@e:f0d3",
-        "t",
-        "Sandi|f=password|it=password|ac=current-password|s=r|ph=Minimal 8 karakter|fm=1",
-      ],
-      ["@e:f0d5", "b", "Lupa sandi?"],
-    ];
-    expect(newAccountPasswordTargets(signin, {}, [], () => ["masuk"])).toBeUndefined();
-  });
-
-  it("does not infer signup from two unannotated Indonesian password controls", () => {
-    const rows: WireRow[] = [
-      ["@e:email", "t", "Surel|f=email|s=r|n=ada@fixture.test|fm=1"],
-      ["@e:pw", "t", "Kata sandi|f=password|it=password|s=r|fm=1"],
-      ["@e:pw2", "t", "Ulangi kata sandi|f=password|it=password|s=r|fm=1"],
-      ["@e:go", "b", "Lanjut|a=submit|fm=1"],
-    ];
-    expect(newAccountPasswordTargets(rows, {}, [])).toBeUndefined();
-  });
-
-  // Added controls belong to the same frame as the captured Kenari form.
-  const pairedSignup: WireRow[] = [
-    ...kenariSignup,
-    ["@e:f0d15", "t", "Ulangi sandi|f=password|it=password|ac=new-password|s=r|fm=1"],
-  ];
-
-  it("assigns primary and confirmation roles before filtering filled controls", () => {
-    const targets = newAccountPasswordTargets(pairedSignup, {}, []);
-    expect(targets?.password[0]).toBe("@e:f0d9");
-    expect(targets?.confirms.map((row) => row[0])).toEqual(["@e:f0d15"]);
-    expect(targets?.reuseOnly).toBe(false);
-    for (const populated of [true, false]) {
-      const rows: WireRow[] = pairedSignup.map((row) =>
-        row[0] === "@e:f0d9" && populated ? [row[0], row[1], row[2]!.replace("s=r", "s=rp")] : row,
-      );
-      const filled = populated ? [] : ["@e:f0d9"];
-      expect(newAccountPasswordTargets(rows, {}, filled)).toBeUndefined();
-      const confirmation = newAccountPasswordTargets(
-        rows,
-        {},
-        filled,
-        () => [],
-        () => true,
-      );
-      expect(confirmation?.password[0]).toBe("@e:f0d15");
-      expect(confirmation?.confirms).toEqual([]);
-      expect(confirmation?.reuseOnly).toBe(true);
-    }
-  });
-
-  it.each([false, true])("rejects an Indonesian inbox reset form with reuse=%s", (reuse) => {
-    const reset: WireRow[] = kenariSignup.map((row) =>
-      row[0] === "@e:f0d13" ? [row[0], row[1], "Atur ulang sandi|a=submit|fm=1"] : row,
-    );
-    expect(
-      newAccountPasswordTargets(
-        reset,
-        {},
-        [],
-        () => [],
-        () => reuse,
-        true,
-      ),
-    ).toBeUndefined();
-  });
-
-  it.each(["current", "third"])("excludes a %s password on Indonesian forms", (kind) => {
-    const rows: WireRow[] =
-      kind === "current"
-        ? [
-            ...pairedSignup,
-            ["@e:f0d16", "t", "Sandi lama|f=password|it=password|ac=current-password|s=rp|fm=1"],
-          ]
-        : [...pairedSignup, ["@e:f0d16", "t", "Sandi lama|f=password|it=password|s=rp|fm=1"]];
-    expect(newAccountPasswordTargets(rows, {}, [])).toBeUndefined();
-    expect(
-      newAccountPasswordTargets(
-        rows,
-        {},
-        [],
-        () => ["Create account"],
-        () => true,
-      ),
-    ).toBeUndefined();
-  });
-
-  it.each([
-    ["same form", "@e:f0d16", 1, false],
-    ["another form", "@e:f0d16", 2, true],
-    ["another frame", "@e:f1d16", 1, true],
-  ] as const)("scopes revealed current-password exclusion to %s", (_scope, ref, form, eligible) => {
-    const rows: WireRow[] = [
-      ...pairedSignup,
-      [ref, "t", `Sandi lama|ac=current-password|s=p|n=existing-secret|fm=${form}`],
-    ];
-    for (const reuse of [false, true]) {
-      const targets = newAccountPasswordTargets(
-        rows,
-        {},
-        reuse ? ["@e:f0d9"] : [],
-        () => ["Create account"],
-        () => reuse,
-      );
-      if (eligible) {
-        expect(targets?.password[0]).toBe(reuse ? "@e:f0d15" : "@e:f0d9");
-      } else {
-        expect(targets).toBeUndefined();
-      }
-    }
-  });
-
-  it("excludes current-password even on a single-field signup-labeled form", () => {
-    const rows: WireRow[] = kenariSignup.map((row) =>
-      row[0] === "@e:f0d9"
-        ? [row[0], row[1], row[2]!.replace("new-password", "current-password")]
-        : row,
-    );
-    expect(newAccountPasswordTargets(rows, {}, [], () => ["Create account"])).toBeUndefined();
   });
 
   it("excludes populated primary and confirmation controls", () => {
@@ -515,12 +353,12 @@ describe("newAccountPasswordTargets", () => {
     "keeps signup selection inside its frame with form metadata %s",
     (form) => {
       const rows: WireRow[] = [
-        ["@e:f0d1", "t", `Confirm password|f=password|it=password|s=r${form}`],
+        ["@e:f0d1", "t", `Confirm password|f=password|s=r${form}`],
         ["@e:f0d2", "t", `Email|f=email|n=merchant@fixture.test${form}`],
         ["@e:f0d3", "b", `Sign in|a=submit${form}`],
         ["@e:f1d1", "t", `Email|f=email|n=provider@fixture.test${form}`],
-        ["@e:f1d2", "t", `Password|f=password|it=password|s=r${form}`],
-        ["@e:f1d3", "t", `Confirm password|f=password|it=password|s=r${form}`],
+        ["@e:f1d2", "t", `Password|f=password|s=r${form}`],
+        ["@e:f1d3", "t", `Confirm password|f=password|s=r${form}`],
         ["@e:f1d4", "b", `Create account|a=submit${form}`],
       ];
       const headings = (row: WireRow) =>
@@ -543,13 +381,13 @@ describe("newAccountPasswordTargets", () => {
   ])("skips an earlier ineligible %s form", (submit, login) => {
     const earlier: WireRow[] = [
       ["@e:f0d1", "t", `Email|f=email|n=${login}|fm=1`],
-      ["@e:f0d2", "t", "Password|f=password|it=password|s=r|fm=1"],
+      ["@e:f0d2", "t", "Password|f=password|s=r|fm=1"],
       ["@e:f0d3", "b", `${submit}|a=submit|fm=1`],
     ];
     const later: WireRow[] = [
       ["@e:f0d4", "t", "Email|f=email|n=later@fixture.test|fm=2"],
-      ["@e:f0d5", "t", "Password|f=password|it=password|s=r|fm=2"],
-      ["@e:f0d6", "t", "Confirm password|f=password|it=password|s=r|fm=2"],
+      ["@e:f0d5", "t", "Password|f=password|s=r|fm=2"],
+      ["@e:f0d6", "t", "Confirm password|f=password|s=r|fm=2"],
       ["@e:f0d7", "b", "Create account|a=submit|fm=2"],
     ];
     const rows = [...earlier, ...later];
@@ -567,9 +405,9 @@ describe("newAccountPasswordTargets", () => {
 
   it("skips an ineligible confirmation before an eligible saved-password confirmation", () => {
     const rows: WireRow[] = [
-      ["@e:f0d1", "t", "Confirm password|f=password|it=password|s=r|fm=1"],
+      ["@e:f0d1", "t", "Confirm password|f=password|s=r|fm=1"],
       ["@e:f0d2", "b", "Reset password|a=submit|fm=1"],
-      ["@e:f1d1", "t", "Confirm password|f=password|it=password|s=r|fm=1"],
+      ["@e:f1d1", "t", "Confirm password|f=password|s=r|fm=1"],
       ["@e:f1d2", "b", "Continue|a=submit|fm=1"],
     ];
     const targets = newAccountPasswordTargets(
@@ -584,9 +422,9 @@ describe("newAccountPasswordTargets", () => {
 
   it("never fills a change-password form", () => {
     const rows: WireRow[] = [
-      ["@e:old", "t", "Current password|f=password|it=password|s=r|fm=1"],
-      ["@e:new", "t", "New password|f=password|it=password|s=r|fm=1"],
-      ["@e:again", "t", "Confirm new password|f=password|it=password|s=r|fm=1"],
+      ["@e:old", "t", "Current password|f=password|s=r|fm=1"],
+      ["@e:new", "t", "New password|f=password|s=r|fm=1"],
+      ["@e:again", "t", "Confirm new password|f=password|s=r|fm=1"],
       ["@e:save", "b", "Save|a=submit|fm=1"],
     ];
     expect(newAccountPasswordTargets(rows, {}, [])).toBeUndefined();

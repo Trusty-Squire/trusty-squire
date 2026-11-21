@@ -17,7 +17,6 @@ import {
   loginWithOAuth,
   oauthTransitionStatus,
   settleAfterOAuth,
-  OAuthAccountChoiceRequiredError,
   OAuthAwaitingHumanError,
   OAuthFailedError,
   OAuthOnboardingRequiredError,
@@ -1097,50 +1096,6 @@ describe("BrowserController OAuth popup lifecycle", () => {
       );
       expect(identityAuthUser).toBe("worker@example.com");
       expect(controller.currentUrl()).toBe("https://product.test/callback");
-    } finally {
-      await context.close().catch(() => undefined);
-    }
-  });
-
-  // Bootstrap run 13 (1.1.50 trace L2): the chooser listed two accounts, none
-  // matched the session email, and the action waited out its budget before
-  // returning awaiting_human. It now hands the chooser back at once.
-  it.each([
-    ["no session account is known", undefined],
-    ["no tile matches the session account", "worker@example.com"],
-  ])("hands back a multi-account chooser when %s", async (_case, expectedEmail) => {
-    const context = await signedInGoogleContext();
-    const product = await context.newPage();
-    let consentRequested = false;
-    const chooser =
-      "https://accounts.google.com/v3/signin/accountchooser?prompt=select_account&redirect_uri=https%3A%2F%2Fproduct.test%2Fcallback";
-    await context.route("https://product.test/**", async (route) => {
-      await route.fulfill({
-        contentType: "text/html",
-        body: `<main id="state">Signed out</main><button id="oauth" onclick='window.open(${JSON.stringify(chooser)})'>Continue with Google</button>`,
-      });
-    });
-    await context.route("https://accounts.google.com/**", async (route) => {
-      if (route.request().url().includes("/consent?")) consentRequested = true;
-      await route.fulfill({
-        contentType: "text/html",
-        body: `<h1>Choose an account</h1>
-          <button data-identifier="first@example.com" onclick="location.href='https://accounts.google.com/consent?account=first@example.com'">First first@example.com</button>
-          <button data-identifier="second@example.com" onclick="location.href='https://accounts.google.com/consent?account=second@example.com'">Second second@example.com</button>
-          <button>Use another account</button>`,
-      });
-    });
-    await product.goto("https://product.test/login");
-    const controller = BrowserController.fromHarnessPage(product);
-
-    try {
-      const started = Date.now();
-      await expect(
-        loginWithOAuth(controller, "#oauth", 20_000, "google", expectedEmail),
-      ).rejects.toBeInstanceOf(OAuthAccountChoiceRequiredError);
-      expect(Date.now() - started).toBeLessThan(15_000);
-      expect(consentRequested).toBe(false);
-      expect(controller.currentUrl()).toBe(chooser);
     } finally {
       await context.close().catch(() => undefined);
     }

@@ -8,7 +8,7 @@
 // re-exporting the tool layer's import surface; this module imports only from
 // the rest of the tree, never from provision-session.
 
-import type { ElementHandle, Locator, Page } from "playwright";
+import type { ElementHandle, Page } from "playwright";
 import type { CaptureSource, ElementCaptureSource } from "../credential-capture.js";
 import type { Session } from "../session/model.js";
 import { audit, sessionForCall } from "../session/lifecycle.js";
@@ -656,12 +656,10 @@ async function ensureCaptureClipboardPermission(page: Page | undefined): Promise
 
 /** A created-key dialog may render its readable value outside DOM text (for
  * example in generated content) while keeping a stale mask in the DOM. Its
- * adjacent Copy control is then the page's authoritative value source. A key
- * revealed inline has no dialog; `inlineCopyRef` names its rowed Copy control. */
+ * adjacent Copy control is then the page's authoritative value source. */
 async function copyCredentialFromDialog(
   page: Page | undefined,
   browser: Session["browser"],
-  inlineCopyRef?: string,
 ): Promise<string | null> {
   if (page === undefined) return null;
   const modalSelector = 'dialog[open], [role="dialog"], [role="alertdialog"], [aria-modal="true"]';
@@ -709,7 +707,7 @@ async function copyCredentialFromDialog(
     }
     return null;
   });
-  let copyButton: Locator | ElementHandle | null =
+  let copyButton =
     target === null
       ? null
       : page
@@ -782,73 +780,56 @@ async function copyCredentialFromDialog(
     // The drive snapshot already hit-tests controls against covering layers.
     // Use that same evidence for a visually modal surface with no dialog role.
     const snapshot = await captureFrameSnapshot(page, [], 0);
-    const modal =
-      snapshot !== null &&
-      !snapshot.timedOut &&
-      snapshot.elements.some(
+    if (
+      snapshot === null ||
+      snapshot.timedOut ||
+      !snapshot.elements.some(
         (element) => element.occludedBy === "overlay" || element.occludedBy === "dialog",
-      ) &&
-      /\b(?:api\s*key|secret|token|credential|key)\b/i.test(snapshot.text);
-    const candidates = modal
-      ? snapshot.elements.filter(
-          (element) =>
-            element.role === "button" &&
-            element.occludedBy === undefined &&
-            !element.offscreen &&
-            element.selector !== undefined,
-        )
-      : [];
-    const selector =
-      candidates.length === 0
-        ? null
-        : await page.evaluate(
-            (refs) => {
-              const registry = (
-                window as Window & {
-                  __tsDriveRegistry?: { nodes: Map<string, Element> };
-                }
-              ).__tsDriveRegistry;
-              for (const candidate of refs) {
-                const button = registry?.nodes.get(candidate.ref);
-                if (button === undefined || !button.isConnected) continue;
-                const icon = button.querySelector("svg");
-                const cues = [button, icon]
-                  .filter((element): element is Element => element !== null)
-                  .map((element) =>
-                    [
-                      element.textContent,
-                      element.getAttribute("aria-label"),
-                      element.getAttribute("title"),
-                      element.id,
-                      element.getAttribute("class"),
-                      element.getAttribute("data-testid"),
-                      element.getAttribute("data-icon"),
-                    ].join(" "),
-                  )
-                  .join(" ");
-                if (/cop(?:y|ied)|clipboard/i.test(cues)) return candidate.selector;
-              }
-              return null;
-            },
-            candidates.map(({ ref, selector }) => ({ ref, selector: selector! })),
-          );
-    if (selector !== null) copyButton = page.locator(selector);
-  }
-  if (copyButton === null && inlineCopyRef !== undefined) {
-    // No modal layer holds a Copy control: the key was revealed inline, so its
-    // own rowed Copy control is the source.
-    const handle = await page
-      .evaluateHandle((ref) => {
+      ) ||
+      !/\b(?:api\s*key|secret|token|credential|key)\b/i.test(snapshot.text)
+    )
+      return null;
+    const candidates = snapshot.elements.filter(
+      (element) =>
+        element.role === "button" &&
+        element.occludedBy === undefined &&
+        !element.offscreen &&
+        element.selector !== undefined,
+    );
+    const selector = await page.evaluate(
+      (refs) => {
         const registry = (
-          window as Window & { __tsDriveRegistry?: { nodes: Map<string, Element> } }
+          window as Window & {
+            __tsDriveRegistry?: { nodes: Map<string, Element> };
+          }
         ).__tsDriveRegistry;
-        const node = registry?.nodes.get(ref);
-        return node !== undefined && node.isConnected ? node : null;
-      }, inlineCopyRef)
-      .catch(() => null);
-    copyButton = handle?.asElement() ?? null;
+        for (const candidate of refs) {
+          const button = registry?.nodes.get(candidate.ref);
+          if (button === undefined || !button.isConnected) continue;
+          const icon = button.querySelector("svg");
+          const cues = [button, icon]
+            .filter((element): element is Element => element !== null)
+            .map((element) =>
+              [
+                element.textContent,
+                element.getAttribute("aria-label"),
+                element.getAttribute("title"),
+                element.id,
+                element.getAttribute("class"),
+                element.getAttribute("data-testid"),
+                element.getAttribute("data-icon"),
+              ].join(" "),
+            )
+            .join(" ");
+          if (/cop(?:y|ied)|clipboard/i.test(cues)) return candidate.selector;
+        }
+        return null;
+      },
+      candidates.map(({ ref, selector }) => ({ ref, selector: selector! })),
+    );
+    if (selector === null) return null;
+    copyButton = page.locator(selector);
   }
-  if (copyButton === null) return null;
   // Empty the clipboard first: a value present after the click was written by
   // this click, even when it equals what an earlier Copy click left there.
   const before = await browser.readClipboard(page).catch(() => "");
@@ -879,10 +860,7 @@ async function copyCredentialFromDialog(
   return copied;
 }
 
-export async function extractCredentials(
-  sessionId: string,
-  inlineCopyRef?: string,
-): Promise<ExtractResult> {
+export async function extractCredentials(sessionId: string): Promise<ExtractResult> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
   const { browser } = session;
@@ -892,7 +870,7 @@ export async function extractCredentials(
   // Storage is decided by source, never by shape: the Copy click itself proves
   // provenance, whatever the value looks like (Vast.ai's key is 64-char hex).
   await ensureCaptureClipboardPermission(page);
-  const copied = await copyCredentialFromDialog(page, browser, inlineCopyRef);
+  const copied = await copyCredentialFromDialog(page, browser);
   audit(sessionId, "extract", { found: copied !== null });
   return {
     session_id: sessionId,

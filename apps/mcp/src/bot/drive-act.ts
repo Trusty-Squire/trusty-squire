@@ -299,57 +299,6 @@ export async function reenterDriveField(
   }
 }
 
-/** The submitted form's fields that fail the browser's own constraint
- *  validation, as "label: message". A submit blocked this way shows only a
- *  transient native bubble, so the page itself never says why it did nothing. */
-export async function submitFormInvalidFields(
-  scope: Page | Frame,
-  selector: string,
-): Promise<string[]> {
-  if (selector.length === 0) return [];
-  return await evaluateBound(
-    scope,
-    (sel: string) => {
-      const registry = (
-        window as Window & {
-          __tsDriveRegistry?: { resolveSelector?: (selector: string) => Element[] };
-        }
-      ).__tsDriveRegistry;
-      const element = registry?.resolveSelector?.(sel)[0] ?? document.querySelector(sel);
-      if (element === null) return [];
-      const form =
-        element instanceof HTMLButtonElement || element instanceof HTMLInputElement
-          ? (element.form ?? element.closest("form"))
-          : element.closest("form");
-      if (form === null) return [];
-      const out: string[] = [];
-      for (const control of Array.from(form.elements)) {
-        if (
-          !(
-            control instanceof HTMLInputElement ||
-            control instanceof HTMLSelectElement ||
-            control instanceof HTMLTextAreaElement
-          )
-        ) {
-          continue;
-        }
-        if (!control.willValidate || control.validity.valid) continue;
-        const label =
-          control.labels?.[0]?.textContent ??
-          control.getAttribute("aria-label") ??
-          control.getAttribute("placeholder") ??
-          control.name;
-        const name = (label ?? "").replace(/\s+/g, " ").trim();
-        out.push(
-          name.length > 0 ? `${name}: ${control.validationMessage}` : control.validationMessage,
-        );
-      }
-      return out;
-    },
-    selector,
-  ).catch(() => [] as string[]);
-}
-
 /** The rowed controls' identity and actionability, read back through the
  *  snapshot's own derivation. */
 export async function driveControlDigest(page: Page): Promise<string> {
