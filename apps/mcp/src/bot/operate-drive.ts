@@ -7101,22 +7101,22 @@ async function driveLoop(input: {
           url_after: session.browser.currentUrl(),
           outcome: "error",
         });
-        // A thrown dispatch never reaches markDead, so without this the next
-        // drive call re-picks the same control until the caller times out.
-        rememberFailedAction(drive, rows, decision.actionKey, observation.url);
-        const thrownRow = findRow(rows, decision.actionKey, observation.url);
-        recordDeadAction(
-          drive,
-          pageProgressKey(
-            observation.url,
-            rows,
-            drive.filledRefs,
-            observation.semantic?.headings ?? [],
-          ),
-          thrownRow === undefined
-            ? decision.actionKey
-            : stableControlKey(thrownRow, observation.url),
-        );
+        if (!(error instanceof OAuthAwaitingHumanError)) {
+          rememberFailedAction(drive, rows, decision.actionKey, observation.url);
+          const thrownRow = findRow(rows, decision.actionKey, observation.url);
+          recordDeadAction(
+            drive,
+            pageProgressKey(
+              observation.url,
+              rows,
+              drive.filledRefs,
+              observation.semantic?.headings ?? [],
+            ),
+            thrownRow === undefined
+              ? decision.actionKey
+              : stableControlKey(thrownRow, observation.url),
+          );
+        }
       }
       throw error;
     }

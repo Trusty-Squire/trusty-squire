@@ -6,6 +6,8 @@ import { chromium, type Browser } from "playwright";
 import type { ApiClient } from "../../api-client.js";
 import { BrowserController } from "../browser.js";
 import { OAUTH_PROVIDERS } from "../oauth-providers.js";
+import { OAuthAwaitingHumanError } from "../oauth-login.js";
+import { sessionForCall } from "../session/lifecycle.js";
 import {
   ensureGeneratedFacts,
   peakedProbabilities,
@@ -244,6 +246,58 @@ describe("drive OAuth trace", () => {
       await context.close();
     }
   }, 30_000);
+
+  it.each(["not_attempted", "pending"] as const)(
+    "keeps an OAuth control retryable after a recoverable %s budget exception",
+    async (phase) => {
+      const provider = Object.keys(OAUTH_PROVIDERS)[0]!;
+      const context = await browser.newContext();
+      const page = await context.newPage();
+      const label = `Sign up with ${provider}`;
+      await page.goto(`data:text/html,${encodeURIComponent(`<button>${label}</button>`)}`);
+      const started = await startHarnessProvisionSession({
+        browser: BrowserController.fromHarnessPage(page),
+        serviceUrl: page.url(),
+        format: "compact",
+        initialObservation: "drive",
+      });
+      try {
+        let dispatches = 0;
+        const deps: DriveDependencies = {
+          askJev: chooseOauth(label),
+          act,
+          observe,
+          startSession: async () => {
+            throw new Error("fixture uses an existing session");
+          },
+          awaitVerification,
+          injectCard: async () => ({ status: "unused" }),
+          driveAct: async () => {
+            dispatches += 1;
+            throw new OAuthAwaitingHumanError("OAuth call budget exhausted", phase);
+          },
+        };
+        const call = () =>
+          runOperateDrive(
+            { session_id: started.session_id, goal: `Sign up with ${provider}`, max_steps: 2 },
+            {} as ApiClient,
+            undefined,
+            deps,
+          );
+        expect((await call()).status).toBe("budget");
+        expect(dispatches).toBe(1);
+        const drive = sessionForCall(started.session_id)!.drive!;
+        expect(drive.failedActionKeys).toEqual([]);
+        expect(drive.exhaustedActionKeys).toEqual([]);
+        expect((await call()).status).toBe("budget");
+        expect(dispatches).toBe(2);
+      } finally {
+        await finishProvisionSession(started.session_id);
+        await context.close();
+      }
+    },
+    30_000,
+  );
 
   it("records dispatch and handoff when identity admission returns before a click", async () => {
     const provider = Object.keys(OAUTH_PROVIDERS)[0]!;
