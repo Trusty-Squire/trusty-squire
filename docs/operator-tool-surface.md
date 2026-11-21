@@ -225,8 +225,11 @@ login was saved. These completion fields are absent on other statuses.
 A complete result leaves the session open for further tasks; no additional
 key capture is needed when `stored` is true.
 `needs_value` names the selected field's label when its value is unavailable.
-Empty required fields and a vote that the page is not asking for an emailed
-code do not override the selected operation. `stuck` means no listed element
+Empty required fields do not block a selected OAuth dispatch, even when the
+OAuth control shares a form with empty username/password fields. Ordinary
+submit clicks still check for outstanding empty required fields in their own
+form before dispatch. A vote that the page is not asking for an emailed code
+does not override the selected operation. `stuck` means no listed element
 advances the goal. Resume the same session with `answer` (a
 readable action slug from the handoff options, `done`, or `stuck`) and/or
 added `facts`. Use the single-step primitives only for a handoff you are

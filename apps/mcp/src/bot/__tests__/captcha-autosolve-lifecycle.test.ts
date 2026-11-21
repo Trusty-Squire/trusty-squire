@@ -20,6 +20,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 const h = vi.hoisted(() => ({
   solveCalls: [] as string[],
   injectCalls: 0,
+  turnstileInjectCalls: 0,
+  variant: "hcaptcha" as CaptchaVariant,
   failSolve: false,
   variantTokenPresent: false,
   challengeRendered: true,
@@ -59,7 +61,7 @@ vi.mock("../captcha.js", async (importOriginal) => ({
     }
   },
   detectCaptchaVariant: async () => ({
-    variant: "hcaptcha" as const,
+    variant: h.variant,
     challengeRendered: h.challengeRendered,
   }),
   hasHcaptchaResponseTokenWithCompat: async () => h.variantTokenPresent,
@@ -77,6 +79,12 @@ vi.mock("../captcha.js", async (importOriginal) => ({
     h.variantTokenPresent = true;
     return true;
   },
+  extractTurnstileSitekey: async () => "0x4AAAAAAAAAAAAAAAAAAAAA",
+  injectTurnstileToken: async () => {
+    h.turnstileInjectCalls += 1;
+    h.variantTokenPresent = true;
+    return true;
+  },
 }));
 
 const auditMock = vi.hoisted(() => ({ fn: vi.fn() }));
@@ -90,6 +98,7 @@ import type { Page } from "playwright";
 import type { Session } from "../session/model.js";
 import type * as CaptchaModule from "../captcha.js";
 import type * as LifecycleModule from "../session/lifecycle.js";
+import type { CaptchaVariant } from "../captcha.js";
 
 const PAGE_URL = "https://bsky.app/";
 
@@ -147,6 +156,8 @@ const outcomes = (): string[] =>
 beforeEach(() => {
   h.solveCalls = [];
   h.injectCalls = 0;
+  h.turnstileInjectCalls = 0;
+  h.variant = "hcaptcha";
   h.failSolve = false;
   h.variantTokenPresent = false;
   h.challengeRendered = true;
@@ -187,7 +198,9 @@ describe("attemptOperateCaptchaAutoSolve — bounded spend", () => {
     expect(h.solveCalls).toHaveLength(1);
     expect(outcomes()).toContain("token_expired");
     expect(outcomes()).toContain("fetch_skipped");
-    expect(diag.some((line) => /outcome=fetch_skipped reason=expiry_backoff/.test(line))).toBe(true);
+    expect(diag.some((line) => /outcome=fetch_skipped reason=expiry_backoff/.test(line))).toBe(
+      true,
+    );
 
     // 30s into the backoff: still skipped (backoff is 30s from the expiry,
     // minus the elapsed observe time — advance just past it).
@@ -343,6 +356,61 @@ describe("attemptOperateCaptchaAutoSolve — bounded spend", () => {
       );
       expect(detectNoChallenge).toHaveLength(1);
       expect(detectNoChallenge[0]).toContain("challenge_rendered=false");
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+});
+
+describe("attemptOperateCaptchaAutoSolve — Cloudflare Turnstile", () => {
+  beforeEach(() => {
+    h.variant = "turnstile";
+    // Turnstile never renders an image grid; its widget is the challenge.
+    h.challengeRendered = false;
+  });
+
+  it("buys a Turnstile token for an unsolved widget and injects it on the next observation", async () => {
+    const session = fakeSession();
+    const page = fakePage(false);
+
+    const first = await attemptOperateCaptchaAutoSolve(session, page);
+    await flushDetached();
+    expect(first).toBe("fetch_started");
+    expect(h.solveCalls).toEqual(["turnstile"]);
+    expect(h.turnstileInjectCalls).toBe(0);
+
+    const delivered = await attemptOperateCaptchaAutoSolve(session, page);
+    await flushDetached();
+    expect(delivered).toBe("injected");
+    expect(h.turnstileInjectCalls).toBe(1);
+    expect(h.injectCalls).toBe(0);
+    expect(h.solveCalls).toEqual(["turnstile"]);
+  });
+
+  it("never spends on a Turnstile widget that already holds a token", async () => {
+    h.variantTokenPresent = true;
+    const outcome = await attemptOperateCaptchaAutoSolve(fakeSession(), fakePage(false));
+    await flushDetached();
+    expect(outcome).toBe("already_settled");
+    expect(h.solveCalls).toHaveLength(0);
+  });
+
+  it("keeps the failure cooldown on Turnstile purchases", async () => {
+    const session = fakeSession();
+    const page = fakePage(false);
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      h.failSolve = true;
+      expect(await attemptOperateCaptchaAutoSolve(session, page)).toBe("fetch_started");
+      await flushDetached();
+      expect(await attemptOperateCaptchaAutoSolve(session, page)).toBe("cooldown");
+      expect(h.solveCalls).toEqual(["turnstile"]);
+
+      vi.advanceTimersByTime(30_001);
+      h.failSolve = false;
+      expect(await attemptOperateCaptchaAutoSolve(session, page)).toBe("fetch_started");
+      await flushDetached();
+      expect(h.solveCalls).toEqual(["turnstile", "turnstile"]);
     } finally {
       errorSpy.mockRestore();
     }

@@ -5668,9 +5668,10 @@ describe("operate session — captcha auto-solve on the general drive", () => {
     await finishProvisionSession(started.session_id);
   });
 
-  it("leaves Turnstile to its managed challenge even when one is rendered", async () => {
+  it("solves an unsolved Turnstile widget through 2Captcha and injects the token", async () => {
     h.captchaVariant = "turnstile";
-    h.captchaChallengeRendered = true;
+    // Turnstile never renders an image grid; the widget itself is the challenge.
+    h.captchaChallengeRendered = false;
     h.twoCaptchaAvailable = true;
     h.captureOverride = challengeCapture();
 
@@ -5680,15 +5681,19 @@ describe("operate session — captcha auto-solve on the general drive", () => {
       format: "compact",
     });
     await drainDetached();
-    await observe(started.session_id);
-
-    expect(h.twoCaptchaCalls).toEqual([]);
-    expect(h.injectCaptchaCalls).toEqual([]);
     const payload = started as unknown as {
       semantic: { blocked: boolean; blockers: Array<Record<string, unknown>> };
     };
     expect(payload.semantic.blocked).toBe(true);
     expect(payload.semantic.blockers[0]).toMatchObject({ kind: "challenge" });
+    expect(h.twoCaptchaCalls).toEqual(["turnstile"]);
+    expect(h.injectCaptchaCalls).toEqual([]);
+
+    await observe(started.session_id);
+    await drainDetached();
+    expect(h.injectCaptchaCalls).toEqual(["turnstile"]);
+    expect(h.twoCaptchaCalls).toEqual(["turnstile"]);
+    await finishProvisionSession(started.session_id);
   });
 });
 
