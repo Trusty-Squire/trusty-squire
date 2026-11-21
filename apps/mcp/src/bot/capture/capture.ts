@@ -21,8 +21,8 @@ import { captureFrameSnapshot } from "../drive-snapshot.js";
 export interface ExtractResult {
   session_id: string;
   url: string;
-  // Only a value with a known source: what this extraction's own Copy click
-  // in a credential dialog wrote to the clipboard. Page text is never scanned.
+  // A value selected from a named source: explicit capture, a credential
+  // dialog's Copy result, or the drive's chosen visible snapshot value.
   credentials: Record<string, string>;
   // Set when no key had a known source; nothing is stored.
   error?: string;

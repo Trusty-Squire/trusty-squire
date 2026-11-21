@@ -555,6 +555,10 @@ export class BrowserController implements BrowserDriver {
     return this.cardValueOutputMask.maskDriveRows(rows);
   }
 
+  maskDriveSaveValue(value: string, textbox: boolean): string {
+    return this.cardValueOutputMask.maskDriveSaveValue(value, textbox);
+  }
+
   logOperatorDiagnostic(message: string): void {
     console.error(this.cardValueOutputMask.maskText(message));
   }

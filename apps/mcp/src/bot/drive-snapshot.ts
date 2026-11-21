@@ -68,6 +68,13 @@ export interface DriveSnapshotElement {
   frameOrdinal: number;
 }
 
+export interface DriveSaveValue {
+  ref: string;
+  value: string;
+  activeLayer?: boolean;
+  textbox?: boolean;
+}
+
 export interface DriveSnapshot {
   url: string;
   title: string;
@@ -77,6 +84,7 @@ export interface DriveSnapshot {
   notices?: string[];
   fingerprint: string;
   documentEpoch: string;
+  saveValues?: DriveSaveValue[];
   elements: DriveSnapshotElement[];
   omittedValues: number;
   scriptMs: number;
@@ -92,6 +100,7 @@ interface DriveSnapshotArg {
   maxWalkNodes: number;
   maxNameVisits: number;
   keepOffscreenButtons: boolean;
+  captureSaveValues: boolean;
 }
 
 type DriveInPageSnapshot = {
@@ -102,6 +111,7 @@ type DriveInPageSnapshot = {
   notices: string[];
   fingerprint: string;
   documentEpoch: string;
+  saveValues?: DriveSaveValue[];
   elements: DriveSnapshotElement[];
   omittedValues: number;
   scriptMs: number;
@@ -174,7 +184,10 @@ export function inferFieldFromControl(input: {
   return inferFieldFromLabel(input.label, input.role);
 }
 
-export function driveRowsFromSnapshot(snapshot: DriveSnapshot): SnapshotRow[] {
+export function driveRowsFromSnapshot(
+  snapshot: DriveSnapshot,
+  maskSaveValue: (value: string, textbox: boolean) => string = (value) => value,
+): SnapshotRow[] {
   const rows: SnapshotRow[] = [];
   let mainOrigin = "";
   try {
@@ -281,6 +294,9 @@ export function driveRowsFromSnapshot(snapshot: DriveSnapshot): SnapshotRow[] {
       facts.length === 0 ? [element.ref, roleLetter] : [element.ref, roleLetter, facts.join("|")],
     );
   }
+  for (const source of snapshot.saveValues ?? []) {
+    rows.push([source.ref, "save", maskSaveValue(source.value, source.textbox === true)]);
+  }
   return rows;
 }
 
@@ -343,6 +359,7 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
   type ControlDescription = { role: string; label: string; href: string };
   type DriveCache = {
     ids: WeakMap<Element, number>;
+    saveIds?: WeakMap<Node, number>;
     nodes: Map<string, Element>;
     next: number;
     describe?: (element: Element) => ControlDescription | null;
@@ -356,6 +373,7 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
     next: 1,
   };
   root.__tsDriveRegistry = cache;
+  cache.saveIds ??= new WeakMap<Node, number>();
   const omit = new Set(arg.omitValueRefs);
   const frameOrdinal = arg.frameOrdinal;
   const identity = (element: Element): string => {
@@ -992,25 +1010,115 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
     const text = (heading.textContent ?? "").replace(/\s+/g, " ").trim();
     if (text.length > 0) headings.push(text);
   }
+  const topHit = document.elementFromPoint(innerWidth / 2, innerHeight / 2);
+  let hit = topHit;
+  while (hit?.shadowRoot !== null && hit?.shadowRoot !== undefined) {
+    const inner = hit.shadowRoot.elementFromPoint(innerWidth / 2, innerHeight / 2);
+    if (inner === null || inner === hit) break;
+    hit = inner;
+  }
+  let priorityRoot: Element | ShadowRoot | null = null;
+  for (let node = hit; node !== null; node = composedParent(node)) {
+    if (node.matches("dialog[open],[role='dialog'],[role='alertdialog']")) {
+      priorityRoot = node;
+      break;
+    }
+  }
+  priorityRoot ??=
+    queryAll("dialog[open],[role='dialog'],[role='alertdialog']")
+      .filter((element) => {
+        const rect = element.getBoundingClientRect();
+        return (
+          visible(element) &&
+          rect.width > 0 &&
+          rect.height > 0 &&
+          rect.bottom > 0 &&
+          rect.top < innerHeight &&
+          rect.right > 0 &&
+          rect.left < innerWidth
+        );
+      })
+      .at(-1) ??
+    topHit?.shadowRoot ??
+    null;
+  const activeNode = (node: Node): boolean => {
+    const element = node instanceof Element ? node : node.parentElement;
+    if (element === null || priorityRoot === null) return false;
+    if (priorityRoot instanceof Element) return composedContains(priorityRoot, element);
+    for (
+      let current: Element | null = element;
+      current !== null;
+      current = composedParent(current)
+    ) {
+      if (current.getRootNode() === priorityRoot) return true;
+    }
+    return false;
+  };
+  const saveValues: DriveSaveValue[] = [];
+  const savedNodes = new WeakSet<Node>();
+  const saveValue = (node: Node, value: string): void => {
+    if (
+      !arg.captureSaveValues ||
+      value.length === 0 ||
+      value.length > 6000 ||
+      saveValues.length >= arg.maxElements ||
+      savedNodes.has(node)
+    )
+      return;
+    savedNodes.add(node);
+    let id = cache.saveIds!.get(node);
+    if (id === undefined) {
+      id = cache.next++;
+      cache.saveIds!.set(node, id);
+    }
+    const element = node instanceof Element ? node : node.parentElement;
+    saveValues.push({
+      ref: `@save:f${frameOrdinal}s${id}`,
+      value,
+      activeLayer: activeNode(node),
+      textbox: element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement,
+    });
+  };
   const words: string[] = [];
   const range = document.createRange();
   let length = 0;
   let walkNodes = 0;
-  // A covering shadow tree gets first claim on the bounded text budget. Its
-  // content may include a one-time value that the underlying page obscures.
-  const topHit = document.elementFromPoint(innerWidth / 2, innerHeight / 2);
-  const priorityRoot = topHit?.shadowRoot ?? null;
-  const textRoots =
+  const textRoots: Array<Document | ShadowRoot | Element> =
     priorityRoot === null
       ? queryRoots
-      : [priorityRoot, ...queryRoots.filter((queryRoot) => queryRoot !== priorityRoot)];
+      : [
+          priorityRoot,
+          ...queryRoots.filter(
+            (queryRoot) => queryRoot instanceof ShadowRoot && activeNode(queryRoot.host),
+          ),
+          ...queryRoots.filter(
+            (queryRoot) =>
+              queryRoot !== priorityRoot &&
+              !(queryRoot instanceof ShadowRoot && activeNode(queryRoot.host)),
+          ),
+        ];
+  const seenText = new WeakSet<Node>();
   for (const textRoot of textRoots) {
+    if (arg.captureSaveValues) {
+      for (const element of inView) {
+        if (element.occludedBy || omit.has(element.ref)) continue;
+        const node = cache.nodes.get(element.ref);
+        if (node === undefined || element.value === undefined) continue;
+        if (textRoot === document ? activeNode(node) : !textRoot.contains(node)) continue;
+        saveValue(node, element.value);
+      }
+    }
     const walker = document.createTreeWalker(
       textRoot === document ? document.body : textRoot,
       NodeFilter.SHOW_TEXT,
     );
     let node = walker.nextNode();
     while (node !== null && length < 6000 && walkNodes < arg.maxWalkNodes && !expired()) {
+      if (seenText.has(node)) {
+        node = walker.nextNode();
+        continue;
+      }
+      seenText.add(node);
       walkNodes += 1;
       const value = (node.textContent ?? "").trim();
       const parent = node.parentElement;
@@ -1031,6 +1139,7 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
           rect.left < innerWidth
         ) {
           words.push(value);
+          if (arg.captureSaveValues && !omit.has(identity(parent))) saveValue(node, value);
           length += value.length;
         }
       }
@@ -1120,6 +1229,7 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
     fingerprint,
     documentEpoch: `${performance.timeOrigin}|${location.href}`,
     elements,
+    ...(arg.captureSaveValues ? { saveValues } : {}),
     omittedValues,
     scriptMs: performance.now() - scriptStarted,
   };
@@ -1130,6 +1240,7 @@ export async function captureFrameSnapshot(
   omitValueRefs: readonly string[],
   frameOrdinal: number,
   keepOffscreenButtons = false,
+  captureSaveValues = false,
 ): Promise<DriveSnapshot | null> {
   const wallStarted = Date.now();
   try {
@@ -1141,6 +1252,7 @@ export async function captureFrameSnapshot(
       maxWalkNodes: DRIVE_SNAPSHOT_MAX_WALK_NODES,
       maxNameVisits: DRIVE_SNAPSHOT_MAX_NAME_VISITS,
       keepOffscreenButtons,
+      captureSaveValues,
     });
     const wallMs = Date.now() - wallStarted;
     if (raw === null) return null;
@@ -1253,6 +1365,9 @@ export function mergeSnapshots(parts: readonly DriveSnapshot[]): DriveSnapshot {
     fingerprint,
     documentEpoch: main.documentEpoch,
     elements,
+    saveValues: parts
+      .flatMap((part) => part.saveValues ?? [])
+      .sort((a, b) => Number(b.activeLayer === true) - Number(a.activeLayer === true)),
     omittedValues: parts.reduce((sum, part) => sum + part.omittedValues, 0),
     scriptMs: parts.reduce((sum, part) => sum + part.scriptMs, 0),
     wallMs: parts.reduce((sum, part) => sum + part.wallMs, 0),
