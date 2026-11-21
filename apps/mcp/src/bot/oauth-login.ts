@@ -440,14 +440,18 @@ function oauthActionDeadlineError(
   phase: "lease" | "action",
 ): OAuthAwaitingHumanError {
   const seconds = Math.ceil(deadline.timeoutMs / 1000);
+  const pending = phase === "action" && deadline.dispatchAttempted === true;
   return new OAuthAwaitingHumanError(
     phase === "lease"
       ? "OAuth has not been attempted yet: it was still waiting behind a prior OAuth call " +
           `on this browser after ${seconds} seconds. Retry oauth_login.`
-      : `OAuth action did not complete within ${seconds} seconds. ` +
+      : pending
+        ? `OAuth action did not complete within ${seconds} seconds. ` +
           "Call operate_observe to check whether the pending step has resolved, rather than " +
-          "treating this as a failure.",
-    phase === "lease" ? "not_attempted" : "pending",
+          "treating this as a failure."
+        : `OAuth has not been attempted yet: the ${seconds}-second action budget elapsed ` +
+          "before an authorization click. Retry oauth_login.",
+    pending ? "pending" : "not_attempted",
   );
 }
 

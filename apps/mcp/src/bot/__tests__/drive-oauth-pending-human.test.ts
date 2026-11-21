@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ApiClient } from "../../api-client.js";
-import { OAuthAwaitingHumanError, withinOAuthCallerDeadline } from "../oauth-login.js";
+import {
+  OAuthAwaitingHumanError,
+  withinOAuthActionDeadline,
+  withinOAuthCallerDeadline,
+} from "../oauth-login.js";
 import { runOperateDrive, type DriveDependencies } from "../operate-drive.js";
 import type { Session } from "../session/model.js";
 import type { Observation } from "../provision-session.js";
@@ -24,7 +28,7 @@ describe("drive pending OAuth handoff", () => {
     ],
     ["https://openference.com/register", "Continue with GitHub"],
   ] as const).flatMap(([url, label]) =>
-    ["pending", "not_attempted", "caller_before", "caller_after"].map(
+    ["pending", "not_attempted", "caller_before", "caller_after", "action_before"].map(
       (phase) => [url, label, phase] as const,
     ),
   ))("hands back OAuth on %s (%s, %s)", async (url, label, phase) => {
@@ -48,6 +52,11 @@ describe("drive pending OAuth handoff", () => {
       "An owned OAuth attempt is still pending. Call operate_observe or oauth_settle; a second authorization attempt was not started.";
     const driveAct = vi.fn<NonNullable<DriveDependencies["driveAct"]>>(
       async (_id, _action, deadline) => {
+        if (phase === "action_before") {
+          deadline!.capAt = Date.now() + 45_000;
+          deadline!.expiresAt = Date.now();
+          return await withinOAuthActionDeadline(new Promise<never>(() => {}), deadline!);
+        }
         if (phase === "caller_before" || phase === "caller_after") {
           deadline!.dispatchAttempted = phase === "caller_after";
           deadline!.capAt = Date.now() - 1;

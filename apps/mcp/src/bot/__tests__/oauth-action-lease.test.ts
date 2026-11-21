@@ -73,6 +73,30 @@ describe("Google OAuth action serialization", () => {
 });
 
 describe("OAuth action deadline under a caller budget", () => {
+  describe.each(["already expired", "timer expiry"])("%s", (expiry) => {
+    it.each([
+      ["lease", undefined, "not_attempted", "Retry oauth_login"],
+      ["lease", true, "not_attempted", "Retry oauth_login"],
+      ["action", undefined, "not_attempted", "Retry oauth_login"],
+      ["action", false, "not_attempted", "Retry oauth_login"],
+      ["action", true, "pending", "Call operate_observe"],
+    ] as const)("classifies %s timeout with dispatch=%s as %s", async (phase, dispatched, expected, guidance) => {
+      vi.useFakeTimers();
+      const deadline = oauthActionDeadline("google", 45_000);
+      deadline.dispatchAttempted = dispatched;
+      if (expiry === "already expired") deadline.expiresAt = Date.now();
+      const result = withinOAuthActionDeadline(
+        new Promise<never>(() => {}),
+        deadline,
+        phase,
+      ).catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(30_000);
+      const error = await result;
+      expect(error).toBeInstanceOf(OAuthAwaitingHumanError);
+      expect(error).toMatchObject({ phase: expected, message: expect.stringContaining(guidance) });
+    });
+  });
+
   // Kenari, 1.1.54: a max_seconds 45 drive dispatched Google OAuth, reached the
   // consent page, and the human-handoff re-arm let the call run past 60 s.
   it("never re-arms past the caller's remaining budget", async () => {
