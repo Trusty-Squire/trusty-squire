@@ -80,6 +80,8 @@ export class OAuthAwaitingHumanError extends Error {
   }
 }
 
+export class OAuthCallerDeadlineError extends OAuthAwaitingHumanError {}
+
 export class OAuthFailedError extends Error {
   constructor(message: string) {
     super(message);
@@ -491,7 +493,7 @@ export async function withinOAuthCallerDeadline<T>(
 ): Promise<T> {
   if (deadline?.capAt === undefined) return await operation();
   const remainingMs = deadline.capAt - Date.now();
-  const expired = new OAuthAwaitingHumanError("Drive OAuth action reached its call budget");
+  const expired = new OAuthCallerDeadlineError("Drive OAuth action reached its call budget");
   if (remainingMs <= 0) throw expired;
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {

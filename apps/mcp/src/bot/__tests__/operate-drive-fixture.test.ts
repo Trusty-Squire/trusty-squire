@@ -50,7 +50,7 @@ import { waitForPageReady } from "../page-ready.js";
 import type { DriveSnapshot } from "../drive-snapshot.js";
 import { sessionForCall } from "../session/lifecycle.js";
 import { DriveEvaluateTimeout } from "../drive-evaluate.js";
-import { OAuthAwaitingHumanError } from "../oauth-login.js";
+import { OAuthAwaitingHumanError, OAuthCallerDeadlineError } from "../oauth-login.js";
 
 const SIGNUP_HTML = `<!doctype html><meta charset="utf-8"><title>Signup fixture</title>
 <main>
@@ -1238,7 +1238,7 @@ describe("operate_drive real-browser fixture", () => {
   }, 30_000);
 
   it.each(["preflight", "execution"])(
-    "preserves OAuth retry state when handing back during %s",
+    "preserves OAuth retry state when the budget expires during %s",
     async (stage) => {
       const { context, page, started } = await openFixture(
         `<main><h1>Create account</h1><a href="/oauth/google">Continue with Google</a></main>`,
@@ -1264,7 +1264,7 @@ describe("operate_drive real-browser fixture", () => {
       const dispatch = vi.fn<NonNullable<DriveDependencies["driveAct"]>>(
         async (_sessionId, _action, deadline) => {
           deadline!.dispatchAttempted = true;
-          if (stage === "preflight") throw new OAuthAwaitingHumanError("execution expired");
+          if (stage === "preflight") throw new OAuthCallerDeadlineError("execution expired");
           return await new Promise<never>((_resolve, reject) => {
             finishRead = () => reject(new OAuthAwaitingHumanError("execution released"));
           });
@@ -1278,7 +1278,7 @@ describe("operate_drive real-browser fixture", () => {
       };
       try {
         expect((await runOperateDrive(input, api(), undefined, dependencies)).status).toBe(
-          "awaiting_human",
+          "budget",
         );
         const drive = sessionForCall(started.session_id)!.drive!;
         if (stage === "preflight") {
@@ -1287,7 +1287,7 @@ describe("operate_drive real-browser fixture", () => {
           restoreEvaluate();
           finishRead();
           expect((await runOperateDrive(input, api(), undefined, dependencies)).status).toBe(
-            "awaiting_human",
+            "budget",
           );
           expect(dispatch).toHaveBeenCalledOnce();
         } else {
@@ -1350,7 +1350,7 @@ describe("operate_drive real-browser fixture", () => {
           undefined,
           dependencies,
         );
-        expect(result.status).toBe("awaiting_human");
+        expect(result.status).toBe("budget");
         expect(dispatched).toBe(true);
         expect(fallback).toBe(stage === "fallback");
         if (stage === "snapshot") expect(snapshots).toBeGreaterThan(1);

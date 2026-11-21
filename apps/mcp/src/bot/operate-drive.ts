@@ -44,6 +44,7 @@ import { yieldOperateDriveToHuman } from "./live-share.js";
 import type { OAuthProviderId } from "./oauth-providers.js";
 import {
   OAuthAwaitingHumanError,
+  OAuthCallerDeadlineError,
   oauthActionDeadline,
   oauthActionRemainingMs,
   withinOAuthCallerDeadline,
@@ -7626,6 +7627,9 @@ async function driveLoop(input: {
     } catch (error) {
       if (deadline !== undefined && error instanceof OAuthAwaitingHumanError) {
         if (deadline.dispatchAttempted !== true) drive.consumedActionKey = null;
+        if (error instanceof OAuthCallerDeadlineError || error.phase === "not_attempted") {
+          return finish("budget", { reason: error.message });
+        }
         return finish("awaiting_human", {
           reason: error.message,
           oauth: {
