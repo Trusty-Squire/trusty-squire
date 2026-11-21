@@ -4065,21 +4065,33 @@ export function buildDriveQuestions(
     (entry): entry is [string, Extract<JevQuestion, { type: "choice" }>] =>
       entry[1].type === "choice",
   );
-  let remaining = DRIVE_MAX_CRITERIA;
+  const limits = choices.map(([name, question]) =>
+    Math.min(
+      Object.keys(question.criteria).length,
+      name === "operation"
+        ? Object.keys(question.criteria).length
+        : name === "SCROLL_target"
+          ? 4
+          : name === DRIVE_VALUE_QUESTION
+            ? 2
+            : 1,
+    ),
+  );
+  let remaining = DRIVE_MAX_CRITERIA - limits.reduce((total, limit) => total + limit, 0);
+  while (remaining > 0) {
+    let allocated = false;
+    for (const [index, [, question]] of choices.entries()) {
+      if (remaining === 0) break;
+      if (limits[index]! >= Object.keys(question.criteria).length) continue;
+      limits[index]! += 1;
+      remaining -= 1;
+      allocated = true;
+    }
+    if (!allocated) break;
+  }
   for (const [index, [name, question]] of choices.entries()) {
-    const reserved = choices
-      .slice(index + 1)
-      .reduce(
-        (total, [laterName, later]) =>
-          total +
-          Math.min(
-            Object.keys(later.criteria).length,
-            laterName === "SCROLL_target" ? 4 : laterName === DRIVE_VALUE_QUESTION ? 2 : 1,
-          ),
-        0,
-      );
     const entries = Object.entries(question.criteria);
-    const limit = remaining - reserved;
+    const limit = limits[index]!;
     if (entries.length > limit) {
       const none = entries.find(([key]) => key === DRIVE_FIXED_NONE);
       const kept =
@@ -4089,7 +4101,6 @@ export function buildDriveQuestions(
       question.criteria = Object.fromEntries(kept);
       question.instructions += " Some choices were omitted to fit the decision budget.";
     }
-    remaining -= Object.keys(question.criteria).length;
     if (name === "SELECT_target") {
       const omittedRefs = new Set(
         sets.SELECT.filter(

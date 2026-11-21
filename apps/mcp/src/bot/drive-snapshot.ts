@@ -71,6 +71,7 @@ export interface DriveSnapshotElement {
 export interface DriveSaveValue {
   ref: string;
   value: string;
+  activeLayer?: boolean;
 }
 
 export interface DriveSnapshot {
@@ -1003,50 +1004,105 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
     const text = (heading.textContent ?? "").replace(/\s+/g, " ").trim();
     if (text.length > 0) headings.push(text);
   }
+  const topHit = document.elementFromPoint(innerWidth / 2, innerHeight / 2);
+  let hit = topHit;
+  while (hit?.shadowRoot !== null && hit?.shadowRoot !== undefined) {
+    const inner = hit.shadowRoot.elementFromPoint(innerWidth / 2, innerHeight / 2);
+    if (inner === null || inner === hit) break;
+    hit = inner;
+  }
+  let priorityRoot: Element | ShadowRoot | null = null;
+  for (let node = hit; node !== null; node = composedParent(node)) {
+    if (node.matches("dialog[open],[role='dialog'],[role='alertdialog']")) {
+      priorityRoot = node;
+      break;
+    }
+  }
+  priorityRoot ??=
+    queryAll("dialog[open],[role='dialog'],[role='alertdialog']")
+      .filter((element) => {
+        const rect = element.getBoundingClientRect();
+        return (
+          visible(element) &&
+          rect.width > 0 &&
+          rect.height > 0 &&
+          rect.bottom > 0 &&
+          rect.top < innerHeight &&
+          rect.right > 0 &&
+          rect.left < innerWidth
+        );
+      })
+      .at(-1) ??
+    topHit?.shadowRoot ??
+    null;
+  const activeNode = (node: Node): boolean => {
+    const element = node instanceof Element ? node : node.parentElement;
+    if (element === null || priorityRoot === null) return false;
+    if (priorityRoot instanceof Element) return composedContains(priorityRoot, element);
+    for (let current: Element | null = element; current !== null; current = composedParent(current)) {
+      if (current.getRootNode() === priorityRoot) return true;
+    }
+    return false;
+  };
   const saveValues: DriveSaveValue[] = [];
+  const savedNodes = new WeakSet<Node>();
   const saveValue = (node: Node, value: string): void => {
     if (
       !arg.captureSaveValues ||
       value.length === 0 ||
       value.length > 6000 ||
-      saveValues.length >= arg.maxElements
+      saveValues.length >= arg.maxElements ||
+      savedNodes.has(node)
     )
       return;
+    savedNodes.add(node);
     let id = cache.saveIds!.get(node);
     if (id === undefined) {
       id = cache.next++;
       cache.saveIds!.set(node, id);
     }
-    saveValues.push({ ref: `@save:f${frameOrdinal}s${id}`, value });
+    saveValues.push({ ref: `@save:f${frameOrdinal}s${id}`, value, activeLayer: activeNode(node) });
   };
-  // Values are offered for model selection without guessing a credential's
-  // language, label, or format. Text uses its exact snapshot text-node value.
-  if (arg.captureSaveValues) {
-    for (const element of elements) {
-      if (element.offscreen || element.occludedBy || omit.has(element.ref)) continue;
-      const node = cache.nodes.get(element.ref);
-      if (node !== undefined && element.value !== undefined) saveValue(node, element.value);
-    }
-  }
   const words: string[] = [];
   const range = document.createRange();
   let length = 0;
   let walkNodes = 0;
-  // A covering shadow tree gets first claim on the bounded text budget. Its
-  // content may include a one-time value that the underlying page obscures.
-  const topHit = document.elementFromPoint(innerWidth / 2, innerHeight / 2);
-  const priorityRoot = topHit?.shadowRoot ?? null;
-  const textRoots =
+  const textRoots: Array<Document | ShadowRoot | Element> =
     priorityRoot === null
       ? queryRoots
-      : [priorityRoot, ...queryRoots.filter((queryRoot) => queryRoot !== priorityRoot)];
+      : [
+          priorityRoot,
+          ...queryRoots.filter(
+            (queryRoot) => queryRoot instanceof ShadowRoot && activeNode(queryRoot.host),
+          ),
+          ...queryRoots.filter(
+            (queryRoot) =>
+              queryRoot !== priorityRoot &&
+              !(queryRoot instanceof ShadowRoot && activeNode(queryRoot.host)),
+          ),
+        ];
+  const seenText = new WeakSet<Node>();
   for (const textRoot of textRoots) {
+    if (arg.captureSaveValues) {
+      for (const element of inView) {
+        if (element.occludedBy || omit.has(element.ref)) continue;
+        const node = cache.nodes.get(element.ref);
+        if (node === undefined || element.value === undefined) continue;
+        if (textRoot === document ? activeNode(node) : !textRoot.contains(node)) continue;
+        saveValue(node, element.value);
+      }
+    }
     const walker = document.createTreeWalker(
       textRoot === document ? document.body : textRoot,
       NodeFilter.SHOW_TEXT,
     );
     let node = walker.nextNode();
     while (node !== null && length < 6000 && walkNodes < arg.maxWalkNodes && !expired()) {
+      if (seenText.has(node)) {
+        node = walker.nextNode();
+        continue;
+      }
+      seenText.add(node);
       walkNodes += 1;
       const value = (node.textContent ?? "").trim();
       const parent = node.parentElement;
@@ -1293,7 +1349,9 @@ export function mergeSnapshots(parts: readonly DriveSnapshot[]): DriveSnapshot {
     fingerprint,
     documentEpoch: main.documentEpoch,
     elements,
-    saveValues: parts.flatMap((part) => part.saveValues ?? []),
+    saveValues: parts
+      .flatMap((part) => part.saveValues ?? [])
+      .sort((a, b) => Number(b.activeLayer === true) - Number(a.activeLayer === true)),
     omittedValues: parts.reduce((sum, part) => sum + part.omittedValues, 0),
     scriptMs: parts.reduce((sum, part) => sum + part.scriptMs, 0),
     wallMs: parts.reduce((sum, part) => sum + part.wallMs, 0),

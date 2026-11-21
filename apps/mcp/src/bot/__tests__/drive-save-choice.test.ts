@@ -1,8 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ApiClient } from "../../api-client.js";
-import { driveRowsFromSnapshot, type DriveSnapshot } from "../drive-snapshot.js";
+import { driveRowsFromSnapshot, mergeSnapshots, type DriveSnapshot } from "../drive-snapshot.js";
 import {
   buildDriveQuestions,
+  DRIVE_MAX_CRITERIA,
   decideAfterJev,
   driveTargetSets,
   runOperateDrive,
@@ -201,5 +202,100 @@ describe("explicit SAVE choice", () => {
       questions,
     });
     expect(result.kind).toBe("invalid_answer");
+  });
+});
+
+describe("SAVE candidate budgets", () => {
+  it.each([true, false])("shares choices with ordinary actions (storage=%s)", (canSave) => {
+    const rows: WireRow[] = [
+      ...Array.from({ length: 125 }, (_, index): WireRow => [
+        `@save:${index}`,
+        "save",
+        `text ${index}`,
+      ]),
+      ...Array.from({ length: 40 }, (_, index): WireRow => [
+        `@button:${index}`,
+        "b",
+        `Action ${index}`,
+      ]),
+      ...Array.from({ length: 40 }, (_, index): WireRow => [
+        `@email:${index}`,
+        "t",
+        "Email|f=email",
+      ]),
+      ...Array.from({ length: 40 }, (_, index): WireRow => [
+        `@country:${index}`,
+        "s",
+        "Country|f=country",
+      ]),
+      ...Array.from({ length: 40 }, (_, index): WireRow => [
+        `@offscreen:${index}`,
+        "b",
+        `Action ${index}|v=offscreen`,
+      ]),
+    ];
+    const facts = { email: "a@b.test", country: "Canada" };
+    const sets = driveTargetSets(rows, facts, false, [], URL, new Map(), (text) => text, [], {
+      canSave,
+    });
+    const operations = [...sets.operations];
+    const questions = buildDriveQuestions(rows, facts, "Sign up", false, [], URL, new Map(), sets);
+    const choices = Object.values(questions).filter((question) => question.type === "choice");
+    expect(
+      choices.reduce((count, question) => count + Object.keys(question.criteria).length, 0),
+    ).toBeLessThanOrEqual(DRIVE_MAX_CRITERIA);
+    for (const operation of ["CLICK", "TYPE_TEXT", "SELECT"] as const) {
+      expect(sets[operation].length).toBeGreaterThanOrEqual(10);
+      const target = questions[`${operation}_target`];
+      expect(target?.type).toBe("choice");
+      if (target?.type !== "choice") throw new Error("Missing target choices");
+      expect(Object.keys(target.criteria)).toEqual(sets[operation].map((candidate) => candidate.slug));
+    }
+    const scroll = questions.SCROLL_target;
+    if (scroll?.type !== "choice") throw new Error("Missing scroll choices");
+    expect(Object.keys(scroll.criteria)).toEqual(
+      expect.arrayContaining(["down", "up", "bottom", "top"]),
+    );
+    expect(sets.SCROLL.length).toBeGreaterThanOrEqual(10);
+    const operation = questions.operation;
+    if (operation?.type !== "choice") throw new Error("Missing operations");
+    expect(Object.keys(operation.criteria)).toEqual(expect.arrayContaining(operations));
+    if (canSave) {
+      expect(sets.SAVE!.length).toBeGreaterThanOrEqual(10);
+    } else {
+      expect(questions.SAVE_target).toBeUndefined();
+    }
+  });
+
+  it("keeps active-layer values ahead of background values from other frames", () => {
+    const base: DriveSnapshot = {
+      url: URL,
+      title: "Keys",
+      headings: [],
+      text: "",
+      fingerprint: "fixture",
+      documentEpoch: "fixture",
+      elements: [],
+      omittedValues: 0,
+      scriptMs: 0,
+      wallMs: 0,
+    };
+    const snapshot = mergeSnapshots([
+      {
+        ...base,
+        saveValues: Array.from({ length: 300 }, (_, index) => ({
+          ref: `@save:f0s${index}`,
+          value: `background ${index}`,
+        })),
+      },
+      { ...base, saveValues: [{ ref: "@save:f1s1", value: hexKey, activeLayer: true }] },
+    ]);
+    const rows = driveRowsFromSnapshot(snapshot);
+    const sets = driveTargetSets(rows, {}, false, [], URL, new Map(), (text) => text, [], {
+      canSave: true,
+    });
+    const questions = buildDriveQuestions(rows, {}, "Store the key", false, [], URL, new Map(), sets);
+    expect(sets.SAVE?.[0]).toMatchObject({ ref: "@save:f1s1", description: hexKey });
+    expect(questions.SAVE_target).toMatchObject({ criteria: { save_1: hexKey } });
   });
 });

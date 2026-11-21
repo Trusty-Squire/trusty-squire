@@ -2,7 +2,13 @@ import { afterAll, beforeAll, expect, it, vi } from "vitest";
 import { chromium, type Browser } from "playwright";
 import type { ApiClient } from "../../api-client.js";
 import { BrowserController } from "../browser.js";
-import { runOperateDrive, type DriveDependencies } from "../operate-drive.js";
+import { captureFrameSnapshot, driveRowsFromSnapshot } from "../drive-snapshot.js";
+import {
+  buildDriveQuestions,
+  driveTargetSets,
+  runOperateDrive,
+  type DriveDependencies,
+} from "../operate-drive.js";
 import {
   act,
   awaitVerification,
@@ -108,3 +114,48 @@ it.each([
   },
   15_000,
 );
+
+it.each([
+  ["dialog", false],
+  ["dialog", true],
+  ["shadow-dialog", false],
+  ["shadow-dialog", true],
+  ["shadow-cover", false],
+  ["shadow-cover", true],
+] as const)("retains a %s value before background truncation (input=%s)", async (layer, input) => {
+  const page = await browser.newPage();
+  const key = "opaque|credential-value";
+  try {
+    await page.setContent(`<main>${Array.from(
+      { length: 300 },
+      (_, index) =>
+        `<span style="position:absolute;top:0;left:0">background ${index}</span><input style="position:absolute;top:0;left:0" value="background ${index}">`,
+    ).join("")}</main>`);
+    await page.evaluate(
+      ({ layer, input, key }) => {
+        const host = document.createElement("div");
+        document.body.append(host);
+        const root = layer === "dialog" ? host : host.attachShadow({ mode: "open" });
+        root.innerHTML = `<section ${layer === "shadow-cover" ? "" : 'role="dialog"'} style="position:fixed;inset:10px;background:white;z-index:1000">${input ? `<input readonly value="${key}">` : `<code>${key}</code>`}<button>Salin</button></section>`;
+      },
+      { layer, input, key },
+    );
+    const snapshot = await captureFrameSnapshot(page, [], 0, false, true);
+    expect(snapshot).not.toBeNull();
+    if (snapshot === null) throw new Error("No snapshot");
+    expect(snapshot.saveValues?.filter((value) => value.value === key)).toHaveLength(1);
+    const rows = driveRowsFromSnapshot(snapshot);
+    const sets = driveTargetSets(rows, {}, false, [], "", new Map(), (text) => text, [], {
+      canSave: true,
+    });
+    const questions = buildDriveQuestions(rows, {}, "Store the key", false, [], "", new Map(), sets);
+    const save = questions.SAVE_target;
+    if (save?.type !== "choice") throw new Error("SAVE not offered");
+    expect(Object.values(save.criteria)).toContain(key);
+    expect(sets.SAVE?.find((candidate) => candidate.description === key)?.ref).toBe(
+      snapshot.saveValues?.find((value) => value.value === key)?.ref,
+    );
+  } finally {
+    await page.close();
+  }
+});
