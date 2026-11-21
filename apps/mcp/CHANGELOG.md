@@ -1,5 +1,11 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.61-rc.1 (2026-11-21)
+
+- `operate_drive` uses the session account email as the email fact when the caller supplies none, so an empty email field gets a TYPE choice; explicit caller or retained email facts still take precedence ([PR](https://github.com/Trusty-Squire/trusty-squire/pull/1175)).
+- `operate_drive` dispatches an OAuth control even when its form still has empty required credential fields; ordinary submit clicks keep the required-field check ([PR](https://github.com/Trusty-Squire/trusty-squire/pull/1177)).
+- Captcha auto-solve now covers unsolved Cloudflare Turnstile widgets through 2Captcha, under the existing in-flight, cooldown, and spend bounds ([PR](https://github.com/Trusty-Squire/trusty-squire/pull/1177)).
+
 ## 1.1.60-rc.1 (2026-11-21)
 
 - Roll back provider-specific `operate_drive` tuning: the in-viewport scroll-box occlusion re-check, invalid-field silent-submit notices, the emailed-code BLOCKED rule, inline Copy-control key capture, the Google account-chooser `account_choice` hand-back, and localized password detection by input type/autocomplete. The drive's OAuth wait stays capped by the call's remaining `max_seconds` ([PR](https://github.com/Trusty-Squire/trusty-squire/pull/1173)).
