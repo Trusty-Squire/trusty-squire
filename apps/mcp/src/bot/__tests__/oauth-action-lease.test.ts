@@ -83,7 +83,7 @@ describe("OAuth action deadline under a caller budget", () => {
     ] as const)("classifies %s timeout with dispatch=%s as %s", async (phase, dispatched, expected, guidance) => {
       vi.useFakeTimers();
       const deadline = oauthActionDeadline("google", 45_000);
-      deadline.dispatchAttempted = dispatched;
+      if (dispatched !== undefined) deadline.dispatchAttempted = dispatched;
       if (expiry === "already expired") deadline.expiresAt = Date.now();
       const result = withinOAuthActionDeadline(
         new Promise<never>(() => {}),

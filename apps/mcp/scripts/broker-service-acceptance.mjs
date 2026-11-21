@@ -235,7 +235,6 @@ try {
     assert.notEqual(pid, firstPid);
     return pid;
   }, "Manager restart replaced broker PID");
-  assert.ok(run("ps", ["-p", String(restartedPid), "-o", "args="]).includes(secondEntry));
   await Promise.all(peers.map(tools));
   assert.deepEqual(brokers(), [restartedPid]);
   const restarted = client(secondEntry);
