@@ -1,5 +1,9 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.59-rc.1 (2026-11-21)
+
+- Let `operate_drive` save a selected visible credential without relying on an English Copy label or a recognizable key format, and default signup email to the session account when no email fact is supplied ([PR](https://github.com/Trusty-Squire/trusty-squire/pull/1170)).
+
 ## 1.1.58-rc.1 (2026-11-21)
 
 - fix(mcp): hand off pending OAuth attempts for observation (#1168)
