@@ -6933,7 +6933,7 @@ async function driveLoop(input: {
         snapshot_wall_ms: inboxSnap.snapshotWallMs,
       };
       drive.trajectory.push({
-        action: verification.code !== null ? "type_otp" : "goto_verify",
+        action: inboxNext === "type_code" ? "type_otp" : "goto_verify",
         target: decision.actionKey,
         confidence: decision.confidence,
         url: observation.url,
@@ -6942,7 +6942,7 @@ async function driveLoop(input: {
         ...takeActProfile(drive),
       });
       drive.history.push(
-        verification.code !== null ? "type verification code" : "open verification link",
+        inboxNext === "type_code" ? "type verification code" : "open verification link",
       );
       const nextFingerprint = driveProgressFingerprint(observation, rows, drive, session);
       return await noteProgress(fingerprint, nextFingerprint, decision.actionKey);
