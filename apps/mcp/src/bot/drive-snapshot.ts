@@ -1045,7 +1045,11 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
     const element = node instanceof Element ? node : node.parentElement;
     if (element === null || priorityRoot === null) return false;
     if (priorityRoot instanceof Element) return composedContains(priorityRoot, element);
-    for (let current: Element | null = element; current !== null; current = composedParent(current)) {
+    for (
+      let current: Element | null = element;
+      current !== null;
+      current = composedParent(current)
+    ) {
       if (current.getRootNode() === priorityRoot) return true;
     }
     return false;

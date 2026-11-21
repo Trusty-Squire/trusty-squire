@@ -129,11 +129,13 @@ it.each([
   const page = await browser.newPage();
   const key = "opaque|credential-value";
   try {
-    await page.setContent(`<main>${Array.from(
-      { length: 300 },
-      (_, index) =>
-        `<span style="position:absolute;top:0;left:0">background ${index}</span><input style="position:absolute;top:0;left:0" value="background ${index}">`,
-    ).join("")}</main>`);
+    await page.setContent(
+      `<main>${Array.from(
+        { length: 300 },
+        (_, index) =>
+          `<span style="position:absolute;top:0;left:0">background ${index}</span><input style="position:absolute;top:0;left:0" value="background ${index}">`,
+      ).join("")}</main>`,
+    );
     await page.evaluate(
       ({ layer, input, key }) => {
         const host = document.createElement("div");
@@ -151,7 +153,16 @@ it.each([
     const sets = driveTargetSets(rows, {}, false, [], "", new Map(), (text) => text, [], {
       canSave: true,
     });
-    const questions = buildDriveQuestions(rows, {}, "Store the key", false, [], "", new Map(), sets);
+    const questions = buildDriveQuestions(
+      rows,
+      {},
+      "Store the key",
+      false,
+      [],
+      "",
+      new Map(),
+      sets,
+    );
     const save = questions.SAVE_target;
     if (save?.type !== "choice") throw new Error("SAVE not offered");
     expect(Object.values(save.criteria)).toContain(key);
@@ -206,7 +217,9 @@ it("masks remounted textbox SAVE values in drive choices, observations, and trac
       const save = questions.SAVE_target;
       if (save?.type !== "choice") throw new Error("SAVE not offered");
       criteria = save.criteria;
-      expect(Object.values(criteria).filter((value) => value === "[security code]")).toHaveLength(2);
+      expect(Object.values(criteria).filter((value) => value === "[security code]")).toHaveLength(
+        2,
+      );
       expect(Object.values(criteria)).toEqual(expect.arrayContaining(["739", "321"]));
       return {
         attempts: 1,
@@ -222,7 +235,9 @@ it("masks remounted textbox SAVE values in drive choices, observations, and trac
                 {
                   choice,
                   confidence: 1,
-                  probabilities: Object.fromEntries(keys.map((key) => [key, key === choice ? 1 : 0])),
+                  probabilities: Object.fromEntries(
+                    keys.map((key) => [key, key === choice ? 1 : 0]),
+                  ),
                 },
               ];
             }),
@@ -243,7 +258,10 @@ it("masks remounted textbox SAVE values in drive choices, observations, and trac
     const saveRows = publicRows.filter((row) => row[1] === "save");
     expect(saveRows.filter((row) => row[2] === "[security code]")).toHaveLength(2);
     expect(saveRows.map((row) => row[2])).toEqual(expect.arrayContaining(["739", "321"]));
-    const trace = readFileSync(tracePath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    const trace = readFileSync(tracePath, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
     const step = trace.find((entry) => entry.at === "step");
     expect(step?.SAVE_target).toEqual(criteria);
     expect(

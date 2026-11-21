@@ -215,31 +215,26 @@ describe("explicit SAVE choice", () => {
 describe("SAVE candidate budgets", () => {
   it.each([true, false])("shares choices with ordinary actions (storage=%s)", (canSave) => {
     const rows: WireRow[] = [
-      ...Array.from({ length: 125 }, (_, index): WireRow => [
-        `@save:${index}`,
-        "save",
-        `text ${index}`,
-      ]),
-      ...Array.from({ length: 40 }, (_, index): WireRow => [
-        `@button:${index}`,
-        "b",
-        `Action ${index}`,
-      ]),
-      ...Array.from({ length: 40 }, (_, index): WireRow => [
-        `@email:${index}`,
-        "t",
-        "Email|f=email",
-      ]),
-      ...Array.from({ length: 40 }, (_, index): WireRow => [
-        `@country:${index}`,
-        "s",
-        "Country|f=country",
-      ]),
-      ...Array.from({ length: 40 }, (_, index): WireRow => [
-        `@offscreen:${index}`,
-        "b",
-        `Action ${index}|v=offscreen`,
-      ]),
+      ...Array.from(
+        { length: 125 },
+        (_, index): WireRow => [`@save:${index}`, "save", `text ${index}`],
+      ),
+      ...Array.from(
+        { length: 40 },
+        (_, index): WireRow => [`@button:${index}`, "b", `Action ${index}`],
+      ),
+      ...Array.from(
+        { length: 40 },
+        (_, index): WireRow => [`@email:${index}`, "t", "Email|f=email"],
+      ),
+      ...Array.from(
+        { length: 40 },
+        (_, index): WireRow => [`@country:${index}`, "s", "Country|f=country"],
+      ),
+      ...Array.from(
+        { length: 40 },
+        (_, index): WireRow => [`@offscreen:${index}`, "b", `Action ${index}|v=offscreen`],
+      ),
     ];
     const facts = { email: "a@b.test", country: "Canada" };
     const sets = driveTargetSets(rows, facts, false, [], URL, new Map(), (text) => text, [], {
@@ -256,7 +251,9 @@ describe("SAVE candidate budgets", () => {
       const target = questions[`${operation}_target`];
       expect(target?.type).toBe("choice");
       if (target?.type !== "choice") throw new Error("Missing target choices");
-      expect(Object.keys(target.criteria)).toEqual(sets[operation].map((candidate) => candidate.slug));
+      expect(Object.keys(target.criteria)).toEqual(
+        sets[operation].map((candidate) => candidate.slug),
+      );
     }
     const scroll = questions.SCROLL_target;
     if (scroll?.type !== "choice") throw new Error("Missing scroll choices");
@@ -301,72 +298,93 @@ describe("SAVE candidate budgets", () => {
     const sets = driveTargetSets(rows, {}, false, [], URL, new Map(), (text) => text, [], {
       canSave: true,
     });
-    const questions = buildDriveQuestions(rows, {}, "Store the key", false, [], URL, new Map(), sets);
+    const questions = buildDriveQuestions(
+      rows,
+      {},
+      "Store the key",
+      false,
+      [],
+      URL,
+      new Map(),
+      sets,
+    );
     expect(sets.SAVE?.[0]).toMatchObject({ ref: "@save:f1s1", description: hexKey });
     expect(questions.SAVE_target).toMatchObject({ criteria: { save_1: hexKey } });
   });
 });
 
 describe("released-card SAVE boundary (§4.5)", () => {
-  it.each(["739", "1739"])("masks textbox copies of released CVV %s before SAVE serialization", (cvv) => {
-    const mask = new CardValueOutputMask();
-    mask.register({ pan: "4111111111111111", cvv });
-    const snapshot: DriveSnapshot = {
-      url: URL,
-      title: "Keys",
-      headings: [],
-      text: "",
-      fingerprint: "fixture",
-      documentEpoch: "fixture",
-      elements: [],
-      omittedValues: 0,
-      scriptMs: 0,
-      wallMs: 0,
-      saveValues: [
-        { ref: "@save:remounted-input", value: cvv, textbox: true },
-        { ref: "@save:remounted-textarea", value: cvv, textbox: true },
-        { ref: "@save:ordinary-text", value: cvv, textbox: false },
-        { ref: "@save:select", value: cvv, textbox: false },
-        { ref: "@save:ordinary-input", value: "321", textbox: true },
-        { ref: "@save:opaque-input", value: "opaque|value", textbox: true },
-        { ref: "@save:pan-text", value: "4111 1111 1111 1111", textbox: false },
-      ],
-    };
-    const rows = driveRowsFromSnapshot(snapshot, mask.maskDriveSaveValue.bind(mask));
-    expect(rows).toEqual([
-      ["@save:remounted-input", "save", "[security code]"],
-      ["@save:remounted-textarea", "save", "[security code]"],
-      ["@save:ordinary-text", "save", cvv],
-      ["@save:select", "save", cvv],
-      ["@save:ordinary-input", "save", "321"],
-      ["@save:opaque-input", "save", "opaque|value"],
-      ["@save:pan-text", "save", "[card number]"],
-    ]);
-    const sets = driveTargetSets(rows, {}, false, [], URL, new Map(), (text) => text, [], {
-      canSave: true,
-    });
-    const questions = buildDriveQuestions(rows, {}, "Store the key", false, [], URL, new Map(), sets);
-    expect(questions.SAVE_target).toMatchObject({
-      criteria: {
-        save_1: "[security code]",
-        save_2: "[security code]",
-        save_3: cvv,
-        save_4: cvv,
-        save_5: "321",
-        save_6: "opaque|value",
-        save_7: "[card number]",
-      },
-    });
-    expect(snapshotToObservation(snapshot, "save-unit", rows).safe_table).toEqual(rows);
-    expect(resumeAnswerOptions(rows, {}, "Store the key", false, URL)).toMatchObject({
-      save_1: "Save [security code]",
-      save_2: "Save [security code]",
-      save_3: `Save ${cvv}`,
-      save_4: `Save ${cvv}`,
-      save_5: "Save 321",
-      save_6: "Save opaque|value",
-    });
-    expect(snapshot.saveValues?.[0]?.value).toBe(cvv);
-    expect(new CardValueOutputMask().maskDriveSaveValue(cvv, true)).toBe(cvv);
-  });
+  it.each(["739", "1739"])(
+    "masks textbox copies of released CVV %s before SAVE serialization",
+    (cvv) => {
+      const mask = new CardValueOutputMask();
+      mask.register({ pan: "4111111111111111", cvv });
+      const snapshot: DriveSnapshot = {
+        url: URL,
+        title: "Keys",
+        headings: [],
+        text: "",
+        fingerprint: "fixture",
+        documentEpoch: "fixture",
+        elements: [],
+        omittedValues: 0,
+        scriptMs: 0,
+        wallMs: 0,
+        saveValues: [
+          { ref: "@save:remounted-input", value: cvv, textbox: true },
+          { ref: "@save:remounted-textarea", value: cvv, textbox: true },
+          { ref: "@save:ordinary-text", value: cvv, textbox: false },
+          { ref: "@save:select", value: cvv, textbox: false },
+          { ref: "@save:ordinary-input", value: "321", textbox: true },
+          { ref: "@save:opaque-input", value: "opaque|value", textbox: true },
+          { ref: "@save:pan-text", value: "4111 1111 1111 1111", textbox: false },
+        ],
+      };
+      const rows = driveRowsFromSnapshot(snapshot, mask.maskDriveSaveValue.bind(mask));
+      expect(rows).toEqual([
+        ["@save:remounted-input", "save", "[security code]"],
+        ["@save:remounted-textarea", "save", "[security code]"],
+        ["@save:ordinary-text", "save", cvv],
+        ["@save:select", "save", cvv],
+        ["@save:ordinary-input", "save", "321"],
+        ["@save:opaque-input", "save", "opaque|value"],
+        ["@save:pan-text", "save", "[card number]"],
+      ]);
+      const sets = driveTargetSets(rows, {}, false, [], URL, new Map(), (text) => text, [], {
+        canSave: true,
+      });
+      const questions = buildDriveQuestions(
+        rows,
+        {},
+        "Store the key",
+        false,
+        [],
+        URL,
+        new Map(),
+        sets,
+      );
+      expect(questions.SAVE_target).toMatchObject({
+        criteria: {
+          save_1: "[security code]",
+          save_2: "[security code]",
+          save_3: cvv,
+          save_4: cvv,
+          save_5: "321",
+          save_6: "opaque|value",
+          save_7: "[card number]",
+        },
+      });
+      expect(snapshotToObservation(snapshot, "save-unit", rows).safe_table).toEqual(rows);
+      expect(resumeAnswerOptions(rows, {}, "Store the key", false, URL)).toMatchObject({
+        save_1: "Save [security code]",
+        save_2: "Save [security code]",
+        save_3: `Save ${cvv}`,
+        save_4: `Save ${cvv}`,
+        save_5: "Save 321",
+        save_6: "Save opaque|value",
+      });
+      expect(snapshot.saveValues?.[0]?.value).toBe(cvv);
+      expect(new CardValueOutputMask().maskDriveSaveValue(cvv, true)).toBe(cvv);
+    },
+  );
 });
