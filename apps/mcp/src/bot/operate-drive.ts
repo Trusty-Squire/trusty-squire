@@ -5345,7 +5345,10 @@ async function captureDriveSession(
     session,
     new Map(snapshot.elements.map((element) => [element.ref, element])),
   );
-  const rawRows = driveRowsFromSnapshot(snapshot);
+  const rawRows = driveRowsFromSnapshot(
+    snapshot,
+    session.browser.maskDriveSaveValue?.bind(session.browser),
+  );
   lastSelectOptions.set(session, snapshotSelectOptions(snapshot));
   const previousEpoch = drive.lastDocumentEpoch;
   if (

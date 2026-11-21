@@ -1,3 +1,5 @@
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { join } from "node:path";
 import { afterAll, beforeAll, expect, it, vi } from "vitest";
 import { chromium, type Browser } from "playwright";
 import type { ApiClient } from "../../api-client.js";
@@ -8,6 +10,7 @@ import {
   driveTargetSets,
   runOperateDrive,
   type DriveDependencies,
+  type WireRow,
 } from "../operate-drive.js";
 import {
   act,
@@ -159,3 +162,100 @@ it.each([
     await page.close();
   }
 });
+
+it("masks remounted textbox SAVE values in drive choices, observations, and traces", async () => {
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  const url = "https://mask.example.test/keys";
+  await page.route("**/*", (route) =>
+    route.fulfill({
+      contentType: "text/html",
+      body: '<main><input id="field"><textarea id="area"></textarea><p>739</p><input value="321"><button>Salin</button></main>',
+    }),
+  );
+  await page.goto(url);
+  const controller = BrowserController.fromHarnessPage(page);
+  const started = await startHarnessProvisionSession({
+    browser: controller,
+    serviceUrl: url,
+    format: "compact",
+    initialObservation: "drive",
+  });
+  const dir = mkdtempSync(join(process.cwd(), ".drive-save-mask-"));
+  const tracePath = join(dir, "trace.jsonl");
+  const previousTrace = process.env.DRIVE_TRACE_PATH;
+  process.env.DRIVE_TRACE_PATH = tracePath;
+  try {
+    controller.registerCardValueOutputMask({ pan: "4111111111111111", cvv: "739" });
+    await page.evaluate(() => {
+      for (const id of ["field", "area"]) {
+        const old = document.getElementById(id)!;
+        const replacement = document.createElement(old.tagName) as
+          | HTMLInputElement
+          | HTMLTextAreaElement;
+        replacement.value = "739";
+        old.replaceWith(replacement);
+      }
+    });
+    const snapshot = await captureFrameSnapshot(page, [], 0, false, true);
+    expect(
+      snapshot?.saveValues?.filter((source) => source.value === "739" && source.textbox),
+    ).toHaveLength(2);
+    let criteria: Record<string, string> = {};
+    const askJev = vi.fn<DriveDependencies["askJev"]>(async (_api, _state, questions) => {
+      const save = questions.SAVE_target;
+      if (save?.type !== "choice") throw new Error("SAVE not offered");
+      criteria = save.criteria;
+      expect(Object.values(criteria).filter((value) => value === "[security code]")).toHaveLength(2);
+      expect(Object.values(criteria)).toEqual(expect.arrayContaining(["739", "321"]));
+      return {
+        attempts: 1,
+        elapsedMs: 1,
+        result: {
+          answers: Object.fromEntries(
+            Object.entries(questions).map(([name, question]) => {
+              if (question.type !== "choice") return [name, { noul: 0 }];
+              const keys = Object.keys(question.criteria);
+              const choice = name === "operation" ? "BLOCKED" : keys[0]!;
+              return [
+                name,
+                {
+                  choice,
+                  confidence: 1,
+                  probabilities: Object.fromEntries(keys.map((key) => [key, key === choice ? 1 : 0])),
+                },
+              ];
+            }),
+          ),
+        },
+      };
+    });
+    const persistCredentials = vi.fn(async () => STORED);
+    const result = await runOperateDrive(
+      { session_id: started.session_id, goal: "Store the key", max_steps: 1 },
+      {} as ApiClient,
+      { persistCredentials },
+      { askJev, act, observe, awaitVerification, startSession: vi.fn(), injectCard: vi.fn() },
+    );
+    expect(askJev).toHaveBeenCalledOnce();
+    expect(persistCredentials).not.toHaveBeenCalled();
+    const publicRows = (result.observation?.safe_table ?? []) as unknown as WireRow[];
+    const saveRows = publicRows.filter((row) => row[1] === "save");
+    expect(saveRows.filter((row) => row[2] === "[security code]")).toHaveLength(2);
+    expect(saveRows.map((row) => row[2])).toEqual(expect.arrayContaining(["739", "321"]));
+    const trace = readFileSync(tracePath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    const step = trace.find((entry) => entry.at === "step");
+    expect(step?.SAVE_target).toEqual(criteria);
+    expect(
+      step?.rows.filter((row: WireRow) => row[1] === "save" && row[2] === "[security code]"),
+    ).toHaveLength(2);
+    expect(await page.locator("main > input").first().inputValue()).toBe("739");
+    expect(await page.locator("textarea").inputValue()).toBe("739");
+  } finally {
+    if (previousTrace === undefined) delete process.env.DRIVE_TRACE_PATH;
+    else process.env.DRIVE_TRACE_PATH = previousTrace;
+    rmSync(dir, { recursive: true, force: true });
+    await finishProvisionSession(started.session_id);
+    await context.close();
+  }
+}, 15_000);

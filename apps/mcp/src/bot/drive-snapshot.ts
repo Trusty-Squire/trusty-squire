@@ -72,6 +72,7 @@ export interface DriveSaveValue {
   ref: string;
   value: string;
   activeLayer?: boolean;
+  textbox?: boolean;
 }
 
 export interface DriveSnapshot {
@@ -183,7 +184,10 @@ export function inferFieldFromControl(input: {
   return inferFieldFromLabel(input.label, input.role);
 }
 
-export function driveRowsFromSnapshot(snapshot: DriveSnapshot): SnapshotRow[] {
+export function driveRowsFromSnapshot(
+  snapshot: DriveSnapshot,
+  maskSaveValue: (value: string, textbox: boolean) => string = (value) => value,
+): SnapshotRow[] {
   const rows: SnapshotRow[] = [];
   let mainOrigin = "";
   try {
@@ -290,7 +294,9 @@ export function driveRowsFromSnapshot(snapshot: DriveSnapshot): SnapshotRow[] {
       facts.length === 0 ? [element.ref, roleLetter] : [element.ref, roleLetter, facts.join("|")],
     );
   }
-  for (const source of snapshot.saveValues ?? []) rows.push([source.ref, "save", source.value]);
+  for (const source of snapshot.saveValues ?? []) {
+    rows.push([source.ref, "save", maskSaveValue(source.value, source.textbox === true)]);
+  }
   return rows;
 }
 
@@ -1061,7 +1067,13 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
       id = cache.next++;
       cache.saveIds!.set(node, id);
     }
-    saveValues.push({ ref: `@save:f${frameOrdinal}s${id}`, value, activeLayer: activeNode(node) });
+    const element = node instanceof Element ? node : node.parentElement;
+    saveValues.push({
+      ref: `@save:f${frameOrdinal}s${id}`,
+      value,
+      activeLayer: activeNode(node),
+      textbox: element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement,
+    });
   };
   const words: string[] = [];
   const range = document.createRange();
