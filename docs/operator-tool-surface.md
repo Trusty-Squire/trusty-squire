@@ -304,11 +304,22 @@ Calls default to 60 steps and 45 seconds; `max_steps` and `max_seconds` set
 the per-call allowances within the registered schema's limits. A drive-dispatched
 OAuth step shares the call's remaining `max_seconds` across preflight checks,
 the human-handoff window, fallback dispatch, and post-action reads. OAuth phase
-changes do not extend that limit; exhaustion returns a `budget` handoff.
+changes do not extend that limit; call-budget exhaustion returns a `budget` handoff.
 If an OAuth deadline expires before dispatch is attempted, the control remains
 eligible for retry on the next call; after dispatch may have occurred, the drive
 preserves that uncertainty rather than treating the control as unclicked.
-If the OAuth executor throws an error other than recoverable budget exhaustion,
+If the OAuth executor reports a pending attempt, including an already-owned
+attempt that prevents a second authorization click, drive returns
+`status: "awaiting_human"` with `oauth.state: "awaiting_human"`, the observed
+`reason`, any challenge and notification details, and
+`oauth.next_action: "operate_observe"`. Observe the owned session before choosing
+another action; do not resume drive merely to repeat the authorization click.
+This handoff does not record a failure or dead action. An action deadline that
+expires before authorization dispatch remains `budget`, as does call-budget
+exhaustion even when dispatch may have occurred. These distinctions are covered by
+[`drive-oauth-pending-human.test.ts`](../apps/mcp/src/bot/__tests__/drive-oauth-pending-human.test.ts).
+If the OAuth executor throws an error other than recoverable budget exhaustion
+or a pending-attempt handoff,
 the error still propagates, but the drive first records the selected control as
 failed and dead. Later calls on the same session withhold that control on that
 page even if other page controls change. Recoverable OAuth budget exceptions
