@@ -367,8 +367,10 @@ The drive considers up to 250 candidates and caps each decision batch at 128
 total choice criteria, including operation and goal-value choices. Truncation
 is disclosed in the question instructions; retained dropdown choices with
 omitted siblings carry `options_elided` in planner state. The allocator reserves
-a usable goal-value choice alongside `none` when available. Omitted choices
-cannot be selected in that batch.
+a usable goal-value choice alongside `none` when available, keeps all offered
+operations, and distributes remaining capacity across choice heads so SAVE
+cannot consume the ordinary action choices. Omitted choices cannot be selected
+in that batch.
 
 Covered controls remain eligible for the drive's action menu alongside dialog
 and overlay dismiss controls; the action-time occlusion guard still applies.
@@ -595,14 +597,18 @@ SAVE operation and a SAVE_target choice over visible text and control values.
 Each candidate carries an exact snapshot value and a stable source ref. Jev
 chooses the credential requested by the goal; no credential shape, English
 label, or Copy button is required. The synthetic `secret=1` marker is page
-context, not a value source. Prefixless keys are selectable too.
+context, not a value source. Prefixless keys are selectable too. Candidates are
+bounded by the decision budget above; visible dialog and covering
+shadow-layer values take priority over background values before truncation.
 
 SAVE re-snapshots before storing. If the selected source, value, document, or
 URL changed, the drive asks again rather than saving a replacement value. It
 sends the selected value through the existing vault store path and returns
-`complete` with storage metadata. Storage failure returns `stuck`. It does not
-click a Copy control, track copy-button relabeling, or save a value before Jev
-chooses SAVE. Calls without `store` do not offer SAVE.
+`complete` with storage metadata. Storage failure returns `stuck`. SAVE itself
+does not click a Copy control or track copy-button relabeling. A revealed value
+or Copy click no longer triggers automatic capture before the next decision.
+An offered SAVE target can also be selected through a resumed call's `answer`.
+Calls without `store` do not offer SAVE.
 
 DONE also attempts extraction and requires successful storage if a credential
 is extracted. It refuses completion when a visible credential cannot be
