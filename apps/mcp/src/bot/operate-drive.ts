@@ -6725,7 +6725,7 @@ async function driveLoop(input: {
       });
     }
     const blockedSubmitField =
-      (decision.action.kind === "click" || decision.action.kind === "oauth_login") &&
+      decision.action.kind === "click" &&
       liveRow !== undefined &&
       isSubmitLikeRow(liveRow) &&
       rowFormId(liveRow) !== undefined

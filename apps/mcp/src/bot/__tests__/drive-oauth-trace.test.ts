@@ -197,6 +197,55 @@ describe("drive OAuth trace", () => {
     }
   }, 30_000);
 
+  it("dispatches an OAuth control that shares a form with empty credential fields", async () => {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await page.goto(
+      `data:text/html,${encodeURIComponent('<main><h1>Sign in</h1><form><label>Username <input name="username" required></label><label>Password <input name="password" type="password" required></label><button type="submit">Sign in</button><button type="button">Continue with Google</button><button type="button">Continue with GitHub</button></form></main>')}`,
+    );
+    const started = await startHarnessProvisionSession({
+      browser: BrowserController.fromHarnessPage(page),
+      serviceUrl: page.url(),
+      format: "compact",
+      initialObservation: "drive",
+    });
+    try {
+      const actions: string[] = [];
+      const deps: DriveDependencies = {
+        askJev: chooseOauth("Continue with Google"),
+        act,
+        observe,
+        startSession: async () => {
+          throw new Error("existing session");
+        },
+        awaitVerification,
+        injectCard: async () => ({ status: "unused" }),
+        driveAct: async (_sessionId, action) => {
+          actions.push(
+            action.kind === "oauth_login" ? (action.provider ?? "unknown") : action.kind,
+          );
+          return {
+            kind: "ok",
+            combobox: false,
+            needsUser: { wall: "google_session", message: "Connect first", resume: "connect" },
+          };
+        },
+      };
+      await runOperateDrive(
+        { session_id: started.session_id, goal: "Sign in to BeatAPI", max_steps: 2 },
+        {} as ApiClient,
+        undefined,
+        deps,
+      );
+      expect(actions).toEqual(["google"]);
+      expect(await page.locator('input[name="username"]').inputValue()).toBe("");
+      expect(await page.locator('input[type="password"]').inputValue()).toBe("");
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
   it("does not re-pick an OAuth control whose dispatch threw on the next drive call", async () => {
     const provider = Object.keys(OAUTH_PROVIDERS)[0]!;
     const context = await browser.newContext();

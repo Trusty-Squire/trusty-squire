@@ -49,14 +49,18 @@ export async function runOperateCaptchaSolve(
     pressTimeoutMs?: number;
     page?: Page | undefined;
     attemptAutoSolve?: ((session: Session, page?: Page) => Promise<string>) | undefined;
-    pressCheckboxChallenge?: ((session: Session, page?: Page) => Promise<CaptchaSolveResult>) | undefined;
+    pressCheckboxChallenge?:
+      | ((session: Session, page?: Page) => Promise<CaptchaSolveResult>)
+      | undefined;
   } = {},
 ): Promise<{ outcome: string; checkbox?: CaptchaSolveResult }> {
   const page = options.page ?? session.browser.page ?? undefined;
   const checkbox = options.pressCheckbox
-    ? await (options.pressCheckboxChallenge ??
+    ? await (
+        options.pressCheckboxChallenge ??
         ((s: Session, p?: Page) =>
-          solveVisibleCaptcha(s.browser, options.pressTimeoutMs ?? 30_000, p)))(session, page)
+          solveVisibleCaptcha(s.browser, options.pressTimeoutMs ?? 30_000, p))
+      )(session, page)
     : undefined;
   const outcome =
     options.autoSolve === false
@@ -286,13 +290,18 @@ function sameDocument(a: string, b: string): boolean {
 
 // ── operate-path auto-solve ──
 
-// The checkbox-family challenges a token solver can clear. Turnstile is
-// deliberately excluded: its managed challenge clears on its own (and
-// detectCaptchaVariant never reports a rendered Turnstile image grid).
-// recaptcha_v3 is invisible scoring — included only because a rendered bframe
-// alongside a badge means the substrate path already failed and the solver is
-// the remaining escalation (same as the provision gate).
-const AUTOSOLVE_VARIANTS = new Set<CaptchaVariant>(["hcaptcha", "recaptcha_v2", "recaptcha_v3"]);
+// The checkbox-family challenges a token solver can clear. recaptcha_v3 is
+// invisible scoring — included only because a rendered bframe alongside a badge
+// means the substrate path already failed and the solver is the remaining
+// escalation (same as the provision gate). Turnstile never renders an image
+// grid, so its challenge is the widget itself: one without a response token
+// is solved from its sitekey and page URL.
+const AUTOSOLVE_VARIANTS = new Set<CaptchaVariant>([
+  "hcaptcha",
+  "recaptcha_v2",
+  "recaptcha_v3",
+  "turnstile",
+]);
 
 // A solve takes tens of seconds on 2Captcha and each successful one costs the
 // operator's funded key. Bound RETRIES: skip while one attempt is in flight
@@ -489,12 +498,11 @@ export async function injectPendingCaptchaToken(
     // this variant's token actually belongs, so a token that landed nowhere
     // backs off instead of suppressing the next attempt.
     const confirmed = res.solved && (await variantTokenPresent(session, pending.variant, page));
-    const outcome =
-      confirmed
-        ? res.outcome
-        : res.outcome === "ok"
-          ? "token_not_confirmed"
-          : res.outcome;
+    const outcome = confirmed
+      ? res.outcome
+      : res.outcome === "ok"
+        ? "token_not_confirmed"
+        : res.outcome;
     audit(session.id, "captcha_autosolve", {
       variant: pending.variant,
       outcome,
@@ -620,17 +628,17 @@ async function runDetachedTokenFetch(session: Session, page?: Page): Promise<str
     // sealed value, so without this there is NO readable record of whether
     // detection saw a rendered challenge — making a silent early return
     // indistinguishable from the auto-solve never running at all.
-    const evidence =
-      det.recaptcha === undefined ? "" : ` ${recaptchaEvidenceDiag(det.recaptcha)}`;
+    const evidence = det.recaptcha === undefined ? "" : ` ${recaptchaEvidenceDiag(det.recaptcha)}`;
     console.error(
       `[captcha-autosolve-diag] session=${session.id} variant=${det.variant} outcome=detect challenge_rendered=${det.challengeRendered}${evidence}`,
     );
-    // Only a RENDERED challenge escalates to the solver. A mere checkbox
-    // (or a settled widget) with a response token needs nothing, and a
-    // no-challenge page must never spend the funded key.
-    if (!det.challengeRendered || !AUTOSOLVE_VARIANTS.has(det.variant)) {
+    // Only a RENDERED challenge escalates to the solver; a no-challenge page
+    // must never spend the funded key. A Turnstile widget is its own challenge,
+    // and the token check below spares one that has already settled.
+    const challengePresent = det.challengeRendered || det.variant === "turnstile";
+    if (!challengePresent || !AUTOSOLVE_VARIANTS.has(det.variant)) {
       state.inFlight = false;
-      return det.challengeRendered ? "unsupported_variant" : "no_challenge";
+      return challengePresent ? "unsupported_variant" : "no_challenge";
     }
     // Scoped to the DETECTED provider: a co-resident reCAPTCHA v3 badge token
     // must not read as "the rendered hCaptcha is already solved".
