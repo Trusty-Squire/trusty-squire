@@ -1,5 +1,9 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.57-rc.1 (2026-11-21)
+
+- fix(mcp): prevent repeated dispatch of failed OAuth controls (#1166)
+
 ## 1.1.56-rc.1 (2026-11-20)
 
 - fix(mcp): allow inbox polling to resume after budget exhaustion (#1164)
