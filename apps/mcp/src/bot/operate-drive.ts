@@ -1025,10 +1025,6 @@ export function recordUndeliveredDecision(
   recordRefusedDecision(drive, rows, decision, url, reason);
 }
 
-/** A submit refused for an empty field of its own form stays offered, marked
- *  with that field, so the decider can fill the field or pick the submit the
- *  goal names. Refused again while the same field is still empty, the drive
- *  hands that field back instead of offering the submit forever. */
 export function recordWaitingDecision(
   drive: RefusedDecisionMemory & Pick<SessionDriveState, "waitingControls">,
   rows: readonly WireRow[],
@@ -1036,19 +1032,21 @@ export function recordWaitingDecision(
   url: string,
   field: WireRow,
   reason: string,
-): "waiting" | "repeated" {
+): void {
   const row = rows.find((entry) => entry[0] === decision.actionKey);
   const waiting: DriveWaitingControl = {
     control: row === undefined ? decision.actionKey : actionFailureKey(row, url),
     field: stableControlKey(field, url),
   };
   drive.waitingControls ??= [];
-  const repeated = drive.waitingControls.some(
-    (entry) => entry.control === waiting.control && entry.field === waiting.field,
-  );
-  if (!repeated) drive.waitingControls.push(waiting);
+  if (
+    !drive.waitingControls.some(
+      (entry) => entry.control === waiting.control && entry.field === waiting.field,
+    )
+  ) {
+    drive.waitingControls.push(waiting);
+  }
   recordRefusedDecision(drive, rows, decision, url, reason);
-  return repeated ? "repeated" : "waiting";
 }
 
 /** The empty field each still-waiting submit on this page needs, by the
@@ -1155,7 +1153,10 @@ export function isPendingPageAction(row: WireRow, _goal: string = ""): boolean {
 
 export function pageHasUntriedPendingAction(
   rows: readonly WireRow[],
-  drive: Pick<SessionDriveState, "failedActionKeys" | "exhaustedActionKeys" | "waitingControls">,
+  drive: Pick<
+    SessionDriveState,
+    "failedActionKeys" | "exhaustedActionKeys" | "waitingControls" | "filledRefs"
+  >,
   pageUrl: string,
   goal: string,
 ): boolean {
@@ -1163,7 +1164,12 @@ export function pageHasUntriedPendingAction(
   const exhausted = new Set(drive.exhaustedActionKeys ?? []);
   // A submit waiting on an empty field is not untried work either: it was
   // refused and stays refused until that field is filled.
-  const waiting = new Set((drive.waitingControls ?? []).map((entry) => entry.control));
+  const waiting = waitingFieldsByControl(
+    drive.waitingControls ?? [],
+    rows,
+    drive.filledRefs,
+    pageUrl,
+  );
   return rows.some((row) => {
     if (!isPendingPageAction(row, goal)) return false;
     if (failed.has(actionFailureKey(row, pageUrl)) || failed.has(row[0])) return false;
@@ -1937,6 +1943,13 @@ export function isExistingCredentialMutationRow(
   const label = `${readableLabel(row)} ${selectedOption}`;
   const named = hasCredentialNoun(label);
   if (
+    isCredentialPage(pageUrl, rows, headings) &&
+    /(?:^|\|)item=1(?:\||$)/.test(row[2] ?? "") &&
+    !(isRevealOrCopyRow(row) && revealedKeyCaptureDue(rows, false))
+  ) {
+    return true;
+  }
+  if (
     !/\b(?:regenerat\w*|rotat\w*|reset|revoke|delet\w*|remove)\b/i.test(label) &&
     !CREDENTIAL_MUTATION_WORDS.test(label) &&
     !(named && CREDENTIAL_REPLACE_WORDS.test(label))
@@ -1969,7 +1982,12 @@ export function isCredentialMutationConfirmRow(
   if (labelIdentity(label).length === 0 || labelIdentity(label) !== labelIdentity(pressed.label)) {
     return false;
   }
-  if (!hasCredentialNoun(label) || isKeyCreateRow(row) || CREDENTIAL_CREATE_WORDS.test(label)) {
+  if (
+    (!hasCredentialNoun(label) && !isCredentialPage(pageUrl, rows, [])) ||
+    isRevealOrCopyRow(row) ||
+    isKeyCreateRow(row) ||
+    CREDENTIAL_CREATE_WORDS.test(label)
+  ) {
     return false;
   }
   // What stands in its place is a dialog's handful of controls: a modal hides
@@ -7114,24 +7132,14 @@ async function driveLoop(input: {
       traceUndispatchedOauth("required_field_empty");
       const field = fieldLabelForRow(blockedSubmitField);
       const reason = `decided submit was not executed because required field ${field} is still empty`;
-      if (
-        recordWaitingDecision(
-          drive,
-          rows,
-          decision,
-          observation.url,
-          blockedSubmitField,
-          reason,
-        ) === "repeated"
-      ) {
-        return finish("needs_value", {
-          field,
-          question: {
-            question: `${readableLabel(liveRow!)} waits for the empty ${field} field`,
-            options: {},
-          },
-        });
-      }
+      recordWaitingDecision(
+        drive,
+        rows,
+        decision,
+        observation.url,
+        blockedSubmitField,
+        reason,
+      );
       automaticDecisionRefused = true;
       return "continue";
     }

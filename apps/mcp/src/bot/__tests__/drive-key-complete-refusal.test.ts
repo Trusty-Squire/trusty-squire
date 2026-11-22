@@ -335,11 +335,21 @@ it.each([
   // Kenari's Indonesian revoke and rotate (squire-1.1.57 L132-138).
   { label: "Cabut key", path: "/keys" },
   { label: "Ganti key", path: "/keys" },
+  { label: "Ganti", path: "/keys" },
+  { label: "Ganti", path: "/keys", container: "list" },
+  { label: "Ganti", path: "/keys", container: "aria" },
+  { label: "Badilisha", path: "/keys" },
 ])(
   "hands $label back before dispatch",
-  async ({ label, path, confidence = 1 }) => {
+  async ({ label, path, confidence = 1, container = "table" }) => {
     await withKeyPage(
-      `<main><h1>API keys</h1><button>${label}</button></main>`,
+      `<main><h1>API keys</h1>${
+        container === "list"
+          ? `<ul><li>Production<button>${label}</button></li></ul>`
+          : container === "aria"
+            ? `<div role="table"><div role="row">Production<button>${label}</button></div></div>`
+            : `<table><tbody><tr><td>Production</td><td><button>${label}</button></td></tr></tbody></table>`
+      }</main>`,
       async (sessionId) => {
         const driveAct = vi.fn<NonNullable<DriveDependencies["driveAct"]>>(async () => {
           throw new Error("mutation action must not dispatch");

@@ -218,7 +218,7 @@ describe("a guard-refused submit stays offered", () => {
 
   it("marks the submit with the field it waits on and offers that field", () => {
     const drive = emptyDriveState("sign up", {});
-    expect(recordWaitingDecision(drive, rows, decision, url, rows[0]!, reason)).toBe("waiting");
+    recordWaitingDecision(drive, rows, decision, url, rows[0]!, reason);
     expect(drive.failedActionKeys).toEqual([]);
     expect(drive.staleClickRefs).toEqual([]);
     const waitingFields = waitingFieldsByControl(drive.waitingControls!, rows, [], url);
@@ -244,12 +244,16 @@ describe("a guard-refused submit stays offered", () => {
       ...rows.slice(1),
     ];
     expect(waitingFieldsByControl(drive.waitingControls!, typed, [], url).size).toBe(0);
+    expect(pageHasUntriedPendingAction(typed, drive, url, "sign up")).toBe(true);
+    drive.filledRefs.push("@e:f0d1");
+    expect(pageHasUntriedPendingAction(rows, drive, url, "sign up")).toBe(true);
+    expect(pageHasUntriedPendingAction(rows.slice(1), drive, url, "sign up")).toBe(true);
   });
 
-  it("reports a repeat refusal over the same empty field", () => {
+  it("keeps repeated refusals waiting on the same empty field", () => {
     const drive = emptyDriveState("sign up", {});
-    expect(recordWaitingDecision(drive, rows, decision, url, rows[0]!, reason)).toBe("waiting");
-    expect(recordWaitingDecision(drive, rows, decision, url, rows[0]!, reason)).toBe("repeated");
+    recordWaitingDecision(drive, rows, decision, url, rows[0]!, reason);
+    recordWaitingDecision(drive, rows, decision, url, rows[0]!, reason);
     expect(drive.waitingControls).toEqual([
       { control: stableControlKey(rows[1]!, url), field: stableControlKey(rows[0]!, url) },
     ]);
@@ -286,6 +290,27 @@ describe("credential changes are caught in any language", () => {
     ["@key-value", "h1", "@key-value|secret=1|len=51"],
   ];
   const at = (ref: string): WireRow => kenari.find((row) => row[0] === ref)!;
+
+  it.each(["Ganti", "Badilisha", "任意"])("refuses an existing row's %s control", (label) => {
+    expect(isExistingCredentialMutationRow(["@e:x", "b", `${label}|item=1`], url)).toBe(true);
+    const dialog: WireRow[] = [["@e:y", "b", label]];
+    expect(
+      isCredentialMutationConfirmRow(dialog[0]!, url, dialog, {
+        ref: "@e:x",
+        url,
+        label,
+      }),
+    ).toBe(true);
+  });
+
+  it("permits copying a just-shown key inside an existing row", () => {
+    const copy: WireRow = ["@e:copy", "b", "Copy key|item=1"];
+    expect(isExistingCredentialMutationRow(copy, url, [copy, kenari[7]!])).toBe(false);
+    expect(isExistingCredentialMutationRow(copy, url, [copy])).toBe(true);
+    expect(
+      isExistingCredentialMutationRow(["@e:select", "s", "Actions|item=1"], url, [], "任意"),
+    ).toBe(true);
+  });
 
   it("refuses Kenari's revoke and rotate", () => {
     expect(isExistingCredentialMutationRow(at("@e:f0d181"), url, kenari)).toBe(true);

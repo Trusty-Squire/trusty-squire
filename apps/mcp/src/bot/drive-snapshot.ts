@@ -59,6 +59,7 @@ export interface DriveSnapshotElement {
   invalid?: boolean;
   /** HTML form owner identity, stable for one snapshot walk. */
   formId?: number;
+  entityRow?: boolean;
   /** Covering control ref, or a region kind when the cover is not a listed control. */
   occludedBy?: string;
   operations: Array<"click" | "fill" | "select">;
@@ -245,6 +246,7 @@ export function driveRowsFromSnapshot(snapshot: DriveSnapshot): SnapshotRow[] {
     const choice = optionOrdinal.get(element.ref);
     if (choice !== undefined) facts.push(`q=${choice.index}/${choice.total}`);
     if (element.formId !== undefined) facts.push(`fm=${element.formId}`);
+    if (element.entityRow) facts.push("item=1");
     if (element.occludedBy !== undefined && element.occludedBy.length > 0) {
       facts.push(`oc=${element.occludedBy.replace(/\|/g, " ").slice(0, 40)}`);
     }
@@ -900,6 +902,8 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
       label,
       operations,
       frameOrdinal,
+      entityRow:
+        !pinned && element.closest('tr,[role="row"],li,[role="listitem"]') !== null,
       selector: selectorFor(element),
       ...(value === undefined ? {} : { value }),
       ...(element instanceof HTMLInputElement && element.type === "password"
