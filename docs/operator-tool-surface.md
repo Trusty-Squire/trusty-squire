@@ -39,11 +39,11 @@ Use `operate_dialog({session_id,dialog_id,action:"accept"|"dismiss",text?})`;
 is refused. Unanswered dialogs are dismissed after two minutes, and subsequent
 observations include `native_dialog_notices`. Outside `operate_drive`, no dialog
 is automatically accepted. `operate_drive` acknowledges alerts and decides native
-confirmations against the user's goal. It hands prompt text, and uncertainty on a
-confirmation identified as an existing credential mutation from the dialog and
-preceding page context, back to the host. Destructive consequences still require
-authorization; ordinary confirmations have no confidence threshold. Each dialog
-answer consumes a drive step, including an automatic alert acknowledgement. The
+confirmations against the user's goal. It hands prompt text and uncertain
+credential confirmations back to the host under the
+[credential guard policy](#credential-capture-and-retrieval). Destructive
+consequences still require authorization; ordinary confirmations have no confidence
+threshold. Each dialog answer consumes a drive step, including an automatic alert acknowledgement. The
 human live viewer displays the same question with OK, Cancel and a prompt input.
 
 `operate_upload` takes `session_id`, exactly one of a current `target` ref or
@@ -602,9 +602,12 @@ controls marked `credential=1`, except Copy/reveal buttons, links, and menu
 items. The marker comes from the nearest table row or list item (including
 ARIA equivalents) containing a credential-shaped token, a visible masked
 display, or a visible readonly input. This structural check does not depend
-on mutation verbs or their language. A dialog control following a recorded
+on mutation verbs or their language. A DOM dialog control following a recorded
 credential-row mutation click on the same page path is also refused, with the
-same Copy/reveal exception. Other rows, including new-key creation controls
+same Copy/reveal exception. Native confirmations use that same recorded-click
+provenance to offer a human handoff and require confidence of at least 0.6
+for an automatic accept or dismiss; dialog wording alone does not classify
+them as credential mutations. Other rows, including new-key creation controls
 without that evidence, remain eligible. Regression coverage lives in
 [`drive-key-complete-refusal.test.ts`](../apps/mcp/src/bot/__tests__/drive-key-complete-refusal.test.ts).
 
