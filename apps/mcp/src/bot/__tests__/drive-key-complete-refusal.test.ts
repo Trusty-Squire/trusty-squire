@@ -409,22 +409,46 @@ it.each([
 );
 
 it.each([
-  { body: '<ul><li><button>Create key</button></li></ul>', guarded: false },
-  { body: '<ul><li><button>Ganti workspace</button></li></ul>', guarded: false },
-  { body: '<table><tr><td><button>Create key...</button></td></tr></table>', guarded: false },
-  { body: '<ul><li>sk_live_••••<button>Ganti</button></li></ul>', guarded: true },
-  { body: '<ul><li><input readonly value="d7bd...4a"><button>Ganti</button></li></ul>', guarded: true },
-  { body: '<ul><li>d7bd...4a<button>Ganti</button></li></ul>', guarded: true },
-  { body: '<table><tr><td>d7bd…4a</td><td><button>Cabut key</button></td></tr></table>', guarded: true },
-  { body: '<ul><li>••••<button>Ganti</button></li></ul>', guarded: true },
-  { body: '<ul><li><span hidden>••••</span><button>Create key</button></li></ul>', guarded: false },
-  { body: '<ul><li><button>sk_123456789abcdefghijk</button></li></ul>', guarded: true },
-  { body: '<ul><li><input readonly value="arbitrary"><button>Ganti</button></li></ul>', guarded: true },
-  { body: `<ul><li>${"0123456789abcdef".repeat(4)}<button>Ganti</button></li></ul>`, guarded: true },
-  { body: '<ul><li><input readonly type="password" value="arbitrary-format"><button>Ganti</button></li></ul>', guarded: true },
-  { body: '<ul><li><input readonly type="password" value=""><button>Ganti</button></li></ul>', guarded: true },
-  { body: '<ul><li><input readonly value="sk_123456789abcdefghijk"><button>Ganti</button></li></ul>', guarded: true },
-  { body: '<dialog open><code>sk_123456789abcdefghijk</code><button>Copy</button></dialog>', guarded: false },
+  { body: "<ul><li><button>Create key</button></li></ul>", guarded: false },
+  { body: "<ul><li><button>Ganti workspace</button></li></ul>", guarded: false },
+  { body: "<table><tr><td><button>Create key...</button></td></tr></table>", guarded: false },
+  { body: "<ul><li>sk_live_••••<button>Ganti</button></li></ul>", guarded: true },
+  {
+    body: '<ul><li><input readonly value="d7bd...4a"><button>Ganti</button></li></ul>',
+    guarded: true,
+  },
+  { body: "<ul><li>d7bd...4a<button>Ganti</button></li></ul>", guarded: true },
+  {
+    body: "<table><tr><td>d7bd…4a</td><td><button>Cabut key</button></td></tr></table>",
+    guarded: true,
+  },
+  { body: "<ul><li>••••<button>Ganti</button></li></ul>", guarded: true },
+  { body: "<ul><li><span hidden>••••</span><button>Create key</button></li></ul>", guarded: false },
+  { body: "<ul><li><button>sk_123456789abcdefghijk</button></li></ul>", guarded: true },
+  {
+    body: '<ul><li><input readonly value="arbitrary"><button>Ganti</button></li></ul>',
+    guarded: true,
+  },
+  {
+    body: `<ul><li>${"0123456789abcdef".repeat(4)}<button>Ganti</button></li></ul>`,
+    guarded: true,
+  },
+  {
+    body: '<ul><li><input readonly type="password" value="arbitrary-format"><button>Ganti</button></li></ul>',
+    guarded: true,
+  },
+  {
+    body: '<ul><li><input readonly type="password" value=""><button>Ganti</button></li></ul>',
+    guarded: true,
+  },
+  {
+    body: '<ul><li><input readonly value="sk_123456789abcdefghijk"><button>Ganti</button></li></ul>',
+    guarded: true,
+  },
+  {
+    body: "<dialog open><code>sk_123456789abcdefghijk</code><button>Copy</button></dialog>",
+    guarded: false,
+  },
 ])("guards only credential-bearing rows: $body", async ({ body, guarded }) => {
   await withKeyPage(`<main>${body}</main>`, async (sessionId) => {
     const page = sessionForCall(sessionId)!.browser.page!;
@@ -436,17 +460,22 @@ it.each([
   });
 });
 
-it.each(["button", "menuitem"].flatMap((role) =>
-  ["inline", "navigation", "existing"].map((mode) => ({ role, mode })),
-))("copies a key using a $role after $mode presentation", async ({ role, mode }) => {
-  const value = "0123456789abcdef".repeat(4);
-  const create = mode === "existing"
-    ? ""
-    : mode === "navigation"
-      ? '<form action="/keys"><input type="hidden" name="created" value="1"><button type="submit">Create key</button></form>'
-      : `<button type="button" onclick="document.querySelector('ul').hidden=false">Create key</button>`;
-  await withKeyPage(
-    `<main>${create}
+it.each(
+  ["button", "menuitem"].flatMap((role) =>
+    ["inline", "navigation", "existing"].map((mode) => ({ role, mode })),
+  ),
+)(
+  "copies a key using a $role after $mode presentation",
+  async ({ role, mode }) => {
+    const value = "0123456789abcdef".repeat(4);
+    const create =
+      mode === "existing"
+        ? ""
+        : mode === "navigation"
+          ? '<form action="/keys"><input type="hidden" name="created" value="1"><button type="submit">Create key</button></form>'
+          : `<button type="button" onclick="document.querySelector('ul').hidden=false">Create key</button>`;
+    await withKeyPage(
+      `<main>${create}
       <ul ${mode === "existing" ? "" : "hidden"}><li><code>${value}</code>
         <button type="button" role="${role}" onclick="navigator.clipboard.writeText('${value}')">Copy</button>
         <button type="button">Ganti</button>
@@ -457,36 +486,51 @@ it.each(["button", "menuitem"].flatMap((role) =>
           document.querySelector('form').remove();
         }
       </script>`,
-    async (sessionId) => {
-      const page = sessionForCall(sessionId)!.browser.page!;
-      await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
-      await page.evaluate(() => navigator.clipboard.writeText(""));
-      const askJev = vi.fn<DriveDependencies["askJev"]>(async (_api, _state, questions) => ({
-        attempts: 1,
-        elapsedMs: 1,
-        result: {
-          answers: Object.fromEntries(Object.entries(questions).flatMap(([name, question]) => {
-            if (question.type !== "choice") return [];
-            const keys = Object.keys(question.criteria);
-            const choice = name === "operation" ? "CLICK" : name === "CLICK_target"
-              ? keys.find((key) => question.criteria[key] === "Copy") ?? keys[0]!
-              : keys[0]!;
-            return [[name, {
-              choice, confidence: 1,
-              probabilities: Object.fromEntries(keys.map((key) => [key, key === choice ? 1 : 0])),
-            }]];
-          })),
-        },
-      }));
-      const result = await runOperateDrive(
-        { session_id: sessionId, goal: "create and copy a key", max_steps: 3, max_seconds: 10 },
-        api,
-        undefined,
-        dependencies(askJev),
-      );
-      const session = sessionForCall(sessionId)!;
-      expect(await session.browser.readClipboard(session.browser.page!)).toBe(value);
-      expect(result.reason ?? "").not.toContain("operator decision required before Copy");
-    },
-  );
-}, 15_000);
+      async (sessionId) => {
+        const page = sessionForCall(sessionId)!.browser.page!;
+        await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+        await page.evaluate(() => navigator.clipboard.writeText(""));
+        const askJev = vi.fn<DriveDependencies["askJev"]>(async (_api, _state, questions) => ({
+          attempts: 1,
+          elapsedMs: 1,
+          result: {
+            answers: Object.fromEntries(
+              Object.entries(questions).flatMap(([name, question]) => {
+                if (question.type !== "choice") return [];
+                const keys = Object.keys(question.criteria);
+                const choice =
+                  name === "operation"
+                    ? "CLICK"
+                    : name === "CLICK_target"
+                      ? (keys.find((key) => question.criteria[key] === "Copy") ?? keys[0]!)
+                      : keys[0]!;
+                return [
+                  [
+                    name,
+                    {
+                      choice,
+                      confidence: 1,
+                      probabilities: Object.fromEntries(
+                        keys.map((key) => [key, key === choice ? 1 : 0]),
+                      ),
+                    },
+                  ],
+                ];
+              }),
+            ),
+          },
+        }));
+        const result = await runOperateDrive(
+          { session_id: sessionId, goal: "create and copy a key", max_steps: 3, max_seconds: 10 },
+          api,
+          undefined,
+          dependencies(askJev),
+        );
+        const session = sessionForCall(sessionId)!;
+        expect(await session.browser.readClipboard(session.browser.page!)).toBe(value);
+        expect(result.reason ?? "").not.toContain("operator decision required before Copy");
+      },
+    );
+  },
+  15_000,
+);

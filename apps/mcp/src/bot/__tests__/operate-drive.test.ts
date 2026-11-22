@@ -813,9 +813,9 @@ describe("clear-winner decision routing", () => {
         answers: { operation: valid("CLICK", ops), CLICK_target: valid(wrong, targets, 0.4) },
       }),
     ).toMatchObject({ kind: "act", action: { kind: "click", target: "@e:b5" } });
-    expect(
-      isExistingCredentialMutationRow(["@e:delete", "b", "Delete API key|credential=1"]),
-    ).toBe(true);
+    expect(isExistingCredentialMutationRow(["@e:delete", "b", "Delete API key|credential=1"])).toBe(
+      true,
+    );
     expect(isExistingCredentialMutationRow(["@e:delete", "b", "Delete project"])).toBe(false);
   });
 

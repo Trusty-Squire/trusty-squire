@@ -73,7 +73,9 @@ describe("submit detection uses the page's own marker", () => {
   });
 
   it("keeps navigation and carousel guards ahead of submit markers", () => {
-    expect(isSubmitLikeRow(["@e:link", "l", "Create Account|u=https://x.test/signup|a=submit|fm=1"])).toBe(false);
+    expect(
+      isSubmitLikeRow(["@e:link", "l", "Create Account|u=https://x.test/signup|a=submit|fm=1"]),
+    ).toBe(false);
     expect(isSubmitLikeRow(["@e:slide", "b", "Next slide|a=submit|fm=1"])).toBe(false);
   });
 
@@ -124,11 +126,32 @@ describe("links to the same place are one answer", () => {
   it("keeps long destinations distinct through snapshot conversion and admission", () => {
     const prefix = `https://cloud.livekit.io/${"x".repeat(130)}`;
     const snapshot: DriveSnapshot = {
-      url, title: "Settings", headings: [], text: "", fingerprint: "fp", documentEpoch: "1",
-      omittedValues: 0, scriptMs: 0, wallMs: 0,
+      url,
+      title: "Settings",
+      headings: [],
+      text: "",
+      fingerprint: "fp",
+      documentEpoch: "1",
+      omittedValues: 0,
+      scriptMs: 0,
+      wallMs: 0,
       elements: [
-        { ref: "@e:a", role: "link", label: "First", href: `${prefix}/first`, operations: ["click"], frameOrdinal: 0 },
-        { ref: "@e:b", role: "link", label: "Second", href: `${prefix}/second`, operations: ["click"], frameOrdinal: 0 },
+        {
+          ref: "@e:a",
+          role: "link",
+          label: "First",
+          href: `${prefix}/first`,
+          operations: ["click"],
+          frameOrdinal: 0,
+        },
+        {
+          ref: "@e:b",
+          role: "link",
+          label: "Second",
+          href: `${prefix}/second`,
+          operations: ["click"],
+          frameOrdinal: 0,
+        },
         { ref: "@e:c", role: "button", label: "Other", operations: ["click"], frameOrdinal: 0 },
       ],
     };
@@ -142,7 +165,9 @@ describe("links to the same place are one answer", () => {
         [slugFor(criteria, "Second")]: 0.44,
         [slugFor(criteria, "Other")]: 0.09,
       });
-      return admitsChoice(criteria, votes, { destinations: candidateDestinations(candidates, url) });
+      return admitsChoice(criteria, votes, {
+        destinations: candidateDestinations(candidates, url),
+      });
     };
     expect(admission()).toMatchObject({ kind: "low_confidence" });
     snapshot.elements[1]!.href = snapshot.elements[0]!.href;
@@ -150,15 +175,27 @@ describe("links to the same place are one answer", () => {
   });
 
   it.each([
-    "javascript:void(0)", " JavaScript:void(0) ", "#", "#panel", " #panel ",
-    url, `${url}#`, `${url}#panel`, "./settings", "./settings#panel", "mailto:team@example.test",
-    "data:text/plain,action", "http://[", "   ",
+    "javascript:void(0)",
+    " JavaScript:void(0) ",
+    "#",
+    "#panel",
+    " #panel ",
+    url,
+    `${url}#`,
+    `${url}#panel`,
+    "./settings",
+    "./settings#panel",
+    "mailto:team@example.test",
+    "data:text/plain,action",
+    "http://[",
+    "   ",
   ])("does not merge distinct actions sharing the placeholder %s", (href) => {
     const candidates = sets.CLICK.map((candidate) => ({
       ...candidate,
-      row: candidate.row[1] === "l"
-        ? [candidate.ref, candidate.row[1], `${candidate.description}|u=${href}`] as WireRow
-        : candidate.row,
+      row:
+        candidate.row[1] === "l"
+          ? ([candidate.ref, candidate.row[1], `${candidate.description}|u=${href}`] as WireRow)
+          : candidate.row,
     }));
     const votes = answer(targets, {
       [slugFor(targets, "Observability")]: 0.47,
@@ -166,27 +203,41 @@ describe("links to the same place are one answer", () => {
       [slugFor(targets, "Members")]: 0.09,
     });
     const destinations = candidateDestinations(candidates, url);
-    expect(admitsChoice(targets, votes, { destinations })).toMatchObject({ kind: "low_confidence" });
-    expect(decideAfterJev({
-      answers: { operation: answer(ops, { CLICK: 1 }), CLICK_target: votes },
-      rows: candidates.map((candidate) => candidate.row),
-      facts: {}, lastFingerprint: null, lastActionKey: null, fingerprint: "fp",
-      goal: "open settings", pageUrl: url, questions, sets: { ...sets, CLICK: candidates },
-    })).toMatchObject({ kind: "low_confidence" });
+    expect(admitsChoice(targets, votes, { destinations })).toMatchObject({
+      kind: "low_confidence",
+    });
+    expect(
+      decideAfterJev({
+        answers: { operation: answer(ops, { CLICK: 1 }), CLICK_target: votes },
+        rows: candidates.map((candidate) => candidate.row),
+        facts: {},
+        lastFingerprint: null,
+        lastActionKey: null,
+        fingerprint: "fp",
+        goal: "open settings",
+        pageUrl: url,
+        questions,
+        sets: { ...sets, CLICK: candidates },
+      }),
+    ).toMatchObject({ kind: "low_confidence" });
   });
 
   it.each([
-    "/projects/p_1/observability", "https://cloud.livekit.io/other#panel",
-    "http://cloud.livekit.io/other", `${url}?view=other#panel`,
+    "/projects/p_1/observability",
+    "https://cloud.livekit.io/other#panel",
+    "http://cloud.livekit.io/other",
+    `${url}?view=other#panel`,
   ])("keeps equivalent real navigation links to %s", (href) => {
     const candidates = sets.CLICK.map((candidate) => ({
       ...candidate,
-      row: candidate.row[1] === "l"
-        ? [candidate.ref, candidate.row[1], `${candidate.description}|u=${href}`] as WireRow
-        : candidate.row,
+      row:
+        candidate.row[1] === "l"
+          ? ([candidate.ref, candidate.row[1], `${candidate.description}|u=${href}`] as WireRow)
+          : candidate.row,
     }));
-    expect(admitsChoice(targets, split, { destinations: candidateDestinations(candidates, url) }))
-      .toEqual({ ok: true });
+    expect(
+      admitsChoice(targets, split, { destinations: candidateDestinations(candidates, url) }),
+    ).toEqual({ ok: true });
   });
 
   it("ignores a same-destination twin as the runner-up", () => {
@@ -352,12 +403,26 @@ describe("a guard-refused submit stays offered", () => {
     const drive = emptyDriveState("sign up", {});
     recordWaitingDecision(drive, formRows, decision, url, select, reason);
     const waitingFields = waitingFieldsByControl(drive.waitingControls!, formRows, [], url);
-    const sets = driveTargetSets(formRows, {}, false, [], url,
-      new Map([[select[0], ["Canada", "Japan"]]]), (text) => text, [], { waitingFields });
+    const sets = driveTargetSets(
+      formRows,
+      {},
+      false,
+      [],
+      url,
+      new Map([[select[0], ["Canada", "Japan"]]]),
+      (text) => text,
+      [],
+      { waitingFields },
+    );
     expect(sets.TYPE_TEXT.some((candidate) => candidate.ref === select[0])).toBe(false);
-    expect(sets.SELECT.filter((candidate) => candidate.ref === select[0]).map((candidate) => candidate.option))
-      .toEqual(expect.arrayContaining(["Canada", "Japan"]));
-    expect(sets.CLICK.find((candidate) => candidate.ref === decision.actionKey)?.waitsFor).toBe("Country");
+    expect(
+      sets.SELECT.filter((candidate) => candidate.ref === select[0]).map(
+        (candidate) => candidate.option,
+      ),
+    ).toEqual(expect.arrayContaining(["Canada", "Japan"]));
+    expect(sets.CLICK.find((candidate) => candidate.ref === decision.actionKey)?.waitsFor).toBe(
+      "Country",
+    );
   });
 
   it("still removes a control refused for any other reason", () => {
@@ -397,7 +462,9 @@ describe("credential changes are caught by structure", () => {
         expect(isCredentialMutationConfirmRow(row, url, { url, credentialRow: true })).toBe(false);
       }
       for (const label of ["Cabut key", "Ganti key", "Ganti"]) {
-        expect(isExistingCredentialMutationRow(["@e:rotate", role, `${label}|credential=1`])).toBe(true);
+        expect(isExistingCredentialMutationRow(["@e:rotate", role, `${label}|credential=1`])).toBe(
+          true,
+        );
       }
     },
   );
@@ -419,7 +486,9 @@ describe("credential changes are caught by structure", () => {
     ).toBe(false);
     expect(
       isCredentialMutationConfirmRow(
-        ["@e:y", "b", "Ganti|dialog=@e:dialog"], "https://kenari.id/other", pressed,
+        ["@e:y", "b", "Ganti|dialog=@e:dialog"],
+        "https://kenari.id/other",
+        pressed,
       ),
     ).toBe(false);
   });
