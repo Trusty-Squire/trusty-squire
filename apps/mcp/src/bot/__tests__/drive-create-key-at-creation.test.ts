@@ -111,10 +111,16 @@ it("creates a named key when existing keys are masked, then captures its one-tim
   };
   try {
     sessionForCall(started.session_id)!.drive = emptyDriveState(goal, { key_name: "Corpus Key" });
+    // A key goal completes only once the captured key is in the vault (#1148).
+    const persistCredentials = vi.fn(async () => ({
+      reference: "vault://ref",
+      service: "fixture",
+      label: undefined,
+    }));
     const result = await runOperateDrive(
       { session_id: started.session_id, goal, max_steps: 8, max_seconds: 20 },
       api,
-      undefined,
+      { persistCredentials },
       {
         askJev,
         act,
@@ -127,6 +133,9 @@ it("creates a named key when existing keys are masked, then captures its one-tim
       },
     );
     expect(result.status).toBe("complete");
+    expect(persistCredentials).toHaveBeenCalledWith(
+      expect.objectContaining({ credentials: { api_key: key } }),
+    );
     expect(await page.locator("main").innerText()).toContain("Name: Corpus Key");
     expect(await page.locator('[name="key_name"]').count()).toBe(0);
     const extracted = await extractCredentials(started.session_id);

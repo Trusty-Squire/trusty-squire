@@ -123,6 +123,7 @@ describe("drive stop reason is not page prose", () => {
       // The stop reason is the loop's own deterministic account, not page text.
       expect(result.reason ?? "").not.toContain("never knew we failed");
       expect(result.reason ?? "").not.toContain("not found");
+      // The call budget can end the inbox poll before its own window (#1164).
       expect(result.reason ?? "").toMatch(
         /^(?:nothing on the page can advance the goal|inbox poll found nothing|drive budget ended while waiting for verification mail)/,
       );
