@@ -72,6 +72,7 @@ import {
   type DriveActProfile,
   type DriveHandoffQuestion,
   type DriveTrajectoryStep,
+  type DriveWaitingControl,
   type Session,
   type SessionDriveState,
 } from "./session/model.js";
@@ -348,6 +349,8 @@ export interface DriveCandidate {
   option?: string;
   optionLabel?: string;
   optionsElided?: boolean;
+  /** The empty field of its own form this refused submit waits on. */
+  waitsFor?: string;
 }
 
 export type DriveStatus =
@@ -456,6 +459,7 @@ export function resetDriveGoalMemory(drive: SessionDriveState): void {
   drive.exhaustedProgressKey = null;
   drive.exhaustedActionKeys = [];
   drive.failedActionKeys = [];
+  drive.waitingControls = [];
   drive.staleClickRefs = [];
   drive.staleNonWait = 0;
   drive.consumedActionKey = null;
@@ -501,6 +505,7 @@ export function emptyDriveState(goal: string, facts: Record<string, string>): Se
     exhaustedProgressKey: null,
     exhaustedActionKeys: [],
     failedActionKeys: [],
+    waitingControls: [],
     boundFingerprint: null,
     consumedActionKey: null,
     lastActProfile: null,
@@ -959,6 +964,8 @@ export interface DriveAimContext {
   submittedThisDrive?: boolean;
   visitedSectionKeys?: readonly string[];
   liveProviders?: readonly OAuthProviderId[];
+  /** Refused submits still waiting, by stable key, with the empty field each needs. */
+  waitingFields?: ReadonlyMap<string, WireRow>;
 }
 
 export function rowFormId(row: WireRow): string | undefined {
@@ -987,24 +994,26 @@ export function rememberFailedAction(
   if (!drive.failedActionKeys.includes(key)) drive.failedActionKeys.push(key);
 }
 
+type RefusedDecisionMemory = Pick<
+  SessionDriveState,
+  | "trajectory"
+  | "history"
+  | "consumedActionKey"
+  | "outcomeTrail"
+  | "lastTrailPage"
+  | "visitedPages"
+  | "triedHere"
+  | "triedHereLabels"
+  | "triedHereKey"
+  | "goal"
+>;
+
+type RefusedDecision = { action: { kind: string }; actionKey: string; confidence: number };
+
 export function recordUndeliveredDecision(
-  drive: Pick<
-    SessionDriveState,
-    | "failedActionKeys"
-    | "staleClickRefs"
-    | "trajectory"
-    | "history"
-    | "consumedActionKey"
-    | "outcomeTrail"
-    | "lastTrailPage"
-    | "visitedPages"
-    | "triedHere"
-    | "triedHereLabels"
-    | "triedHereKey"
-    | "goal"
-  >,
+  drive: RefusedDecisionMemory & Pick<SessionDriveState, "failedActionKeys" | "staleClickRefs">,
   rows: readonly WireRow[],
-  decision: { action: { kind: string }; actionKey: string; confidence: number },
+  decision: RefusedDecision,
   url: string,
   reason: string,
 ): void {
@@ -1013,6 +1022,59 @@ export function recordUndeliveredDecision(
   if (!drive.staleClickRefs.includes(decision.actionKey)) {
     drive.staleClickRefs.push(decision.actionKey);
   }
+  recordRefusedDecision(drive, rows, decision, url, reason);
+}
+
+export function recordWaitingDecision(
+  drive: RefusedDecisionMemory & Pick<SessionDriveState, "waitingControls">,
+  rows: readonly WireRow[],
+  decision: RefusedDecision,
+  url: string,
+  field: WireRow,
+  reason: string,
+): void {
+  const row = rows.find((entry) => entry[0] === decision.actionKey);
+  const waiting: DriveWaitingControl = {
+    control: row === undefined ? decision.actionKey : actionFailureKey(row, url),
+    field: stableControlKey(field, url),
+  };
+  drive.waitingControls ??= [];
+  if (
+    !drive.waitingControls.some(
+      (entry) => entry.control === waiting.control && entry.field === waiting.field,
+    )
+  ) {
+    drive.waitingControls.push(waiting);
+  }
+  recordRefusedDecision(drive, rows, decision, url, reason);
+}
+
+/** The empty field each still-waiting submit on this page needs, by the
+ *  submit's stable key. A filled or vanished field no longer holds it back. */
+export function waitingFieldsByControl(
+  waiting: readonly DriveWaitingControl[],
+  rows: readonly WireRow[],
+  filledRefs: readonly string[],
+  url: string,
+): Map<string, WireRow> {
+  const fields = new Map<string, WireRow>();
+  for (const entry of waiting) {
+    const field = rows.find((row) => stableControlKey(row, url) === entry.field);
+    if (field === undefined || outstandingEmptyFill([field], filledRefs, true) === undefined) {
+      continue;
+    }
+    fields.set(entry.control, field);
+  }
+  return fields;
+}
+
+function recordRefusedDecision(
+  drive: RefusedDecisionMemory,
+  rows: readonly WireRow[],
+  decision: RefusedDecision,
+  url: string,
+  reason: string,
+): void {
   drive.trajectory.push({
     action: decision.action.kind,
     target: decision.actionKey,
@@ -1091,15 +1153,27 @@ export function isPendingPageAction(row: WireRow, _goal: string = ""): boolean {
 
 export function pageHasUntriedPendingAction(
   rows: readonly WireRow[],
-  drive: Pick<SessionDriveState, "failedActionKeys" | "exhaustedActionKeys">,
+  drive: Pick<
+    SessionDriveState,
+    "failedActionKeys" | "exhaustedActionKeys" | "waitingControls" | "filledRefs"
+  >,
   pageUrl: string,
   goal: string,
 ): boolean {
   const failed = new Set(drive.failedActionKeys ?? []);
   const exhausted = new Set(drive.exhaustedActionKeys ?? []);
+  // A submit waiting on an empty field is not untried work either: it was
+  // refused and stays refused until that field is filled.
+  const waiting = waitingFieldsByControl(
+    drive.waitingControls ?? [],
+    rows,
+    drive.filledRefs,
+    pageUrl,
+  );
   return rows.some((row) => {
     if (!isPendingPageAction(row, goal)) return false;
     if (failed.has(actionFailureKey(row, pageUrl)) || failed.has(row[0])) return false;
+    if (waiting.has(actionFailureKey(row, pageUrl))) return false;
     if (exhausted.has(stableControlKey(row, pageUrl)) || exhausted.has(row[0])) return false;
     return true;
   });
@@ -1263,6 +1337,7 @@ export function isSubmitLikeRow(row: WireRow): boolean {
   // made Fireworks listedWork stay true after the passwords, so settle never
   // waited on the still-disabled Create Account.
   if (/\b(?:next|previous|prev)\s+slide\b/.test(label)) return false;
+  if (/(?:^|\|)a=submit(?:\||$)/.test(row[2] ?? "") && rowFormId(row) !== undefined) return true;
   return /submit|continue|creat(?:e|ing)|loading|sign[- ]?up|register|\bnext\b|pay[- ]?now|place[- ]?order|get[- ]?started/.test(
     label,
   );
@@ -1607,26 +1682,24 @@ export function isKeyCreateRow(row: WireRow): boolean {
   return (create && thing) || (isCreateEntryRow(row) && thing);
 }
 
-/** Hand an existing credential mutation to the operator before dispatch. */
-export function isExistingCredentialMutationRow(
+function isCredentialReadRow(row: WireRow): boolean {
+  return ["b", "button", "l", "link", "m", "menuitem"].includes(row[1]) && isRevealOrCopyRow(row);
+}
+
+export function isExistingCredentialMutationRow(row: WireRow): boolean {
+  return /(?:^|\|)credential=1(?:\||$)/.test(row[2] ?? "") && !isCredentialReadRow(row);
+}
+
+export function isCredentialMutationConfirmRow(
   row: WireRow,
   pageUrl: string,
-  rows: readonly WireRow[] = [],
-  selectedOption: string = "",
-  headings: readonly string[] = [],
+  pressed: { url: string; credentialRow?: boolean } | null | undefined,
 ): boolean {
-  const label = `${readableLabel(row)} ${selectedOption}`;
-  if (!/\b(?:regenerat\w*|rotat\w*|reset|revoke|delet\w*|remove)\b/i.test(label)) {
-    return false;
-  }
-  const credentialNoun = /\b(?:(?:api[- ]?)?keys?|tokens?|secrets?|credentials?)\b/i;
   return (
-    credentialNoun.test(label) ||
-    /(?:^|\/)(?:api[-_]?keys?|keys?|tokens?|credentials?)(?:\/|$)/.test(urlPathname(pageUrl)) ||
-    headings.some((heading) => credentialNoun.test(heading)) ||
-    rows.some(
-      (entry) => /^(?:h[1-6]|heading)$/.test(entry[1]) && credentialNoun.test(readableLabel(entry)),
-    )
+    !isCredentialReadRow(row) &&
+    pressed?.credentialRow === true &&
+    pagePathKey(pressed.url) === pagePathKey(pageUrl) &&
+    /(?:^|\|)dialog=[^|]+/.test(row[2] ?? "")
   );
 }
 
@@ -3040,6 +3113,9 @@ export function typeableCandidates(
     // omits it so it cannot hold the card back.
     if (isSearchRow(row) && includePayment && isCheckoutUrl(pageUrl)) continue;
     if (!isOtpRow(row) && !isSearchRow(row) && !isFormValueField(row, rows, goal ?? "")) continue;
+    // A field a fact names was already judged above; one left out there
+    // already shows its fact and is not work to offer again.
+    if (!isOtpRow(row) && matchingFactKeys(facts, row).length > 0) continue;
     const role = ROLE_LETTERS[row[1]] ?? row[1];
     const seed = `${row[2] ?? readableLabel(row)}_${role}`;
     const slug = uniqueCriteriaSlug(seed, used);
@@ -3415,6 +3491,8 @@ export interface DriveStateElement {
   leads?: DriveElementLeads;
   /** Which region the control sits in. */
   in?: DriveElementLayer;
+  /** A refused submit: the empty field of its own form it waits on. */
+  waits_for?: string;
 }
 
 export interface DriveSecretsPresent {
@@ -3598,6 +3676,7 @@ export function elementState(
     ...(extras.tried === true ? { tried: true } : {}),
     ...(extras.leads === undefined ? {} : { leads: extras.leads }),
     ...(extras.layer === undefined ? {} : { in: extras.layer }),
+    ...(candidate.waitsFor === undefined ? {} : { waits_for: candidate.waitsFor }),
   };
 }
 
@@ -3764,6 +3843,26 @@ export function driveTargetSets(
     if (failed.has(actionFailureKey(row, pageUrl)) || failed.has(row[0])) return false;
     return true;
   };
+  const waitingFields = aim.waitingFields ?? new Map<string, WireRow>();
+  const typeable = typeableCandidates(rows, facts, includePayment, filledRefs, pageUrl, aim.goal);
+  // The field a refused submit waits on is offered even when no fact names it:
+  // filling it is the way forward, and a value the drive lacks is asked for.
+  const typeableRefs = new Set(typeable.map((candidate) => candidate.ref));
+  const typeableSlugs = new Set(typeable.map((candidate) => candidate.slug));
+  for (const field of waitingFields.values()) {
+    if (!isFillableRow(field) || isSelectRow(field) || typeableRefs.has(field[0])) continue;
+    typeableRefs.add(field[0]);
+    const role = ROLE_LETTERS[field[1]] ?? field[1];
+    const slug = uniqueCriteriaSlug(`${field[2] ?? readableLabel(field)}_${role}`, typeableSlugs);
+    typeableSlugs.add(slug);
+    typeable.push({
+      ref: field[0],
+      role,
+      slug,
+      description: actionDescription(field, rows),
+      row: field,
+    });
+  }
   const aimInput = {
     rows,
     filledRefs,
@@ -3774,9 +3873,7 @@ export function driveTargetSets(
   };
   const typeText = takeCapped(
     rankDriveCandidates(
-      typeableCandidates(rows, facts, includePayment, filledRefs, pageUrl, aim.goal).filter(
-        (candidate) => !skipped.has(candidate.ref) && keepRow(candidate.row),
-      ),
+      typeable.filter((candidate) => !skipped.has(candidate.ref) && keepRow(candidate.row)),
       aimInput,
     ),
     candidateBudget(),
@@ -3797,9 +3894,14 @@ export function driveTargetSets(
   );
   const click = takeCapped(
     rankDriveCandidates(
-      clickableCandidates(rows, includePayment, skippedClickRefs, pageUrl, filledRefs).filter(
-        (candidate) => keepRow(candidate.row),
-      ),
+      clickableCandidates(rows, includePayment, skippedClickRefs, pageUrl, filledRefs)
+        .filter((candidate) => keepRow(candidate.row))
+        .map((candidate) => {
+          const field = waitingFields.get(actionFailureKey(candidate.row, pageUrl));
+          return field === undefined
+            ? candidate
+            : { ...candidate, waitsFor: fieldLabelForRow(field) };
+        }),
       aimInput,
     ),
     candidateBudget(),
@@ -3830,7 +3932,11 @@ function criteriaFromCandidates(
     }
     const label = readableLabel(candidate.row);
     criteria[candidate.slug] =
-      operation === "CLICK" && isPickerRow(candidate.row) ? `Open ${label}` : label;
+      operation === "CLICK" && isPickerRow(candidate.row)
+        ? `Open ${label}`
+        : candidate.waitsFor === undefined
+          ? label
+          : `${label} (waits for the empty ${candidate.waitsFor} field)`;
   }
   return criteria;
 }
@@ -4222,7 +4328,12 @@ export function senderHost(url: string): string | undefined {
 export function admitsChoice(
   criteria: Record<string, string>,
   answer: JevAnswer | undefined,
-  _options: { reversible?: boolean; hard?: boolean } = {},
+  options: {
+    reversible?: boolean;
+    hard?: boolean;
+    /** Where each choice leads, when it is a link. */
+    destinations?: Readonly<Record<string, string>>;
+  } = {},
   threshold: number = DRIVE_CONFIDENCE_THRESHOLD,
 ):
   | { ok: true }
@@ -4238,12 +4349,15 @@ export function admitsChoice(
     const winnerRatio = 2;
     const probabilities = answer!.probabilities!;
     const selected = probabilities[choice]!;
+    const destination = options.destinations?.[choice];
     let runnerUp = 0;
     for (const [key, probability] of Object.entries(probabilities)) {
-      // An identically labeled twin is not a competing answer; it only
-      // splits the model's mass between two indistinguishable options.
-      if (key !== choice && criteria[key] !== criteria[choice])
-        runnerUp = Math.max(runnerUp, probability);
+      // An identically labeled twin, or a link to the same place, is not a
+      // competing answer; it only splits the model's mass between two
+      // options that do the same thing.
+      if (key === choice || criteria[key] === criteria[choice]) continue;
+      if (destination !== undefined && options.destinations?.[key] === destination) continue;
+      runnerUp = Math.max(runnerUp, probability);
     }
     if (
       fixedChoices.includes(choice) ||
@@ -4253,6 +4367,35 @@ export function admitsChoice(
       return { kind: "low_confidence", confidence };
   }
   return { ok: true };
+}
+
+/** Each link choice's resolved destination, keyed by its criteria slug. */
+export function candidateDestinations(
+  candidates: readonly DriveCandidate[],
+  pageUrl: string,
+): Record<string, string> {
+  const destinations: Record<string, string> = {};
+  for (const candidate of candidates) {
+    const href = rowHref(candidate.row);
+    if (href === undefined || href.trim().length === 0 || href.trim().startsWith("#")) continue;
+    try {
+      const page = pageUrl.length > 0 ? new URL(pageUrl) : undefined;
+      const target = new URL(href, page);
+      if (target.protocol !== "http:" && target.protocol !== "https:") continue;
+      if (
+        page !== undefined &&
+        target.origin === page.origin &&
+        target.pathname === page.pathname &&
+        target.search === page.search
+      ) {
+        continue;
+      }
+      destinations[candidate.slug] = target.href;
+    } catch {
+      continue;
+    }
+  }
+  return destinations;
 }
 
 function refuseAdmission(
@@ -4446,7 +4589,12 @@ export function decideAfterJev(input: {
     const targetAdmission = admitsChoice(
       targetCriteria,
       targetAnswer,
-      { reversible: REVERSIBLE_OPERATIONS.has(choice as DriveOperation) },
+      {
+        reversible: REVERSIBLE_OPERATIONS.has(choice as DriveOperation),
+        ...(choice === "CLICK"
+          ? { destinations: candidateDestinations(sets.CLICK, input.pageUrl ?? "") }
+          : {}),
+      },
       threshold,
     );
     if (
@@ -4668,6 +4816,25 @@ export function decideAfterJev(input: {
       );
     }
     return decideChosen(tentative, confidenceOf(operation));
+  }
+  // The operation follows from a confident target. Clicking an offscreen
+  // control scrolls it into view first, so "scroll to X" and "click X" are one
+  // intent: a vote split between CLICK and SCROLL must not refuse a click
+  // target the decider is sure of. Acting on a control at all still needs the
+  // threshold, from the two operations together.
+  const clickTarget = input.answers.CLICK_target;
+  const clickQuestion = questions.CLICK_target;
+  const probabilities = operation?.probabilities ?? {};
+  if (
+    operationAdmission.kind === "low_confidence" &&
+    (tentative === "CLICK" || tentative === "SCROLL") &&
+    "CLICK" in operationCriteriaMap &&
+    (probabilities.CLICK ?? 0) + (probabilities.SCROLL ?? 0) >= threshold &&
+    clickQuestion?.type === "choice" &&
+    validateChoiceReason(clickQuestion.criteria, clickTarget) === undefined &&
+    confidenceOf(clickTarget) >= threshold
+  ) {
+    return decideChosen("CLICK", confidenceOf(clickTarget));
   }
   return refuseAdmission(operationAdmission, instructions, operationCriteriaMap, operation);
 }
@@ -6648,13 +6815,8 @@ async function driveLoop(input: {
     if (
       (decision.action.kind === "click" || decision.action.kind === "select") &&
       liveRow !== undefined &&
-      isExistingCredentialMutationRow(
-        liveRow,
-        observation.url,
-        rows,
-        decision.action.kind === "select" ? decision.action.text : "",
-        observation.semantic?.headings ?? [],
-      )
+      (isExistingCredentialMutationRow(liveRow) ||
+        isCredentialMutationConfirmRow(liveRow, observation.url, drive.lastActBinding))
     ) {
       return finish("stuck", {
         reason: `operator decision required before ${readableLabel(liveRow)} on ${observation.url}; no action was dispatched`,
@@ -6673,13 +6835,9 @@ async function driveLoop(input: {
         : undefined;
     if (blockedSubmitField !== undefined) {
       traceUndispatchedOauth("required_field_empty");
-      recordUndeliveredDecision(
-        drive,
-        rows,
-        decision,
-        observation.url,
-        `decided submit was not executed because required field ${fieldLabelForRow(blockedSubmitField)} is still empty`,
-      );
+      const field = fieldLabelForRow(blockedSubmitField);
+      const reason = `decided submit was not executed because required field ${field} is still empty`;
+      recordWaitingDecision(drive, rows, decision, observation.url, blockedSubmitField, reason);
       automaticDecisionRefused = true;
       return "continue";
     }
@@ -7368,6 +7526,8 @@ async function driveLoop(input: {
           ref: clicked[0],
           binding: decisionTargetBinding(clicked, urlBeforeClick),
           url: urlBeforeClick,
+          label: readableLabel(clicked),
+          credentialRow: isExistingCredentialMutationRow(clicked),
         };
         if (isSubmitLikeRow(clicked) && !isKeyCreateOpener(clicked)) {
           drive.submittedThisDrive = true;
@@ -7591,13 +7751,10 @@ async function driveLoop(input: {
       const pageContext = session.lastCompactObservation ?? priorCompact ?? observation;
       const keyMutation =
         native.type !== "alert" &&
-        isExistingCredentialMutationRow(
-          // Row facts split on "|" and "="; the dialog text is only a label.
-          ["dialog", "b", native.text.replace(/[|=]/g, " ")],
+        isCredentialMutationConfirmRow(
+          ["dialog", "b", "dialog=native"],
           pageContext.url,
-          mergeCompactTable([], pageContext),
-          "",
-          pageContext.semantic?.headings ?? [],
+          drive.lastActBinding,
         );
       observation = nativeDialogObservation(session)!;
       rows = [];
@@ -8178,6 +8335,12 @@ async function driveLoop(input: {
       {
         headings: observation.semantic?.headings ?? [],
         failedKeys: drive.failedActionKeys ?? [],
+        waitingFields: waitingFieldsByControl(
+          drive.waitingControls ?? [],
+          rows,
+          drive.filledRefs,
+          pageUrl,
+        ),
         goal: drive.goal,
         submittedThisDrive: drive.submittedThisDrive === true,
         visitedSectionKeys: drive.visitedSectionKeys ?? [],

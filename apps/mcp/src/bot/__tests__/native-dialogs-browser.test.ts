@@ -16,7 +16,7 @@ import {
 import { operateDialogTool } from "../../tools/operate-dialog.js";
 import { shareOperateSession } from "../live-share.js";
 import { sessionForCall } from "../session/lifecycle.js";
-import { runOperateDrive } from "../operate-drive.js";
+import { emptyDriveState, runOperateDrive } from "../operate-drive.js";
 import { vi } from "vitest";
 import { ApiClient } from "../../api-client.js";
 
@@ -247,54 +247,37 @@ it("Reproduction 2026-10-20: a human in the real live viewer sees and accepts th
   }
 }, 15_000);
 
-const keyFixture = fixture.replace(
-  'data-confirm="This action cannot be undone"',
-  'data-confirm="Revoke this API key? This action cannot be undone"',
-);
-
+// The native-confirmation contract keeps credential confirmations at 0.6,
+// while ordinary confirmations use main's accept/dismiss path.
 it.each([
-  {
-    name: "accepts an ordinary confirm on a low-confidence accept",
-    body: fixture,
-    choice: "accept",
-    confidence: 0.55,
-    accepted: true,
-  },
-  {
-    name: "hands a key-revoking confirm back on a low-confidence accept",
-    body: keyFixture,
-    choice: "accept",
-    confidence: 0.55,
-    accepted: false,
-  },
-  {
-    name: "hands a key-revoking confirm back on handoff",
-    body: keyFixture,
-    choice: "handoff",
-    confidence: 1,
-    accepted: false,
-  },
-  {
-    name: "retains API key page context for a generic startup confirmation",
-    body: `<h1>API keys</h1>${fixture.replace(
-      "This action cannot be undone",
-      "Revoke selected? This action cannot be undone",
-    )}`,
-    choice: "accept",
-    confidence: 0.55,
-    accepted: false,
-  },
+  { choice: "accept", confidence: 1, credentialRow: false, accepted: true },
+  { choice: "handoff", confidence: 1, credentialRow: true, accepted: false },
+  { choice: "accept", confidence: 0.5, credentialRow: true, accepted: false },
+  { choice: "accept", confidence: 0.5, credentialRow: false, accepted: true },
 ] as const)(
-  "drive native confirmation: $name",
-  async ({ body, choice, confidence, accepted }) => {
+  "drive native confirmation: $choice at $confidence, credential=$credentialRow",
+  async ({ choice, confidence, credentialRow, accepted }) => {
     const page = await browser.newPage();
-    await page.route("**/*", (route) => route.fulfill({ contentType: "text/html", body }));
+    await page.route("**/*", (route) => route.fulfill({ contentType: "text/html", body: fixture }));
     const controller = BrowserController.fromHarnessPage(page);
     const started = await startHarnessProvisionSession({
       browser: controller,
       serviceUrl: url,
     });
     try {
+      const session = sessionForCall(started.session_id)!;
+      const goal =
+        choice === "accept"
+          ? "Uninstall and accept the browser confirmation dialog"
+          : "Inspect the installation";
+      session.drive = emptyDriveState(goal, {});
+      session.drive.lastActBinding = {
+        ref: "@e:uninstall",
+        binding: "uninstall",
+        url,
+        label: "Uninstall",
+        credentialRow,
+      };
       await controller.click({ kind: "selector", selector: "#uninstall", method: "click" });
       const askJev = vi.fn(
         async (_api: unknown, _state: unknown, questions: Record<string, unknown>) => {
@@ -333,7 +316,7 @@ it.each([
       const result = await runOperateDrive(
         {
           session_id: started.session_id,
-          goal: "Uninstall and accept the browser confirmation dialog",
+          goal,
           max_steps: 1,
         },
         new ApiClient({

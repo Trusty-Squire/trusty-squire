@@ -2,7 +2,13 @@ import { afterAll, beforeAll, expect, it, vi } from "vitest";
 import { chromium, type Browser } from "playwright";
 import type { ApiClient } from "../../api-client.js";
 import { BrowserController } from "../browser.js";
-import { emptyDriveState, runOperateDrive, type DriveDependencies } from "../operate-drive.js";
+import {
+  emptyDriveState,
+  isExistingCredentialMutationRow,
+  runOperateDrive,
+  type DriveDependencies,
+} from "../operate-drive.js";
+import { captureFrameSnapshot, driveRowsFromSnapshot } from "../drive-snapshot.js";
 import {
   act,
   awaitVerification,
@@ -46,7 +52,7 @@ async function withKeyPage(
   const url = `https://app.example.test${path}`;
   await page.route("**/*", (route) =>
     route.fulfill({
-      contentType: "text/html",
+      contentType: "text/html; charset=utf-8",
       body,
     }),
   );
@@ -332,11 +338,24 @@ it.each([
   { label: "Revoke credential", path: "/keys" },
   { label: "Reset", path: "/keys" },
   { label: "Delete", path: "/settings" },
+  // Kenari's Indonesian revoke and rotate (squire-1.1.57 L132-138).
+  { label: "Cabut key", path: "/keys" },
+  { label: "Ganti key", path: "/keys" },
+  { label: "Ganti", path: "/keys" },
+  { label: "Ganti", path: "/keys", container: "list" },
+  { label: "Ganti", path: "/keys", container: "aria" },
+  { label: "Badilisha", path: "/keys" },
 ])(
   "hands $label back before dispatch",
-  async ({ label, path, confidence = 1 }) => {
+  async ({ label, path, confidence = 1, container = "table" }) => {
     await withKeyPage(
-      `<main><h1>API keys</h1><button>${label}</button></main>`,
+      `<main><h1>API keys</h1>${
+        container === "list"
+          ? `<ul><li>Production <code>sk_123456789abcdefghijk</code><button>${label}</button></li></ul>`
+          : container === "aria"
+            ? `<div role="table"><div role="row">Production <code>sk_123456789abcdefghijk</code><button>${label}</button></div></div>`
+            : `<table><tbody><tr><td>Production <code>sk_123456789abcdefghijk</code></td><td><button>${label}</button></td></tr></tbody></table>`
+      }</main>`,
       async (sessionId) => {
         const driveAct = vi.fn<NonNullable<DriveDependencies["driveAct"]>>(async () => {
           throw new Error("mutation action must not dispatch");
@@ -384,6 +403,133 @@ it.each([
         expect(driveAct).not.toHaveBeenCalled();
       },
       path,
+    );
+  },
+  15_000,
+);
+
+it.each([
+  { body: "<ul><li><button>Create key</button></li></ul>", guarded: false },
+  { body: "<ul><li><button>Ganti workspace</button></li></ul>", guarded: false },
+  { body: "<table><tr><td><button>Create key...</button></td></tr></table>", guarded: false },
+  { body: "<ul><li>sk_live_••••<button>Ganti</button></li></ul>", guarded: true },
+  {
+    body: '<ul><li><input readonly value="d7bd...4a"><button>Ganti</button></li></ul>',
+    guarded: true,
+  },
+  { body: "<ul><li>d7bd...4a<button>Ganti</button></li></ul>", guarded: true },
+  {
+    body: "<table><tr><td>d7bd…4a</td><td><button>Cabut key</button></td></tr></table>",
+    guarded: true,
+  },
+  { body: "<ul><li>••••<button>Ganti</button></li></ul>", guarded: true },
+  { body: "<ul><li><span hidden>••••</span><button>Create key</button></li></ul>", guarded: false },
+  { body: "<ul><li><button>sk_123456789abcdefghijk</button></li></ul>", guarded: true },
+  {
+    body: '<ul><li><input readonly value="arbitrary"><button>Ganti</button></li></ul>',
+    guarded: true,
+  },
+  {
+    body: `<ul><li>${"0123456789abcdef".repeat(4)}<button>Ganti</button></li></ul>`,
+    guarded: true,
+  },
+  {
+    body: '<ul><li><input readonly type="password" value="arbitrary-format"><button>Ganti</button></li></ul>',
+    guarded: true,
+  },
+  {
+    body: '<ul><li><input readonly type="password" value=""><button>Ganti</button></li></ul>',
+    guarded: true,
+  },
+  {
+    body: '<ul><li><input readonly value="sk_123456789abcdefghijk"><button>Ganti</button></li></ul>',
+    guarded: true,
+  },
+  {
+    body: "<dialog open><code>sk_123456789abcdefghijk</code><button>Copy</button></dialog>",
+    guarded: false,
+  },
+])("guards only credential-bearing rows: $body", async ({ body, guarded }) => {
+  await withKeyPage(`<main>${body}</main>`, async (sessionId) => {
+    const page = sessionForCall(sessionId)!.browser.page!;
+    const snapshot = await captureFrameSnapshot(page, [], 0);
+    expect(snapshot).not.toBeNull();
+    const button = driveRowsFromSnapshot(snapshot!).find((row) => row[1] === "b");
+    expect(button).toBeDefined();
+    expect(isExistingCredentialMutationRow(button!)).toBe(guarded);
+  });
+});
+
+it.each(
+  ["button", "menuitem"].flatMap((role) =>
+    ["inline", "navigation", "existing"].map((mode) => ({ role, mode })),
+  ),
+)(
+  "copies a key using a $role after $mode presentation",
+  async ({ role, mode }) => {
+    const value = "0123456789abcdef".repeat(4);
+    const create =
+      mode === "existing"
+        ? ""
+        : mode === "navigation"
+          ? '<form action="/keys"><input type="hidden" name="created" value="1"><button type="submit">Create key</button></form>'
+          : `<button type="button" onclick="document.querySelector('ul').hidden=false">Create key</button>`;
+    await withKeyPage(
+      `<main>${create}
+      <ul ${mode === "existing" ? "" : "hidden"}><li><code>${value}</code>
+        <button type="button" role="${role}" onclick="navigator.clipboard.writeText('${value}')">Copy</button>
+        <button type="button">Ganti</button>
+      </li></ul></main>
+      <script>
+        if (location.search.includes('created=1')) {
+          document.querySelector('ul').hidden = false;
+          document.querySelector('form').remove();
+        }
+      </script>`,
+      async (sessionId) => {
+        const page = sessionForCall(sessionId)!.browser.page!;
+        await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+        await page.evaluate(() => navigator.clipboard.writeText(""));
+        const askJev = vi.fn<DriveDependencies["askJev"]>(async (_api, _state, questions) => ({
+          attempts: 1,
+          elapsedMs: 1,
+          result: {
+            answers: Object.fromEntries(
+              Object.entries(questions).flatMap(([name, question]) => {
+                if (question.type !== "choice") return [];
+                const keys = Object.keys(question.criteria);
+                const choice =
+                  name === "operation"
+                    ? "CLICK"
+                    : name === "CLICK_target"
+                      ? (keys.find((key) => question.criteria[key] === "Copy") ?? keys[0]!)
+                      : keys[0]!;
+                return [
+                  [
+                    name,
+                    {
+                      choice,
+                      confidence: 1,
+                      probabilities: Object.fromEntries(
+                        keys.map((key) => [key, key === choice ? 1 : 0]),
+                      ),
+                    },
+                  ],
+                ];
+              }),
+            ),
+          },
+        }));
+        const result = await runOperateDrive(
+          { session_id: sessionId, goal: "create and copy a key", max_steps: 3, max_seconds: 10 },
+          api,
+          undefined,
+          dependencies(askJev),
+        );
+        const session = sessionForCall(sessionId)!;
+        expect(await session.browser.readClipboard(session.browser.page!)).toBe(value);
+        expect(result.reason ?? "").not.toContain("operator decision required before Copy");
+      },
     );
   },
   15_000,

@@ -813,15 +813,10 @@ describe("clear-winner decision routing", () => {
         answers: { operation: valid("CLICK", ops), CLICK_target: valid(wrong, targets, 0.4) },
       }),
     ).toMatchObject({ kind: "act", action: { kind: "click", target: "@e:b5" } });
-    expect(
-      isExistingCredentialMutationRow(["@e:delete", "b", "Delete API key"], "https://x.test/keys"),
-    ).toBe(true);
-    expect(
-      isExistingCredentialMutationRow(
-        ["@e:delete", "b", "Delete project"],
-        "https://x.test/projects",
-      ),
-    ).toBe(false);
+    expect(isExistingCredentialMutationRow(["@e:delete", "b", "Delete API key|credential=1"])).toBe(
+      true,
+    );
+    expect(isExistingCredentialMutationRow(["@e:delete", "b", "Delete project"])).toBe(false);
   });
 
   it("preserves consume-once and last-action failure behavior for low-score targets", () => {
@@ -4368,8 +4363,8 @@ describe("dialog overlay secret and oauth bounce rules", () => {
   it("offers mutation controls but identifies them for handback", () => {
     const rows: WireRow[] = [
       ["@e:reveal", "b", "Reveal key"],
-      ["@e:rotate", "b", "Rotate key"],
-      ["@e:reset", "b", "Reset"],
+      ["@e:rotate", "b", "Rotate key|credential=1"],
+      ["@e:reset", "b", "Reset|credential=1"],
     ];
     const sets = driveTargetSets(
       rows,
@@ -4385,39 +4380,10 @@ describe("dialog overlay secret and oauth bounce rules", () => {
     expect(sets.CLICK.map((candidate) => candidate.ref)).toContain("@e:reveal");
     expect(sets.CLICK.map((candidate) => candidate.ref)).toContain("@e:rotate");
     expect(sets.CLICK.map((candidate) => candidate.ref)).toContain("@e:reset");
-    expect(isExistingCredentialMutationRow(rows[1]!, "https://app.example.test/keys")).toBe(true);
-    expect(isExistingCredentialMutationRow(rows[2]!, "https://app.example.test/keys")).toBe(true);
-    expect(
-      isExistingCredentialMutationRow(
-        ["@e:delete", "b", "Delete"],
-        "https://app.example.test/settings",
-        [["@e:heading", "h1", "API Keys"]],
-      ),
-    ).toBe(true);
-    expect(
-      isExistingCredentialMutationRow(
-        ["@e:delete", "b", "Delete"],
-        "https://app.example.test/settings",
-        [],
-        "",
-        ["API Keys"],
-      ),
-    ).toBe(true);
-    expect(
-      isExistingCredentialMutationRow(
-        ["@e:action", "s", "Action"],
-        "https://app.example.test/settings",
-        [["@e:heading", "h1", "API Keys"]],
-        "Revoke",
-      ),
-    ).toBe(true);
-    expect(
-      isExistingCredentialMutationRow(
-        ["@e:delete", "b", "Delete"],
-        "https://app.example.test/settings",
-        [["@e:heading", "h1", "Team members"]],
-      ),
-    ).toBe(false);
+    expect(isExistingCredentialMutationRow(rows[1]!)).toBe(true);
+    expect(isExistingCredentialMutationRow(rows[2]!)).toBe(true);
+    expect(isExistingCredentialMutationRow(["@e:action", "s", "Action|credential=1"])).toBe(true);
+    expect(isExistingCredentialMutationRow(["@e:delete", "b", "Delete"])).toBe(false);
   });
 
   it("keeps a covered dialog's Create and Cancel beside Close (BeatAPI trace)", () => {

@@ -5,6 +5,7 @@
 import type { Frame, Page } from "playwright";
 import { frameOriginOf } from "./browser-use-capture.js";
 import { DriveEvaluateTimeout, evaluateBound } from "./drive-evaluate.js";
+import { findCredentialTokens, isMaskedDisplay } from "./credential-shape.js";
 import type { Observation } from "./provision-session.js";
 
 type SnapshotRow = [string, string, string?];
@@ -59,6 +60,10 @@ export interface DriveSnapshotElement {
   invalid?: boolean;
   /** HTML form owner identity, stable for one snapshot walk. */
   formId?: number;
+  entityText?: string;
+  entityDisplayText?: string;
+  entityHasReadonlyInput?: boolean;
+  dialogRef?: string;
   /** Covering control ref, or a region kind when the cover is not a listed control. */
   occludedBy?: string;
   operations: Array<"click" | "fill" | "select">;
@@ -234,7 +239,7 @@ export function driveRowsFromSnapshot(snapshot: DriveSnapshot): SnapshotRow[] {
       facts.push(`ph=${element.placeholder.replace(/\|/g, " ").slice(0, 40)}`);
     }
     if (element.href !== undefined && element.href.length > 0) {
-      facts.push(`u=${element.href.replace(/\|/g, " ").slice(0, 120)}`);
+      facts.push(`u=${element.href.replace(/\|/g, "%7C")}`);
     }
     if (element.pattern !== undefined && element.pattern.length > 0) {
       facts.push(`pt=${element.pattern.replace(/\|/g, " ").slice(0, 40)}`);
@@ -245,6 +250,16 @@ export function driveRowsFromSnapshot(snapshot: DriveSnapshot): SnapshotRow[] {
     const choice = optionOrdinal.get(element.ref);
     if (choice !== undefined) facts.push(`q=${choice.index}/${choice.total}`);
     if (element.formId !== undefined) facts.push(`fm=${element.formId}`);
+    if (
+      element.entityHasReadonlyInput === true ||
+      (element.entityText !== undefined && findCredentialTokens(element.entityText).length > 0) ||
+      (element.entityDisplayText !== undefined &&
+        (isMaskedDisplay(element.entityDisplayText) ||
+          findCredentialTokens(element.entityDisplayText).length > 0))
+    ) {
+      facts.push("credential=1");
+    }
+    if (element.dialogRef !== undefined) facts.push(`dialog=${element.dialogRef}`);
     if (element.occludedBy !== undefined && element.occludedBy.length > 0) {
       facts.push(`oc=${element.occludedBy.replace(/\|/g, " ").slice(0, 40)}`);
     }
@@ -894,12 +909,46 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
               label: option.label || option.textContent || option.value,
             }))
         : undefined;
+    const entity = pinned ? null : element.closest('tr,[role="row"],li,[role="listitem"]');
+    const entityWords: string[] = [];
+    if (entity !== null) {
+      const walker = document.createTreeWalker(entity, NodeFilter.SHOW_TEXT);
+      let node = walker.nextNode();
+      while (node !== null && !expired()) {
+        const parent = node.parentElement;
+        if (
+          parent !== null &&
+          visible(parent) &&
+          parent.closest('button,a,input,select,textarea,[role="button"],[role="menuitem"]') ===
+            null
+        ) {
+          entityWords.push(node.textContent ?? "");
+        }
+        node = walker.nextNode();
+      }
+    }
+    const dialog = element.closest('dialog,[role="dialog"],[role="alertdialog"]');
     const row: DriveSnapshotElement = {
       ref,
       role,
       label,
       operations,
       frameOrdinal,
+      ...(entity === null
+        ? {}
+        : {
+            entityText:
+              entity instanceof HTMLElement ? entity.innerText : (entity.textContent ?? ""),
+            entityDisplayText: entityWords.join(" "),
+          }),
+      ...(entity === null
+        ? {}
+        : {
+            entityHasReadonlyInput: Array.from(entity.querySelectorAll("input[readonly]")).some(
+              (node) => visible(node),
+            ),
+          }),
+      ...(dialog === null ? {} : { dialogRef: identity(dialog) }),
       selector: selectorFor(element),
       ...(value === undefined ? {} : { value }),
       ...(element instanceof HTMLInputElement && element.type === "password"

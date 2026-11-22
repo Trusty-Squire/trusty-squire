@@ -29,13 +29,8 @@ export function isStandaloneOtpCredential(value: string): boolean {
   return /^\d{4,8}$/.test(value.trim());
 }
 
-// Collect every distinct credential-SHAPED token in a blob of page text:
-// a short prefix + separator + a long body that carries at least one digit
-// (vsk_sandbox_write_…, xai-…, sk-lw-…, re_…). Used to surface the SECOND key a
-// multi-credential service shows (e.g. VouchFlow's sandbox read alongside write)
-// that the single-key extraction policy stops short of. The `[_-]` and has-digit
-// requirements exclude the dotted-function-name false positive.
-export const CRED_TOKEN_RE = /\b[A-Za-z][A-Za-z0-9]{1,9}[_-][A-Za-z0-9][A-Za-z0-9_-]{12,}\b/g;
+export const CRED_TOKEN_RE =
+  /\b([A-Fa-f0-9]{64})\b|\b[A-Za-z][A-Za-z0-9]{1,9}[_-][A-Za-z0-9][A-Za-z0-9_-]{12,}\b/g;
 export function findCredentialTokens(text: string): string[] {
   const out: string[] = [];
   const seen = new Set<string>();
@@ -46,10 +41,12 @@ export function findCredentialTokens(text: string): string[] {
     if (isMaskedDisplay(text.slice((m.index ?? 0) + t.length, (m.index ?? 0) + t.length + 4)))
       continue;
     if (seen.has(t)) continue;
-    if (t.length < 16) continue;
-    if (!/[0-9]/.test(t)) continue; // real keys carry digits; dictionary words don't
-    if (/^[A-Z][A-Z0-9_]*$/.test(t)) continue; // env-var name
-    if (!looksLikeCredentialToken(t)) continue;
+    if (m[1] === undefined) {
+      if (t.length < 16) continue;
+      if (!/[0-9]/.test(t)) continue;
+      if (/^[A-Z][A-Z0-9_]*$/.test(t)) continue;
+      if (!looksLikeCredentialToken(t)) continue;
+    }
     seen.add(t);
     out.push(t);
   }
@@ -57,6 +54,7 @@ export function findCredentialTokens(text: string): string[] {
 }
 
 export function looksLikeCredentialToken(token: string): boolean {
+  if (/^[A-Fa-f0-9]{64}$/.test(token)) return true;
   if (token.includes("_")) return true;
   if (/^(?:api|key|pk|re|rk|sk|xai|ghp|pat|vsk|tly)-/i.test(token)) return true;
   // <short alpha vendor prefix>-<single long alphanumeric run>: tly-xkVZ…
@@ -69,17 +67,7 @@ export function looksLikeCredentialToken(token: string): boolean {
   return token.split("-").some((s) => s.length >= 10 && /[A-Za-z]/.test(s) && /[0-9]/.test(s));
 }
 
-// ---- Observation redaction policy note ------------------------------------
-// There is NO redaction in the observation or screenshot path at all (owner's
-// decision, 2026-09-05): no secret-shape screen, no payment/card carve-out, no
-// sealed-context refusal. What the page renders is what `operate_observe`,
-// `operate_observe_query`, and `operate_screenshot` return. The scanners in
-// this file never hide page content — do not wire them into a presentation
-// path.
-//
-// ONE narrow exception lives elsewhere and stays there: the compact-v2 label
-// ALIAS (`controlLabelV2`, compact-observation-v2.ts) screens credential-shaped
-// accessible names into `@redacted-secret` (2026-09-06 ipinfo Finding 1 — the
-// live token was emitted as the copy button's label). That is a code-derived
-// alias fixing its own documented "never a value" contract, not a read seal;
-// keep it out of this file and out of every read path.
+// These scanners must not screen observation or screenshot output. The read
+// boundary, including the separate released-card value mask, is owned by
+// docs/observation-model.md §4.5; credential capture is owned by
+// docs/operator-tool-surface.md#credential-capture-and-retrieval.

@@ -39,11 +39,11 @@ Use `operate_dialog({session_id,dialog_id,action:"accept"|"dismiss",text?})`;
 is refused. Unanswered dialogs are dismissed after two minutes, and subsequent
 observations include `native_dialog_notices`. Outside `operate_drive`, no dialog
 is automatically accepted. `operate_drive` acknowledges alerts and decides native
-confirmations against the user's goal. It hands prompt text, and uncertainty on a
-confirmation identified as an existing credential mutation from the dialog and
-preceding page context, back to the host. Destructive consequences still require
-authorization; ordinary confirmations have no confidence threshold. Each dialog
-answer consumes a drive step, including an automatic alert acknowledgement. The
+confirmations against the user's goal. It hands prompt text and uncertain
+credential confirmations back to the host under the
+[credential guard policy](#credential-capture-and-retrieval). Destructive
+consequences still require authorization; ordinary confirmations have no confidence
+threshold. Each dialog answer consumes a drive step, including an automatic alert acknowledgement. The
 human live viewer displays the same question with OK, Cancel and a prompt input.
 
 `operate_upload` takes `session_id`, exactly one of a current `target` ref or
@@ -237,8 +237,13 @@ key capture is needed when `stored` is true.
 Empty required fields do not block a selected OAuth dispatch, even when the
 OAuth control shares a form with empty username/password fields. Ordinary
 submit clicks still check for outstanding empty required fields in their own
-form before dispatch. A vote that the page is not asking for an emailed code
-does not override the selected operation. `stuck` means no listed element
+form before dispatch. A refused submit stays offered with `waits_for` naming
+the empty field it needs; that field is offered for typing, or through SELECT
+for a native select. Filling or removing the field releases the wait. Native
+`a=submit` evidence with a form owner identifies submits regardless of label
+language, alongside the existing label-based recognition. A vote that the page
+is not asking for an emailed code does not override the selected operation.
+`stuck` means no listed element
 advances the goal. Resume the same session with `answer` (a
 readable action slug from the handoff options, `done`, or `stuck`) and/or
 added `facts`. Use the single-step primitives only for a handoff you are
@@ -357,11 +362,17 @@ browser-use/jev-ultrafast (MIT) adoptions live in `operate-drive.ts`. Mapping:
 | 5 | SELECT option is a target (`slug:option`) | `selectTargets`, `selectTargetKey`, `lastSelectOptions` |
 | 6 | WAIT when the needed control is absent/disabled or results are loading | `DRIVE_RULES`, `{kind:"wait"}`, `DRIVE_WAIT_MS` |
 | 7 | Rules prose adapted from their MIT `NEXT_ACTION` / `TARGET` | `DRIVE_RULES` |
-| 8 | After answer-shape validation, concrete operation, target, and value choices below `DRIVE_CONFIDENCE_THRESHOLD` (0.6) normally require both confidence and selected probability of at least 0.30, and selected probability at least twice the runner-up; an option whose label is identical to the selected one is not a runner-up. Otherwise they return `low_confidence`, except for the session-identity CLICK target described below. DONE, BLOCKED, NONE_OF_THESE, GO_BACK, WAIT, INBOX, and value `none` retain the 0.6 bar; the direct `email_code_field` shortcut also retains it. Purchase approval remains a separate check | `DRIVE_CONFIDENCE_THRESHOLD`, `admitsChoice`, `decideAfterJev` |
+| 8 | After answer-shape validation, concrete operation, target, and value choices below `DRIVE_CONFIDENCE_THRESHOLD` (0.6) normally require both confidence and selected probability of at least 0.30, and selected probability at least twice the runner-up; an option whose label is identical to the selected one is not a runner-up. CLICK targets with the same resolved HTTP(S) destination also do not compete; full URLs are compared, excluding fragment-only links and links to the current origin/path/query. Otherwise choices return `low_confidence`, except for the CLICK fallbacks described below. DONE, BLOCKED, NONE_OF_THESE, GO_BACK, WAIT, INBOX, and value `none` retain the 0.6 bar; the direct `email_code_field` shortcut also retains it. Purchase approval remains a separate check | `DRIVE_CONFIDENCE_THRESHOLD`, `admitsChoice`, `decideAfterJev` |
 | 9 | Three consecutive non-wait actions with no fingerprint change | `DRIVE_STALE_LIMIT`, `staleNonWait` |
 | 10 | Decision bound to the observation fingerprint, consumed once | `boundFingerprint`, `consumedActionKey` |
 | 11 | Candidate and question budgets; only offered choices can be selected | `driveTargetSets`, `buildDriveQuestions` |
 | 12 | Snapshot, decision, guarded act through the shared executor, then bounded settling; automatic combobox opening follows the policy above | `drive-snapshot.ts`, `act/act.ts`, `act/identity.ts`, `drive-act.ts`, `operate-drive.ts` |
+
+If operation admission returns `low_confidence` with CLICK or SCROLL selected,
+the drive can derive CLICK from a valid CLICK target with confidence at least
+0.6 when the combined CLICK and SCROLL probability is at least 0.6. The click
+executor scrolls an offscreen target into view. Fixed operation choices and
+invalid answers do not take this fallback.
 
 For an admitted CLICK operation, a valid target vote that would otherwise return
 `low_confidence` is admitted when its chosen candidate is the only CLICK candidate
@@ -585,6 +596,20 @@ inferred `already_closed`. Clients should feature-detect the output schema in
 `tools/list` when talking to older installed servers.
 
 ## Credential capture and retrieval
+
+Before dispatching a drive click or select, the drive hands back `stuck` for
+controls marked `credential=1`, except Copy/reveal buttons, links, and menu
+items. The marker comes from the nearest table row or list item (including
+ARIA equivalents) containing a credential-shaped token, a visible masked
+display, or a visible readonly input. This structural check does not depend
+on mutation verbs or their language. A DOM dialog control following a recorded
+credential-row mutation click on the same page path is also refused, with the
+same Copy/reveal exception. Native confirmations use that same recorded-click
+provenance to offer a human handoff and require confidence of at least 0.6
+for an automatic accept or dismiss; dialog wording alone does not classify
+them as credential mutations. Other rows, including new-key creation controls
+without that evidence, remain eligible. Regression coverage lives in
+[`drive-key-complete-refusal.test.ts`](../apps/mcp/src/bot/__tests__/drive-key-complete-refusal.test.ts).
 
 Extracted credentials are stored by source, never by shape. `operate_extract` without
 `capture` clicks the Copy button in an open key dialog and keeps only the value
