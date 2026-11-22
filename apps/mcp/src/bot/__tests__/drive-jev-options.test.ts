@@ -20,6 +20,7 @@ import {
   type WireRow,
 } from "../operate-drive.js";
 import type { JevAnswer } from "../jev-client.js";
+import { driveRowsFromSnapshot, type DriveSnapshot } from "../drive-snapshot.js";
 
 function answer(
   criteria: Record<string, string>,
@@ -114,6 +115,34 @@ describe("links to the same place are one answer", () => {
     [slugFor(targets, "Observability")]: 0.47,
     [slugFor(targets, "Members")]: 0.05,
     [slugFor(targets, "Switch project")]: 0.04,
+  });
+
+  it("keeps long destinations distinct through snapshot conversion and admission", () => {
+    const prefix = `https://cloud.livekit.io/${"x".repeat(130)}`;
+    const snapshot: DriveSnapshot = {
+      url, title: "Settings", headings: [], text: "", fingerprint: "fp", documentEpoch: "1",
+      omittedValues: 0, scriptMs: 0, wallMs: 0,
+      elements: [
+        { ref: "@e:a", role: "link", label: "First", href: `${prefix}/first`, operations: ["click"], frameOrdinal: 0 },
+        { ref: "@e:b", role: "link", label: "Second", href: `${prefix}/second`, operations: ["click"], frameOrdinal: 0 },
+        { ref: "@e:c", role: "button", label: "Other", operations: ["click"], frameOrdinal: 0 },
+      ],
+    };
+    const admission = () => {
+      const candidates = driveTargetSets(driveRowsFromSnapshot(snapshot), {}, false, [], url).CLICK;
+      const criteria = Object.fromEntries(
+        candidates.map((candidate) => [candidate.slug, candidate.description]),
+      );
+      const votes = answer(criteria, {
+        [slugFor(criteria, "First")]: 0.47,
+        [slugFor(criteria, "Second")]: 0.44,
+        [slugFor(criteria, "Other")]: 0.09,
+      });
+      return admitsChoice(criteria, votes, { destinations: candidateDestinations(candidates, url) });
+    };
+    expect(admission()).toMatchObject({ kind: "low_confidence" });
+    snapshot.elements[1]!.href = snapshot.elements[0]!.href;
+    expect(admission()).toEqual({ ok: true });
   });
 
   it("ignores a same-destination twin as the runner-up", () => {
@@ -333,6 +362,20 @@ describe("credential changes are caught by structure", () => {
     rememberJustShownCredentialRows(drive, [copy], [copy]);
     expect(drive.justShownCredentialRows).toEqual(["@e:new"]);
   });
+
+  it.each(["b", "button", "l", "link", "m", "menuitem"])(
+    "allows just-shown credential reads through the %s role",
+    (role) => {
+      for (const label of ["Copy", "Reveal key"]) {
+        const row: WireRow = ["@e:read", role, `${label}|credential=1|entity=@e:new`];
+        expect(isExistingCredentialMutationRow(row, ["@e:new"])).toBe(false);
+        expect(isExistingCredentialMutationRow(row)).toBe(true);
+      }
+      expect(isExistingCredentialMutationRow(
+        ["@e:rotate", role, "Ganti|credential=1|entity=@e:new"], ["@e:new"],
+      )).toBe(true);
+    },
+  );
 
   it("guards a following dialog regardless of the confirmation's words", () => {
     const pressed = { url, credentialRow: true };

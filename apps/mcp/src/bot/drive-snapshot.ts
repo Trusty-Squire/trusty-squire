@@ -5,7 +5,7 @@
 import type { Frame, Page } from "playwright";
 import { frameOriginOf } from "./browser-use-capture.js";
 import { DriveEvaluateTimeout, evaluateBound } from "./drive-evaluate.js";
-import { findCredentialTokens } from "./credential-shape.js";
+import { findCredentialTokens, isMaskedDisplay } from "./credential-shape.js";
 import type { Observation } from "./provision-session.js";
 
 type SnapshotRow = [string, string, string?];
@@ -61,8 +61,9 @@ export interface DriveSnapshotElement {
   /** HTML form owner identity, stable for one snapshot walk. */
   formId?: number;
   entityText?: string;
+  entityDisplayText?: string;
   entityRef?: string;
-  entityHasPasswordValue?: boolean;
+  entityHasReadonlyInput?: boolean;
   dialogRef?: string;
   /** Covering control ref, or a region kind when the cover is not a listed control. */
   occludedBy?: string;
@@ -239,7 +240,7 @@ export function driveRowsFromSnapshot(snapshot: DriveSnapshot): SnapshotRow[] {
       facts.push(`ph=${element.placeholder.replace(/\|/g, " ").slice(0, 40)}`);
     }
     if (element.href !== undefined && element.href.length > 0) {
-      facts.push(`u=${element.href.replace(/\|/g, " ").slice(0, 120)}`);
+      facts.push(`u=${element.href.replace(/\|/g, "%7C")}`);
     }
     if (element.pattern !== undefined && element.pattern.length > 0) {
       facts.push(`pt=${element.pattern.replace(/\|/g, " ").slice(0, 40)}`);
@@ -251,10 +252,9 @@ export function driveRowsFromSnapshot(snapshot: DriveSnapshot): SnapshotRow[] {
     if (choice !== undefined) facts.push(`q=${choice.index}/${choice.total}`);
     if (element.formId !== undefined) facts.push(`fm=${element.formId}`);
     if (
-      element.entityHasPasswordValue === true ||
-      (element.entityText !== undefined &&
-        (findCredentialTokens(element.entityText).length > 0 ||
-          /[•●⬤*]{3,}|\b[A-Za-z][A-Za-z0-9_-]*[_-][A-Za-z0-9_-]*(?:…|\.{3})/.test(element.entityText)))
+      element.entityHasReadonlyInput === true ||
+      (element.entityText !== undefined && findCredentialTokens(element.entityText).length > 0) ||
+      (element.entityDisplayText !== undefined && isMaskedDisplay(element.entityDisplayText))
     ) {
       facts.push("credential=1");
     }
@@ -910,14 +910,22 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
             }))
         : undefined;
     const entity = pinned ? null : element.closest('tr,[role="row"],li,[role="listitem"]');
-    const entityText = entity === null
-      ? undefined
-      : [
-          entity instanceof HTMLElement ? entity.innerText : entity.textContent ?? "",
-          ...Array.from(entity.querySelectorAll('input[readonly]:not([type="password"])'))
-            .filter((node) => visible(node))
-            .map((node) => (node as HTMLInputElement).value),
-        ].join(" ");
+    const entityWords: string[] = [];
+    if (entity !== null) {
+      const walker = document.createTreeWalker(entity, NodeFilter.SHOW_TEXT);
+      let node = walker.nextNode();
+      while (node !== null && !expired()) {
+        const parent = node.parentElement;
+        if (
+          parent !== null &&
+          visible(parent) &&
+          parent.closest('button,a,input,select,textarea,[role="button"],[role="menuitem"]') === null
+        ) {
+          entityWords.push(node.textContent ?? "");
+        }
+        node = walker.nextNode();
+      }
+    }
     const dialog = element.closest('dialog,[role="dialog"],[role="alertdialog"]');
     const row: DriveSnapshotElement = {
       ref,
@@ -925,11 +933,14 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
       label,
       operations,
       frameOrdinal,
-      ...(entityText === undefined ? {} : { entityText }),
+      ...(entity === null ? {} : {
+        entityText: entity instanceof HTMLElement ? entity.innerText : entity.textContent ?? "",
+        entityDisplayText: entityWords.join(" "),
+      }),
       ...(entity === null ? {} : {
         entityRef: identity(entity),
-        entityHasPasswordValue: Array.from(entity.querySelectorAll('input[readonly][type="password"]'))
-          .some((node) => visible(node) && (node as HTMLInputElement).value.length > 0),
+        entityHasReadonlyInput: Array.from(entity.querySelectorAll('input[readonly]'))
+          .some((node) => visible(node)),
       }),
       ...(dialog === null ? {} : { dialogRef: identity(dialog) }),
       selector: selectorFor(element),

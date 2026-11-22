@@ -413,9 +413,16 @@ it.each([
   { body: '<ul><li><button>Ganti workspace</button></li></ul>', guarded: false },
   { body: '<table><tr><td><button>Create key...</button></td></tr></table>', guarded: false },
   { body: '<ul><li>sk_live_••••<button>Ganti</button></li></ul>', guarded: true },
+  { body: '<ul><li><input readonly value="d7bd...4a"><button>Ganti</button></li></ul>', guarded: true },
+  { body: '<ul><li>d7bd...4a<button>Ganti</button></li></ul>', guarded: true },
+  { body: '<table><tr><td>d7bd…4a</td><td><button>Cabut key</button></td></tr></table>', guarded: true },
+  { body: '<ul><li>••••<button>Ganti</button></li></ul>', guarded: true },
+  { body: '<ul><li><span hidden>••••</span><button>Create key</button></li></ul>', guarded: false },
+  { body: '<ul><li><button>sk_123456789abcdefghijk</button></li></ul>', guarded: true },
+  { body: '<ul><li><input readonly value="arbitrary"><button>Ganti</button></li></ul>', guarded: true },
   { body: `<ul><li>${"0123456789abcdef".repeat(4)}<button>Ganti</button></li></ul>`, guarded: true },
   { body: '<ul><li><input readonly type="password" value="arbitrary-format"><button>Ganti</button></li></ul>', guarded: true },
-  { body: '<ul><li><input readonly type="password" value=""><button>Ganti</button></li></ul>', guarded: false },
+  { body: '<ul><li><input readonly type="password" value=""><button>Ganti</button></li></ul>', guarded: true },
   { body: '<ul><li><input readonly value="sk_123456789abcdefghijk"><button>Ganti</button></li></ul>', guarded: true },
   { body: '<dialog open><code>sk_123456789abcdefghijk</code><button>Copy</button></dialog>', guarded: false },
 ])("guards only credential-bearing rows: $body", async ({ body, guarded }) => {
@@ -429,12 +436,12 @@ it.each([
   });
 });
 
-it("copies a key from the inline row a preceding action just showed", async () => {
+it.each(["button", "menuitem"])("copies a key using a %s from the inline row just shown", async (role) => {
   const value = "0123456789abcdef".repeat(4);
   await withKeyPage(
     `<main><button type="button" onclick="document.querySelector('ul').hidden=false">Create key</button>
       <ul hidden><li><code>${value}</code>
-        <button type="button" onclick="navigator.clipboard.writeText('${value}')">Copy</button>
+        <button type="button" role="${role}" onclick="navigator.clipboard.writeText('${value}')">Copy</button>
         <button type="button">Ganti</button>
       </li></ul></main>`,
     async (sessionId) => {

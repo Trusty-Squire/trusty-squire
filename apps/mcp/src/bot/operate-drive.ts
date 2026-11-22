@@ -1684,7 +1684,7 @@ export function isExistingCredentialMutationRow(
   return !(
     entity !== undefined &&
     justShownRows.includes(entity) &&
-    ["b", "button", "l", "link"].includes(row[1]) &&
+    ["b", "button", "l", "link", "m", "menuitem"].includes(row[1]) &&
     isRevealOrCopyRow(row)
   );
 }
