@@ -2121,7 +2121,7 @@ describe("form-fill assignment helpers", () => {
     ).toBe(false);
     const inFlight: WireRow[] = [
       ["@e:email", "t", "Email|f=email|n=a@b.test"],
-      ["@e:go", "b", "Creating your account|s=d|a=submit|fm=1"],
+      ["@e:go", "b", "Creating your account|s=d"],
     ];
     expect(snapshotNeedsSettle(inFlight, 0)).toBe(true);
     expect(snapshotNeedsSettle(inFlight, 1)).toBe(false);
@@ -2130,7 +2130,7 @@ describe("form-fill assignment helpers", () => {
       ["@e:email", "t", "Email|f=email|s=d|n=a@b.test"],
       ["@e:pw", "t", "Password|f=password"],
       ["@e:slide", "b", "Next slide"],
-      ["@e:go", "b", "Create Account|s=d|a=submit|fm=1"],
+      ["@e:go", "b", "Create Account|s=d"],
     ];
     expect(isSubmitLikeRow(fireworksInFlight[2]!)).toBe(false);
     expect(isProgressSubmitRow(fireworksInFlight[3]!)).toBe(false);
@@ -2150,28 +2150,28 @@ describe("form-fill assignment helpers", () => {
     expect(captchaSolveStillWorking("unsupported_variant")).toBe(false);
     expect(captchaSolveStillWorking("solver_error")).toBe(false);
     expect(widgetUnreadySolveReason("no_key")).toBe(`${DRIVE_WIDGET_UNREADY_REASON} (no_key)`);
-    expect(isProgressSubmitRow(["@e:go", "b", "Creating your account|s=d|a=submit|fm=1"])).toBe(true);
+    expect(isProgressSubmitRow(["@e:go", "b", "Creating your account|s=d"])).toBe(true);
     expect(isProgressSubmitRow(["@e:go", "b", "Loading Continue|s=d"])).toBe(true);
-    expect(isProgressSubmitRow(["@e:go", "b", "Create Account|s=d|a=submit|fm=1"])).toBe(false);
+    expect(isProgressSubmitRow(["@e:go", "b", "Create Account|s=d"])).toBe(false);
     expect(
       disabledSubmitKind(
         [
           ["@e:email", "t", "Email|f=email|n=a@b.test"],
-          ["@e:go", "b", "Creating your account|s=d|a=submit|fm=1"],
+          ["@e:go", "b", "Creating your account|s=d"],
         ],
         0,
       ),
     ).toBe("in_flight");
     const emptyRequired: WireRow[] = [
       ["@e:email", "t", "Email|f=email|s=r"],
-      ["@e:go", "b", "Sign Up|s=d|a=submit|fm=1"],
+      ["@e:go", "b", "Sign Up|s=d"],
     ];
     expect(outstandingRequiredFill(emptyRequired)?.[0]).toBe("@e:email");
     expect(disabledSubmitKind(emptyRequired, 0)).toBe("needs_fill");
     expect(snapshotNeedsSettle(emptyRequired, 0)).toBe(false);
     const invalid: WireRow[] = [
       ["@e:email", "t", "Email|f=email|s=ri|n=nope"],
-      ["@e:go", "b", "Continue|s=d|a=submit|fm=1"],
+      ["@e:go", "b", "Continue|s=d"],
     ];
     expect(disabledSubmitKind(invalid, 0)).toBe("needs_fill");
     const shopifyComplete: WireRow[] = [
@@ -2194,13 +2194,13 @@ describe("form-fill assignment helpers", () => {
     ).toEqual(["@e:email"]);
     const staticDisabled: WireRow[] = [
       ["@e:email", "t", "Email|f=email|n=a@b.test"],
-      ["@e:go", "b", "Sign Up|s=d|a=submit|fm=1"],
+      ["@e:go", "b", "Sign Up|s=d"],
     ];
     expect(disabledSubmitKind(staticDisabled, 0)).toBe("none");
     expect(disabledSubmitKind(staticDisabled, 0, [], true)).toBe("widget_unready");
     const captchaGate: WireRow[] = [
       ["@e:email", "t", "Email|f=email|n=a@b.test"],
-      ["@e:go", "b", "Sign Up|s=d|a=submit|fm=1"],
+      ["@e:go", "b", "Sign Up|s=d"],
       ["@e:img", "b", "image challenge|x=x"],
       ["@e:v", "b", "Verify|x=x"],
       ["@e:skip", "b", "Skip|x=x"],
@@ -2216,7 +2216,7 @@ describe("form-fill assignment helpers", () => {
       disabledSubmitKind(
         [
           ["@e:email", "t", "Email|f=email|n=a@b.test"],
-          ["@e:go", "b", "Creating your account|s=d|a=submit|fm=1"],
+          ["@e:go", "b", "Creating your account|s=d"],
           ["@e:img", "b", "image challenge|x=x"],
         ],
         0,

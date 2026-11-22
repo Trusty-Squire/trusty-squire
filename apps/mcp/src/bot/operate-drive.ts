@@ -1328,7 +1328,19 @@ export function rankDriveCandidates<T extends DriveCandidate>(
 }
 
 export function isSubmitLikeRow(row: WireRow): boolean {
-  return /(?:^|\|)a=submit(?:\||$)/.test(row[2] ?? "") && rowFormId(row) !== undefined;
+  const label = readableLabel(row).toLowerCase();
+  // A named destination is navigation, even when its label says "Create".
+  // Treating that link as a submit makes the next page's prose look like a
+  // response to a form that was never submitted.
+  if ((row[1] === "l" || row[1] === "link") && rowHref(row) !== undefined) return false;
+  // Carousel chrome ("Next slide") is not a form submit. Treating it as one
+  // made Fireworks listedWork stay true after the passwords, so settle never
+  // waited on the still-disabled Create Account.
+  if (/\b(?:next|previous|prev)\s+slide\b/.test(label)) return false;
+  if (/(?:^|\|)a=submit(?:\||$)/.test(row[2] ?? "") && rowFormId(row) !== undefined) return true;
+  return /submit|continue|creat(?:e|ing)|loading|sign[- ]?up|register|\bnext\b|pay[- ]?now|place[- ]?order|get[- ]?started/.test(
+    label,
+  );
 }
 
 /** The act path scrolls an offscreen target into view before acting. */

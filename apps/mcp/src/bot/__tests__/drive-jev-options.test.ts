@@ -66,10 +66,15 @@ describe("submit detection uses the page's own marker", () => {
     expect(isSubmitLikeRow(["@e:f0d2", "b", "☾|a=submit"])).toBe(false);
   });
 
-  it("does not infer submission from a control's words", () => {
+  it("preserves the existing submit labels without a marker", () => {
     for (const label of ["Submit", "Continue", "Create Account", "Register", "Next", "Pay now"]) {
-      expect(isSubmitLikeRow(["@e:x", "b", `${label}|fm=1`])).toBe(false);
+      expect(isSubmitLikeRow(["@e:x", "b", `${label}|fm=1`])).toBe(true);
     }
+  });
+
+  it("keeps navigation and carousel guards ahead of submit markers", () => {
+    expect(isSubmitLikeRow(["@e:link", "l", "Create Account|u=https://x.test/signup|a=submit|fm=1"])).toBe(false);
+    expect(isSubmitLikeRow(["@e:slide", "b", "Next slide|a=submit|fm=1"])).toBe(false);
   });
 
   it("offers the hinted fields of a non-English form for typing", () => {
