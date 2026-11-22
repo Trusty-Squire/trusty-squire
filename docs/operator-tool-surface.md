@@ -37,9 +37,10 @@ observations read that browser evidence without evaluating the blocked document.
 Use `operate_dialog({session_id,dialog_id,action:"accept"|"dismiss",text?})`;
 `text` is only valid when accepting a prompt. An expired or already answered id
 is refused. Unanswered dialogs are dismissed after two minutes, and subsequent
-observations include `native_dialog_notices`. No dialog is automatically accepted.
-`operate_drive` makes an explicit decision against the user's goal for native
-confirmations, and hands uncertainty or prompt text back to the host. The human
+observations include `native_dialog_notices`. Outside `operate_drive`, no dialog
+is automatically accepted. `operate_drive` acknowledges alerts and decides native
+confirmations against the user's goal. It hands prompt text, and uncertainty on a
+confirmation that names an existing credential mutation, back to the host. The human
 live viewer displays the same question with OK, Cancel and a prompt input.
 
 `operate_upload` takes `session_id`, exactly one of a current `target` ref or

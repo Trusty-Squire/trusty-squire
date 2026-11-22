@@ -66,7 +66,7 @@ function chooseOauth(label: string): DriveDependencies["askJev"] {
 }
 
 describe("drive OAuth trace", () => {
-  it("keeps signed-out providers out of human resume choices", () => {
+  it("offers signed-out providers as human resume choices beside the live one", () => {
     const rows: WireRow[] = [
       ["@github", "b", "Continue with GitHub"],
       ["@google", "b", "Continue with Google"],
@@ -81,35 +81,27 @@ describe("drive OAuth trace", () => {
       "https://console.neon.tech/login",
       ["google"],
     );
-    expect(Object.values(options)).toContain("Continue with Google");
-    expect(Object.values(options)).not.toContain("Continue with GitHub");
-    expect(Object.values(options)).not.toContain("Continue with Microsoft");
-    expect(Object.values(options)).not.toContain("Continue with Hasura");
-    expect(
-      resumeAction(
-        "@github",
-        rows,
-        {},
-        "Sign in to Neon",
-        undefined,
-        "https://console.neon.tech/login",
-        ["google"],
-      ),
-    ).toMatchObject({
-      kind: "invalid_answer",
-      reason: "resume_not_current_option",
-    });
-    expect(
-      resumeAction(
-        "@microsoft",
-        rows,
-        {},
-        "Sign in to Neon",
-        undefined,
-        "https://console.neon.tech/login",
-        ["google"],
-      ).kind,
-    ).toBe("invalid_answer");
+    expect(Object.values(options)).toEqual(
+      expect.arrayContaining([
+        "Continue with Google",
+        "Continue with GitHub",
+        "Continue with Microsoft",
+        "Continue with Hasura",
+      ]),
+    );
+    for (const ref of ["@github", "@microsoft"]) {
+      expect(
+        resumeAction(
+          ref,
+          rows,
+          {},
+          "Sign in to Neon",
+          undefined,
+          "https://console.neon.tech/login",
+          ["google"],
+        ).kind,
+      ).not.toBe("invalid_answer");
+    }
   });
 
   it("shows all providers to Jev while allowing it to choose the live Google provider", async () => {

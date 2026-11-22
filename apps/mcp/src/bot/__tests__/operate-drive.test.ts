@@ -59,7 +59,6 @@ import {
   SUBMIT_RESPONSE_REASON_MAX,
   attachObservationNotice,
   typedValueEquals,
-  typedFieldMismatchReason,
   solverOutcomeBlocksSubmit,
   DRIVE_IN_FLIGHT_MS,
   outstandingRequiredFill,
@@ -834,11 +833,33 @@ describe("clear-winner decision routing", () => {
     };
     expect(decideAfterJev(input)).toEqual({ kind: "no_progress" });
     expect(decideAfterJev({ ...input, fingerprint: "changed" })).toMatchObject({ kind: "act" });
+    // An ordinary control the model judged ineffective is retried.
     expect(
       decideAfterJev({
         ...base,
         lastActionKey: "@e:b0",
         answers: { ...clickAnswers(), last_action_worked: { noul: 0.2 } },
+      }),
+    ).toMatchObject({ kind: "act" });
+    // A key-create control is not pressed again on that judgment: a create
+    // whose first press landed can pause or replace the key it made.
+    const keyRows: WireRow[] = buttons.map(
+      (row, i): WireRow => (i === 0 ? ["@e:b0", "b", "Create API key"] : row),
+    );
+    const keyQuestions = buildDriveQuestions(keyRows, {}, "create an API key");
+    const keyTargets = criteriaFor(keyQuestions, "CLICK_target");
+    const keyTarget = Object.keys(keyTargets).find((key) => /create/i.test(key))!;
+    expect(
+      decideAfterJev({
+        ...base,
+        rows: keyRows,
+        goal: "create an API key",
+        lastActionKey: "@e:b0",
+        answers: {
+          operation: valid("CLICK", criteriaFor(keyQuestions, "operation")),
+          CLICK_target: valid(keyTarget, keyTargets, 0.4),
+          last_action_worked: { noul: 0.2 },
+        },
       }),
     ).toMatchObject({ kind: "replan" });
     expect(
@@ -2305,9 +2326,6 @@ describe("form-fill assignment helpers", () => {
       typedValueEquals("4242-4242", "42424242", ["@e:pan", "t", "Card number|f=payment"]),
     ).toBe(true);
     expect(typedValueEquals("(212) 555-0123", "2125550123", ["@e:name", "t", "Name"])).toBe(false);
-    expect(typedFieldMismatchReason("First name", "Squire", "Squir")).toBe(
-      'typed First name as "Squire" but the field shows "Squir"',
-    );
   });
 
   it("never treats an already-settled solver as a submit blocker", () => {

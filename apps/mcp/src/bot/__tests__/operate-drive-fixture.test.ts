@@ -1651,7 +1651,7 @@ describe("operate_drive real-browser fixture", () => {
     }
   }, 30_000);
 
-  it("reports a page-level notice after navigation as the outcome", async () => {
+  it("keeps driving past a page-level notice after navigation", async () => {
     const dashHtml = `<!doctype html><meta charset="utf-8"><title>Dashboard</title>
 <nav><a id="settings" href="/settings">Settings</a></nav>`;
     const noticeHtml = `<!doctype html><meta charset="utf-8"><title>Settings</title>
@@ -1681,8 +1681,9 @@ describe("operate_drive real-browser fixture", () => {
         undefined,
         dependencies,
       );
-      expect(result.status).toBe("stuck");
-      expect(result.reason).toMatch(/more information/i);
+      // The notice is page evidence for the model, not a stop.
+      expect(page.url()).toMatch(/\/settings/);
+      expect(result.status).not.toBe("stuck");
     } finally {
       await finishProvisionSession(started.session_id);
       await context.close();
@@ -2054,7 +2055,72 @@ describe("operate_drive real-browser fixture", () => {
     }
   }, 30_000);
 
-  it("finishes with a same-URL field error after submit", async () => {
+  it("does not treat an off-checkout email code page as a wallet sign-in", async () => {
+    const html = `<!doctype html><meta charset="utf-8"><title>Verify your email</title>
+<main>
+  <h1>Check your inbox</h1>
+  <p>We sent a verification code to your email, or use the magic link.</p>
+  <label>Code <input id="code" name="code"></label>
+  <button type="button" id="close" onclick="document.title='closed'">Close</button>
+</main>`;
+    const { context, page, started } = await openFixture(
+      html,
+      "magic-link.test",
+      "drive",
+      "/verify",
+    );
+    try {
+      let asked = 0;
+      const dependencies = deps(async (_api, _state, questions) => {
+        asked += 1;
+        return jevFromQuestions(questions, true);
+      });
+      const result = await runOperateDrive(
+        { session_id: started.session_id, goal: "verify the email", max_steps: 2 },
+        api(),
+        undefined,
+        dependencies,
+      );
+      expect(asked).toBeGreaterThan(0);
+      expect(await page.title()).toBe("Verify your email");
+      expect(result.trajectory.some((step) => step.action === "press")).toBe(false);
+      expect(result.reason ?? "").not.toMatch(/wallet sign-in/);
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
+  it("ends a budget-exhausted drive as budget, carrying the submit response", async () => {
+    const html = `<!doctype html><meta charset="utf-8"><title>Register</title>
+<main>
+  <label>Email <input id="email" name="email" type="email"></label>
+  <button type="button" id="go" onclick="document.getElementById('msg').textContent='We are reviewing your request.'">Register</button>
+  <p id="msg"></p>
+</main>`;
+    const { context, started } = await openFixture(
+      html,
+      "budget-response.test",
+      "standard",
+      "/register",
+    );
+    try {
+      const dependencies = deps(async (_api, _state, questions) => jevFromQuestions(questions));
+      const result = await runOperateDrive(
+        { session_id: started.session_id, goal: "create an account", max_steps: 1 },
+        api(),
+        undefined,
+        dependencies,
+      );
+      expect(result.status).toBe("budget");
+      expect(result.reason ?? "").toMatch(/reviewing your request/i);
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
+  it("keeps driving after a same-URL field error on submit", async () => {
     const html = `<!doctype html><meta charset="utf-8"><title>Register</title>
 <main>
   <label>Email <input id="email" name="email" type="email"></label>
@@ -2097,9 +2163,9 @@ describe("operate_drive real-browser fixture", () => {
         undefined,
         dependencies,
       );
+      // The invalid field is page evidence for the model, not a stop.
       expect(page.url()).toMatch(/\/register/);
-      expect(result.status).toBe("stuck");
-      expect(result.reason).toMatch(/email was marked invalid/i);
+      expect(result.status).not.toBe("stuck");
       expect(await page.locator("#email-error").textContent()).toMatch(
         /prohibited of registering/i,
       );
@@ -6013,7 +6079,7 @@ describe("operate_drive feedback loop", () => {
     }
   }, 30_000);
 
-  it("never counts the drive's own refusal toward a dead end, and names the refusal", async () => {
+  it("never counts the drive's own refusal toward a dead end", async () => {
     const html = `<!doctype html><meta charset="utf-8"><title>Workspace</title>
 <main><h1>Workspace</h1><button id="advance">Continue</button></main>`;
     const { context, started } = await openFixture(html, "refused-act.test", "drive");
@@ -6048,9 +6114,9 @@ describe("operate_drive feedback loop", () => {
       // The refusal is recorded as a not-executed step, never as progress.
       const trail = sessionForCall(started.session_id)?.drive?.outcomeTrail ?? [];
       expect(trail.some((entry) => entry.outcome === "not_executed:covered")).toBe(true);
-      // The stop reason is the loop's own dispatch failure, not a description
-      // of the unchanged page and not an exhausted-action tally.
-      expect(handoff.reason ?? "").toMatch(/covered before|refused before/);
+      // Repeated occlusion refusals re-plan instead of ending the drive, and
+      // never read as an unchanged page or an exhausted-action tally.
+      expect(handoff.status).not.toBe("stuck");
       expect(handoff.reason ?? "").not.toMatch(
         /nothing on the page can advance the goal|no change after/,
       );
@@ -6151,7 +6217,7 @@ describe("operate_drive feedback loop", () => {
     }
   }, 30_000);
 
-  it("answers NONE_OF_THESE instead of forcing a low-confidence click", async () => {
+  it("re-plans on NONE_OF_THESE instead of forcing a click", async () => {
     const html = `<!doctype html><meta charset="utf-8"><title>Welcome</title>
 <main><h1>Welcome</h1><a id="learn" href="/docs">Learn more</a></main>`;
     const { context, started } = await openFixture(html, "none-of-these.test");
@@ -6172,9 +6238,9 @@ describe("operate_drive feedback loop", () => {
         undefined,
         dependencies,
       );
-      expect(handoff.status).toBe("stuck");
+      // NONE_OF_THESE re-plans once, then ends as resumable no_progress.
+      expect(handoff.status).toBe("no_progress");
       expect(handoff.reason).toMatch(/nothing on the page can advance the goal/i);
-      expect(handoff.reason).toContain("https://none-of-these.test/");
       expect(clicks).toEqual([]);
     } finally {
       await finishProvisionSession(started.session_id);
@@ -6300,7 +6366,7 @@ describe("operate_drive feedback loop", () => {
     30_000,
   );
 
-  it("does not reissue an identical low-confidence prompt on resume", async () => {
+  it("reissues an unchanged low-confidence prompt with its options", async () => {
     const html = `<!doctype html><meta charset="utf-8"><title>Challenge</title>
 <main><h1>Complete verification</h1><button>Go back</button></main>`;
     const { context, page, started } = await openFixture(html, "repeat-prompt.test");
@@ -6314,13 +6380,11 @@ describe("operate_drive feedback loop", () => {
       const input = { session_id: started.session_id, goal: "Complete verification", max_steps: 4 };
       const first = await runOperateDrive(input, api(), undefined, dependencies);
       expect(first.status).toBe("low_confidence");
+      // The host keeps the option list it needs in order to act.
       const repeated = await runOperateDrive(input, api(), undefined, dependencies);
-      expect(repeated.status).toBe("stuck");
-      expect(repeated.question).toBeUndefined();
-      expect(repeated.options).toBeUndefined();
-      expect(repeated.reason).toMatch(/unchanged question/i);
-      const repeatedAgain = await runOperateDrive(input, api(), undefined, dependencies);
-      expect(repeatedAgain.question).toBeUndefined();
+      expect(repeated.status).toBe("low_confidence");
+      expect(repeated.question).toBe(first.question);
+      expect(repeated.options).toEqual(first.options);
       await page.getByRole("button").evaluate((button) => {
         button.textContent = "Continue";
       });
