@@ -5131,7 +5131,16 @@ async function captureDriveSession(
     const finalized = await finalizeSnapshotOutputs(session, sessionId, observation, compactRows);
     return await fellBack(finalized.observation, finalized.rows);
   }
-  let readiness = await waitForPageReady(page, { kind: "drive-read" });
+  // Accepting one dialog can synchronously open another. The next dialog may
+  // arrive after the check above but while readiness evaluates in the page;
+  // native dialogs suspend that evaluation, including its in-page timers.
+  const readReadiness = () => session.browser.nativeDialogs.read(
+    () => waitForPageReady(page, { kind: "drive-read" }),
+    (): PageReadyResult => ({ ready: true, elapsedMs: 0 }),
+  );
+  let readiness = await readReadiness();
+  const openedDuringReadiness = nativeDialogObservation(session);
+  if (openedDuringReadiness !== undefined) return timed(openedDuringReadiness, []);
   const pending = (state: PageReadyResult) => {
     // No fast DOM snapshot is taken from an unrendered or navigating document.
     // The drive loop retries the reason before it offers any action to Jev.
@@ -5149,7 +5158,9 @@ async function captureDriveSession(
   const injected = await injectPendingCaptchaToken(session, page);
   if (injected === "injected") {
     // Provider callbacks may navigate or replace the document before capture.
-    readiness = await waitForPageReady(page, { kind: "drive-read" });
+    readiness = await readReadiness();
+    const openedAfterInjection = nativeDialogObservation(session);
+    if (openedAfterInjection !== undefined) return timed(openedAfterInjection, []);
     if (!readiness.ready) return pending(readiness);
   }
   ensureFrameCacheInvalidation(session);
