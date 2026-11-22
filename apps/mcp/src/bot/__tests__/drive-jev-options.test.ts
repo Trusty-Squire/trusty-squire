@@ -170,7 +170,7 @@ describe("links to the same place are one answer", () => {
       });
     };
     expect(admission()).toMatchObject({ kind: "low_confidence" });
-    snapshot.elements[1]!.href = snapshot.elements[0]!.href;
+    snapshot.elements[1]!.href = snapshot.elements[0]!.href!;
     expect(admission()).toEqual({ ok: true });
   });
 
