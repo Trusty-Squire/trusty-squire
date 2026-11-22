@@ -253,7 +253,9 @@ export function driveRowsFromSnapshot(snapshot: DriveSnapshot): SnapshotRow[] {
     if (
       element.entityHasReadonlyInput === true ||
       (element.entityText !== undefined && findCredentialTokens(element.entityText).length > 0) ||
-      (element.entityDisplayText !== undefined && isMaskedDisplay(element.entityDisplayText))
+      (element.entityDisplayText !== undefined &&
+        (isMaskedDisplay(element.entityDisplayText) ||
+          findCredentialTokens(element.entityDisplayText).length > 0))
     ) {
       facts.push("credential=1");
     }

@@ -130,7 +130,7 @@ describe("links to the same place are one answer", () => {
     const admission = () => {
       const candidates = driveTargetSets(driveRowsFromSnapshot(snapshot), {}, false, [], url).CLICK;
       const criteria = Object.fromEntries(
-        candidates.map((candidate) => [candidate.slug, candidate.description]),
+        candidates.map((candidate) => [candidate.slug, candidate.row[2]!.split("|")[0]!]),
       );
       const votes = answer(criteria, {
         [slugFor(criteria, "First")]: 0.47,

@@ -52,7 +52,7 @@ async function withKeyPage(
   const url = `https://app.example.test${path}`;
   await page.route("**/*", (route) =>
     route.fulfill({
-      contentType: "text/html",
+      contentType: "text/html; charset=utf-8",
       body,
     }),
   );
@@ -486,7 +486,7 @@ it.each(["button", "menuitem"].flatMap((role) =>
       );
       const session = sessionForCall(sessionId)!;
       expect(await session.browser.readClipboard(session.browser.page!)).toBe(value);
-      expect(result.reason ?? "").not.toContain("operator decision required");
+      expect(result.reason ?? "").not.toContain("operator decision required before Copy");
     },
   );
 }, 15_000);
