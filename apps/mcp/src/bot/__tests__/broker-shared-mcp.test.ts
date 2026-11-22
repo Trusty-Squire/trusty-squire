@@ -332,7 +332,10 @@ it("relay restores initialization after a broker restart and fails a dropped in-
     capabilities: {},
     clientInfo: { name: "fixture", version: "1" },
   });
-  await vi.waitFor(() => expect(responses.find((frame) => frame.id === 1)?.result).toBeTruthy());
+  // A fresh tsx relay loads the CLI graph before it can answer initialize.
+  await vi.waitFor(() => expect(responses.find((frame) => frame.id === 1)?.result).toBeTruthy(), {
+    timeout: 5_000,
+  });
   relay.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n");
   send(2, "tools/call", { name: "tools/list", arguments: {} });
   await vi.waitFor(() =>
@@ -355,7 +358,7 @@ it("relay restores initialization after a broker restart and fails a dropped in-
   expect(identities).toEqual(["relay-agent", "relay-agent"]);
   relay.stdin.end();
   await new Promise<void>((resolve) => relay.once("exit", () => resolve()));
-});
+}, 15_000);
 
 it("isolates concurrent socket principals, attributes vault calls, coexists with stdio, and reaccepts after restart", async () => {
   const root = await mkdtemp(join(tmpdir(), "ts-shared-mcp-test-"));
@@ -635,7 +638,7 @@ it("closes the agent's session when a `server` relay process is killed", async (
   });
   const call = async (id: number, method: string, params: Record<string, unknown> = {}) => {
     child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
-    await vi.waitFor(() => expect(replies.has(id)).toBe(true));
+    await vi.waitFor(() => expect(replies.has(id)).toBe(true), { timeout: 5_000 });
     const frame = replies.get(id)!;
     if (frame.error) throw new Error(JSON.stringify(frame.error));
     return frame.result;

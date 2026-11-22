@@ -854,6 +854,8 @@ describe("native screenshot/click tool contract on an isolated session", () => {
     },
   );
 
+  // Session setup, navigation settling, observation and replay rejection all
+  // run against Chrome; together they can exceed the default five seconds.
   it("navigates to an undeclared host through a screenshot-bound coordinate click", async () => {
     const f = await fixture();
     const started = await startHarnessProvisionSession({
@@ -891,7 +893,7 @@ describe("native screenshot/click tool contract on an isolated session", () => {
       await finishProvisionSession(started.session_id);
       await f.close();
     }
-  });
+  }, 15_000);
 
   it("distinguishes an unresolved screenshot-derived label from an expired physical ref", async () => {
     const f = await fixture();
