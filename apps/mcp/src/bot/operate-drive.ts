@@ -7820,13 +7820,24 @@ async function driveLoop(input: {
     );
     if (downloaded !== undefined) return finish(downloaded.status, { reason: downloaded.reason });
     if (!pageReadiness.ready) {
-      // The readiness module has already spent the bounded wait for this
-      // reason. Retry only while the document is actually not ready; never
-      // offer a control or a DONE choice from an unrendered snapshot.
+      // Retry only while the document is actually not ready; never offer a
+      // control or a DONE choice from an unrendered snapshot. A closed or
+      // detached page reports "navigating" without waiting at all, so top the
+      // readiness wait up to one model wait before re-reading. The retry
+      // spends a step: a page that never becomes ready then ends the drive by
+      // its step budget instead of spinning until the clock runs out.
+      const waitMs = driveWaitMs(remainingMs(), DRIVE_WAIT_MS - pageReadiness.elapsedMs);
+      if (waitMs > 0) await sleepDrive(waitMs, context?.signal);
       const next = await refreshSnapshot(framesIfNeeded());
       if (next.timedOut)
         return finish("evaluate_timeout", { reason: "in-page evaluate exceeded budget" });
-      spendStep(`page_not_ready:${pageReadiness.reason ?? "unknown"}`);
+      appendDriveTrace(session, {
+        at: "page_not_ready",
+        step: steps,
+        reason: pageReadiness.reason ?? "unknown",
+        url: observation.url,
+      });
+      steps += 1;
       continue;
     }
     // Shop and Link can open their own sign-in prompt after the merchant's

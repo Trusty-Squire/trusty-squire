@@ -37,14 +37,21 @@ export const EXTRACT_NO_SOURCE_ERROR =
 
 /** The credential fields a store keeps: truncated displays are dropped, and a
  * result holding only id fields is not a credential. Null when nothing is
- * storable. Decided by field name, never by the value's shape. */
+ * storable. Decided by field name; the one value rule is that a web URL is not
+ * a key, since a Copy beside an invite or docs link writes the link itself. */
 export function storableCredentials(
   credentials: Record<string, string>,
 ): Record<string, string> | null {
   const kept = Object.fromEntries(
-    Object.entries(credentials).filter(([key]) => !key.endsWith("_truncated")),
+    Object.entries(credentials).filter(
+      ([key, value]) => !key.endsWith("_truncated") && !isWebUrl(value),
+    ),
   );
   return Object.keys(kept).some((key) => key !== "id" && !key.endsWith("_id")) ? kept : null;
+}
+
+function isWebUrl(value: string): boolean {
+  return /^https?:\/\/\S+$/i.test(value.trim());
 }
 
 /** What a zero-match capture DID find, so the caller can pick a better source
@@ -867,8 +874,8 @@ export async function extractCredentials(sessionId: string): Promise<ExtractResu
   const page = operationPageForSession(session);
   invalidateCompactV2Snapshot(session);
 
-  // Storage is decided by source, never by shape: the Copy click itself proves
-  // provenance, whatever the value looks like (Vast.ai's key is 64-char hex).
+  // The Copy click establishes provenance; storage eligibility is checked
+  // separately by storableCredentials.
   await ensureCaptureClipboardPermission(page);
   const copied = await copyCredentialFromDialog(page, browser);
   audit(sessionId, "extract", { found: copied !== null });
