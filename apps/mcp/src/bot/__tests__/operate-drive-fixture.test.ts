@@ -3979,6 +3979,39 @@ describe("operate_drive real-browser fixture", () => {
     }
   }, 60_000);
 
+  // The DOM value is the oracle: a display row may shorten it or replace pipes.
+  // A correct fill must not be retried merely because that display is lossy.
+  it.each(["Ada | Lovelace", "A".repeat(100)])(
+    "accepts a full typed value despite lossy display text: %s",
+    async (value) => {
+      const { context, page, started } = await openFixture(
+        '<main><label>Company<input id="company" name="company" oninput="window.writes = (window.writes || 0) + 1"></label></main>',
+        "typed-display.test",
+        "drive",
+      );
+      try {
+        const result = await runOperateDrive(
+          {
+            session_id: started.session_id,
+            goal: "fill the company field",
+            facts: { company: value },
+            max_steps: 1,
+          },
+          api(),
+          undefined,
+          deps(async (_api, _state, questions) => jevChoose(questions, "TYPE_TEXT")),
+        );
+        expect(await page.locator("#company").inputValue()).toBe(value);
+        expect(await page.evaluate(() => (window as unknown as { writes: number }).writes)).toBe(1);
+        expect(result.status).toBe("budget");
+      } finally {
+        await finishProvisionSession(started.session_id);
+        await context.close();
+      }
+    },
+    30_000,
+  );
+
   it("retypes a field whose first entry dropped the last character", async () => {
     const { context, page, started } = await openFixture(
       DROPPED_LAST_CHAR_HTML,
