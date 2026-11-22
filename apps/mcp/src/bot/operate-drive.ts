@@ -7321,8 +7321,15 @@ async function driveLoop(input: {
     }
     if (actDispatched && decision.action.kind === "type") {
       const intended = decision.action.text ?? "";
+      // The row's n= is display text (`|` replaced, cut at 80 characters), so
+      // the read-back compares the snapshot's own value for the control.
+      const shownValue = (row: WireRow | undefined): string | undefined => {
+        if (row === undefined) return undefined;
+        const raw = drivePasswordControls.get(session)?.get(row[0])?.value;
+        return raw !== undefined && raw.length > 0 ? raw : rowCurrentValue(row);
+      };
       const typedRow = findRow(rows, decision.actionKey, observation.url);
-      const shown = typedRow === undefined ? undefined : rowCurrentValue(typedRow);
+      const shown = shownValue(typedRow);
       if (
         intended.length > 0 &&
         typedRow !== undefined &&

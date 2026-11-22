@@ -829,7 +829,14 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
       ) {
         container = container.parentElement;
       }
-      if (container instanceof HTMLElement) localHelp.push(container.innerText);
+      // One entry per child: innerText runs inline siblings together
+      // ("PasswordShow passwordAt least 32 characters"), hiding the rule.
+      if (container instanceof HTMLElement) {
+        for (const child of Array.from(container.childNodes)) {
+          if (child.nodeType === Node.TEXT_NODE) localHelp.push(child.textContent ?? "");
+          else if (child instanceof HTMLElement && visible(child)) localHelp.push(child.innerText);
+        }
+      }
       const helpSibling = (sibling: Element): boolean =>
         (sibling.matches("small,p,span,div,ul,ol") || auxiliary(sibling)) &&
         (!sibling.matches(controls) || auxiliary(sibling)) &&

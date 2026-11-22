@@ -5,7 +5,12 @@ import { chromium, type BrowserContext } from "playwright";
 import type { ApiClient } from "../../api-client.js";
 import { BrowserController } from "../browser.js";
 import { extractCredentials } from "../capture/capture.js";
-import { emptyDriveState, runOperateDrive, type DriveDependencies } from "../operate-drive.js";
+import {
+  emptyDriveState,
+  runOperateDrive,
+  type DriveCallContext,
+  type DriveDependencies,
+} from "../operate-drive.js";
 import {
   act,
   awaitVerification,
@@ -125,14 +130,22 @@ it.each([
     await withPage(copyOnlyDialog(key), async (sessionId) => {
       sessionForCall(sessionId)!.drive = emptyDriveState(goal, {});
       const askJev = doneJev();
+      // A key goal completes only once the captured key is in the vault (#1148),
+      // so the drive runs with the `store` persistence operate_drive wires up.
+      const persistCredentials = vi.fn<NonNullable<DriveCallContext["persistCredentials"]>>(
+        async () => ({ reference: "vault://ref", service: "127.0.0.1", label: undefined }),
+      );
       const result = await runOperateDrive(
         { session_id: sessionId, goal, max_steps: 3, max_seconds: 5 },
         api,
-        undefined,
+        { persistCredentials },
         dependencies(askJev),
       );
       expect(result.status, `${result.reason} | ${JSON.stringify(result.trajectory)}`).toBe(
         "complete",
+      );
+      expect(persistCredentials).toHaveBeenCalledWith(
+        expect.objectContaining({ credentials: expect.objectContaining({ api_key: key }) }),
       );
       // operate_finish extracts again: the repeat Copy click leaves the clipboard
       // unchanged, and the session's earlier Copy click still vouches for it.
@@ -175,20 +188,25 @@ it("sends page content to Jev without pattern masking", async () => {
 it.each([
   ["prefixed", "sk" + "_live_fixturekey0123456789abcdef"],
   ["unprefixed", "Ab3kZ9"],
-])("stops a key-goal drive on a plain-text %s key and asks for capture", async (_name, key) => {
-  // No Copy click and no target: the drive never guesses which text is the key.
-  const html = `<!doctype html><main><h1>API keys</h1>
+])(
+  "stops a key-goal drive on a plain-text %s key and asks for capture",
+  async (_name, key) => {
+    // No Copy click and no target: the drive never guesses which text is the key.
+    const html = `<!doctype html><main><h1>API keys</h1>
     <label>API key <input readonly value="${key}"></label></main>`;
-  await withPage(html, async (sessionId) => {
-    sessionForCall(sessionId)!.drive = emptyDriveState(goal, {});
-    const result = await runOperateDrive(
-      { session_id: sessionId, goal, max_steps: 4, max_seconds: 5 },
-      api,
-      undefined,
-      dependencies(doneJev()),
-    );
-    expect(result.status).toBe("stuck");
-    expect(result.reason).toContain("operate_observe");
-    expect(result.reason).toContain("capture");
-  });
-}, 30_000);
+    await withPage(html, async (sessionId) => {
+      sessionForCall(sessionId)!.drive = emptyDriveState(goal, {});
+      const result = await runOperateDrive(
+        { session_id: sessionId, goal, max_steps: 4, max_seconds: 5 },
+        api,
+        undefined,
+        dependencies(doneJev()),
+      );
+      expect(result.status).toBe("stuck");
+      expect(result.reason).toContain("key not stored");
+      expect(result.reason).toContain("operate_extract");
+      expect(result.reason).toContain("capture");
+    });
+  },
+  30_000,
+);

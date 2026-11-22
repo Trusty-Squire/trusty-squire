@@ -66,18 +66,33 @@ describe("drive commerce fixtures", () => {
       });
       sessionId = started.session_id;
       const deps: DriveDependencies = {
+        // The model types the delivery form's facts one at a time (the drive
+        // no longer types them before the vote, #1159) and answers DONE once
+        // none is left; the newsletter and lower forms are never its choice.
         askJev: async (_api, _state, questions) => {
           const operation = questions.operation;
           const ids = operation?.type === "choice" ? Object.keys(operation.criteria) : [];
-          const choice = ids[0]!;
+          const typeTarget = questions.TYPE_TEXT_target;
+          const targets = typeTarget?.type === "choice" ? Object.keys(typeTarget.criteria) : [];
+          const delivery = targets.find((key) => key.endsWith("_fm_1_t"));
+          const choice = delivery === undefined ? "DONE" : "TYPE_TEXT";
           return {
             result: {
               answers: {
                 operation: {
                   choice,
-                  confidence: 0.2,
-                  probabilities: peakedProbabilities(ids, choice, 0.51),
+                  confidence: 0.93,
+                  probabilities: peakedProbabilities(ids, choice, 0.91),
                 },
+                ...(delivery === undefined
+                  ? {}
+                  : {
+                      TYPE_TEXT_target: {
+                        choice: delivery,
+                        confidence: 0.93,
+                        probabilities: peakedProbabilities(targets, delivery, 0.91),
+                      },
+                    }),
               },
             },
             attempts: 1,
@@ -312,7 +327,12 @@ describe("drive commerce fixtures", () => {
         document.querySelector("main")!.prepend(decoy);
       });
       const resumed = await runOperateDrive(
-        { session_id: sessionId, goal: `${GOAL} with exactly one item`, answer: key!, max_steps: 1 },
+        {
+          session_id: sessionId,
+          goal: `${GOAL} with exactly one item`,
+          answer: key!,
+          max_steps: 1,
+        },
         api,
         undefined,
         deps,

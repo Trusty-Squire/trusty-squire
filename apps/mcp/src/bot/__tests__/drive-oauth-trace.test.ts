@@ -511,7 +511,7 @@ describe("drive OAuth trace", () => {
     }
   }, 30_000);
 
-  it("hands back a new-account password when no password fact was supplied", async () => {
+  it("does not type a new-account password when no password fact was supplied", async () => {
     const context = await browser.newContext();
     const page = await context.newPage();
     await page.goto(
@@ -525,26 +525,23 @@ describe("drive OAuth trace", () => {
     });
     try {
       const deps: DriveDependencies = {
+        // A password with no fact is never offered as a fill, so the model
+        // can only report the step blocked.
         askJev: async (_api, _state, questions) => {
           const operation = questions.operation;
-          const type = questions.TYPE_TEXT_target;
-          if (operation?.type !== "choice" || type?.type !== "choice")
-            throw new Error("No password choice");
-          const target = Object.keys(type.criteria)[0]!;
+          if (operation?.type !== "choice") throw new Error("No operation question");
+          if (questions.TYPE_TEXT_target?.type === "choice") {
+            expect(Object.keys(questions.TYPE_TEXT_target.criteria)).toEqual([]);
+          }
           return {
             attempts: 1,
             elapsedMs: 1,
             result: {
               answers: {
                 operation: {
-                  choice: "TYPE_TEXT",
+                  choice: "BLOCKED",
                   confidence: 0.95,
-                  probabilities: peakedProbabilities(Object.keys(operation.criteria), "TYPE_TEXT"),
-                },
-                TYPE_TEXT_target: {
-                  choice: target,
-                  confidence: 0.95,
-                  probabilities: peakedProbabilities(Object.keys(type.criteria), target),
+                  probabilities: peakedProbabilities(Object.keys(operation.criteria), "BLOCKED"),
                 },
               },
             },
@@ -564,8 +561,7 @@ describe("drive OAuth trace", () => {
         undefined,
         deps,
       );
-      expect(result.status).toBe("needs_value");
-      expect(result.field).toMatch(/password/i);
+      expect(result.status).toBe("stuck");
       expect(await page.locator('input[type="password"]').inputValue()).toBe("");
       const loginRows: WireRow[] = [
         ["@password", "t", "Password|f=password"],

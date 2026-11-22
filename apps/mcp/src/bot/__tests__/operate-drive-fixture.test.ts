@@ -27,6 +27,7 @@ import {
   matchingFactKeys,
   emptyDriveState,
   runOperateDrive,
+  type DriveCallContext,
   type DriveDependencies,
   type WireRow,
 } from "../operate-drive.js";
@@ -448,6 +449,18 @@ function api(): ApiClient {
   return { useCredential: vi.fn() } as unknown as ApiClient;
 }
 
+/** The `store` persistence operate_drive wires up: a key goal completes only
+ * once the captured key is in the vault (#1148). */
+function vaultStore() {
+  return {
+    persistCredentials: vi.fn<NonNullable<DriveCallContext["persistCredentials"]>>(async () => ({
+      reference: "vault://ref",
+      service: "fixture",
+      label: undefined,
+    })),
+  };
+}
+
 // Built by concatenation so no contiguous Stripe-shaped literal sits in this file.
 const DRIVE_FIXTURE_KEY = "sk" + "_live_fixtureKey" + "1234567890abcde";
 
@@ -562,6 +575,17 @@ function jevChoose(
     };
   }
   return result;
+}
+
+/** Types each offered fact field, then answers `then`. Fact fields are the
+ * model's to fill since the drive stopped auto-typing before the vote (#1159). */
+function jevFillThen(
+  questions: Record<string, JevQuestion>,
+  then: "DONE" | "BLOCKED" = "DONE",
+): JevCallOutcome {
+  return Object.keys(choiceCriteria(questions.TYPE_TEXT_target)).length > 0
+    ? jevChoose(questions, "TYPE_TEXT")
+    : jevChoose(questions, then);
 }
 
 function choiceCriteria(question: JevQuestion | undefined): Record<string, string> {
@@ -1326,6 +1350,11 @@ describe("operate_drive real-browser fixture", () => {
               .spyOn(page, "evaluate")
               .mockImplementation(() => new Promise<never>(() => {}));
             restoreEvaluate = () => evaluate.mockRestore();
+          }
+          // The dispatch changes the page so readiness settles at once and the
+          // stall is the post-dispatch snapshot's, not the change watch's.
+          if (stage === "snapshot") {
+            await page.evaluate(() => document.body.append("Signing in…"));
           }
           return { kind: "ok", combobox: false };
         };
@@ -2259,16 +2288,20 @@ describe("operate_drive real-browser fixture", () => {
       const dependencies = deps(async (_api, _state, questions) =>
         jevFromQuestions(questions, (await page.locator("#copy:visible").count()) > 0),
       );
+      const store = vaultStore();
       const result = await runOperateDrive(
         { session_id: started.session_id, goal: "extract an API key", max_steps: 8 },
         api(),
-        undefined,
+        store,
         dependencies,
       );
       expect(page.url()).toMatch(/\/settings\/apps\//);
       expect(await page.locator("#secret").innerText()).toBe(DRIVE_FIXTURE_KEY);
       // DONE extracts from the visible dialog's Copy source.
       expect(result.status).toBe("complete");
+      expect(store.persistCredentials).toHaveBeenCalledWith(
+        expect.objectContaining({ credentials: { api_key: DRIVE_FIXTURE_KEY } }),
+      );
       expect(await sessionForCall(started.session_id)!.browser.readClipboard(page)).toBe(
         DRIVE_FIXTURE_KEY,
       );
@@ -2344,10 +2377,11 @@ describe("operate_drive real-browser fixture", () => {
           ? jevChoose(questions, "CLICK", /Reveal/)
           : jevChoose(questions, "DONE");
       });
+      const store = vaultStore();
       const result = await runOperateDrive(
         { session_id: started.session_id, goal: "extract an API key", max_steps: 8 },
         api(),
-        undefined,
+        store,
         dependencies,
       );
       const tabClicks = await page.evaluate(
@@ -2359,6 +2393,9 @@ describe("operate_drive real-browser fixture", () => {
       expect(page.url()).toMatch(/\/settings\/apps\//);
       expect(await page.locator("#secret").innerText()).toBe(DRIVE_FIXTURE_KEY);
       expect(result.status).toBe("complete");
+      expect(store.persistCredentials).toHaveBeenCalledWith(
+        expect.objectContaining({ credentials: { api_key: DRIVE_FIXTURE_KEY } }),
+      );
       expect(await sessionForCall(started.session_id)!.browser.readClipboard(page)).toBe(
         DRIVE_FIXTURE_KEY,
       );
@@ -2436,10 +2473,11 @@ describe("operate_drive real-browser fixture", () => {
           page.url().includes("/settings") ? /payments-api/ : /Settings/,
         );
       });
+      const store = vaultStore();
       const result = await runOperateDrive(
         { session_id: started.session_id, goal: "extract an API key", max_steps: 8 },
         api(),
-        undefined,
+        store,
         dependencies,
       );
       expect(page.url()).not.toMatch(/\/docs/);
@@ -2448,6 +2486,9 @@ describe("operate_drive real-browser fixture", () => {
       expect(page.url()).toMatch(/\/settings\/apps\//);
       expect(await page.locator("#secret").innerText()).toBe(DRIVE_FIXTURE_KEY);
       expect(result.status).toBe("complete");
+      expect(store.persistCredentials).toHaveBeenCalledWith(
+        expect.objectContaining({ credentials: { api_key: DRIVE_FIXTURE_KEY } }),
+      );
       expect(await sessionForCall(started.session_id)!.browser.readClipboard(page)).toBe(
         DRIVE_FIXTURE_KEY,
       );
@@ -2686,7 +2727,7 @@ describe("operate_drive real-browser fixture", () => {
 
   const CONFIRMATION_HTML = `<!doctype html><meta charset="utf-8"><title>Blank</title><main><p>Your order is confirmed. #1042</p></main>`;
 
-  it("re-observes a second blank window after an auto-applied fill", async () => {
+  it("re-observes a second blank window after a fill re-renders the stage", async () => {
     // The Shopify shape: a stage swap blanks the snapshot, the next stage
     // mounts carrying one outstanding fact-backed fill, and writing it makes
     // the merchant re-render — blanking the snapshot a second time. The
@@ -2721,6 +2762,10 @@ describe("operate_drive real-browser fixture", () => {
         api(),
         undefined,
         deps(async (_api, state, questions) => {
+          // The model types the email fact the next stage mounts with.
+          if (Object.keys(choiceCriteria(questions.TYPE_TEXT_target)).length > 0) {
+            return jevChoose(questions, "TYPE_TEXT");
+          }
           const text = (state as { page?: { text?: string } }).page?.text ?? "";
           const keys = Object.keys(
             questions.operation?.type === "choice" ? questions.operation.criteria : {},
@@ -3261,7 +3306,8 @@ describe("operate_drive real-browser fixture", () => {
         },
         api(),
         undefined,
-        deps(async (_api, _state, questions) => jevFromQuestions(questions, true)),
+        // The model types the expiry fact; the drive rewrites a rejected short form.
+        deps(async (_api, _state, questions) => jevFillThen(questions)),
       );
       expect(result.status).not.toBe("stuck");
       expect(await page.locator("#writes").textContent()).toBe("12/30;12/2030;");
@@ -3317,7 +3363,7 @@ describe("operate_drive real-browser fixture", () => {
       };
       // The expiry rewrite is an automatic correction. Jev ends each call
       // once the drive has exhausted the available correction step.
-      const dependencies = deps(async (_api, _state, questions) => jevChoose(questions, "DONE"));
+      const dependencies = deps(async (_api, _state, questions) => jevFillThen(questions));
       let staled = 0;
       dependencies.driveAct = async (_sessionId, action) => {
         if (action.kind === "type" && action.text === "12/2030" && staled === 0) {
@@ -3407,7 +3453,7 @@ describe("operate_drive real-browser fixture", () => {
           },
           api(),
           undefined,
-          deps(async (_api, _state, questions) => jevFromQuestions(questions, true)),
+          deps(async (_api, _state, questions) => jevFillThen(questions)),
         );
       await drive(1);
       expect(await page.locator("#writes").textContent()).toBe("12/30;");
@@ -3933,6 +3979,39 @@ describe("operate_drive real-browser fixture", () => {
     }
   }, 60_000);
 
+  // The DOM value is the oracle: a display row may shorten it or replace pipes.
+  // A correct fill must not be retried merely because that display is lossy.
+  it.each(["Ada | Lovelace", "A".repeat(100)])(
+    "accepts a full typed value despite lossy display text: %s",
+    async (value) => {
+      const { context, page, started } = await openFixture(
+        '<main><label>Company<input id="company" name="company" oninput="window.writes = (window.writes || 0) + 1"></label></main>',
+        "typed-display.test",
+        "drive",
+      );
+      try {
+        const result = await runOperateDrive(
+          {
+            session_id: started.session_id,
+            goal: "fill the company field",
+            facts: { company: value },
+            max_steps: 1,
+          },
+          api(),
+          undefined,
+          deps(async (_api, _state, questions) => jevChoose(questions, "TYPE_TEXT")),
+        );
+        expect(await page.locator("#company").inputValue()).toBe(value);
+        expect(await page.evaluate(() => (window as unknown as { writes: number }).writes)).toBe(1);
+        expect(result.status).toBe("budget");
+      } finally {
+        await finishProvisionSession(started.session_id);
+        await context.close();
+      }
+    },
+    30_000,
+  );
+
   it("retypes a field whose first entry dropped the last character", async () => {
     const { context, page, started } = await openFixture(
       DROPPED_LAST_CHAR_HTML,
@@ -4113,7 +4192,7 @@ describe("operate_drive real-browser fixture", () => {
     }
   }, 60_000);
 
-  it("returns needs_value naming a field with no matching fact, then resume completes", async () => {
+  it("stops on a required field with no matching fact, then resume with the fact completes", async () => {
     const { context, page, started } = await openFixture(SIGNUP_HTML, "signup-missing.test");
     try {
       const companyRef = refFor(started, "@company");
@@ -4126,7 +4205,9 @@ describe("operate_drive real-browser fixture", () => {
         api(),
         undefined,
         deps(async (_api, _state, questions) => {
-          const result = jevFromQuestions(questions);
+          // Company has no fact, so it is never offered as a fill: once the
+          // email is typed the model has nothing to type and reports blocked.
+          const result = jevFillThen(questions, "BLOCKED");
           for (const [name, question] of Object.entries(questions)) {
             if (
               !(
@@ -4146,8 +4227,10 @@ describe("operate_drive real-browser fixture", () => {
           return result;
         }),
       );
-      expect(missing.status).toBe("needs_value");
-      expect(missing.field).toMatch(/company/i);
+      expect(missing.status).toBe("stuck");
+      expect(await page.locator("#email").inputValue()).toBe("ada@fixture.test");
+      expect(await page.locator("#company").inputValue()).toBe("");
+      expect(await page.locator("#done").count()).toBe(0);
       let round = 0;
       const resumed = await runOperateDrive(
         {
@@ -4171,7 +4254,7 @@ describe("operate_drive real-browser fixture", () => {
     }
   }, 60_000);
 
-  it("hands back a create-password step reached after resume without typing or submitting", async () => {
+  it("stops at a create-password step reached after resume without typing or submitting", async () => {
     const { context, page, started } = await openFixture(
       CREATE_PASSWORD_NEXT_HTML,
       "signup-password-missing.test",
@@ -4192,10 +4275,10 @@ describe("operate_drive real-browser fixture", () => {
         { session_id: started.session_id, goal: "create an account", max_steps: 4 },
         api(),
         undefined,
-        deps(async (_api, _state, questions) => jevFromQuestions(questions)),
+        // With no password to type, the model reports the step blocked.
+        deps(async (_api, _state, questions) => jevFillThen(questions, "BLOCKED")),
       );
-      expect(resumed.status).toBe("needs_value");
-      expect(resumed.field).toMatch(/password/i);
+      expect(resumed.status).toBe("stuck");
       expect(await page.locator("#password").inputValue()).toBe("");
       expect(await page.locator("#done").count()).toBe(0);
       expect(sessionForCall(started.session_id)?.drive?.facts.password).toBeUndefined();
@@ -4243,7 +4326,7 @@ describe("operate_drive real-browser fixture", () => {
           },
           api(),
           { persistLogin },
-          deps(async (_api, _state, questions) => jevChoose(questions, "DONE")),
+          deps(async (_api, _state, questions) => jevFillThen(questions)),
         );
         const password = await page.locator("#password").inputValue();
         expect(password.length).toBeGreaterThanOrEqual(32);
@@ -4454,10 +4537,13 @@ describe("operate_drive real-browser fixture", () => {
       <label id="confirmation" hidden>Confirm password<input id="confirm" type="password" required></label>
       <button type="submit">Create account</button>
     </form>`;
+    // operate_drive's own start reads the page with the drive snapshot. The
+    // standard observation's raw CDP Runtime session leaves an iframe attached
+    // after it unreadable under plain Playwright, which this test is not about.
     const { context, page, started } = await openFixture(
       main,
       "merchant.test",
-      "standard",
+      "drive",
       "/checkout",
     );
     const stored: Array<Record<string, unknown>> = [];
@@ -4542,7 +4628,7 @@ describe("operate_drive real-browser fixture", () => {
         },
         api(),
         { persistLogin: async (invented) => storeInventedLogin(vault, invented) },
-        deps(async (_api, _state, questions) => jevChoose(questions, "DONE")),
+        deps(async (_api, _state, questions) => jevFillThen(questions)),
       );
       const password = await page.locator("#password").inputValue();
       expect(password.length).toBeGreaterThanOrEqual(32);
@@ -4593,10 +4679,11 @@ describe("operate_drive real-browser fixture", () => {
         },
         api(),
         { persistLogin: async () => false },
-        deps(async (_api, _state, questions) => jevFromQuestions(questions)),
+        // With no password to type, the model reports the step blocked.
+        deps(async (_api, _state, questions) => jevFillThen(questions, "BLOCKED")),
       );
-      expect(result.status).toBe("needs_value");
-      expect(result.field).toMatch(/password/i);
+      expect(result.status).toBe("stuck");
+      expect(await page.locator("#email").inputValue()).toBe("ada@fixture.test");
       expect(await page.locator("#password").inputValue()).toBe("");
       expect(sessionForCall(started.session_id)?.secretSlots.size).toBe(0);
     } finally {
@@ -4623,9 +4710,10 @@ describe("operate_drive real-browser fixture", () => {
         },
         api(),
         { persistLogin },
-        deps(async (_api, _state, questions) => jevFromQuestions(questions)),
+        deps(async (_api, _state, questions) => jevFillThen(questions, "BLOCKED")),
       );
-      expect(result.status).toBe("needs_value");
+      expect(result.status).toBe("stuck");
+      expect(await page.locator("#email").inputValue()).toBe("ada@fixture.test");
       expect(persistLogin).not.toHaveBeenCalled();
       expect(await page.locator("#password").inputValue()).toBe("");
     } finally {
@@ -5328,7 +5416,18 @@ describe("operate_drive real-browser fixture", () => {
 </script>`;
     const { context, page, started } = await openFixture(html, "overlay-consent.test", "drive");
     try {
-      const dependencies = deps(async (_api, _state, questions) => jevFromQuestions(questions));
+      const dependencies = deps(async (_api, _state, questions) => {
+        if (Object.keys(choiceCriteria(questions.CLICK_target)).length === 0) {
+          return jevFromQuestions(questions);
+        }
+        // Checked controls stay offered: choosing the first click repeatedly
+        // would only toggle the terms checkbox instead of submitting the form.
+        return jevChoose(
+          questions,
+          "CLICK",
+          (await page.locator("#terms").isChecked()) ? /Create account/ : /I agree to the terms/,
+        );
+      });
       const result = await runOperateDrive(
         { session_id: started.session_id, goal: "create an account", max_steps: 8 },
         api(),
@@ -5591,7 +5690,11 @@ describe("drive review regressions", () => {
           }),
         );
         const dependencies = deps(async (_api, _state, questions) => {
-          const result = jevFromQuestions(questions);
+          // The Email field on /next has no fact, so it is never offered as a
+          // fill and the model reports the page blocked.
+          const result = page.url().includes("/next")
+            ? jevChoose(questions, "BLOCKED")
+            : jevFromQuestions(questions);
           if (page.url().includes("/next")) {
             for (const [name, question] of Object.entries(questions)) {
               if (
@@ -5622,8 +5725,8 @@ describe("drive review regressions", () => {
           undefined,
           dependencies,
         );
-        expect(result.status).toBe("needs_value");
-        expect(result.field).toBe("Email");
+        expect(result.status).toBe("stuck");
+        expect(page.url()).toContain("/next");
         expect(await page.locator("#email").inputValue()).toBe("");
         expect(sessionForCall(started.session_id)!.drive!.filledRefs).toEqual([]);
       } finally {
@@ -6763,10 +6866,11 @@ describe("capture flow key evidence", () => {
       const dependencies = deps(async (_api, _state, questions) =>
         jevFromQuestions(questions, (await page.locator("#copy:visible").count()) > 0),
       );
+      const store = vaultStore();
       const result = await runOperateDrive(
         { session_id: started.session_id, goal: "extract an API key", max_steps: 12 },
         api(),
-        undefined,
+        store,
         dependencies,
       );
       // The covering layer was dismissed and the same control was offered
@@ -6775,6 +6879,9 @@ describe("capture flow key evidence", () => {
       expect(page.url()).toMatch(/\/settings\/keys/);
       expect(await page.locator("#secret").innerText()).toBe(DRIVE_FIXTURE_KEY);
       expect(result.status).toBe("complete");
+      expect(store.persistCredentials).toHaveBeenCalledWith(
+        expect.objectContaining({ credentials: { api_key: DRIVE_FIXTURE_KEY } }),
+      );
       expect(await sessionForCall(started.session_id)!.browser.readClipboard(page)).toBe(
         DRIVE_FIXTURE_KEY,
       );
