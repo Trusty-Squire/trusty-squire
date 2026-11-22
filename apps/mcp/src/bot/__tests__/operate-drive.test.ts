@@ -2398,7 +2398,7 @@ describe("form-fill assignment helpers", () => {
     const checkedWelcome = welcome.map((row) =>
       row[0] === "@e:cb" ? (["@e:cb", "c", "checkbox|s=c"] as WireRow) : row,
     );
-    expect(driveTargetSets(checkedWelcome, {}, false).CLICK.map((c) => c.ref)).not.toContain(
+    expect(driveTargetSets(checkedWelcome, {}, false).CLICK.map((c) => c.ref)).toContain(
       "@e:cb",
     );
     const openReasons: WireRow[] = [
@@ -2423,6 +2423,24 @@ describe("form-fill assignment helpers", () => {
     );
     expect(nav.operations).toContain("WAIT");
     expect(nav.operations).toContain("BLOCKED");
+  });
+
+  it.each(["c", "checkbox"])("offers checked %s controls for clicks and resume", (role) => {
+    const rows: WireRow[] = [["@e:marketing", role, "Send marketing emails|s=c"]];
+    const goal = "Unsubscribe from marketing emails";
+    const pageUrl = "https://example.test/settings";
+    expect(clickableCandidates(rows, false).map((candidate) => candidate.ref)).toContain(
+      "@e:marketing",
+    );
+    const sets = driveTargetSets(rows, {}, false);
+    expect(sets.CLICK.map((candidate) => candidate.ref)).toContain("@e:marketing");
+    expect(Object.keys(resumeAnswerOptions(rows, {}, goal, false, pageUrl))).toContain(
+      sets.CLICK[0]!.slug,
+    );
+    expect(resumeAction("@e:marketing", rows, {}, goal, undefined, pageUrl)).toMatchObject({
+      kind: "act",
+      action: { kind: "click", target: "@e:marketing" },
+    });
   });
 
   it("offers the same dashboard controls for compound and single goals", () => {
@@ -2450,16 +2468,13 @@ describe("form-fill assignment helpers", () => {
     );
   });
 
-  it("keeps a non-DONE answer when every listed control is suppressed", () => {
-    // A stalled form: consent already ticked, submit disabled while the server
-    // validates. Both rows are withheld from CLICK, so offering DONE alone
-    // would force a false "complete" on an unfinished signup.
+  it("offers WAIT and BLOCKED beside checked consent on a stalled form", () => {
     const stalled: WireRow[] = [
       ["@e:cb", "c", "I agree to the terms|s=c"],
       ["@e:go", "b", "Create account|s=d"],
     ];
     const sets = driveTargetSets(stalled, {}, false);
-    expect(sets.CLICK).toEqual([]);
+    expect(sets.CLICK.map((candidate) => candidate.ref)).toEqual(["@e:cb"]);
     expect(sets.operations).toContain("WAIT");
     expect(sets.operations).toContain("BLOCKED");
   });

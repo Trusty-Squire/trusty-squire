@@ -2970,12 +2970,6 @@ export function clickableCandidates(
       ) {
         return false;
       }
-      if (
-        (candidate.row[1] === "c" || candidate.row[1] === "checkbox") &&
-        rowChecked(candidate.row) === true
-      ) {
-        return false;
-      }
       return true;
     })
     .map((candidate) => ({
@@ -7665,7 +7659,7 @@ async function driveLoop(input: {
     // the prompt before asking Jev about any of its code controls. Off checkout
     // the same words are an ordinary email-code page.
     if (
-      (drive.facts.card_ref !== undefined || isCheckoutUrl(observation.url)) &&
+      isCheckoutUrl(observation.url) &&
       isWalletSignInPrompt(observation.dom ?? "")
     ) {
       const dismissRef = walletSignInDismissRef(rows);

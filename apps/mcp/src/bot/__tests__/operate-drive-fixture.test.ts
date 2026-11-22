@@ -2055,41 +2055,50 @@ describe("operate_drive real-browser fixture", () => {
     }
   }, 30_000);
 
-  it("does not treat an off-checkout email code page as a wallet sign-in", async () => {
-    const html = `<!doctype html><meta charset="utf-8"><title>Verify your email</title>
+  it.each([undefined, "card-1"])(
+    "does not treat an off-checkout email code page as a wallet sign-in (card_ref=%s)",
+    async (cardRef) => {
+      const html = `<!doctype html><meta charset="utf-8"><title>Verify your email</title>
 <main>
   <h1>Check your inbox</h1>
   <p>We sent a verification code to your email, or use the magic link.</p>
   <label>Code <input id="code" name="code"></label>
   <button type="button" id="close" onclick="document.title='closed'">Close</button>
 </main>`;
-    const { context, page, started } = await openFixture(
-      html,
-      "magic-link.test",
-      "drive",
-      "/verify",
-    );
-    try {
-      let asked = 0;
-      const dependencies = deps(async (_api, _state, questions) => {
-        asked += 1;
-        return jevFromQuestions(questions, true);
-      });
-      const result = await runOperateDrive(
-        { session_id: started.session_id, goal: "verify the email", max_steps: 2 },
-        api(),
-        undefined,
-        dependencies,
+      const { context, page, started } = await openFixture(
+        html,
+        "magic-link.test",
+        "drive",
+        "/verify",
       );
-      expect(asked).toBeGreaterThan(0);
-      expect(await page.title()).toBe("Verify your email");
-      expect(result.trajectory.some((step) => step.action === "press")).toBe(false);
-      expect(result.reason ?? "").not.toMatch(/wallet sign-in/);
-    } finally {
-      await finishProvisionSession(started.session_id);
-      await context.close();
-    }
-  }, 30_000);
+      try {
+        let asked = 0;
+        const dependencies = deps(async (_api, _state, questions) => {
+          asked += 1;
+          return jevFromQuestions(questions, true);
+        });
+        const result = await runOperateDrive(
+          {
+            session_id: started.session_id,
+            goal: "verify the email",
+            max_steps: 2,
+            ...(cardRef === undefined ? {} : { facts: { card_ref: cardRef } }),
+          },
+          api(),
+          undefined,
+          dependencies,
+        );
+        expect(asked).toBeGreaterThan(0);
+        expect(await page.title()).toBe("Verify your email");
+        expect(result.trajectory.some((step) => step.action === "press")).toBe(false);
+        expect(result.reason ?? "").not.toMatch(/wallet sign-in/);
+      } finally {
+        await finishProvisionSession(started.session_id);
+        await context.close();
+      }
+    },
+    30_000,
+  );
 
   it("ends a budget-exhausted drive as budget, carrying the submit response", async () => {
     const html = `<!doctype html><meta charset="utf-8"><title>Register</title>
