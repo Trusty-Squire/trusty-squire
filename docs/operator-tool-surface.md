@@ -617,7 +617,9 @@ that click writes to the clipboard, as `api_key`; it never scans page text,
 labels or inputs. When no Copy click yields a value it stores nothing and returns
 an `error` telling the agent to read the page with `operate_observe` and point
 `capture` at the key. A targeted `capture` (selector, role, or the clipboard
-after an `operate_click`) stores the pointed value as is.
+after an `operate_click`) stores the pointed value as is. The one exception on
+every store path, the drive's included, is a value that is an http(s) URL: a Copy
+beside an invite or docs link writes the link, so it is not stored.
 
 `operate_extract(store=...)` sends the value directly to the write-only vault
 and returns storage metadata, not the secret. Without `store`, it returns the

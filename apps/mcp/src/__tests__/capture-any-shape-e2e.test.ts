@@ -164,6 +164,19 @@ it.each(SHAPES)(
   30_000,
 );
 
+// Trace case (100milionseek): the dashboard's only Copy sat beside "Your invite
+// link" and wrote the ?ref= URL, which was vaulted and failed as an API key.
+it("stores nothing when the Copy click writes a web URL", async () => {
+  await showKey("https://100milionseek.top/?ref=hkhcz8ma", "••••");
+  storeCredential.mockClear();
+  const result = await call("operate_click", {
+    ref: "@copy",
+    capture: { store: { service: "Shape fixture" }, source: { clipboard: true } },
+  });
+  expect(result.structuredContent, JSON.stringify(result)).toMatchObject({ stored: false });
+  expect(storeCredential).not.toHaveBeenCalled();
+}, 30_000);
+
 it("stores nothing for a plain-text key with no target and no Copy click", async () => {
   // Assembled at runtime so secret scanning does not flag fixture data.
   const key = "sk" + "_live_fixturekey0123456789abcdef";
