@@ -5134,10 +5134,11 @@ async function captureDriveSession(
   // Accepting one dialog can synchronously open another. The next dialog may
   // arrive after the check above but while readiness evaluates in the page;
   // native dialogs suspend that evaluation, including its in-page timers.
-  const readReadiness = () => session.browser.nativeDialogs.read(
-    () => waitForPageReady(page, { kind: "drive-read" }),
-    (): PageReadyResult => ({ ready: true, elapsedMs: 0 }),
-  );
+  const readReadiness = () =>
+    session.browser.nativeDialogs.read(
+      () => waitForPageReady(page, { kind: "drive-read" }),
+      (): PageReadyResult => ({ ready: true, elapsedMs: 0 }),
+    );
   let readiness = await readReadiness();
   const openedDuringReadiness = nativeDialogObservation(session);
   if (openedDuringReadiness !== undefined) return timed(openedDuringReadiness, []);
@@ -7669,10 +7670,7 @@ async function driveLoop(input: {
     // and signing in would expose the wallet's saved payment methods. Dismiss
     // the prompt before asking Jev about any of its code controls. Off checkout
     // the same words are an ordinary email-code page.
-    if (
-      isCheckoutUrl(observation.url) &&
-      isWalletSignInPrompt(observation.dom ?? "")
-    ) {
+    if (isCheckoutUrl(observation.url) && isWalletSignInPrompt(observation.dom ?? "")) {
       const dismissRef = walletSignInDismissRef(rows);
       const action: ProvisionAction =
         dismissRef === null

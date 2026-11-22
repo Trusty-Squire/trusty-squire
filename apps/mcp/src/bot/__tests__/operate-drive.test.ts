@@ -2398,9 +2398,7 @@ describe("form-fill assignment helpers", () => {
     const checkedWelcome = welcome.map((row) =>
       row[0] === "@e:cb" ? (["@e:cb", "c", "checkbox|s=c"] as WireRow) : row,
     );
-    expect(driveTargetSets(checkedWelcome, {}, false).CLICK.map((c) => c.ref)).toContain(
-      "@e:cb",
-    );
+    expect(driveTargetSets(checkedWelcome, {}, false).CLICK.map((c) => c.ref)).toContain("@e:cb");
     const openReasons: WireRow[] = [
       ["@e:reasons", "t", "Select reasons...|a=picker"],
       ["@e:kw", "l", "Keyword Search|f=search|q=1/8"],

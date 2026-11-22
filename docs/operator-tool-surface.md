@@ -40,8 +40,11 @@ is refused. Unanswered dialogs are dismissed after two minutes, and subsequent
 observations include `native_dialog_notices`. Outside `operate_drive`, no dialog
 is automatically accepted. `operate_drive` acknowledges alerts and decides native
 confirmations against the user's goal. It hands prompt text, and uncertainty on a
-confirmation that names an existing credential mutation, back to the host. The human
-live viewer displays the same question with OK, Cancel and a prompt input.
+confirmation identified as an existing credential mutation from the dialog and
+preceding page context, back to the host. Destructive consequences still require
+authorization; ordinary confirmations have no confidence threshold. Each dialog
+answer consumes a drive step, including an automatic alert acknowledgement. The
+human live viewer displays the same question with OK, Cancel and a prompt input.
 
 `operate_upload` takes `session_id`, exactly one of a current `target` ref or
 `@label` for an upload button/file input or `screenshot:{screenshot_id,x,y}`
@@ -193,10 +196,15 @@ and then offers only DONE and BLOCKED.
 
 An action that produced no observable change is not offered again while the
 page's URL, form surface, and filled fields stay the same; WAIT is excluded from
-that budget, and a stale or occluded click ref is withheld until the observation
+that budget, and a stale click ref is withheld until the observation
 fingerprint changes. After five such dead actions on one page, or when they
 leave no actionable operation, the drive ends with `no_progress` and a `reason`
 naming them.
+
+Negative model feedback alone permits an ordinary control to be retried; a
+key-create control retains that retry guard because the first press may have
+created a key. `NONE_OF_THESE` replans once on a fresh observation; another
+replan on the same page state returns `no_progress`.
 
 A drive snapshot ref names the control that snapshot recorded — its selector,
 frame, role, label, and a link's destination — not a position within it. Every
@@ -235,6 +243,20 @@ advances the goal. Resume the same session with `answer` (a
 readable action slug from the handoff options, `done`, or `stuck`) and/or
 added `facts`. Use the single-step primitives only for a handoff you are
 answering or a task that is not a goal.
+
+Repeated handoff questions retain their options. OAuth resume choices include
+providers without a live browser session; choosing one still follows the OAuth
+executor's identity and pending-attempt rules. After two OAuth returns to the
+login page, drive returns `no_progress` with the current options.
+
+Post-submit page notices and invalid fields remain evidence for the next
+decision rather than immediately ending the drive. A typed value that still
+differs after one retype also leaves the drive running. If a call budget ends
+with a remembered submit response, the handoff is `budget` and carries that
+response as its reason.
+
+Wallet sign-in dismissal applies only on checkout URLs, even when `card_ref`
+is supplied. An email-code page elsewhere remains ordinary verification work.
 
 When `operate_drive` opens a `url`, its first page read is the drive snapshot;
 startup skips the general observation and automatic consent-banner dismissal
@@ -359,6 +381,9 @@ cannot be selected in that batch.
 
 Covered controls remain eligible for the drive's action menu alongside dialog
 and overlay dismiss controls; the action-time occlusion guard still applies.
+Repeated occlusion refusals replan within the call budgets instead of ending
+after a fixed refusal count. Checked checkboxes remain click candidates so the
+drive can untick them.
 The drive snapshot retains offscreen form controls and controls in header,
 navigation, and footer regions. It retains offscreen buttons only on a checkout
 URL, where they become click candidates too — no label test, so a localized
