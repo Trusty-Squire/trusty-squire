@@ -180,6 +180,12 @@ export interface DriveHandoffQuestion {
   probabilities?: Record<string, number>;
 }
 
+/** A refused submit's stable key and the stable key of the empty field it waits on. */
+export interface DriveWaitingControl {
+  control: string;
+  field: string;
+}
+
 export interface SessionDriveState {
   running: boolean;
   goal: string;
@@ -200,6 +206,9 @@ export interface SessionDriveState {
   exhaustedActionKeys?: string[];
   /** Role+label identities that already failed this drive, including remounts. */
   failedActionKeys?: string[];
+  /** Submits refused because a field of their own form was empty. They stay
+   *  offered, marked with that field, instead of joining failedActionKeys. */
+  waitingControls?: DriveWaitingControl[];
   boundFingerprint: string | null;
   consumedActionKey: string | null;
   lastActProfile: DriveActProfile | null;
@@ -233,7 +242,7 @@ export interface SessionDriveState {
   /** Explorer supplied one click; the next loop must consult the decider. */
   awaitingDecideAfterExplore?: boolean;
   /** Last click's ref+identity, so a reminted ordinal is not reused after nav. */
-  lastActBinding?: { ref: string; binding: string; url: string } | null;
+  lastActBinding?: { ref: string; binding: string; url: string; label: string } | null;
   /** True after this drive clicked a submit-like control. */
   submittedThisDrive?: boolean;
   /** Already tried logout+restart for a pre-existing session. */

@@ -332,6 +332,9 @@ it.each([
   { label: "Revoke credential", path: "/keys" },
   { label: "Reset", path: "/keys" },
   { label: "Delete", path: "/settings" },
+  // Kenari's Indonesian revoke and rotate (squire-1.1.57 L132-138).
+  { label: "Cabut key", path: "/keys" },
+  { label: "Ganti key", path: "/keys" },
 ])(
   "hands $label back before dispatch",
   async ({ label, path, confidence = 1 }) => {

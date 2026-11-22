@@ -1,0 +1,402 @@
+// The option-building causes of low-confidence stops, and the language-neutral
+// credential-change guard. Rows are taken from the traced drives they fixed.
+import { describe, expect, it } from "vitest";
+import {
+  admitsChoice,
+  buildDriveQuestions,
+  candidateDestinations,
+  decideAfterJev,
+  driveTargetSets,
+  emptyDriveState,
+  isCredentialMutationConfirmRow,
+  isExistingCredentialMutationRow,
+  isSubmitLikeRow,
+  pageHasUntriedPendingAction,
+  recordUndeliveredDecision,
+  recordWaitingDecision,
+  stableControlKey,
+  waitingFieldsByControl,
+  type WireRow,
+} from "../operate-drive.js";
+import type { JevAnswer } from "../jev-client.js";
+
+function answer(
+  criteria: Record<string, string>,
+  probabilities: Record<string, number>,
+): JevAnswer {
+  const full = Object.fromEntries(
+    Object.keys(criteria).map((key) => [key, probabilities[key] ?? 0]),
+  );
+  const [choice, confidence] = Object.entries(full).sort((a, b) => b[1] - a[1])[0]!;
+  return { choice, confidence, probabilities: full };
+}
+
+function choiceCriteria(
+  questions: ReturnType<typeof buildDriveQuestions>,
+  name: string,
+): Record<string, string> {
+  const question = questions[name];
+  if (question?.type !== "choice") throw new Error(`missing ${name}`);
+  return question.criteria;
+}
+
+function slugFor(criteria: Record<string, string>, label: string): string {
+  const slug = Object.keys(criteria).find((key) => criteria[key]!.startsWith(label));
+  if (slug === undefined) throw new Error(`no option ${label}`);
+  return slug;
+}
+
+describe("submit detection uses the page's own marker", () => {
+  // Darus register form (squire-1.1.58 L160): "Register now" in Indonesian.
+  const darus: WireRow[] = [
+    ["@e:f0d1", "t", "Nama Anda|s=r|ph=Nama Anda|fm=1"],
+    ["@e:f0d2", "t", "username|s=r|fm=1"],
+    ["@e:f0d3", "b", "Daftar sekarang|s=d|a=submit|fm=1"],
+    ["@e:f0d4", "l", "Daftar|u=https://gateway.darusalfatah.id/masuk?mode=register"],
+  ];
+
+  it("counts a form's a=submit control whatever its words", () => {
+    expect(isSubmitLikeRow(darus[2]!)).toBe(true);
+    expect(isSubmitLikeRow(["@e:x", "b", "Simpan|a=submit|fm=2"])).toBe(true);
+  });
+
+  it("does not count a type=submit button outside any form", () => {
+    // Fikra's dark-mode toggle (squire-1.1.58 L342) submits nothing.
+    expect(isSubmitLikeRow(["@e:f0d2", "b", "☾|a=submit"])).toBe(false);
+  });
+
+  it("offers the hinted fields of a non-English form for typing", () => {
+    const url = "https://gateway.darusalfatah.id/masuk?mode=register";
+    const facts = { plan: "free", project_name: "grunt" };
+    const sets = driveTargetSets(darus, facts, false, [], url);
+    expect(sets.operations).toContain("TYPE_TEXT");
+    expect(sets.TYPE_TEXT.map((candidate) => candidate.ref)).toEqual(["@e:f0d1", "@e:f0d2"]);
+    const questions = buildDriveQuestions(darus, facts, "register grunt", false, [], url);
+    expect(Object.keys(questions).filter((name) => name.startsWith("form_value"))).toHaveLength(2);
+  });
+});
+
+describe("links to the same place are one answer", () => {
+  // LiveKit settings (squire-1.1.57 L1062): .47 / .44 over two links to one page.
+  const url = "https://cloud.livekit.io/projects/p_1/settings";
+  const rows: WireRow[] = [
+    ["@e:a", "l", "Observability|u=https://cloud.livekit.io/projects/p_1/settings/observability"],
+    [
+      "@e:b",
+      "l",
+      "Observability settings|v=offscreen|u=https://cloud.livekit.io/projects/p_1/settings/observability",
+    ],
+    ["@e:c", "l", "Members|u=https://cloud.livekit.io/projects/p_1/settings/members"],
+    ["@e:d", "b", "Switch project"],
+  ];
+  const sets = driveTargetSets(rows, {}, false, [], url);
+  const questions = buildDriveQuestions(
+    rows,
+    {},
+    "turn observability off",
+    false,
+    [],
+    url,
+    new Map(),
+    sets,
+  );
+  const ops = choiceCriteria(questions, "operation");
+  const targets = choiceCriteria(questions, "CLICK_target");
+  const split = answer(targets, {
+    [slugFor(targets, "Observability settings")]: 0.44,
+    [slugFor(targets, "Observability")]: 0.47,
+    [slugFor(targets, "Members")]: 0.05,
+    [slugFor(targets, "Switch project")]: 0.04,
+  });
+
+  it("ignores a same-destination twin as the runner-up", () => {
+    expect(admitsChoice(targets, split)).toMatchObject({ kind: "low_confidence" });
+    expect(
+      admitsChoice(targets, split, { destinations: candidateDestinations(sets.CLICK, url) }),
+    ).toEqual({ ok: true });
+  });
+
+  it("acts on the split pick when the operation is sure", () => {
+    const decision = decideAfterJev({
+      answers: { operation: answer(ops, { CLICK: 0.9, DONE: 0.1 }), CLICK_target: split },
+      rows,
+      facts: {},
+      lastFingerprint: null,
+      lastActionKey: null,
+      fingerprint: "fp",
+      goal: "turn observability off",
+      pageUrl: url,
+      sets,
+      questions,
+    });
+    expect(decision).toMatchObject({ kind: "act", action: { kind: "click", target: "@e:a" } });
+  });
+
+  it("still counts a different destination as the runner-up", () => {
+    const destinations = candidateDestinations(sets.CLICK, url);
+    destinations[slugFor(targets, "Observability settings")] = "https://cloud.livekit.io/other";
+    expect(admitsChoice(targets, split, { destinations })).toMatchObject({
+      kind: "low_confidence",
+    });
+  });
+});
+
+describe("a confident target derives the operation", () => {
+  // Zro API keys (squire-1.1.56 L56): CLICK .53 vs SCROLL .33, "Create key" .89.
+  const url = "https://zro.moonmath.ai/api-keys";
+  const rows: WireRow[] = [
+    ["@e:f0d1", "b", "Create key"],
+    ["@e:f0d2", "l", "Overview|u=https://zro.moonmath.ai/"],
+    ["@e:f0d3", "l", "Docs|v=offscreen|u=https://zro.moonmath.ai/docs"],
+  ];
+  const goal = "create one API key for grunt";
+  const sets = driveTargetSets(rows, {}, false, [], url);
+  const questions = buildDriveQuestions(rows, {}, goal, false, [], url, new Map(), sets);
+  const ops = choiceCriteria(questions, "operation");
+  const targets = choiceCriteria(questions, "CLICK_target");
+  const decide = (operation: Record<string, number>, target = 0.89) =>
+    decideAfterJev({
+      answers: {
+        operation: answer(ops, operation),
+        CLICK_target: answer(targets, {
+          [slugFor(targets, "Create key")]: target,
+          [slugFor(targets, "Overview")]: 1 - target,
+        }),
+      },
+      rows,
+      facts: {},
+      lastFingerprint: null,
+      lastActionKey: null,
+      fingerprint: "fp",
+      goal,
+      pageUrl: url,
+      sets,
+      questions,
+    });
+
+  it("clicks a confident target through a CLICK / SCROLL split", () => {
+    expect(ops).toHaveProperty("SCROLL");
+    expect(decide({ CLICK: 0.53, SCROLL: 0.33, NONE_OF_THESE: 0.14 })).toMatchObject({
+      kind: "act",
+      action: { kind: "click", target: "@e:f0d1" },
+      confidence: 0.89,
+    });
+    expect(decide({ SCROLL: 0.46, CLICK: 0.31, NONE_OF_THESE: 0.23 })).toMatchObject({
+      kind: "act",
+      action: { kind: "click", target: "@e:f0d1" },
+    });
+  });
+
+  it("keeps the bar on acting at all and on the target", () => {
+    // Acting vs stopping is still the question: CLICK + SCROLL under the bar refuses.
+    expect(decide({ CLICK: 0.5, NONE_OF_THESE: 0.3, BLOCKED: 0.2 })).toMatchObject({
+      kind: "low_confidence",
+    });
+    expect(decide({ CLICK: 0.53, SCROLL: 0.33, NONE_OF_THESE: 0.14 }, 0.56)).toMatchObject({
+      kind: "low_confidence",
+    });
+    // A fixed choice on top is never derived into a click.
+    expect(decide({ DONE: 0.45, CLICK: 0.3, SCROLL: 0.25 })).toMatchObject({
+      kind: "low_confidence",
+    });
+  });
+});
+
+describe("a guard-refused submit stays offered", () => {
+  // Fikra sign-up (squire-1.1.59 L102): the submit was refused for the empty
+  // email field and then vanished from every later question.
+  const url = "https://fikraapi.co.ke/account/signup";
+  const rows: WireRow[] = [
+    ["@e:f0d1", "t", "you@example.com|s=r|ph=you@example.com|fm=1"],
+    ["@e:f0d7", "b", "Create Account with $0.50 free-model credit|a=submit|fm=1"],
+    ["@e:f0d2", "b", "☾|a=submit"],
+    ["@e:f0d3", "l", "Sign In|u=https://fikraapi.co.ke/account/login"],
+  ];
+  const decision = { action: { kind: "click" }, actionKey: "@e:f0d7", confidence: 0.9 };
+  const reason =
+    "decided submit was not executed because required field you@example.com is still empty";
+
+  it("marks the submit with the field it waits on and offers that field", () => {
+    const drive = emptyDriveState("sign up", {});
+    expect(recordWaitingDecision(drive, rows, decision, url, rows[0]!, reason)).toBe("waiting");
+    expect(drive.failedActionKeys).toEqual([]);
+    expect(drive.staleClickRefs).toEqual([]);
+    const waitingFields = waitingFieldsByControl(drive.waitingControls!, rows, [], url);
+    const sets = driveTargetSets(rows, {}, false, [], url, new Map(), (text) => text, [], {
+      failedKeys: drive.failedActionKeys!,
+      waitingFields,
+    });
+    const submit = sets.CLICK.find((candidate) => candidate.ref === "@e:f0d7");
+    expect(submit?.waitsFor).toBe("you@example.com");
+    expect(sets.TYPE_TEXT.map((candidate) => candidate.ref)).toContain("@e:f0d1");
+    const questions = buildDriveQuestions(rows, {}, "sign up", false, [], url, new Map(), sets);
+    expect(choiceCriteria(questions, "CLICK_target")[submit!.slug]).toBe(
+      "Create Account with $0.50 free-model credit (waits for the empty you@example.com field)",
+    );
+  });
+
+  it("stops waiting once the field holds a value", () => {
+    const drive = emptyDriveState("sign up", {});
+    recordWaitingDecision(drive, rows, decision, url, rows[0]!, reason);
+    expect(waitingFieldsByControl(drive.waitingControls!, rows, ["@e:f0d1"], url).size).toBe(0);
+    const typed: WireRow[] = [
+      ["@e:f0d1", "t", "you@example.com|s=rp|n=a@b.co|fm=1"],
+      ...rows.slice(1),
+    ];
+    expect(waitingFieldsByControl(drive.waitingControls!, typed, [], url).size).toBe(0);
+  });
+
+  it("reports a repeat refusal over the same empty field", () => {
+    const drive = emptyDriveState("sign up", {});
+    expect(recordWaitingDecision(drive, rows, decision, url, rows[0]!, reason)).toBe("waiting");
+    expect(recordWaitingDecision(drive, rows, decision, url, rows[0]!, reason)).toBe("repeated");
+    expect(drive.waitingControls).toEqual([
+      { control: stableControlKey(rows[1]!, url), field: stableControlKey(rows[0]!, url) },
+    ]);
+  });
+
+  it("is not untried work while it waits", () => {
+    const drive = emptyDriveState("sign up", {});
+    expect(pageHasUntriedPendingAction(rows, drive, url, "sign up")).toBe(true);
+    recordWaitingDecision(drive, rows, decision, url, rows[0]!, reason);
+    expect(pageHasUntriedPendingAction(rows, drive, url, "sign up")).toBe(false);
+  });
+
+  it("still removes a control refused for any other reason", () => {
+    const drive = emptyDriveState("sign up", {});
+    recordUndeliveredDecision(drive, rows, decision, url, "decided control was no longer bound");
+    const sets = driveTargetSets(rows, {}, false, [], url, new Map(), (text) => text, [], {
+      failedKeys: drive.failedActionKeys!,
+    });
+    expect(sets.CLICK.map((candidate) => candidate.ref)).not.toContain("@e:f0d7");
+  });
+});
+
+describe("credential changes are caught in any language", () => {
+  // Kenari /keys (squire-1.1.57 L132-138), Indonesian.
+  const url = "https://kenari.id/keys";
+  const kenari: WireRow[] = [
+    ["@e:f0d30", "b", "Buat API Key|a=submit"],
+    ["@e:f0d178", "b", "Tutup|a=submit"],
+    ["@e:f0d179", "b", "Ubah pengaturan key|a=submit"],
+    ["@e:f0d180", "b", "Ganti key|a=submit"],
+    ["@e:f0d181", "b", "Cabut key|a=submit"],
+    ["@e:f0d7", "b", "Ganti workspace: Pribadi"],
+    ["@e:f0d176", "b", "Salin"],
+    ["@key-value", "h1", "@key-value|secret=1|len=51"],
+  ];
+  const at = (ref: string): WireRow => kenari.find((row) => row[0] === ref)!;
+
+  it("refuses Kenari's revoke and rotate", () => {
+    expect(isExistingCredentialMutationRow(at("@e:f0d181"), url, kenari)).toBe(true);
+    expect(isExistingCredentialMutationRow(at("@e:f0d180"), url, kenari)).toBe(true);
+  });
+
+  it("leaves Kenari's create, copy, settings and workspace switch alone", () => {
+    for (const ref of ["@e:f0d30", "@e:f0d178", "@e:f0d179", "@e:f0d7", "@e:f0d176"]) {
+      expect(isExistingCredentialMutationRow(at(ref), url, kenari)).toBe(false);
+    }
+  });
+
+  it.each([
+    "API-Schlüssel widerrufen",
+    "Eliminar clave",
+    "Supprimer la clé",
+    "Revogar chave",
+    "Отозвать ключ",
+    "删除密钥",
+    "キーを削除",
+    "키 삭제",
+    "Hapus token",
+    "Replace key",
+  ])("refuses %s", (label) => {
+    expect(isExistingCredentialMutationRow(["@e:x", "b", label], "https://x.test/settings")).toBe(
+      true,
+    );
+  });
+
+  it.each(["Batal", "Cancel", "İptal", "취소", "Annuler", "Abbrechen", "Silver plan"])(
+    "lets the %s button through",
+    (label) => {
+      expect(isExistingCredentialMutationRow(["@e:x", "b", label], url)).toBe(false);
+    },
+  );
+
+  it("treats a confirm that repeats the pressed control as that change", () => {
+    // squire-1.1.57 L134: the dialog after "Ganti key" offered "Batal" / "Ganti Key".
+    const dialog: WireRow[] = [
+      ["@e:f0d326", "b", "Batal"],
+      ["@e:f0d327", "b", "Ganti Key"],
+    ];
+    const pressed = { ref: "@e:f0d180", url, label: "Ganti key" };
+    expect(isCredentialMutationConfirmRow(dialog[1]!, url, dialog, pressed)).toBe(true);
+    expect(isCredentialMutationConfirmRow(dialog[0]!, url, dialog, pressed)).toBe(false);
+    // The same check without any listed word: the echo alone is the signal.
+    const unlisted: WireRow[] = [
+      ["@e:n", "b", "Hapana"],
+      ["@e:y", "b", "Badilisha key"],
+    ];
+    expect(
+      isCredentialMutationConfirmRow(unlisted[1]!, url, unlisted, {
+        ref: "@e:old",
+        url,
+        label: "Badilisha key",
+      }),
+    ).toBe(true);
+  });
+
+  it("does not treat a control re-mounted on the full page as a confirm", () => {
+    // A Copy button re-rendered with a new ref beside the rest of the key page.
+    const page: WireRow[] = [
+      ...kenari.filter((row) => row[0] !== "@e:f0d176"),
+      ["@e:n", "b", "Salin key"],
+    ];
+    expect(
+      isCredentialMutationConfirmRow(page[page.length - 1]!, url, page, {
+        ref: "@e:f0d176",
+        url,
+        label: "Salin key",
+      }),
+    ).toBe(false);
+  });
+
+  it("does not treat a create dialog or a still-visible trigger as a confirm", () => {
+    const create: WireRow[] = [["@e:c2", "b", "Buat API Key|a=submit"]];
+    expect(
+      isCredentialMutationConfirmRow(create[0]!, url, create, {
+        ref: "@e:c1",
+        url,
+        label: "Buat API Key",
+      }),
+    ).toBe(false);
+    const named: WireRow[] = [
+      ["@e:name", "t", "Key name|s=r|fm=1"],
+      ["@e:y", "b", "Badilisha key|fm=1"],
+    ];
+    expect(
+      isCredentialMutationConfirmRow(named[1]!, url, named, {
+        ref: "@e:x",
+        url,
+        label: "Badilisha key",
+      }),
+    ).toBe(false);
+    const still: WireRow[] = [
+      ["@e:x", "b", "Badilisha key"],
+      ["@e:y", "b", "Badilisha key"],
+    ];
+    expect(
+      isCredentialMutationConfirmRow(still[1]!, url, still, {
+        ref: "@e:x",
+        url,
+        label: "Badilisha key",
+      }),
+    ).toBe(false);
+    expect(
+      isCredentialMutationConfirmRow(still[1]!, "https://kenari.id/other", [still[1]!], {
+        ref: "@e:x",
+        url,
+        label: "Badilisha key",
+      }),
+    ).toBe(false);
+  });
+});
