@@ -7751,13 +7751,10 @@ async function driveLoop(input: {
       const pageContext = session.lastCompactObservation ?? priorCompact ?? observation;
       const keyMutation =
         native.type !== "alert" &&
-        isExistingCredentialMutationRow(
-          // Row facts split on "|" and "="; the dialog text is only a label.
-          ["dialog", "b", native.text.replace(/[|=]/g, " ")],
+        isCredentialMutationConfirmRow(
+          ["dialog", "b", "dialog=native"],
           pageContext.url,
-          mergeCompactTable([], pageContext),
-          "",
-          pageContext.semantic?.headings ?? [],
+          drive.lastActBinding,
         );
       observation = nativeDialogObservation(session)!;
       rows = [];
