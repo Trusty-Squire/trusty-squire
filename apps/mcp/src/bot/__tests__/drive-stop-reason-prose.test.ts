@@ -124,7 +124,7 @@ describe("drive stop reason is not page prose", () => {
       expect(result.reason ?? "").not.toContain("never knew we failed");
       expect(result.reason ?? "").not.toContain("not found");
       expect(result.reason ?? "").toMatch(
-        /^(?:nothing on the page can advance the goal|inbox poll found nothing)/,
+        /^(?:nothing on the page can advance the goal|inbox poll found nothing|drive budget ended while waiting for verification mail)/,
       );
     } finally {
       await finishProvisionSession(started.session_id).catch(() => undefined);

@@ -59,7 +59,6 @@ import {
   SUBMIT_RESPONSE_REASON_MAX,
   attachObservationNotice,
   typedValueEquals,
-  typedFieldMismatchReason,
   solverOutcomeBlocksSubmit,
   DRIVE_IN_FLIGHT_MS,
   outstandingRequiredFill,
@@ -834,11 +833,33 @@ describe("clear-winner decision routing", () => {
     };
     expect(decideAfterJev(input)).toEqual({ kind: "no_progress" });
     expect(decideAfterJev({ ...input, fingerprint: "changed" })).toMatchObject({ kind: "act" });
+    // An ordinary control the model judged ineffective is retried.
     expect(
       decideAfterJev({
         ...base,
         lastActionKey: "@e:b0",
         answers: { ...clickAnswers(), last_action_worked: { noul: 0.2 } },
+      }),
+    ).toMatchObject({ kind: "act" });
+    // A key-create control is not pressed again on that judgment: a create
+    // whose first press landed can pause or replace the key it made.
+    const keyRows: WireRow[] = buttons.map(
+      (row, i): WireRow => (i === 0 ? ["@e:b0", "b", "Create API key"] : row),
+    );
+    const keyQuestions = buildDriveQuestions(keyRows, {}, "create an API key");
+    const keyTargets = criteriaFor(keyQuestions, "CLICK_target");
+    const keyTarget = Object.keys(keyTargets).find((key) => /create/i.test(key))!;
+    expect(
+      decideAfterJev({
+        ...base,
+        rows: keyRows,
+        goal: "create an API key",
+        lastActionKey: "@e:b0",
+        answers: {
+          operation: valid("CLICK", criteriaFor(keyQuestions, "operation")),
+          CLICK_target: valid(keyTarget, keyTargets, 0.4),
+          last_action_worked: { noul: 0.2 },
+        },
       }),
     ).toMatchObject({ kind: "replan" });
     expect(
@@ -2305,9 +2326,6 @@ describe("form-fill assignment helpers", () => {
       typedValueEquals("4242-4242", "42424242", ["@e:pan", "t", "Card number|f=payment"]),
     ).toBe(true);
     expect(typedValueEquals("(212) 555-0123", "2125550123", ["@e:name", "t", "Name"])).toBe(false);
-    expect(typedFieldMismatchReason("First name", "Squire", "Squir")).toBe(
-      'typed First name as "Squire" but the field shows "Squir"',
-    );
   });
 
   it("never treats an already-settled solver as a submit blocker", () => {
@@ -2380,9 +2398,7 @@ describe("form-fill assignment helpers", () => {
     const checkedWelcome = welcome.map((row) =>
       row[0] === "@e:cb" ? (["@e:cb", "c", "checkbox|s=c"] as WireRow) : row,
     );
-    expect(driveTargetSets(checkedWelcome, {}, false).CLICK.map((c) => c.ref)).not.toContain(
-      "@e:cb",
-    );
+    expect(driveTargetSets(checkedWelcome, {}, false).CLICK.map((c) => c.ref)).toContain("@e:cb");
     const openReasons: WireRow[] = [
       ["@e:reasons", "t", "Select reasons...|a=picker"],
       ["@e:kw", "l", "Keyword Search|f=search|q=1/8"],
@@ -2405,6 +2421,24 @@ describe("form-fill assignment helpers", () => {
     );
     expect(nav.operations).toContain("WAIT");
     expect(nav.operations).toContain("BLOCKED");
+  });
+
+  it.each(["c", "checkbox"])("offers checked %s controls for clicks and resume", (role) => {
+    const rows: WireRow[] = [["@e:marketing", role, "Send marketing emails|s=c"]];
+    const goal = "Unsubscribe from marketing emails";
+    const pageUrl = "https://example.test/settings";
+    expect(clickableCandidates(rows, false).map((candidate) => candidate.ref)).toContain(
+      "@e:marketing",
+    );
+    const sets = driveTargetSets(rows, {}, false);
+    expect(sets.CLICK.map((candidate) => candidate.ref)).toContain("@e:marketing");
+    expect(Object.keys(resumeAnswerOptions(rows, {}, goal, false, pageUrl))).toContain(
+      sets.CLICK[0]!.slug,
+    );
+    expect(resumeAction("@e:marketing", rows, {}, goal, undefined, pageUrl)).toMatchObject({
+      kind: "act",
+      action: { kind: "click", target: "@e:marketing" },
+    });
   });
 
   it("offers the same dashboard controls for compound and single goals", () => {
@@ -2432,16 +2466,13 @@ describe("form-fill assignment helpers", () => {
     );
   });
 
-  it("keeps a non-DONE answer when every listed control is suppressed", () => {
-    // A stalled form: consent already ticked, submit disabled while the server
-    // validates. Both rows are withheld from CLICK, so offering DONE alone
-    // would force a false "complete" on an unfinished signup.
+  it("offers WAIT and BLOCKED beside checked consent on a stalled form", () => {
     const stalled: WireRow[] = [
       ["@e:cb", "c", "I agree to the terms|s=c"],
       ["@e:go", "b", "Create account|s=d"],
     ];
     const sets = driveTargetSets(stalled, {}, false);
-    expect(sets.CLICK).toEqual([]);
+    expect(sets.CLICK.map((candidate) => candidate.ref)).toEqual(["@e:cb"]);
     expect(sets.operations).toContain("WAIT");
     expect(sets.operations).toContain("BLOCKED");
   });

@@ -247,43 +247,93 @@ it("Reproduction 2026-10-20: a human in the real live viewer sees and accepts th
   }
 }, 15_000);
 
-it.each(["accept", "handoff"] as const)(
-  "drive makes an explicit native confirmation decision: %s",
-  async (choice) => {
+const keyFixture = fixture.replace(
+  'data-confirm="This action cannot be undone"',
+  'data-confirm="Revoke this API key? This action cannot be undone"',
+);
+
+it.each([
+  {
+    name: "accepts an ordinary confirm on a low-confidence accept",
+    body: fixture,
+    choice: "accept",
+    confidence: 0.55,
+    accepted: true,
+  },
+  {
+    name: "hands a key-revoking confirm back on a low-confidence accept",
+    body: keyFixture,
+    choice: "accept",
+    confidence: 0.55,
+    accepted: false,
+  },
+  {
+    name: "hands a key-revoking confirm back on handoff",
+    body: keyFixture,
+    choice: "handoff",
+    confidence: 1,
+    accepted: false,
+  },
+  {
+    name: "retains API key page context for a generic startup confirmation",
+    body: `<h1>API keys</h1>${fixture.replace(
+      "This action cannot be undone",
+      "Revoke selected? This action cannot be undone",
+    )}`,
+    choice: "accept",
+    confidence: 0.55,
+    accepted: false,
+  },
+] as const)(
+  "drive native confirmation: $name",
+  async ({ body, choice, confidence, accepted }) => {
     const page = await browser.newPage();
-    await page.route("**/*", (route) => route.fulfill({ contentType: "text/html", body: fixture }));
+    await page.route("**/*", (route) => route.fulfill({ contentType: "text/html", body }));
     const controller = BrowserController.fromHarnessPage(page);
     const started = await startHarnessProvisionSession({
       browser: controller,
       serviceUrl: url,
-      initialObservation: "drive",
     });
     try {
       await controller.click({ kind: "selector", selector: "#uninstall", method: "click" });
-      const askJev = vi.fn(async () => ({
-        result: {
-          answers: {
-            native_dialog: {
-              choice,
-              confidence: 1,
-              probabilities: {
-                accept: choice === "accept" ? 1 : 0,
-                dismiss: 0,
-                handoff: choice === "handoff" ? 1 : 0,
+      const askJev = vi.fn(
+        async (_api: unknown, _state: unknown, questions: Record<string, unknown>) => {
+          const question = z
+            .object({
+              native_dialog: z.object({
+                criteria: z.record(z.string()),
+                instructions: z.string(),
+              }),
+            })
+            .parse(questions);
+          expect(question.native_dialog.instructions).toContain(
+            "Destructive consequences require authorization.",
+          );
+          const keys = Object.keys(question.native_dialog.criteria);
+          return {
+            result: {
+              answers: {
+                native_dialog: {
+                  choice,
+                  confidence,
+                  probabilities: Object.fromEntries(
+                    keys.map((key) => [
+                      key,
+                      key === choice ? confidence : (1 - confidence) / (keys.length - 1),
+                    ]),
+                  ),
+                },
               },
             },
-          },
+            attempts: 1,
+            elapsedMs: 1,
+          };
         },
-        attempts: 1,
-        elapsedMs: 1,
-      }));
+      );
       const result = await runOperateDrive(
         {
           session_id: started.session_id,
-          goal:
-            choice === "accept"
-              ? "Uninstall and accept the browser confirmation dialog"
-              : "Inspect the installation",
+          goal: "Uninstall and accept the browser confirmation dialog",
           max_steps: 1,
         },
         new ApiClient({
@@ -303,7 +353,7 @@ it.each(["accept", "handoff"] as const)(
       );
       expect(askJev).toHaveBeenCalledOnce();
       expect(JSON.stringify(askJev.mock.calls)).toContain("This action cannot be undone");
-      if (choice === "accept") await page.waitForURL("**/submitted?");
+      if (accepted) await page.waitForURL("**/submitted?");
       else {
         expect(result.status).toBe("needs_value");
         expect(controller.nativeDialogs.blocked).toBe(true);
@@ -316,6 +366,53 @@ it.each(["accept", "handoff"] as const)(
   },
   15_000,
 );
+
+it("drive spends one step acknowledging one of consecutive native alerts", async () => {
+  const page = await browser.newPage();
+  await page.route("**/*", (route) =>
+    route.fulfill({
+      contentType: "text/html",
+      body: fixture.replace("alert('Notice')", "alert('Notice'); alert('Second notice')"),
+    }),
+  );
+  const controller = BrowserController.fromHarnessPage(page);
+  const started = await startHarnessProvisionSession({
+    browser: controller,
+    serviceUrl: url,
+    initialObservation: "drive",
+  });
+  try {
+    await controller.click({ kind: "selector", selector: "#alert", method: "click" });
+    expect(controller.nativeDialogs.blocked).toBe(true);
+    const askJev = vi.fn(async () => {
+      throw new Error("no model call expected");
+    });
+    const result = await runOperateDrive(
+      { session_id: started.session_id, goal: "Inspect the installation", max_steps: 1 },
+      new ApiClient({
+        apiBaseUrl: "http://127.0.0.1:1",
+        registryBaseUrl: "http://127.0.0.1:1",
+        agentSessionToken: "test",
+      }),
+      undefined,
+      {
+        askJev,
+        act,
+        observe,
+        startSession: startProvisionSession,
+        awaitVerification,
+        injectCard: async () => ({}),
+      },
+    );
+    expect(result.status).toBe("budget");
+    expect(result.steps).toBe(1);
+    expect(controller.nativeDialogs.evidence()[0]?.text).toBe("Second notice");
+    expect(askJev).not.toHaveBeenCalled();
+  } finally {
+    await finishProvisionSession(started.session_id);
+    await page.close();
+  }
+}, 15_000);
 
 it("reports a startup alert before DOMContentLoaded without hanging session creation", async () => {
   const page = await browser.newPage();
