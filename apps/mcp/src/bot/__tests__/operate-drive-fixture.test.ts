@@ -5416,7 +5416,18 @@ describe("operate_drive real-browser fixture", () => {
 </script>`;
     const { context, page, started } = await openFixture(html, "overlay-consent.test", "drive");
     try {
-      const dependencies = deps(async (_api, _state, questions) => jevFromQuestions(questions));
+      const dependencies = deps(async (_api, _state, questions) => {
+        if (Object.keys(choiceCriteria(questions.CLICK_target)).length === 0) {
+          return jevFromQuestions(questions);
+        }
+        // Checked controls stay offered: choosing the first click repeatedly
+        // would only toggle the terms checkbox instead of submitting the form.
+        return jevChoose(
+          questions,
+          "CLICK",
+          (await page.locator("#terms").isChecked()) ? /Create account/ : /I agree to the terms/,
+        );
+      });
       const result = await runOperateDrive(
         { session_id: started.session_id, goal: "create an account", max_steps: 8 },
         api(),
