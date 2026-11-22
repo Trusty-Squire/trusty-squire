@@ -272,7 +272,11 @@ requested format and best-effort consent-banner dismissal before that read.
 
 Before each drive read, readiness uses the same bounded network-idle and
 DOM-quiet settling as an observation. The wait caps are owned by
-`PAGE_READY_CAPS` in `apps/mcp/src/bot/page-ready.ts`.
+`PAGE_READY_CAPS` in `apps/mcp/src/bot/page-ready.ts`. If the page remains
+unready, the loop tops up that wait to `DRIVE_WAIT_MS`, capped by the remaining
+call time, before reading again. Each retry consumes a step without asking the
+model to act on the unready page; persistent navigation ends on the step or
+call budget.
 
 After a guarded drive action, settling waits for two animation frames or
 50 ms. If the document's time origin changed, the loop then polls for a
@@ -611,7 +615,8 @@ them as credential mutations. Other rows, including new-key creation controls
 without that evidence, remain eligible. Regression coverage lives in
 [`drive-key-complete-refusal.test.ts`](../apps/mcp/src/bot/__tests__/drive-key-complete-refusal.test.ts).
 
-Extracted credentials are stored by source, never by shape. `operate_extract` without
+Credential capture uses the selected source rather than scanning for key-shaped
+tokens. `operate_extract` without
 `capture` clicks the Copy button in an open key dialog and keeps only the value
 that click writes to the clipboard, as `api_key`; it never scans page text,
 labels or inputs. When no Copy click yields a value it stores nothing and returns

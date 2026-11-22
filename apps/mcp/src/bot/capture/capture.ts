@@ -874,8 +874,8 @@ export async function extractCredentials(sessionId: string): Promise<ExtractResu
   const page = operationPageForSession(session);
   invalidateCompactV2Snapshot(session);
 
-  // Storage is decided by source, never by shape: the Copy click itself proves
-  // provenance, whatever the value looks like (Vast.ai's key is 64-char hex).
+  // The Copy click establishes provenance; storage eligibility is checked
+  // separately by storableCredentials.
   await ensureCaptureClipboardPermission(page);
   const copied = await copyCredentialFromDialog(page, browser);
   audit(sessionId, "extract", { found: copied !== null });

@@ -1,7 +1,8 @@
 // credential-shape.ts — browser-free, unit-tested predicates for "is this
 // string a masked display / an OTP / credential-shaped". None of them decides
-// whether a value is stored: storage goes by source (a Copy click or a targeted
-// capture), never by shape. browser.ts keeps an inline copy of
+// whether a value is stored: that policy is owned by
+// docs/operator-tool-surface.md#credential-capture-and-retrieval.
+// browser.ts keeps an inline copy of
 // MASKED_DISPLAY_RE's source because `page.evaluate` code can't import — keep
 // the two in sync.
 
