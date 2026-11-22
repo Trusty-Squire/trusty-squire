@@ -144,6 +144,46 @@ describe("links to the same place are one answer", () => {
     expect(admission()).toEqual({ ok: true });
   });
 
+  it.each([
+    "javascript:void(0)", " JavaScript:void(0) ", "#", "#panel", " #panel ",
+    url, `${url}#`, `${url}#panel`, "./settings", "./settings#panel", "mailto:team@example.test",
+    "data:text/plain,action", "http://[", "   ",
+  ])("does not merge distinct actions sharing the placeholder %s", (href) => {
+    const candidates = sets.CLICK.map((candidate) => ({
+      ...candidate,
+      row: candidate.row[1] === "l"
+        ? [candidate.ref, candidate.row[1], `${candidate.description}|u=${href}`] as WireRow
+        : candidate.row,
+    }));
+    const votes = answer(targets, {
+      [slugFor(targets, "Observability")]: 0.47,
+      [slugFor(targets, "Observability settings")]: 0.44,
+      [slugFor(targets, "Members")]: 0.09,
+    });
+    const destinations = candidateDestinations(candidates, url);
+    expect(admitsChoice(targets, votes, { destinations })).toMatchObject({ kind: "low_confidence" });
+    expect(decideAfterJev({
+      answers: { operation: answer(ops, { CLICK: 1 }), CLICK_target: votes },
+      rows: candidates.map((candidate) => candidate.row),
+      facts: {}, lastFingerprint: null, lastActionKey: null, fingerprint: "fp",
+      goal: "open settings", pageUrl: url, questions, sets: { ...sets, CLICK: candidates },
+    })).toMatchObject({ kind: "low_confidence" });
+  });
+
+  it.each([
+    "/projects/p_1/observability", "https://cloud.livekit.io/other#panel",
+    "http://cloud.livekit.io/other", `${url}?view=other#panel`,
+  ])("keeps equivalent real navigation links to %s", (href) => {
+    const candidates = sets.CLICK.map((candidate) => ({
+      ...candidate,
+      row: candidate.row[1] === "l"
+        ? [candidate.ref, candidate.row[1], `${candidate.description}|u=${href}`] as WireRow
+        : candidate.row,
+    }));
+    expect(admitsChoice(targets, split, { destinations: candidateDestinations(candidates, url) }))
+      .toEqual({ ok: true });
+  });
+
   it("ignores a same-destination twin as the runner-up", () => {
     expect(admitsChoice(targets, split)).toMatchObject({ kind: "low_confidence" });
     expect(

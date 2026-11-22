@@ -4365,11 +4365,22 @@ export function candidateDestinations(
   const destinations: Record<string, string> = {};
   for (const candidate of candidates) {
     const href = rowHref(candidate.row);
-    if (href === undefined || href.length === 0) continue;
+    if (href === undefined || href.trim().length === 0 || href.trim().startsWith("#")) continue;
     try {
-      destinations[candidate.slug] = new URL(href, pageUrl).href;
+      const page = pageUrl.length > 0 ? new URL(pageUrl) : undefined;
+      const target = new URL(href, page);
+      if (target.protocol !== "http:" && target.protocol !== "https:") continue;
+      if (
+        page !== undefined &&
+        target.origin === page.origin &&
+        target.pathname === page.pathname &&
+        target.search === page.search
+      ) {
+        continue;
+      }
+      destinations[candidate.slug] = target.href;
     } catch {
-      destinations[candidate.slug] = href;
+      continue;
     }
   }
   return destinations;
