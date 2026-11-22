@@ -6837,14 +6837,7 @@ async function driveLoop(input: {
       traceUndispatchedOauth("required_field_empty");
       const field = fieldLabelForRow(blockedSubmitField);
       const reason = `decided submit was not executed because required field ${field} is still empty`;
-      recordWaitingDecision(
-        drive,
-        rows,
-        decision,
-        observation.url,
-        blockedSubmitField,
-        reason,
-      );
+      recordWaitingDecision(drive, rows, decision, observation.url, blockedSubmitField, reason);
       automaticDecisionRefused = true;
       return "continue";
     }

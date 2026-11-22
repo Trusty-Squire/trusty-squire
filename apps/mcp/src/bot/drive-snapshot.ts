@@ -919,7 +919,8 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
         if (
           parent !== null &&
           visible(parent) &&
-          parent.closest('button,a,input,select,textarea,[role="button"],[role="menuitem"]') === null
+          parent.closest('button,a,input,select,textarea,[role="button"],[role="menuitem"]') ===
+            null
         ) {
           entityWords.push(node.textContent ?? "");
         }
@@ -933,14 +934,20 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
       label,
       operations,
       frameOrdinal,
-      ...(entity === null ? {} : {
-        entityText: entity instanceof HTMLElement ? entity.innerText : entity.textContent ?? "",
-        entityDisplayText: entityWords.join(" "),
-      }),
-      ...(entity === null ? {} : {
-        entityHasReadonlyInput: Array.from(entity.querySelectorAll('input[readonly]'))
-          .some((node) => visible(node)),
-      }),
+      ...(entity === null
+        ? {}
+        : {
+            entityText:
+              entity instanceof HTMLElement ? entity.innerText : (entity.textContent ?? ""),
+            entityDisplayText: entityWords.join(" "),
+          }),
+      ...(entity === null
+        ? {}
+        : {
+            entityHasReadonlyInput: Array.from(entity.querySelectorAll("input[readonly]")).some(
+              (node) => visible(node),
+            ),
+          }),
       ...(dialog === null ? {} : { dialogRef: identity(dialog) }),
       selector: selectorFor(element),
       ...(value === undefined ? {} : { value }),
