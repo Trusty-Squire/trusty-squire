@@ -436,14 +436,27 @@ it.each([
   });
 });
 
-it.each(["button", "menuitem"])("copies a key using a %s from the inline row just shown", async (role) => {
+it.each(["button", "menuitem"].flatMap((role) =>
+  ["inline", "navigation", "existing"].map((mode) => ({ role, mode })),
+))("copies a key using a $role after $mode presentation", async ({ role, mode }) => {
   const value = "0123456789abcdef".repeat(4);
+  const create = mode === "existing"
+    ? ""
+    : mode === "navigation"
+      ? '<form action="/keys"><input type="hidden" name="created" value="1"><button type="submit">Create key</button></form>'
+      : `<button type="button" onclick="document.querySelector('ul').hidden=false">Create key</button>`;
   await withKeyPage(
-    `<main><button type="button" onclick="document.querySelector('ul').hidden=false">Create key</button>
-      <ul hidden><li><code>${value}</code>
+    `<main>${create}
+      <ul ${mode === "existing" ? "" : "hidden"}><li><code>${value}</code>
         <button type="button" role="${role}" onclick="navigator.clipboard.writeText('${value}')">Copy</button>
         <button type="button">Ganti</button>
-      </li></ul></main>`,
+      </li></ul></main>
+      <script>
+        if (location.search.includes('created=1')) {
+          document.querySelector('ul').hidden = false;
+          document.querySelector('form').remove();
+        }
+      </script>`,
     async (sessionId) => {
       const page = sessionForCall(sessionId)!.browser.page!;
       await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);

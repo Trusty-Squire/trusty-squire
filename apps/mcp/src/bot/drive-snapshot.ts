@@ -62,7 +62,6 @@ export interface DriveSnapshotElement {
   formId?: number;
   entityText?: string;
   entityDisplayText?: string;
-  entityRef?: string;
   entityHasReadonlyInput?: boolean;
   dialogRef?: string;
   /** Covering control ref, or a region kind when the cover is not a listed control. */
@@ -258,7 +257,6 @@ export function driveRowsFromSnapshot(snapshot: DriveSnapshot): SnapshotRow[] {
     ) {
       facts.push("credential=1");
     }
-    if (element.entityRef !== undefined) facts.push(`entity=${element.entityRef}`);
     if (element.dialogRef !== undefined) facts.push(`dialog=${element.dialogRef}`);
     if (element.occludedBy !== undefined && element.occludedBy.length > 0) {
       facts.push(`oc=${element.occludedBy.replace(/\|/g, " ").slice(0, 40)}`);
@@ -938,7 +936,6 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
         entityDisplayText: entityWords.join(" "),
       }),
       ...(entity === null ? {} : {
-        entityRef: identity(entity),
         entityHasReadonlyInput: Array.from(entity.querySelectorAll('input[readonly]'))
           .some((node) => visible(node)),
       }),

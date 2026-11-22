@@ -467,7 +467,6 @@ export function resetDriveGoalMemory(drive: SessionDriveState): void {
   drive.lastFingerprint = null;
   drive.lastActionKey = null;
   drive.pendingCopyCapture = null;
-  drive.justShownCredentialRows = [];
   drive.visitedSectionKeys = [];
   drive.seenDestinations = [];
   drive.awaitingDecideAfterExplore = false;
@@ -1671,44 +1670,12 @@ export function isKeyCreateRow(row: WireRow): boolean {
   return (create && thing) || (isCreateEntryRow(row) && thing);
 }
 
-function credentialEntityRef(row: WireRow): string | undefined {
-  return /(?:^|\|)entity=([^|]+)/.exec(row[2] ?? "")?.[1];
+function isCredentialReadRow(row: WireRow): boolean {
+  return ["b", "button", "l", "link", "m", "menuitem"].includes(row[1]) && isRevealOrCopyRow(row);
 }
 
-export function isExistingCredentialMutationRow(
-  row: WireRow,
-  justShownRows: readonly string[] = [],
-): boolean {
-  if (!/(?:^|\|)credential=1(?:\||$)/.test(row[2] ?? "")) return false;
-  const entity = credentialEntityRef(row);
-  return !(
-    entity !== undefined &&
-    justShownRows.includes(entity) &&
-    ["b", "button", "l", "link", "m", "menuitem"].includes(row[1]) &&
-    isRevealOrCopyRow(row)
-  );
-}
-
-export function rememberJustShownCredentialRows(
-  drive: Pick<SessionDriveState, "justShownCredentialRows">,
-  before: readonly WireRow[],
-  after: readonly WireRow[],
-): void {
-  const existing = new Set(
-    before.filter((row) => isExistingCredentialMutationRow(row)).map(credentialEntityRef),
-  );
-  drive.justShownCredentialRows ??= [];
-  for (const row of after) {
-    const entity = credentialEntityRef(row);
-    if (
-      entity !== undefined &&
-      isExistingCredentialMutationRow(row) &&
-      !existing.has(entity) &&
-      !drive.justShownCredentialRows.includes(entity)
-    ) {
-      drive.justShownCredentialRows.push(entity);
-    }
-  }
+export function isExistingCredentialMutationRow(row: WireRow): boolean {
+  return /(?:^|\|)credential=1(?:\||$)/.test(row[2] ?? "") && !isCredentialReadRow(row);
 }
 
 export function isCredentialMutationConfirmRow(
@@ -1717,6 +1684,7 @@ export function isCredentialMutationConfirmRow(
   pressed: { url: string; credentialRow?: boolean } | null | undefined,
 ): boolean {
   return (
+    !isCredentialReadRow(row) &&
     pressed?.credentialRow === true &&
     pagePathKey(pressed.url) === pagePathKey(pageUrl) &&
     /(?:^|\|)dialog=[^|]+/.test(row[2] ?? "")
@@ -5440,7 +5408,6 @@ async function captureDriveSession(
     // Retained state keyed by those refs must die with them, or the new
     // document's fields start out marked as already filled.
     drive.filledRefs = [];
-    drive.justShownCredentialRows = [];
     drive.expiryShortWrittenRefs = [];
     drive.expiryLongAttemptedRefs = [];
     drive.consumedActionKey = null;
@@ -6825,7 +6792,7 @@ async function driveLoop(input: {
     if (
       (decision.action.kind === "click" || decision.action.kind === "select") &&
       liveRow !== undefined &&
-      (isExistingCredentialMutationRow(liveRow, drive.justShownCredentialRows) ||
+      (isExistingCredentialMutationRow(liveRow) ||
         isCredentialMutationConfirmRow(liveRow, observation.url, drive.lastActBinding))
     ) {
       return finish("stuck", {
@@ -7083,7 +7050,6 @@ async function driveLoop(input: {
       drive.filledRefs,
       observation.semantic?.headings ?? [],
     );
-    const credentialRowsBefore = rows;
     const textBeforeClick = observation.dom ?? "";
     const excludeBeforeClick = rows
       .filter((row) => isSubmitLikeRow(row))
@@ -7531,13 +7497,6 @@ async function driveLoop(input: {
     }
     if (
       actDispatched &&
-      documentOriginOf(beforeEpoch) === documentOriginOf(drive.lastDocumentEpoch ?? "") &&
-      pagePathKey(urlBeforeClick) === pagePathKey(observation.url)
-    ) {
-      rememberJustShownCredentialRows(drive, credentialRowsBefore, rows);
-    }
-    if (
-      actDispatched &&
       (decision.action.kind === "click" || decision.action.kind === "oauth_login")
     ) {
       const clicked = clickedBefore ?? findRow(rows, decision.actionKey, urlBeforeClick);
@@ -7552,7 +7511,7 @@ async function driveLoop(input: {
           binding: decisionTargetBinding(clicked, urlBeforeClick),
           url: urlBeforeClick,
           label: readableLabel(clicked),
-          credentialRow: isExistingCredentialMutationRow(clicked, drive.justShownCredentialRows),
+          credentialRow: isExistingCredentialMutationRow(clicked),
         };
         if (isSubmitLikeRow(clicked) && !isKeyCreateOpener(clicked)) {
           drive.submittedThisDrive = true;
