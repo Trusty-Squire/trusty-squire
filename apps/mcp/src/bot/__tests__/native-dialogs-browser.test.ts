@@ -274,6 +274,16 @@ it.each([
     confidence: 1,
     accepted: false,
   },
+  {
+    name: "retains API key page context for a generic startup confirmation",
+    body: `<h1>API keys</h1>${fixture.replace(
+      "This action cannot be undone",
+      "Revoke selected? This action cannot be undone",
+    )}`,
+    choice: "accept",
+    confidence: 0.55,
+    accepted: false,
+  },
 ] as const)(
   "drive native confirmation: $name",
   async ({ body, choice, confidence, accepted }) => {
@@ -283,15 +293,22 @@ it.each([
     const started = await startHarnessProvisionSession({
       browser: controller,
       serviceUrl: url,
-      initialObservation: "drive",
     });
     try {
       await controller.click({ kind: "selector", selector: "#uninstall", method: "click" });
       const askJev = vi.fn(
         async (_api: unknown, _state: unknown, questions: Record<string, unknown>) => {
           const question = z
-            .object({ native_dialog: z.object({ criteria: z.record(z.string()) }) })
+            .object({
+              native_dialog: z.object({
+                criteria: z.record(z.string()),
+                instructions: z.string(),
+              }),
+            })
             .parse(questions);
+          expect(question.native_dialog.instructions).toContain(
+            "Destructive consequences require authorization.",
+          );
           const keys = Object.keys(question.native_dialog.criteria);
           return {
             result: {
@@ -350,9 +367,14 @@ it.each([
   15_000,
 );
 
-it("drive acknowledges a native alert without a model call", async () => {
+it("drive spends one step acknowledging one of consecutive native alerts", async () => {
   const page = await browser.newPage();
-  await page.route("**/*", (route) => route.fulfill({ contentType: "text/html", body: fixture }));
+  await page.route("**/*", (route) =>
+    route.fulfill({
+      contentType: "text/html",
+      body: fixture.replace("alert('Notice')", "alert('Notice'); alert('Second notice')"),
+    }),
+  );
   const controller = BrowserController.fromHarnessPage(page);
   const started = await startHarnessProvisionSession({
     browser: controller,
@@ -365,7 +387,7 @@ it("drive acknowledges a native alert without a model call", async () => {
     const askJev = vi.fn(async () => {
       throw new Error("no model call expected");
     });
-    await runOperateDrive(
+    const result = await runOperateDrive(
       { session_id: started.session_id, goal: "Inspect the installation", max_steps: 1 },
       new ApiClient({
         apiBaseUrl: "http://127.0.0.1:1",
@@ -381,11 +403,11 @@ it("drive acknowledges a native alert without a model call", async () => {
         awaitVerification,
         injectCard: async () => ({}),
       },
-    ).catch(() => undefined);
-    expect(controller.nativeDialogs.blocked).toBe(false);
-    expect(askJev.mock.calls.some((call) => JSON.stringify(call).includes("native_dialog"))).toBe(
-      false,
     );
+    expect(result.status).toBe("budget");
+    expect(result.steps).toBe(1);
+    expect(controller.nativeDialogs.evidence()[0]?.text).toBe("Second notice");
+    expect(askJev).not.toHaveBeenCalled();
   } finally {
     await finishProvisionSession(started.session_id);
     await page.close();
