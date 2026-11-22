@@ -814,14 +814,9 @@ describe("clear-winner decision routing", () => {
       }),
     ).toMatchObject({ kind: "act", action: { kind: "click", target: "@e:b5" } });
     expect(
-      isExistingCredentialMutationRow(["@e:delete", "b", "Delete API key"], "https://x.test/keys"),
+      isExistingCredentialMutationRow(["@e:delete", "b", "Delete API key|credential=1"]),
     ).toBe(true);
-    expect(
-      isExistingCredentialMutationRow(
-        ["@e:delete", "b", "Delete project"],
-        "https://x.test/projects",
-      ),
-    ).toBe(false);
+    expect(isExistingCredentialMutationRow(["@e:delete", "b", "Delete project"])).toBe(false);
   });
 
   it("preserves consume-once and last-action failure behavior for low-score targets", () => {
@@ -2126,7 +2121,7 @@ describe("form-fill assignment helpers", () => {
     ).toBe(false);
     const inFlight: WireRow[] = [
       ["@e:email", "t", "Email|f=email|n=a@b.test"],
-      ["@e:go", "b", "Creating your account|s=d"],
+      ["@e:go", "b", "Creating your account|s=d|a=submit|fm=1"],
     ];
     expect(snapshotNeedsSettle(inFlight, 0)).toBe(true);
     expect(snapshotNeedsSettle(inFlight, 1)).toBe(false);
@@ -2135,7 +2130,7 @@ describe("form-fill assignment helpers", () => {
       ["@e:email", "t", "Email|f=email|s=d|n=a@b.test"],
       ["@e:pw", "t", "Password|f=password"],
       ["@e:slide", "b", "Next slide"],
-      ["@e:go", "b", "Create Account|s=d"],
+      ["@e:go", "b", "Create Account|s=d|a=submit|fm=1"],
     ];
     expect(isSubmitLikeRow(fireworksInFlight[2]!)).toBe(false);
     expect(isProgressSubmitRow(fireworksInFlight[3]!)).toBe(false);
@@ -2155,28 +2150,28 @@ describe("form-fill assignment helpers", () => {
     expect(captchaSolveStillWorking("unsupported_variant")).toBe(false);
     expect(captchaSolveStillWorking("solver_error")).toBe(false);
     expect(widgetUnreadySolveReason("no_key")).toBe(`${DRIVE_WIDGET_UNREADY_REASON} (no_key)`);
-    expect(isProgressSubmitRow(["@e:go", "b", "Creating your account|s=d"])).toBe(true);
+    expect(isProgressSubmitRow(["@e:go", "b", "Creating your account|s=d|a=submit|fm=1"])).toBe(true);
     expect(isProgressSubmitRow(["@e:go", "b", "Loading Continue|s=d"])).toBe(true);
-    expect(isProgressSubmitRow(["@e:go", "b", "Create Account|s=d"])).toBe(false);
+    expect(isProgressSubmitRow(["@e:go", "b", "Create Account|s=d|a=submit|fm=1"])).toBe(false);
     expect(
       disabledSubmitKind(
         [
           ["@e:email", "t", "Email|f=email|n=a@b.test"],
-          ["@e:go", "b", "Creating your account|s=d"],
+          ["@e:go", "b", "Creating your account|s=d|a=submit|fm=1"],
         ],
         0,
       ),
     ).toBe("in_flight");
     const emptyRequired: WireRow[] = [
       ["@e:email", "t", "Email|f=email|s=r"],
-      ["@e:go", "b", "Sign Up|s=d"],
+      ["@e:go", "b", "Sign Up|s=d|a=submit|fm=1"],
     ];
     expect(outstandingRequiredFill(emptyRequired)?.[0]).toBe("@e:email");
     expect(disabledSubmitKind(emptyRequired, 0)).toBe("needs_fill");
     expect(snapshotNeedsSettle(emptyRequired, 0)).toBe(false);
     const invalid: WireRow[] = [
       ["@e:email", "t", "Email|f=email|s=ri|n=nope"],
-      ["@e:go", "b", "Continue|s=d"],
+      ["@e:go", "b", "Continue|s=d|a=submit|fm=1"],
     ];
     expect(disabledSubmitKind(invalid, 0)).toBe("needs_fill");
     const shopifyComplete: WireRow[] = [
@@ -2199,13 +2194,13 @@ describe("form-fill assignment helpers", () => {
     ).toEqual(["@e:email"]);
     const staticDisabled: WireRow[] = [
       ["@e:email", "t", "Email|f=email|n=a@b.test"],
-      ["@e:go", "b", "Sign Up|s=d"],
+      ["@e:go", "b", "Sign Up|s=d|a=submit|fm=1"],
     ];
     expect(disabledSubmitKind(staticDisabled, 0)).toBe("none");
     expect(disabledSubmitKind(staticDisabled, 0, [], true)).toBe("widget_unready");
     const captchaGate: WireRow[] = [
       ["@e:email", "t", "Email|f=email|n=a@b.test"],
-      ["@e:go", "b", "Sign Up|s=d"],
+      ["@e:go", "b", "Sign Up|s=d|a=submit|fm=1"],
       ["@e:img", "b", "image challenge|x=x"],
       ["@e:v", "b", "Verify|x=x"],
       ["@e:skip", "b", "Skip|x=x"],
@@ -2221,7 +2216,7 @@ describe("form-fill assignment helpers", () => {
       disabledSubmitKind(
         [
           ["@e:email", "t", "Email|f=email|n=a@b.test"],
-          ["@e:go", "b", "Creating your account|s=d"],
+          ["@e:go", "b", "Creating your account|s=d|a=submit|fm=1"],
           ["@e:img", "b", "image challenge|x=x"],
         ],
         0,
@@ -4368,8 +4363,8 @@ describe("dialog overlay secret and oauth bounce rules", () => {
   it("offers mutation controls but identifies them for handback", () => {
     const rows: WireRow[] = [
       ["@e:reveal", "b", "Reveal key"],
-      ["@e:rotate", "b", "Rotate key"],
-      ["@e:reset", "b", "Reset"],
+      ["@e:rotate", "b", "Rotate key|credential=1"],
+      ["@e:reset", "b", "Reset|credential=1"],
     ];
     const sets = driveTargetSets(
       rows,
@@ -4385,39 +4380,10 @@ describe("dialog overlay secret and oauth bounce rules", () => {
     expect(sets.CLICK.map((candidate) => candidate.ref)).toContain("@e:reveal");
     expect(sets.CLICK.map((candidate) => candidate.ref)).toContain("@e:rotate");
     expect(sets.CLICK.map((candidate) => candidate.ref)).toContain("@e:reset");
-    expect(isExistingCredentialMutationRow(rows[1]!, "https://app.example.test/keys")).toBe(true);
-    expect(isExistingCredentialMutationRow(rows[2]!, "https://app.example.test/keys")).toBe(true);
-    expect(
-      isExistingCredentialMutationRow(
-        ["@e:delete", "b", "Delete"],
-        "https://app.example.test/settings",
-        [["@e:heading", "h1", "API Keys"]],
-      ),
-    ).toBe(true);
-    expect(
-      isExistingCredentialMutationRow(
-        ["@e:delete", "b", "Delete"],
-        "https://app.example.test/settings",
-        [],
-        "",
-        ["API Keys"],
-      ),
-    ).toBe(true);
-    expect(
-      isExistingCredentialMutationRow(
-        ["@e:action", "s", "Action"],
-        "https://app.example.test/settings",
-        [["@e:heading", "h1", "API Keys"]],
-        "Revoke",
-      ),
-    ).toBe(true);
-    expect(
-      isExistingCredentialMutationRow(
-        ["@e:delete", "b", "Delete"],
-        "https://app.example.test/settings",
-        [["@e:heading", "h1", "Team members"]],
-      ),
-    ).toBe(false);
+    expect(isExistingCredentialMutationRow(rows[1]!)).toBe(true);
+    expect(isExistingCredentialMutationRow(rows[2]!)).toBe(true);
+    expect(isExistingCredentialMutationRow(["@e:action", "s", "Action|credential=1"])).toBe(true);
+    expect(isExistingCredentialMutationRow(["@e:delete", "b", "Delete"])).toBe(false);
   });
 
   it("keeps a covered dialog's Create and Cancel beside Close (BeatAPI trace)", () => {

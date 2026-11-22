@@ -5,6 +5,7 @@
 import type { Frame, Page } from "playwright";
 import { frameOriginOf } from "./browser-use-capture.js";
 import { DriveEvaluateTimeout, evaluateBound } from "./drive-evaluate.js";
+import { findCredentialTokens } from "./credential-shape.js";
 import type { Observation } from "./provision-session.js";
 
 type SnapshotRow = [string, string, string?];
@@ -59,7 +60,8 @@ export interface DriveSnapshotElement {
   invalid?: boolean;
   /** HTML form owner identity, stable for one snapshot walk. */
   formId?: number;
-  entityRow?: boolean;
+  entityText?: string;
+  dialogRef?: string;
   /** Covering control ref, or a region kind when the cover is not a listed control. */
   occludedBy?: string;
   operations: Array<"click" | "fill" | "select">;
@@ -246,7 +248,14 @@ export function driveRowsFromSnapshot(snapshot: DriveSnapshot): SnapshotRow[] {
     const choice = optionOrdinal.get(element.ref);
     if (choice !== undefined) facts.push(`q=${choice.index}/${choice.total}`);
     if (element.formId !== undefined) facts.push(`fm=${element.formId}`);
-    if (element.entityRow) facts.push("item=1");
+    if (
+      element.entityText !== undefined &&
+      (findCredentialTokens(element.entityText).length > 0 ||
+        /[•●⬤*]{3,}|\b[A-Za-z][A-Za-z0-9_-]*[_-][A-Za-z0-9_-]*(?:…|\.{3})/.test(element.entityText))
+    ) {
+      facts.push("credential=1");
+    }
+    if (element.dialogRef !== undefined) facts.push(`dialog=${element.dialogRef}`);
     if (element.occludedBy !== undefined && element.occludedBy.length > 0) {
       facts.push(`oc=${element.occludedBy.replace(/\|/g, " ").slice(0, 40)}`);
     }
@@ -896,14 +905,24 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
               label: option.label || option.textContent || option.value,
             }))
         : undefined;
+    const entity = pinned ? null : element.closest('tr,[role="row"],li,[role="listitem"]');
+    const entityText = entity === null
+      ? undefined
+      : [
+          entity instanceof HTMLElement ? entity.innerText : entity.textContent ?? "",
+          ...Array.from(entity.querySelectorAll('input[readonly]:not([type="password"])'))
+            .filter((node) => visible(node))
+            .map((node) => (node as HTMLInputElement).value),
+        ].join(" ");
+    const dialog = element.closest('dialog,[role="dialog"],[role="alertdialog"]');
     const row: DriveSnapshotElement = {
       ref,
       role,
       label,
       operations,
       frameOrdinal,
-      entityRow:
-        !pinned && element.closest('tr,[role="row"],li,[role="listitem"]') !== null,
+      ...(entityText === undefined ? {} : { entityText }),
+      ...(dialog === null ? {} : { dialogRef: identity(dialog) }),
       selector: selectorFor(element),
       ...(value === undefined ? {} : { value }),
       ...(element instanceof HTMLInputElement && element.type === "password"

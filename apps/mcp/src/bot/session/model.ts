@@ -242,7 +242,13 @@ export interface SessionDriveState {
   /** Explorer supplied one click; the next loop must consult the decider. */
   awaitingDecideAfterExplore?: boolean;
   /** Last click's ref+identity, so a reminted ordinal is not reused after nav. */
-  lastActBinding?: { ref: string; binding: string; url: string; label: string } | null;
+  lastActBinding?: {
+    ref: string;
+    binding: string;
+    url: string;
+    label: string;
+    credentialRow?: boolean;
+  } | null;
   /** True after this drive clicked a submit-like control. */
   submittedThisDrive?: boolean;
   /** Already tried logout+restart for a pre-existing session. */

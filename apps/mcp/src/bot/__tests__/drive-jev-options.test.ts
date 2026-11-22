@@ -65,6 +65,12 @@ describe("submit detection uses the page's own marker", () => {
     expect(isSubmitLikeRow(["@e:f0d2", "b", "☾|a=submit"])).toBe(false);
   });
 
+  it("does not infer submission from a control's words", () => {
+    for (const label of ["Submit", "Continue", "Create Account", "Register", "Next", "Pay now"]) {
+      expect(isSubmitLikeRow(["@e:x", "b", `${label}|fm=1`])).toBe(false);
+    }
+  });
+
   it("offers the hinted fields of a non-English form for typing", () => {
     const url = "https://gateway.darusalfatah.id/masuk?mode=register";
     const facts = { plan: "free", project_name: "grunt" };
@@ -266,6 +272,20 @@ describe("a guard-refused submit stays offered", () => {
     expect(pageHasUntriedPendingAction(rows, drive, url, "sign up")).toBe(false);
   });
 
+  it("offers a waiting native select only through SELECT", () => {
+    const select: WireRow = ["@e:country", "s", "Country|s=r|fm=1"];
+    const formRows = [select, rows[1]!];
+    const drive = emptyDriveState("sign up", {});
+    recordWaitingDecision(drive, formRows, decision, url, select, reason);
+    const waitingFields = waitingFieldsByControl(drive.waitingControls!, formRows, [], url);
+    const sets = driveTargetSets(formRows, {}, false, [], url,
+      new Map([[select[0], ["Canada", "Japan"]]]), (text) => text, [], { waitingFields });
+    expect(sets.TYPE_TEXT.some((candidate) => candidate.ref === select[0])).toBe(false);
+    expect(sets.SELECT.filter((candidate) => candidate.ref === select[0]).map((candidate) => candidate.option))
+      .toEqual(expect.arrayContaining(["Canada", "Japan"]));
+    expect(sets.CLICK.find((candidate) => candidate.ref === decision.actionKey)?.waitsFor).toBe("Country");
+  });
+
   it("still removes a control refused for any other reason", () => {
     const drive = emptyDriveState("sign up", {});
     recordUndeliveredDecision(drive, rows, decision, url, "decided control was no longer bound");
@@ -276,152 +296,39 @@ describe("a guard-refused submit stays offered", () => {
   });
 });
 
-describe("credential changes are caught in any language", () => {
-  // Kenari /keys (squire-1.1.57 L132-138), Indonesian.
+describe("credential changes are caught by structure", () => {
   const url = "https://kenari.id/keys";
-  const kenari: WireRow[] = [
-    ["@e:f0d30", "b", "Buat API Key|a=submit"],
-    ["@e:f0d178", "b", "Tutup|a=submit"],
-    ["@e:f0d179", "b", "Ubah pengaturan key|a=submit"],
-    ["@e:f0d180", "b", "Ganti key|a=submit"],
-    ["@e:f0d181", "b", "Cabut key|a=submit"],
-    ["@e:f0d7", "b", "Ganti workspace: Pribadi"],
-    ["@e:f0d176", "b", "Salin"],
-    ["@key-value", "h1", "@key-value|secret=1|len=51"],
-  ];
-  const at = (ref: string): WireRow => kenari.find((row) => row[0] === ref)!;
 
-  it.each(["Ganti", "Badilisha", "任意"])("refuses an existing row's %s control", (label) => {
-    expect(isExistingCredentialMutationRow(["@e:x", "b", `${label}|item=1`], url)).toBe(true);
-    const dialog: WireRow[] = [["@e:y", "b", label]];
-    expect(
-      isCredentialMutationConfirmRow(dialog[0]!, url, dialog, {
-        ref: "@e:x",
-        url,
-        label,
-      }),
-    ).toBe(true);
-  });
-
-  it("permits copying a just-shown key inside an existing row", () => {
-    const copy: WireRow = ["@e:copy", "b", "Copy key|item=1"];
-    expect(isExistingCredentialMutationRow(copy, url, [copy, kenari[7]!])).toBe(false);
-    expect(isExistingCredentialMutationRow(copy, url, [copy])).toBe(true);
-    expect(
-      isExistingCredentialMutationRow(["@e:select", "s", "Actions|item=1"], url, [], "任意"),
-    ).toBe(true);
-  });
-
-  it("refuses Kenari's revoke and rotate", () => {
-    expect(isExistingCredentialMutationRow(at("@e:f0d181"), url, kenari)).toBe(true);
-    expect(isExistingCredentialMutationRow(at("@e:f0d180"), url, kenari)).toBe(true);
-  });
-
-  it("leaves Kenari's create, copy, settings and workspace switch alone", () => {
-    for (const ref of ["@e:f0d30", "@e:f0d178", "@e:f0d179", "@e:f0d7", "@e:f0d176"]) {
-      expect(isExistingCredentialMutationRow(at(ref), url, kenari)).toBe(false);
-    }
-  });
-
-  it.each([
-    "API-Schlüssel widerrufen",
-    "Eliminar clave",
-    "Supprimer la clé",
-    "Revogar chave",
-    "Отозвать ключ",
-    "删除密钥",
-    "キーを削除",
-    "키 삭제",
-    "Hapus token",
-    "Replace key",
-  ])("refuses %s", (label) => {
-    expect(isExistingCredentialMutationRow(["@e:x", "b", label], "https://x.test/settings")).toBe(
-      true,
-    );
-  });
-
-  it.each(["Batal", "Cancel", "İptal", "취소", "Annuler", "Abbrechen", "Silver plan"])(
-    "lets the %s button through",
+  it.each(["Cabut key", "Ganti key", "Ganti", "任意"])(
+    "refuses an existing credential row's %s control",
     (label) => {
-      expect(isExistingCredentialMutationRow(["@e:x", "b", label], url)).toBe(false);
+      expect(isExistingCredentialMutationRow(["@e:x", "b", `${label}|credential=1`])).toBe(true);
+      expect(isExistingCredentialMutationRow(["@e:x", "s", `${label}|credential=1`])).toBe(true);
+      expect(isExistingCredentialMutationRow(["@e:x", "b", label])).toBe(false);
     },
   );
 
-  it("treats a confirm that repeats the pressed control as that change", () => {
-    // squire-1.1.57 L134: the dialog after "Ganti key" offered "Batal" / "Ganti Key".
-    const dialog: WireRow[] = [
-      ["@e:f0d326", "b", "Batal"],
-      ["@e:f0d327", "b", "Ganti Key"],
-    ];
-    const pressed = { ref: "@e:f0d180", url, label: "Ganti key" };
-    expect(isCredentialMutationConfirmRow(dialog[1]!, url, dialog, pressed)).toBe(true);
-    expect(isCredentialMutationConfirmRow(dialog[0]!, url, dialog, pressed)).toBe(false);
-    // The same check without any listed word: the echo alone is the signal.
-    const unlisted: WireRow[] = [
-      ["@e:n", "b", "Hapana"],
-      ["@e:y", "b", "Badilisha key"],
-    ];
-    expect(
-      isCredentialMutationConfirmRow(unlisted[1]!, url, unlisted, {
-        ref: "@e:old",
-        url,
-        label: "Badilisha key",
-      }),
-    ).toBe(true);
+  it("leaves creation, workspace menus and just-shown key presentation available", () => {
+    for (const label of ["Create key", "Buat API Key", "Ganti workspace", "Salin", "Reveal key"]) {
+      expect(isExistingCredentialMutationRow(["@e:x", "b", label])).toBe(false);
+    }
   });
 
-  it("does not treat a control re-mounted on the full page as a confirm", () => {
-    // A Copy button re-rendered with a new ref beside the rest of the key page.
-    const page: WireRow[] = [
-      ...kenari.filter((row) => row[0] !== "@e:f0d176"),
-      ["@e:n", "b", "Salin key"],
-    ];
+  it("guards a following dialog regardless of the confirmation's words", () => {
+    const pressed = { url, credentialRow: true };
+    for (const label of ["Ganti", "Proceed", "任意"]) {
+      expect(
+        isCredentialMutationConfirmRow(["@e:y", "b", `${label}|dialog=@e:dialog`], url, pressed),
+      ).toBe(true);
+    }
+    expect(isCredentialMutationConfirmRow(["@e:y", "b", "Ganti"], url, pressed)).toBe(false);
     expect(
-      isCredentialMutationConfirmRow(page[page.length - 1]!, url, page, {
-        ref: "@e:f0d176",
-        url,
-        label: "Salin key",
-      }),
-    ).toBe(false);
-  });
-
-  it("does not treat a create dialog or a still-visible trigger as a confirm", () => {
-    const create: WireRow[] = [["@e:c2", "b", "Buat API Key|a=submit"]];
-    expect(
-      isCredentialMutationConfirmRow(create[0]!, url, create, {
-        ref: "@e:c1",
-        url,
-        label: "Buat API Key",
-      }),
-    ).toBe(false);
-    const named: WireRow[] = [
-      ["@e:name", "t", "Key name|s=r|fm=1"],
-      ["@e:y", "b", "Badilisha key|fm=1"],
-    ];
-    expect(
-      isCredentialMutationConfirmRow(named[1]!, url, named, {
-        ref: "@e:x",
-        url,
-        label: "Badilisha key",
-      }),
-    ).toBe(false);
-    const still: WireRow[] = [
-      ["@e:x", "b", "Badilisha key"],
-      ["@e:y", "b", "Badilisha key"],
-    ];
-    expect(
-      isCredentialMutationConfirmRow(still[1]!, url, still, {
-        ref: "@e:x",
-        url,
-        label: "Badilisha key",
-      }),
+      isCredentialMutationConfirmRow(["@e:y", "b", "Ganti|dialog=@e:dialog"], url, { url }),
     ).toBe(false);
     expect(
-      isCredentialMutationConfirmRow(still[1]!, "https://kenari.id/other", [still[1]!], {
-        ref: "@e:x",
-        url,
-        label: "Badilisha key",
-      }),
+      isCredentialMutationConfirmRow(
+        ["@e:y", "b", "Ganti|dialog=@e:dialog"], "https://kenari.id/other", pressed,
+      ),
     ).toBe(false);
   });
 });

@@ -1328,21 +1328,7 @@ export function rankDriveCandidates<T extends DriveCandidate>(
 }
 
 export function isSubmitLikeRow(row: WireRow): boolean {
-  const label = readableLabel(row).toLowerCase();
-  // A named destination is navigation, even when its label says "Create".
-  // Treating that link as a submit makes the next page's prose look like a
-  // response to a form that was never submitted.
-  if ((row[1] === "l" || row[1] === "link") && rowHref(row) !== undefined) return false;
-  // Carousel chrome ("Next slide") is not a form submit. Treating it as one
-  // made Fireworks listedWork stay true after the passwords, so settle never
-  // waited on the still-disabled Create Account.
-  if (/\b(?:next|previous|prev)\s+slide\b/.test(label)) return false;
-  // The page's own submit marker is language-neutral. It counts only inside a
-  // form: a type=submit button outside one (a theme toggle) submits nothing.
-  if (/(?:^|\|)a=submit(?:\||$)/.test(row[2] ?? "") && rowFormId(row) !== undefined) return true;
-  return /submit|continue|creat(?:e|ing)|loading|sign[- ]?up|register|\bnext\b|pay[- ]?now|place[- ]?order|get[- ]?started/.test(
-    label,
-  );
+  return /(?:^|\|)a=submit(?:\||$)/.test(row[2] ?? "") && rowFormId(row) !== undefined;
 }
 
 /** The act path scrolls an offscreen target into view before acting. */
@@ -1684,321 +1670,19 @@ export function isKeyCreateRow(row: WireRow): boolean {
   return (create && thing) || (isCreateEntryRow(row) && thing);
 }
 
-// The credential guard's vocabulary beyond English: a floor under the
-// language-neutral confirm check below, not the whole of it. Space-delimited
-// languages match as whole words; CJK terms match anywhere in the label. Each
-// language's Cancel word stays out, so a confirm dialog's Cancel is pressable.
-function wordPattern(words: readonly string[], cjk: readonly string[]): RegExp {
-  return new RegExp(
-    `(?:(?:^|[^\\p{L}\\p{N}])(?:${words.join("|")})(?=$|[^\\p{L}\\p{N}])|${cjk.join("|")})`,
-    "iu",
-  );
+export function isExistingCredentialMutationRow(row: WireRow): boolean {
+  return /(?:^|\|)credential=1(?:\||$)/.test(row[2] ?? "");
 }
 
-/** Destroys, revokes, regenerates or resets what it names. */
-const CREDENTIAL_MUTATION_WORDS = wordPattern(
-  [
-    // Indonesian / Malay
-    "cabut",
-    "hapus",
-    "buat ulang",
-    "atur ulang",
-    "setel ulang",
-    "hasilkan ulang",
-    // Spanish / Portuguese
-    "revoca[rs]?",
-    "elimina[rs]?",
-    "borra[rs]?",
-    "regenera[rs]?",
-    "restablece[rs]?",
-    "revoga[rs]?",
-    "exclui[rs]?",
-    "apaga[rs]?",
-    "remover",
-    "redefini[rs]?",
-    // French
-    "révoque[rz]?",
-    "supprime[rz]?",
-    "efface[rz]?",
-    "régénère[rz]?",
-    "régénérer",
-    "réinitialise[rz]?",
-    // German / Dutch
-    "widerrufen",
-    "löschen",
-    "entfernen",
-    "regenerieren",
-    "neu generieren",
-    "zurücksetzen",
-    "intrekken",
-    "verwijderen",
-    "opnieuw genereren",
-    // Italian
-    "revocare",
-    "eliminare",
-    "rimuovi",
-    "rimuovere",
-    "rigenera(?:re)?",
-    "reimposta(?:re)?",
-    // Polish / Turkish
-    "unieważnij",
-    "usuń",
-    "wygeneruj ponownie",
-    "zresetuj",
-    "sil",
-    "kaldır",
-    "yeniden oluştur",
-    "sıfırla",
-    // Russian / Ukrainian
-    "отозвать",
-    "удалить",
-    "перевыпустить",
-    "сбросить",
-    "видалити",
-    "відкликати",
-    // Vietnamese
-    "thu hồi",
-    "xóa",
-    "xoá",
-    "tạo lại",
-    "đặt lại",
-  ],
-  [
-    "删除",
-    "刪除",
-    "撤销",
-    "撤銷",
-    "吊销",
-    "吊銷",
-    "移除",
-    "重新生成",
-    "重置",
-    "轮换",
-    "輪換",
-    "削除",
-    "失効",
-    "無効化",
-    "再生成",
-    "再発行",
-    "リセット",
-    "삭제",
-    "폐기",
-    "재생성",
-    "재발급",
-    "재설정",
-  ],
-);
-
-/** Replaces what it names. Everyday labels use these words too ("Ganti
- *  workspace"), so they count only beside a credential noun in the label. */
-const CREDENTIAL_REPLACE_WORDS = wordPattern(
-  [
-    "replace",
-    "roll",
-    "ganti",
-    "tukar",
-    "reemplaza[rs]?",
-    "sustitui[rs]?",
-    "substitui[rs]?",
-    "remplace[rz]?",
-    "ersetzen",
-    "sostituisci",
-    "sostituire",
-    "vervangen",
-    "zastąp",
-    "değiştir",
-    "заменить",
-    "замінити",
-    "thay",
-  ],
-  ["替换", "替換", "更换", "更換", "置き換え", "交換", "교체"],
-);
-
-const CREDENTIAL_NOUN_WORDS = wordPattern(
-  [
-    "(?:api[- ]?)?keys?",
-    "tokens?",
-    "secrets?",
-    "credentials?",
-    "kunci",
-    "kredensial",
-    "claves?",
-    "llaves?",
-    "credencial(?:es)?",
-    "chaves?",
-    "clés?",
-    "clef",
-    "jetons?",
-    "schlüssel",
-    "zugangsdaten",
-    "chiavi",
-    "chiave",
-    "credenziali",
-    "sleutels?",
-    "klucz\\p{L}*",
-    "anahtar\\p{L}*",
-    "ключ\\p{L}*",
-    "токен\\p{L}*",
-    "khóa",
-    "khoá",
-  ],
-  [
-    "密钥",
-    "秘钥",
-    "密鑰",
-    "令牌",
-    "凭据",
-    "凭证",
-    "憑證",
-    "キー",
-    "鍵",
-    "トークン",
-    "認証情報",
-    "키",
-    "토큰",
-  ],
-);
-
-/** Creates or adds what it names; a create dialog's own submit is never a confirm. */
-const CREDENTIAL_CREATE_WORDS = wordPattern(
-  [
-    "create",
-    "generate",
-    "add",
-    "new",
-    "make",
-    "buat",
-    "tambah",
-    "crea[rs]?",
-    "cria[rs]?",
-    "genera[rs]?",
-    "gera[rs]?",
-    "añadir",
-    "agregar",
-    "adicionar",
-    "nuev[oa]",
-    "nov[oa]",
-    "créer",
-    "crée[rz]?",
-    "générer",
-    "ajouter",
-    "nouvel(?:le)?",
-    "nouveau",
-    "erstellen",
-    "generieren",
-    "hinzufügen",
-    "neu(?:e[rs]?)?",
-    "creare",
-    "aggiungi",
-    "nuov[oa]",
-    "aanmaken",
-    "maken",
-    "toevoegen",
-    "nieuwe?",
-    "utwórz",
-    "wygeneruj",
-    "dodaj",
-    "now[ya]",
-    "oluştur",
-    "ekle",
-    "yeni",
-    "создать",
-    "сгенерировать",
-    "добавить",
-    "нов\\p{L}*",
-    "створити",
-    "tạo",
-    "thêm",
-    "mới",
-  ],
-  ["创建", "建立", "新建", "新增", "添加", "生成", "作成", "追加", "新規", "생성", "추가"],
-);
-
-function hasCredentialNoun(text: string): boolean {
-  return CREDENTIAL_NOUN_WORDS.test(text);
-}
-
-function isCredentialPage(
-  pageUrl: string,
-  rows: readonly WireRow[],
-  headings: readonly string[],
-): boolean {
-  return (
-    /(?:^|\/)(?:api[-_]?keys?|keys?|tokens?|credentials?)(?:\/|$)/.test(urlPathname(pageUrl)) ||
-    headings.some(hasCredentialNoun) ||
-    rows.some(
-      (entry) => /^(?:h[1-6]|heading)$/.test(entry[1]) && hasCredentialNoun(readableLabel(entry)),
-    )
-  );
-}
-
-/** Hand an existing credential mutation to the operator before dispatch. */
-export function isExistingCredentialMutationRow(
-  row: WireRow,
-  pageUrl: string,
-  rows: readonly WireRow[] = [],
-  selectedOption: string = "",
-  headings: readonly string[] = [],
-): boolean {
-  const label = `${readableLabel(row)} ${selectedOption}`;
-  const named = hasCredentialNoun(label);
-  if (
-    isCredentialPage(pageUrl, rows, headings) &&
-    /(?:^|\|)item=1(?:\||$)/.test(row[2] ?? "") &&
-    !(isRevealOrCopyRow(row) && revealedKeyCaptureDue(rows, false))
-  ) {
-    return true;
-  }
-  if (
-    !/\b(?:regenerat\w*|rotat\w*|reset|revoke|delet\w*|remove)\b/i.test(label) &&
-    !CREDENTIAL_MUTATION_WORDS.test(label) &&
-    !(named && CREDENTIAL_REPLACE_WORDS.test(label))
-  ) {
-    return false;
-  }
-  return named || isCredentialPage(pageUrl, rows, headings);
-}
-
-/** Uncovered rows a confirm dialog shows: its title, Cancel, the confirm, a close. */
-const CONFIRM_SURFACE_MAX_ROWS = 5;
-
-function labelIdentity(label: string): string {
-  return label.toLocaleLowerCase().replace(/\s+/g, " ").trim();
-}
-
-/** Whatever the page's language, a dashboard confirms a revoke or rotate with
- *  the action's own words: a new control repeating the label of the
- *  credential control the drive just pressed, standing in its place, is that
- *  action's confirmation. A create or a dialog still asking for a value is not. */
 export function isCredentialMutationConfirmRow(
   row: WireRow,
   pageUrl: string,
-  rows: readonly WireRow[],
-  pressed: { ref: string; url: string; label: string } | null | undefined,
+  pressed: { url: string; credentialRow?: boolean } | null | undefined,
 ): boolean {
-  if (pressed === undefined || pressed === null || row[0] === pressed.ref) return false;
-  if (pagePathKey(pressed.url) !== pagePathKey(pageUrl)) return false;
-  const label = readableLabel(row);
-  if (labelIdentity(label).length === 0 || labelIdentity(label) !== labelIdentity(pressed.label)) {
-    return false;
-  }
-  if (
-    (!hasCredentialNoun(label) && !isCredentialPage(pageUrl, rows, [])) ||
-    isRevealOrCopyRow(row) ||
-    isKeyCreateRow(row) ||
-    CREDENTIAL_CREATE_WORDS.test(label)
-  ) {
-    return false;
-  }
-  // What stands in its place is a dialog's handful of controls: a modal hides
-  // the page behind it, a non-modal dialog covers it. A control re-mounted on
-  // the full page (a Copy button after a re-render) is not a confirmation.
-  const open = rows.filter((entry) => rowOccluder(entry) === undefined);
-  if (open.length > CONFIRM_SURFACE_MAX_ROWS || open.some((entry) => entry[0] === pressed.ref)) {
-    return false;
-  }
-  return !open.some(
-    (entry) => isFillableRow(entry) && !isDisabledRow(entry) && rowValueMissing(entry),
+  return (
+    pressed?.credentialRow === true &&
+    pagePathKey(pressed.url) === pagePathKey(pageUrl) &&
+    /(?:^|\|)dialog=[^|]+/.test(row[2] ?? "")
   );
 }
 
@@ -4149,7 +3833,7 @@ export function driveTargetSets(
   const typeableRefs = new Set(typeable.map((candidate) => candidate.ref));
   const typeableSlugs = new Set(typeable.map((candidate) => candidate.slug));
   for (const field of waitingFields.values()) {
-    if (typeableRefs.has(field[0])) continue;
+    if (!isFillableRow(field) || isSelectRow(field) || typeableRefs.has(field[0])) continue;
     typeableRefs.add(field[0]);
     const role = ROLE_LETTERS[field[1]] ?? field[1];
     const slug = uniqueCriteriaSlug(`${field[2] ?? readableLabel(field)}_${role}`, typeableSlugs);
@@ -7103,15 +6787,8 @@ async function driveLoop(input: {
     if (
       (decision.action.kind === "click" || decision.action.kind === "select") &&
       liveRow !== undefined &&
-      (isExistingCredentialMutationRow(
-        liveRow,
-        observation.url,
-        rows,
-        decision.action.kind === "select" ? decision.action.text : "",
-        observation.semantic?.headings ?? [],
-      ) ||
-        (decision.action.kind === "click" &&
-          isCredentialMutationConfirmRow(liveRow, observation.url, rows, drive.lastActBinding)))
+      (isExistingCredentialMutationRow(liveRow) ||
+        isCredentialMutationConfirmRow(liveRow, observation.url, drive.lastActBinding))
     ) {
       return finish("stuck", {
         reason: `operator decision required before ${readableLabel(liveRow)} on ${observation.url}; no action was dispatched`,
@@ -7829,6 +7506,7 @@ async function driveLoop(input: {
           binding: decisionTargetBinding(clicked, urlBeforeClick),
           url: urlBeforeClick,
           label: readableLabel(clicked),
+          credentialRow: isExistingCredentialMutationRow(clicked),
         };
         if (isSubmitLikeRow(clicked) && !isKeyCreateOpener(clicked)) {
           drive.submittedThisDrive = true;
