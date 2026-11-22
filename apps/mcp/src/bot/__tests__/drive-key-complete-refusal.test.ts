@@ -413,6 +413,9 @@ it.each([
   { body: '<ul><li><button>Ganti workspace</button></li></ul>', guarded: false },
   { body: '<table><tr><td><button>Create key...</button></td></tr></table>', guarded: false },
   { body: '<ul><li>sk_live_••••<button>Ganti</button></li></ul>', guarded: true },
+  { body: `<ul><li>${"0123456789abcdef".repeat(4)}<button>Ganti</button></li></ul>`, guarded: true },
+  { body: '<ul><li><input readonly type="password" value="arbitrary-format"><button>Ganti</button></li></ul>', guarded: true },
+  { body: '<ul><li><input readonly type="password" value=""><button>Ganti</button></li></ul>', guarded: false },
   { body: '<ul><li><input readonly value="sk_123456789abcdefghijk"><button>Ganti</button></li></ul>', guarded: true },
   { body: '<dialog open><code>sk_123456789abcdefghijk</code><button>Copy</button></dialog>', guarded: false },
 ])("guards only credential-bearing rows: $body", async ({ body, guarded }) => {
@@ -425,3 +428,45 @@ it.each([
     expect(isExistingCredentialMutationRow(button!)).toBe(guarded);
   });
 });
+
+it("copies a key from the inline row a preceding action just showed", async () => {
+  const value = "0123456789abcdef".repeat(4);
+  await withKeyPage(
+    `<main><button type="button" onclick="document.querySelector('ul').hidden=false">Create key</button>
+      <ul hidden><li><code>${value}</code>
+        <button type="button" onclick="navigator.clipboard.writeText('${value}')">Copy</button>
+        <button type="button">Ganti</button>
+      </li></ul></main>`,
+    async (sessionId) => {
+      const page = sessionForCall(sessionId)!.browser.page!;
+      await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+      await page.evaluate(() => navigator.clipboard.writeText(""));
+      const askJev = vi.fn<DriveDependencies["askJev"]>(async (_api, _state, questions) => ({
+        attempts: 1,
+        elapsedMs: 1,
+        result: {
+          answers: Object.fromEntries(Object.entries(questions).flatMap(([name, question]) => {
+            if (question.type !== "choice") return [];
+            const keys = Object.keys(question.criteria);
+            const choice = name === "operation" ? "CLICK" : name === "CLICK_target"
+              ? keys.find((key) => question.criteria[key] === "Copy") ?? keys[0]!
+              : keys[0]!;
+            return [[name, {
+              choice, confidence: 1,
+              probabilities: Object.fromEntries(keys.map((key) => [key, key === choice ? 1 : 0])),
+            }]];
+          })),
+        },
+      }));
+      const result = await runOperateDrive(
+        { session_id: sessionId, goal: "create and copy a key", max_steps: 3, max_seconds: 10 },
+        api,
+        undefined,
+        dependencies(askJev),
+      );
+      const session = sessionForCall(sessionId)!;
+      expect(await session.browser.readClipboard(session.browser.page!)).toBe(value);
+      expect(result.reason ?? "").not.toContain("operator decision required");
+    },
+  );
+}, 15_000);

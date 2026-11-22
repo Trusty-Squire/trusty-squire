@@ -42,6 +42,15 @@ describe("findCredentialTokens / looksLikeCredentialToken (multi-cred surfacing)
       "vsk_sandbox_write_aB3kLm9PqRs",
     );
   });
+  it.each(["0123456789abcdef".repeat(4), "a".repeat(64), "0".repeat(64)])(
+    "recognizes the separator-less 64-character hex credential format: %s",
+    (hex) => {
+      expect(findCredentialTokens(`Value: ${hex}`)).toEqual([hex]);
+      expect(looksLikeCredentialToken(hex)).toBe(true);
+      expect(findCredentialTokens(hex + "f")).toEqual([]);
+    },
+  );
+
   it("accepts a multi-segment vendor key (Luma)", () => {
     expect(looksLikeCredentialToken("luma-api-4Y7FDyM2pQ8xKw")).toBe(true);
   });

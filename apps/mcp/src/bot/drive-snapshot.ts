@@ -61,6 +61,8 @@ export interface DriveSnapshotElement {
   /** HTML form owner identity, stable for one snapshot walk. */
   formId?: number;
   entityText?: string;
+  entityRef?: string;
+  entityHasPasswordValue?: boolean;
   dialogRef?: string;
   /** Covering control ref, or a region kind when the cover is not a listed control. */
   occludedBy?: string;
@@ -249,12 +251,14 @@ export function driveRowsFromSnapshot(snapshot: DriveSnapshot): SnapshotRow[] {
     if (choice !== undefined) facts.push(`q=${choice.index}/${choice.total}`);
     if (element.formId !== undefined) facts.push(`fm=${element.formId}`);
     if (
-      element.entityText !== undefined &&
-      (findCredentialTokens(element.entityText).length > 0 ||
-        /[•●⬤*]{3,}|\b[A-Za-z][A-Za-z0-9_-]*[_-][A-Za-z0-9_-]*(?:…|\.{3})/.test(element.entityText))
+      element.entityHasPasswordValue === true ||
+      (element.entityText !== undefined &&
+        (findCredentialTokens(element.entityText).length > 0 ||
+          /[•●⬤*]{3,}|\b[A-Za-z][A-Za-z0-9_-]*[_-][A-Za-z0-9_-]*(?:…|\.{3})/.test(element.entityText)))
     ) {
       facts.push("credential=1");
     }
+    if (element.entityRef !== undefined) facts.push(`entity=${element.entityRef}`);
     if (element.dialogRef !== undefined) facts.push(`dialog=${element.dialogRef}`);
     if (element.occludedBy !== undefined && element.occludedBy.length > 0) {
       facts.push(`oc=${element.occludedBy.replace(/\|/g, " ").slice(0, 40)}`);
@@ -922,6 +926,11 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
       operations,
       frameOrdinal,
       ...(entityText === undefined ? {} : { entityText }),
+      ...(entity === null ? {} : {
+        entityRef: identity(entity),
+        entityHasPasswordValue: Array.from(entity.querySelectorAll('input[readonly][type="password"]'))
+          .some((node) => visible(node) && (node as HTMLInputElement).value.length > 0),
+      }),
       ...(dialog === null ? {} : { dialogRef: identity(dialog) }),
       selector: selectorFor(element),
       ...(value === undefined ? {} : { value }),

@@ -29,13 +29,7 @@ export function isStandaloneOtpCredential(value: string): boolean {
   return /^\d{4,8}$/.test(value.trim());
 }
 
-// Collect every distinct credential-SHAPED token in a blob of page text:
-// a short prefix + separator + a long body that carries at least one digit
-// (vsk_sandbox_write_…, xai-…, sk-lw-…, re_…). Used to surface the SECOND key a
-// multi-credential service shows (e.g. VouchFlow's sandbox read alongside write)
-// that the single-key extraction policy stops short of. The `[_-]` and has-digit
-// requirements exclude the dotted-function-name false positive.
-export const CRED_TOKEN_RE = /\b[A-Za-z][A-Za-z0-9]{1,9}[_-][A-Za-z0-9][A-Za-z0-9_-]{12,}\b/g;
+export const CRED_TOKEN_RE = /\b([A-Fa-f0-9]{64})\b|\b[A-Za-z][A-Za-z0-9]{1,9}[_-][A-Za-z0-9][A-Za-z0-9_-]{12,}\b/g;
 export function findCredentialTokens(text: string): string[] {
   const out: string[] = [];
   const seen = new Set<string>();
@@ -46,10 +40,12 @@ export function findCredentialTokens(text: string): string[] {
     if (isMaskedDisplay(text.slice((m.index ?? 0) + t.length, (m.index ?? 0) + t.length + 4)))
       continue;
     if (seen.has(t)) continue;
-    if (t.length < 16) continue;
-    if (!/[0-9]/.test(t)) continue; // real keys carry digits; dictionary words don't
-    if (/^[A-Z][A-Z0-9_]*$/.test(t)) continue; // env-var name
-    if (!looksLikeCredentialToken(t)) continue;
+    if (m[1] === undefined) {
+      if (t.length < 16) continue;
+      if (!/[0-9]/.test(t)) continue;
+      if (/^[A-Z][A-Z0-9_]*$/.test(t)) continue;
+      if (!looksLikeCredentialToken(t)) continue;
+    }
     seen.add(t);
     out.push(t);
   }
@@ -57,6 +53,7 @@ export function findCredentialTokens(text: string): string[] {
 }
 
 export function looksLikeCredentialToken(token: string): boolean {
+  if (/^[A-Fa-f0-9]{64}$/.test(token)) return true;
   if (token.includes("_")) return true;
   if (/^(?:api|key|pk|re|rk|sk|xai|ghp|pat|vsk|tly)-/i.test(token)) return true;
   // <short alpha vendor prefix>-<single long alphanumeric run>: tly-xkVZ…

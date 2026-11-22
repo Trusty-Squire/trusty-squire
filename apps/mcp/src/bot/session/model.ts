@@ -198,6 +198,7 @@ export interface SessionDriveState {
   lastQuestion: DriveHandoffQuestion | null;
   lastActionKey: string | null;
   pendingCopyCapture?: { url: string; documentEpoch: string } | null;
+  justShownCredentialRows?: string[];
   lastFingerprint: string | null;
   jevCalls: number;
   staleNonWait: number;

@@ -14,6 +14,7 @@ import {
   pageHasUntriedPendingAction,
   recordUndeliveredDecision,
   recordWaitingDecision,
+  rememberJustShownCredentialRows,
   stableControlKey,
   waitingFieldsByControl,
   type WireRow,
@@ -312,6 +313,25 @@ describe("credential changes are caught by structure", () => {
     for (const label of ["Create key", "Buat API Key", "Ganti workspace", "Salin", "Reveal key"]) {
       expect(isExistingCredentialMutationRow(["@e:x", "b", label])).toBe(false);
     }
+  });
+
+  it("allows copy and reveal only on a credential row shown by a dispatched action", () => {
+    const drive = emptyDriveState("create a key", {});
+    const oldCopy: WireRow = ["@e:old-copy", "b", "Copy|credential=1|entity=@e:old"];
+    const copy: WireRow = ["@e:copy", "b", "Copy|credential=1|entity=@e:new"];
+    const reveal: WireRow = ["@e:reveal", "b", "Reveal key|credential=1|entity=@e:new"];
+    const rotate: WireRow = ["@e:rotate", "b", "Ganti|credential=1|entity=@e:new"];
+    expect(isExistingCredentialMutationRow(copy, drive.justShownCredentialRows)).toBe(true);
+    rememberJustShownCredentialRows(drive, [oldCopy], [oldCopy, copy, reveal, rotate]);
+    expect(isExistingCredentialMutationRow(copy, drive.justShownCredentialRows)).toBe(false);
+    expect(isExistingCredentialMutationRow(reveal, drive.justShownCredentialRows)).toBe(false);
+    expect(isExistingCredentialMutationRow(oldCopy, drive.justShownCredentialRows)).toBe(true);
+    expect(isExistingCredentialMutationRow(rotate, drive.justShownCredentialRows)).toBe(true);
+    expect(isExistingCredentialMutationRow(
+      ["@e:select", "s", "Copy|credential=1|entity=@e:new"], drive.justShownCredentialRows,
+    )).toBe(true);
+    rememberJustShownCredentialRows(drive, [copy], [copy]);
+    expect(drive.justShownCredentialRows).toEqual(["@e:new"]);
   });
 
   it("guards a following dialog regardless of the confirmation's words", () => {
