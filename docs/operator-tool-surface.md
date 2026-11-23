@@ -264,8 +264,15 @@ executor's identity and pending-attempt rules. After two OAuth returns to the
 login page, drive returns `no_progress` with the current options.
 
 Post-submit page notices and invalid fields remain evidence for the next
-decision rather than immediately ending the drive. A typed value that still
-differs after one retype also leaves the drive running. If a call budget ends
+decision rather than immediately ending the drive. After a submit-like click,
+the drive also compares visible static text in the containing dialog or form,
+so an inline error without an alert role can become an observation notice even
+when the page-wide text budget omits it. If submission replaces that surface,
+the comparison requires a unique replacement with the same ID, name, or ARIA
+label identity; it does not reuse another form by position. Drive traces include
+the remembered response as `submit_response` on `after_act` records and page
+notices on `step` records. A typed value that still differs after one retype
+also leaves the drive running. If a call budget ends
 with a remembered submit response, the handoff is `budget` and carries that
 response as its reason.
 
@@ -647,8 +654,15 @@ without that evidence, remain eligible. Regression coverage lives in
 Credential capture uses the selected source rather than scanning for key-shaped
 tokens. `operate_extract` without
 `capture` clicks the Copy button in an open key dialog and keeps only the value
-that click writes to the clipboard, as `api_key`; it never scans page text,
-labels or inputs. When no Copy click yields a value it stores nothing and returns
+that click writes to the clipboard, as `api_key`. When no dialog holds one, it
+clicks the Copy button nearest a key shown inline on the page, as on a list page
+that reveals the new key once its dialog closes. The shown key only locates that
+button and is never stored itself; that click must write exactly that key. When
+controls with Copy cues beside different shown keys compete, only one whose
+label names a key (such as `Copy key`) is clicked, otherwise none. Copy controls
+are recognized by English cues and common localized labels such as Indonesian
+`Salin`. When no Copy click
+yields a value it stores nothing and returns
 an `error` telling the agent to read the page with `operate_observe` and point
 `capture` at the key. A targeted `capture` (selector, role, or the clipboard
 after an `operate_click`) stores the pointed value as is. The one exception on
@@ -667,11 +681,18 @@ With a destination and an authenticated vault client, a revealed-secret row
 (`@key-value` or `secret=1`) or a successfully dispatched Copy click triggers
 extraction and storage before the next model decision. The Copy evidence
 survives a button changing its label to “Copied!” on the same document and URL.
+A click counts as a Copy dispatch by what the control is, not its wording: the
+Copy control extraction itself would use (including supported localized labels),
+or a control associated with a shown key. Only the former passes the
+credential-mutation stop. From the latter, extraction takes the clipboard only
+when it holds the shown key.
 Extraction still uses the Copy source described above; a revealed-secret row
 does not itself supply the credential value. Successful storage returns
 `complete` without waiting for the model to choose DONE. Each page state gets
 one automatic capture attempt per call; a failed extraction or storage attempt
-returns to ordinary decision-making after a fresh snapshot.
+returns to ordinary decision-making after a fresh snapshot. A new successfully
+dispatched Copy click rearms capture even when that page state was already
+attempted.
 
 DONE also attempts extraction and requires successful storage if a credential
 is extracted. It refuses completion when a visible credential cannot be

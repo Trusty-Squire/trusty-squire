@@ -87,7 +87,7 @@ import {
   type DriveSnapshot,
   type DriveSnapshotElement,
 } from "./drive-snapshot.js";
-import { evaluateBound } from "./drive-evaluate.js";
+import { DriveEvaluateTimeout, evaluateBound } from "./drive-evaluate.js";
 import { DriveRefBridge } from "./drive-ref-bridge.js";
 import type { Frame } from "playwright";
 import type { BrowserController } from "./browser.js";
@@ -120,7 +120,12 @@ import {
 } from "./captcha.js";
 import type { CaptchaSolveResult } from "./captcha.js";
 import { findCredentialTokens, isMaskedDisplay } from "./credential-shape.js";
-import { extractCredentials, storableCredentials, type ExtractResult } from "./capture/capture.js";
+import {
+  extractCredentials,
+  copySourceClick,
+  storableCredentials,
+  type ExtractResult,
+} from "./capture/capture.js";
 import {
   inventPassword,
   parsePasswordRequirements,
@@ -3616,6 +3621,115 @@ export function submitResponseText(
   return fresh.join(" ").replace(/\s+/g, " ").trim().slice(0, SUBMIT_RESPONSE_REASON_MAX);
 }
 
+/** Visible static text inside the form (or dialog) that holds a drive
+ * control: the place a site writes "alias already taken" next to a Create
+ * button without an alert role. Interactive controls are excluded; the rows
+ * already carry them. With a ref, the surface is found from that control and
+ * remembered; without one, the remembered surface is read again, since a
+ * submit may replace the button itself. Null when the surface is gone. */
+function inPageSubmittedFormText(arg: { ref: string | null }): string | null {
+  const scope = window as Window & {
+    __tsDriveRegistry?: { nodes: Map<string, Element> };
+    __tsSubmitSurface?: { element: Element; selector: string | null };
+  };
+  if (arg.ref === null) {
+    const surface = scope.__tsSubmitSurface;
+    if (surface === undefined) return null;
+    if (surface.element.isConnected) return textOf(surface.element);
+    if (surface.selector === null) return null;
+    const matches = document.querySelectorAll(surface.selector);
+    return matches.length === 1 ? textOf(matches[0]!) : null;
+  }
+  const control = scope.__tsDriveRegistry?.nodes.get(arg.ref);
+  if (control === undefined || !control.isConnected) return null;
+  let form =
+    control.closest('dialog, [role="dialog"], [role="alertdialog"], [aria-modal="true"]') ??
+    control.closest("form");
+  for (
+    let ancestor = control.parentElement, depth = 0;
+    form === null && ancestor !== null && depth < 6;
+    ancestor = ancestor.parentElement, depth++
+  ) {
+    if (ancestor.querySelector("input, textarea, select") !== null) form = ancestor;
+  }
+  if (form === null) return null;
+  const identity = ["id", "name", "aria-label", "aria-labelledby"].find(
+    (name) => (form.getAttribute(name) ?? "").trim().length > 0,
+  );
+  const selector =
+    identity === undefined
+      ? null
+      : `${form.tagName}[${identity}="${CSS.escape(form.getAttribute(identity)!)}"]`;
+  scope.__tsSubmitSurface = {
+    element: form,
+    selector:
+      selector !== null && document.querySelectorAll(selector).length === 1 ? selector : null,
+  };
+  return textOf(form);
+
+  function textOf(surface: Element): string {
+    const skip =
+      'script, style, noscript, template, button, a[href], input, textarea, select, option, [role="button"], [role="link"], [role="option"], [role="menuitem"], [role="tab"], [role="checkbox"], [role="radio"], [role="switch"], [role="combobox"], [role="textbox"]';
+    const lines: string[] = [];
+    let length = 0;
+    const walker = document.createTreeWalker(surface, NodeFilter.SHOW_TEXT);
+    for (let node = walker.nextNode(); node !== null && length < 2000; node = walker.nextNode()) {
+      const value = (node.textContent ?? "").replace(/\s+/g, " ").trim();
+      const parent = node.parentElement;
+      if (value.length === 0 || parent === null || parent.closest(skip) !== null) continue;
+      const style = getComputedStyle(parent);
+      const rect = parent.getBoundingClientRect();
+      if (style.display === "none" || style.visibility === "hidden") continue;
+      if (rect.width <= 0 || rect.height <= 0) continue;
+      let hidden = false;
+      for (
+        let ancestor: Element | null = parent;
+        ancestor !== null;
+        ancestor = ancestor.parentElement
+      ) {
+        if (Number(getComputedStyle(ancestor).opacity) <= 0.01) {
+          hidden = true;
+          break;
+        }
+      }
+      if (hidden) continue;
+      lines.push(value);
+      length += value.length;
+    }
+    return lines.join("\n");
+  }
+}
+
+/** Read the submission surface around drive ref `ref` before its click; the
+ * frame comes back so the same surface can be read again afterwards. */
+async function submittedFormText(
+  session: Session,
+  drive: SessionDriveState,
+  ref: string,
+): Promise<{ text: string; frame: Frame } | null> {
+  const page = session.browser.page;
+  const identity = drive.identities?.get(ref);
+  if (page === null || identity === undefined) return null;
+  try {
+    const frame = await resolveIdentityScope(page, ref, identity);
+    if (frame === null) return null;
+    const text = await evaluateBound(frame, inPageSubmittedFormText, { ref });
+    return text === null ? null : { text, frame };
+  } catch (error) {
+    if (error instanceof DriveEvaluateTimeout) throw error;
+    return null;
+  }
+}
+
+async function resubmittedFormText(frame: Frame): Promise<string | null> {
+  try {
+    return await evaluateBound(frame, inPageSubmittedFormText, { ref: null });
+  } catch (error) {
+    if (error instanceof DriveEvaluateTimeout) throw error;
+    return null;
+  }
+}
+
 export function pageTextFromObservation(
   observation: {
     semantic?: { title?: string; headings?: string[]; blockers?: Array<{ text: string }> };
@@ -5557,6 +5671,7 @@ async function captureDriveSession(
     drive.captchaDeliveredProgressKey = null;
     drive.submitBeforeText = null;
     drive.submitExcludeLabels = [];
+    drive.submitFormResponse = null;
     drive.lastSubmitResponse = null;
     drive.inFlightStartedAt = null;
   }
@@ -6327,7 +6442,10 @@ async function driveLoop(input: {
       submitResponseText(
         drive.submitBeforeText,
         observation.dom ?? "",
-        observationNoticeTexts(observation),
+        [
+          ...observationNoticeTexts(observation),
+          ...(typeof drive.submitFormResponse === "string" ? [drive.submitFormResponse] : []),
+        ],
         drive.submitExcludeLabels ?? [],
       ) ?? null;
     if (typeof drive.lastSubmitResponse === "string") {
@@ -6359,6 +6477,7 @@ async function driveLoop(input: {
     if (pagePathKey(observation.url) !== priorPath) {
       drive.submitBeforeText = null;
       drive.submitExcludeLabels = [];
+      drive.submitFormResponse = null;
       drive.lastSubmitResponse = null;
     }
     drive.pendingRevealScan = false;
@@ -6931,9 +7050,18 @@ async function driveLoop(input: {
       automaticDecisionRefused = true;
       return "continue";
     }
+    // The one Copy-source decision for this click (see copySourceClick). Only a
+    // confirmed Copy source — Kenari's "Salin" on a key row, Zro's "Copied" —
+    // passes the credential-mutation stop below: a control that merely sits
+    // beside the key may be its Revoke.
+    const copyClick =
+      decision.action.kind === "click" && liveRow !== undefined && session.browser.page !== null
+        ? await copySourceClick(session.browser.page, decision.actionKey)
+        : null;
     if (
       (decision.action.kind === "click" || decision.action.kind === "select") &&
       liveRow !== undefined &&
+      copyClick !== "source" &&
       (isExistingCredentialMutationRow(liveRow) ||
         isCredentialMutationConfirmRow(liveRow, observation.url, drive.lastActBinding))
     ) {
@@ -7195,9 +7323,15 @@ async function driveLoop(input: {
       decision.action.kind === "click" || decision.action.kind === "oauth_login"
         ? findRow(rows, decision.actionKey, observation.url)
         : undefined;
-    if (clickedBefore !== undefined && isRevealOrCopyRow(clickedBefore)) {
+    const copyDispatched = copyClick !== null && clickedBefore !== undefined;
+    if (clickedBefore !== undefined && (isRevealOrCopyRow(clickedBefore) || copyDispatched)) {
       drive.pendingRevealScan = true;
     }
+    const formTextBeforeClick =
+      shouldInspectSubmitResponse(decision.action, clickedBefore) &&
+      !isKeyCreateOpener(clickedBefore)
+        ? await submittedFormText(session, drive, decision.actionKey)
+        : null;
     // Set when this action's OAuth hand-off came back to where it started, so
     // the trail can name the bounce instead of calling it a fresh page.
     let oauthBouncedThisAction = false;
@@ -7243,13 +7377,9 @@ async function driveLoop(input: {
     };
     const oauthPageBefore = decision.action.kind === "oauth_login" ? session.browser.page : null;
     if (oauthPageBefore !== null) session.browser.armOpenedTabAdoption();
-    drive.pendingCopyCapture =
-      decision.action.kind === "click" &&
-      clickedBefore !== undefined &&
-      isRevealOrCopyRow(clickedBefore) &&
-      /^copy\b/i.test(readableLabel(clickedBefore))
-        ? { url: urlBeforeClick, documentEpoch: beforeEpoch }
-        : null;
+    drive.pendingCopyCapture = copyDispatched
+      ? { url: urlBeforeClick, documentEpoch: beforeEpoch }
+      : null;
     let acted: DriveActResult;
     try {
       acted = await withinOAuthCallerDeadline(
@@ -7509,6 +7639,7 @@ async function driveLoop(input: {
           captchaAfterSubmit = true;
           drive.submitBeforeText = textBeforeClick;
           drive.submitExcludeLabels = excludeBeforeClick;
+          drive.submitFormResponse = null;
         }
       }
       const snap = await withinOAuthCallerDeadline(
@@ -7553,6 +7684,31 @@ async function driveLoop(input: {
           observationNoticeTexts(observation),
         );
         if (fresh !== undefined && isPageLevelSiteAnswer(fresh)) drive.lastSubmitResponse = fresh;
+        // The page-wide text is capped and an inline form error need not be an
+        // alert, so read the submitted form itself for what appeared in it.
+        const formTextAfterClick =
+          formTextBeforeClick === null
+            ? null
+            : await resubmittedFormText(formTextBeforeClick.frame);
+        const formResponse =
+          formTextBeforeClick === null || formTextAfterClick === null
+            ? undefined
+            : submitResponseText(
+                formTextBeforeClick.text,
+                formTextAfterClick,
+                [],
+                excludeBeforeClick,
+              );
+        if (formResponse !== undefined) {
+          drive.submitFormResponse = formResponse;
+          const last = drive.lastSubmitResponse ?? "";
+          if (!last.includes(formResponse)) {
+            drive.lastSubmitResponse = `${last} ${formResponse}`
+              .trim()
+              .slice(0, SUBMIT_RESPONSE_REASON_MAX);
+          }
+          observation = attachObservationNotice(observation, formResponse);
+        }
         const afterFingerprint =
           session.browser.page === null ? "" : await pageFingerprintOf(session.browser.page);
         const rerendered =
@@ -7703,6 +7859,7 @@ async function driveLoop(input: {
       result: "ok",
       url_after: observation.url,
       fingerprint_after: nextFingerprint,
+      submit_response: drive.lastSubmitResponse ?? null,
       ...(driveTraceEnabled()
         ? {
             native_selects_after: await withinOAuthCallerDeadline(
@@ -7995,7 +8152,7 @@ async function driveLoop(input: {
         drive.filledRefs,
         observation.semantic?.headings ?? [],
       );
-      if (!revealedKeyCaptureAttempts.has(captureKey)) {
+      if (drive.pendingCopyCapture != null || !revealedKeyCaptureAttempts.has(captureKey)) {
         revealedKeyCaptureAttempts.add(captureKey);
         drive.pendingCopyCapture = null;
         const extracted = await extractCredentials(sessionId).catch(() => null);
@@ -8596,6 +8753,9 @@ async function driveLoop(input: {
       url_before: observation.url,
       fingerprint_before: fingerprint,
       rows,
+      // Non-interactive page answers (alerts, a submitted form's inline error)
+      // that the rows alone cannot show.
+      notices: observationNoticeTexts(observation),
       question_count: questionCount,
       state_bytes: stateBytes,
       operation_criteria:
