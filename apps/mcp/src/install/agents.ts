@@ -77,6 +77,7 @@ export interface AgentDefinition {
 }
 
 export interface WriteConfigInput {
+  configPath?: string;
   command: string;
   args: string[];
   env: Record<string, string>;
@@ -298,7 +299,7 @@ const claudeCode: AgentDefinition = {
   detect: async () => exists(path.join(home(), ".claude")),
   readConfigEnv: async () =>
     readMappedServerEnv(claudeCode.config_path(), parseJsonConfig, "mcpServers", "env"),
-  writeConfig: async (input) => mergeMcpServersJson(claudeCode.config_path(), input),
+  writeConfig: async (input) => mergeMcpServersJson(input.configPath ?? claudeCode.config_path(), input),
 };
 
 // Claude Code matches permission rules on `mcp__<mcpServers-key>__<tool>`,
@@ -344,7 +345,7 @@ const cursor: AgentDefinition = {
   detect: async () => exists(path.join(home(), ".cursor")),
   readConfigEnv: async () =>
     readMappedServerEnv(cursor.config_path(), parseJsonConfig, "mcpServers", "env"),
-  writeConfig: async (input) => mergeMcpServersJson(cursor.config_path(), input),
+  writeConfig: async (input) => mergeMcpServersJson(input.configPath ?? cursor.config_path(), input),
 };
 
 // ── goose ───────────────────────────────────────────────────
@@ -366,7 +367,7 @@ const goose: AgentDefinition = {
   readConfigEnv: async () =>
     readMappedServerEnv(goose.config_path(), parseYamlConfig, "extensions", "envs"),
   writeConfig: async (input) => {
-    const filePath = goose.config_path();
+    const filePath = input.configPath ?? goose.config_path();
     let data: Record<string, unknown> = {};
     try {
       const raw = await fs.readFile(filePath, "utf8");
@@ -434,7 +435,7 @@ const hermes: AgentDefinition = {
   readConfigEnv: async () =>
     readMappedServerEnv(hermes.config_path(), parseYamlConfig, "mcp_servers", "env"),
   writeConfig: async (input) => {
-    const filePath = hermes.config_path();
+    const filePath = input.configPath ?? hermes.config_path();
     let data: Record<string, unknown> = {};
     try {
       const raw = await fs.readFile(filePath, "utf8");
@@ -491,7 +492,7 @@ const cline: AgentDefinition = {
   detect: async () => exists(path.join(vscodeGlobalStorage(), "saoudrizwan.claude-dev")),
   readConfigEnv: async () =>
     readMappedServerEnv(cline.config_path(), parseJsonConfig, "mcpServers", "env"),
-  writeConfig: async (input) => mergeMcpServersJson(cline.config_path(), input),
+  writeConfig: async (input) => mergeMcpServersJson(input.configPath ?? cline.config_path(), input),
 };
 
 // ── continue ────────────────────────────────────────────────
@@ -516,7 +517,7 @@ const continueAgent: AgentDefinition = {
     );
   },
   writeConfig: async (input) => {
-    const filePath = continueAgent.config_path();
+    const filePath = input.configPath ?? continueAgent.config_path();
     let data: Record<string, unknown> = {};
     try {
       const raw = await fs.readFile(filePath, "utf8");
@@ -563,7 +564,7 @@ const codex: AgentDefinition = {
   readConfigEnv: async () =>
     readMappedServerEnv(codex.config_path(), parseTomlConfig, "mcp_servers", "env"),
   writeConfig: async (input) => {
-    const filePath = codex.config_path();
+    const filePath = input.configPath ?? codex.config_path();
     let data: Record<string, unknown> = {};
     try {
       const raw = await fs.readFile(filePath, "utf8");
@@ -723,7 +724,7 @@ const opencode: AgentDefinition = {
     executableOnPath("opencode"),
   readConfigEnv: async () =>
     readMappedServerEnv(opencode.config_path(), parseJsoncConfig, "mcp", "environment"),
-  writeConfig: async (input) => writeOpenCodeConfig(opencode.config_path(), input),
+  writeConfig: async (input) => writeOpenCodeConfig(input.configPath ?? opencode.config_path(), input),
 };
 
 export const AGENTS: Record<AgentTarget, AgentDefinition> = {

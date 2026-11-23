@@ -539,6 +539,16 @@ async function connect(args: Argv, argv: readonly string[] = []): Promise<void> 
           done: "Browser service ready",
           task: () => installBrokerService(canonicalProfileDir),
         });
+        if (!args.skipBrowser) {
+          const live = await liveBrokerCeremony(canonicalProfileDir, {
+            target, configPath: agent.config_path(),
+            profileDir: canonicalProfileDir, agentIdentity: context.agentIdentity,
+          });
+          if (live !== null) {
+            reportCeremonyHandedOff(args, agent, canonicalProfileDir, wantInteractive, live, placed);
+            return;
+          }
+        }
         // An install that is already connected needs no browser at all. Decide
         // that BEFORE any browser work, or a machine whose browser is busy with
         // other work fails an install it never had to perform.
@@ -812,16 +822,6 @@ async function runConnectInstall(
   wantInteractive: boolean,
   placed: BrowserPlacementSlot,
 ): Promise<void> {
-  // A sign-in the browser service is already running is the one this connect
-  // wants: hand back its window instead of opening a competing tab on the same
-  // display, and before a re-login clear could disturb it.
-  if (!args.skipBrowser) {
-    const live = await liveBrokerCeremony(profileDir);
-    if (live !== null) {
-      reportCeremonyHandedOff(args, agent, profileDir, wantInteractive, live, placed);
-      return;
-    }
-  }
   ui.step(
     "Opening the Trusty Squire install page in a browser. " +
       "The page walks you through signing in with Google and (optionally) GitHub.",
@@ -918,7 +918,7 @@ async function runConnectInstall(
   const claim = await runInstallClaim(args.apiBase, target, baseSession, args.skipBrowser, {
     applyServerPrefs: !wantInteractive,
     profileDir,
-    agentConfig: { target, profileDir, agentIdentity },
+    agentConfig: { target, configPath: agent.config_path(), profileDir, agentIdentity },
     ...(twoCaptchaKey !== undefined && twoCaptchaKey.length > 0 ? { twoCaptchaKey } : {}),
     placed,
     ...(args.forceReloginProvider === undefined
@@ -1038,11 +1038,12 @@ async function runConnectInstall(
 // an already-connected machine must still settle without it.
 async function liveBrokerCeremony(
   profileDir: string,
+  agentConfig: AgentConfigPlan,
 ): Promise<Extract<CeremonyView, { state: "live" }> | null> {
   // No listening broker, no live ceremony: do not wait for one to start.
   if (!(await liveUnixSocket(resolveBrokerSocket(profileDir)))) return null;
   try {
-    const view = await requestBrokerCeremony(profileDir, { action: "get" });
+    const view = await requestBrokerCeremony(profileDir, { action: "join", agentConfigs: [agentConfig] });
     // From this connect's side, a ceremony that was already running is reused.
     return view.state === "live" ? { ...view, reused: true } : null;
   } catch (err) {

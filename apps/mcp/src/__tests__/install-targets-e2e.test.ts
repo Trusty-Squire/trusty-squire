@@ -262,7 +262,7 @@ async function emulateBrokerCeremony(
   profileDir: string,
   request: CeremonyRequest,
 ): Promise<CeremonyView> {
-  if (request.action === "get") return { state: "none" };
+  if (request.action !== "start") return { state: "none" };
   const status = await installPoll(request.apiBase, request.setupCode);
   if (status.status === "claimed" && status.agent_session_token !== undefined) {
     await finalizeCeremonyClaim(
@@ -466,9 +466,13 @@ describe("connect --target=<agent> writes a valid config", () => {
 
   // The incident had two connects 47s apart, each with its own token and tab on
   // the same display. A connect while a ceremony is live joins it instead.
-  it("returns the live ceremony's window to a second connect without a new pairing", async () => {
+  it.each([false, true])("joins a live ceremony before preflight (forceRelogin=%s)", async (forceRelogin) => {
+    const storage = await openSessionStorage();
+    await storage.write({ api_base_url: "https://test.invalid", saved_at: "t",
+      account_id: "acct_test", agent_session_token: "agent-token" });
+    vi.mocked(detectProviderSessionsFromProfile).mockClear();
     vi.mocked(requestBrokerCeremony).mockImplementation(async (_profileDir, request) => {
-      if (request.action === "get") {
+      if (request.action === "join") {
         return {
           state: "live",
           confirm_url: "https://test.invalid/install?token=first_code",
@@ -493,11 +497,15 @@ describe("connect --target=<agent> writes a valid config", () => {
         target: "hermes",
         apiBase: "https://test.invalid",
         skipBrowser: false,
-        forceRelogin: true,
+        forceRelogin,
         noRegistry: false,
         noInteractive: true,
         json: true,
       });
+      expect(requestBrokerCeremony).toHaveBeenCalledWith(expect.any(String), {
+        action: "join", agentConfigs: [expect.objectContaining({ target: "hermes", configPath: AGENTS.hermes.config_path() })],
+      });
+      expect(detectProviderSessionsFromProfile).not.toHaveBeenCalled();
       expect(installInitiate).not.toHaveBeenCalled();
       expect(issueMachineToken).not.toHaveBeenCalled();
       expect(error.mock.calls.flat().join("\n")).toContain(TUNNEL_URL);
@@ -545,7 +553,7 @@ describe("connect --target=<agent> writes a valid config", () => {
   // ceremony; its refusal of the read must not fail an ordinary connect.
   it("treats an outdated broker's ceremony read as no live ceremony", async () => {
     vi.mocked(requestBrokerCeremony).mockImplementation(async (profileDir, request) => {
-      if (request.action === "get") throw new BrokerRefusal("broker_outdated", "old broker");
+      if (request.action === "join") throw new BrokerRefusal("broker_outdated", "old broker");
       return await emulateBrokerCeremony(profileDir, request);
     });
     await connect({

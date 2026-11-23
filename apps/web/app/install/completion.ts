@@ -41,30 +41,22 @@ export function readInstallCompletionProviders(token: string): InstallCompletion
   }
 }
 
-// Finish is recorded on the server, same-origin, and the broker that owns the
-// sign-in window reads it from there. A loopback call to the local machine
-// would need Chrome's Local Network Access permission, which nobody is asked
-// for, so the server is the only channel. The page moves to /install/done at
-// once; the record is retried briefly in the background so one dropped
-// request does not leave the window open until the pairing deadline.
-export function finishInstallCeremony(
+export async function finishInstallCeremony(
   token: string,
   navigateDone: () => void,
   post: (path: string) => Promise<unknown>,
   sleep: (ms: number) => Promise<void> = (ms) => new Promise((r) => setTimeout(r, ms)),
 ): Promise<boolean> {
   const path = `/v1/mcp/install/${encodeURIComponent(token)}/finish`;
-  const recorded = (async () => {
-    for (let attempt = 1; attempt <= FINISH_ATTEMPTS; attempt += 1) {
-      try {
-        await post(path);
-        return true;
-      } catch {
-        if (attempt < FINISH_ATTEMPTS) await sleep(FINISH_RETRY_MS);
-      }
+  for (let attempt = 1; attempt <= FINISH_ATTEMPTS; attempt += 1) {
+    try {
+      await post(path);
+    } catch {
+      if (attempt < FINISH_ATTEMPTS) await sleep(FINISH_RETRY_MS);
+      continue;
     }
-    return false;
-  })();
-  navigateDone();
-  return recorded;
+    navigateDone();
+    return true;
+  }
+  return false;
 }

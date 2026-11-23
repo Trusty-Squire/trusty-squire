@@ -20,14 +20,15 @@ describe("install Finish", () => {
 
     const recorded = finishInstallCeremony("set up/1", navigateDone, post);
 
-    expect(navigateDone).toHaveBeenCalledOnce();
+    expect(navigateDone).not.toHaveBeenCalled();
     await expect(recorded).resolves.toBe(true);
+    expect(navigateDone).toHaveBeenCalledOnce();
     expect(post).toHaveBeenCalledWith("/v1/mcp/install/set%20up%2F1/finish");
     // A relative path is same-origin: no loopback or cross-network request.
     expect(post.mock.calls[0]![0]).toMatch(/^\/v1\//);
   });
 
-  it("retries a dropped Finish record and still navigates first", async () => {
+  it("retries a dropped Finish record before navigating", async () => {
     const post = vi
       .fn()
       .mockRejectedValueOnce(new TypeError("Failed to fetch"))
@@ -37,16 +38,22 @@ describe("install Finish", () => {
 
     const recorded = finishInstallCeremony("setup", navigateDone, post, sleep);
 
-    expect(navigateDone).toHaveBeenCalledOnce();
+    expect(navigateDone).not.toHaveBeenCalled();
     await expect(recorded).resolves.toBe(true);
+    expect(navigateDone).toHaveBeenCalledOnce();
     expect(post).toHaveBeenCalledTimes(2);
   });
 
   it("gives up after bounded attempts without throwing", async () => {
     const post = vi.fn().mockRejectedValue(new TypeError("Failed to fetch"));
-    const recorded = finishInstallCeremony("setup", vi.fn(), post, async () => undefined);
+    const navigateDone = vi.fn();
+    const recorded = finishInstallCeremony("setup", navigateDone, post, async () => undefined);
     await expect(recorded).resolves.toBe(false);
     expect(post).toHaveBeenCalledTimes(3);
+    expect(navigateDone).not.toHaveBeenCalled();
+    post.mockResolvedValueOnce({ ok: true });
+    await expect(finishInstallCeremony("setup", navigateDone, post)).resolves.toBe(true);
+    expect(navigateDone).toHaveBeenCalledOnce();
   });
 
   it("retains earned Google completion across a later GitHub OAuth return", () => {

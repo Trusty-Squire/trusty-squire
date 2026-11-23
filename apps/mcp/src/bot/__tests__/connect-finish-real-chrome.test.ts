@@ -1,131 +1,25 @@
-// Required-tier gate for the connect sign-in Finish (owner decision, 2026-11-22):
-// a PR that breaks Finish must not merge. This is the one real-browser test that
-// deliberately runs on every pull request (see REAL_BROWSER_FILES in
-// vitest.tiers.ts), so it stays small: one real Chrome page, no noVNC helpers.
-//
-// What is real: Google Chrome (system `channel: "chrome"`, preinstalled on the
-// CI runner), the person's clicks on the install page, the daemon's ceremony
-// host, its `/status` reader, and the claim's on-disk landing (session file,
-// broker account binding, host-agent MCP config) in a sandboxed HOME. The
-// install routes are served here following the API's install contract
-// (`/claim`, `/status` delivering the token once then reporting `delivered`,
-// `/finish` refusing before the claim); apps/api's own suite pins that
-// contract against the real route, and apps/web's suite pins the wizard's
-// same-origin Finish POST. The noVNC exposure is a recorder, because the
-// helpers are not installed on CI; its `stop` is the window closing.
-//
-// Oracle: the owner's reported failure — "when I pressed finish at signup, the
-// signup sequence never finishes and the novnc page does not close" — with no
-// connect process running. A broken Finish leaves the page open, the exposure
-// running, or no session on disk.
-
-import { createServer, type IncomingMessage, type Server } from "node:http";
-import type { AddressInfo } from "node:net";
+import { createServer } from "node:net";
+import { createRequire } from "node:module";
+import { spawn, type ChildProcess } from "node:child_process";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { chromium, type Browser } from "playwright";
 import { parse as parseToml } from "smol-toml";
 import { openSessionStorage } from "../../session.js";
-import {
-  BrokerCeremonyHost,
-  pollInstallStatus,
-  type CeremonyStartRequest,
-  type CeremonyTab,
-} from "../broker/ceremony.js";
-import {
-  finalizeCeremonyClaim,
-  writeCeremonyAgentConfigs,
-} from "../../install/ceremony-finalize.js";
+import { BrokerCeremonyHost, pollInstallStatus, type CeremonyTab } from "../broker/ceremony.js";
+import { finalizeCeremonyClaim, writeCeremonyAgentConfigs } from "../../install/ceremony-finalize.js";
 
-const SETUP_CODE = "finish-proof-code";
 const TEST_ACCOUNT = "01TESTACCOUNTFINISHPROOF00";
-const AGENT_TOKEN = "ts_agent_finish_proof";
-
-interface InstallRecord {
-  status: "pending" | "claimed" | "delivered";
-  finished: boolean;
-}
-
-// The install page the bot's Chrome shows: sign in, then Finish. Finish is a
-// same-origin POST to /finish, then the done page — the wizard's shape.
-function installPage(code: string): string {
-  return `<!doctype html><html><body>
-<h1>Set up Trusty Squire</h1>
-<button id="sign-in">Continue with Google</button>
-<button id="finish" hidden>Finish</button>
-<script>
-const code = ${JSON.stringify(code)};
-document.getElementById("sign-in").onclick = async () => {
-  const res = await fetch("/v1/mcp/install/" + encodeURIComponent(code) + "/claim", { method: "POST" });
-  if (res.ok) document.getElementById("finish").hidden = false;
-};
-document.getElementById("finish").onclick = async () => {
-  await fetch("/v1/mcp/install/" + encodeURIComponent(code) + "/finish", { method: "POST" });
-  location.assign("/install/done");
-};
-</script></body></html>`;
-}
-
-function installServer(record: InstallRecord): Server {
-  return createServer((req: IncomingMessage, res) => {
-    const url = new URL(req.url ?? "/", "http://localhost");
-    const send = (status: number, body: unknown) => {
-      res.writeHead(status, { "content-type": "application/json" });
-      res.end(JSON.stringify(body));
-    };
-    const route = url.pathname.match(/^\/v1\/mcp\/install\/([^/]+)\/(claim|status|finish)$/);
-    if (req.method === "GET" && url.pathname === "/install") {
-      res.writeHead(200, { "content-type": "text/html" });
-      res.end(installPage(url.searchParams.get("token") ?? ""));
-      return;
-    }
-    if (req.method === "GET" && url.pathname === "/install/done") {
-      res.writeHead(200, { "content-type": "text/html" });
-      res.end("<h1>Connected</h1>");
-      return;
-    }
-    if (route === null || decodeURIComponent(route[1]!) !== SETUP_CODE) {
-      send(404, { error: "not_found" });
-      return;
-    }
-    const action = route[2];
-    if (action === "claim" && req.method === "POST") {
-      if (record.status !== "pending") return send(409, { error: "not_pending" });
-      record.status = "claimed";
-      return send(200, { ok: true, account_id: TEST_ACCOUNT });
-    }
-    if (action === "finish" && req.method === "POST") {
-      if (record.status === "pending") return send(409, { error: "not_claimed" });
-      record.finished = true;
-      return send(200, { ok: true });
-    }
-    if (action === "status" && req.method === "GET") {
-      if (record.status === "pending") return send(200, { status: "pending" });
-      if (record.status === "claimed") {
-        // The raw token is delivered exactly once.
-        record.status = "delivered";
-        return send(200, {
-          status: "claimed",
-          agent_session_token: AGENT_TOKEN,
-          account_id: TEST_ACCOUNT,
-          install_preferences: { registry_enabled: false, consent_operator_inbox_otp: true },
-          finished: record.finished,
-        });
-      }
-      return send(200, {
-        status: "delivered",
-        account_id: TEST_ACCOUNT,
-        finished: record.finished,
-      });
-    }
-    send(405, { error: "method_not_allowed" });
-  });
-}
-
+const SESSION_SECRET = "finish-proof-session-secret";
+const webDir = fileURLToPath(new URL("../../../../web/", import.meta.url));
+const apiDir = fileURLToPath(new URL("../../../../api/src/", import.meta.url));
 let browser: Browser | undefined;
-let server: Server | undefined;
+let web: ChildProcess | undefined;
+let closeApi: (() => Promise<void>) | undefined;
+let host: BrokerCeremonyHost | undefined;
 let home: string;
 
 beforeEach(async () => {
@@ -135,15 +29,23 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  vi.unstubAllEnvs();
-  await browser?.close().catch(() => undefined);
+  await host?.shutdown();
+  host = undefined;
+  await browser?.close();
   browser = undefined;
-  await new Promise<void>((resolve) => (server ? server.close(() => resolve()) : resolve()));
-  server = undefined;
+  if (web !== undefined && web.exitCode === null) {
+    const exited = new Promise<void>((resolve) => web!.once("exit", () => resolve()));
+    web.kill("SIGTERM");
+    await exited;
+  }
+  web = undefined;
+  await closeApi?.();
+  closeApi = undefined;
+  vi.unstubAllEnvs();
   await rm(home, { recursive: true, force: true });
 });
 
-async function waitFor(predicate: () => boolean | Promise<boolean>, timeoutMs = 15_000) {
+async function waitFor(predicate: () => boolean | Promise<boolean>, timeoutMs = 30_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (await predicate()) return;
@@ -152,110 +54,109 @@ async function waitFor(predicate: () => boolean | Promise<boolean>, timeoutMs = 
   throw new Error("condition not reached in time");
 }
 
-describe("connect sign-in Finish in a real Chrome", () => {
-  it(
-    "saves the session on sign-in and closes the sign-in window when Finish is pressed",
-    { timeout: 60_000 },
-    async () => {
-      const record: InstallRecord = { status: "pending", finished: false };
-      server = installServer(record);
-      await new Promise<void>((resolve) => server!.listen(0, "127.0.0.1", resolve));
-      const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-      const profileDir = join(home, ".trusty-squire", "chrome-profile");
+async function unusedPort(): Promise<number> {
+  const socket = createServer();
+  await new Promise<void>((resolve) => socket.listen(0, "127.0.0.1", resolve));
+  const address = socket.address();
+  if (address === null || typeof address === "string") throw new Error("missing address");
+  await new Promise<void>((resolve) => socket.close(() => resolve()));
+  return address.port;
+}
 
-      browser = await chromium.launch({ channel: "chrome", headless: true });
-      const context = await browser.newContext();
-      const openTab = async (url: string): Promise<CeremonyTab> => {
-        const page = await context.newPage();
-        await page.goto(url);
-        return {
-          command: async (name, args) =>
-            name === "operate_ceremony_window" && args.action === "show_phone"
-              ? { left: 0, top: 0, width: 400, height: 800 }
-              : {},
-          close: async () => await page.close(),
-        };
-      };
-      const stopExposure = vi.fn(async () => undefined);
-      const host = new BrokerCeremonyHost({
-        profileDir,
-        openTab,
-        logoutProviders: async () => undefined,
-        expose: async ({ windowControl }) => {
-          await windowControl.showPhone();
-          return { kind: "exposed", url: "https://novnc.invalid/#p=pw", stop: stopExposure };
-        },
-        pollStatus: pollInstallStatus,
-        finalize: finalizeCeremonyClaim,
-        writeAgentConfigs: writeCeremonyAgentConfigs,
-        detectProviders: async () => ["google"],
-        log: () => undefined,
-        pollIntervalMs: 100,
-      });
-      const request: CeremonyStartRequest = {
-        action: "start",
-        confirmUrl: `${origin}/install?token=${SETUP_CODE}`,
-        setupCode: SETUP_CODE,
-        apiBase: origin,
-        ttlMs: 60_000,
-        callerHasDisplay: false,
-        finalize: {
-          baseSession: {
-            api_base_url: origin,
-            saved_at: new Date().toISOString(),
-            machine_token: "tsm_finish_proof",
-          },
-          applyServerPrefs: true,
-          agentConfigs: [{ target: "codex", agentIdentity: "codex", profileDir }],
-        },
-      };
-
-      // connect's request returns as soon as the window is up; nothing waits on it.
-      const view = await host.call(request);
-      expect(view).toMatchObject({
-        state: "live",
-        browser_location: { kind: "virtual", url: "https://novnc.invalid/#p=pw" },
-      });
-      const installTabs = () => context.pages().filter((p) => p.url().includes("/install?token="));
-      expect(installTabs()).toHaveLength(1);
-
-      // A second connect while it is live gets the same window, not a second tab.
-      await expect(
-        host.call({ ...request, setupCode: "second-connect-code" }),
-      ).resolves.toMatchObject({ state: "live", confirm_url: request.confirmUrl, reused: true });
-      expect(installTabs()).toHaveLength(1);
-
-      // The person signs in. The claim lands on disk while the window stays open
-      // for the optional GitHub step.
-      const page = installTabs()[0]!;
-      await page.click("#sign-in");
-      await waitFor(async () => (await (await openSessionStorage()).read(TEST_ACCOUNT)) !== null);
-      expect(page.isClosed()).toBe(false);
-      expect(stopExposure).not.toHaveBeenCalled();
-      expect(host.current()).toMatchObject({ state: "live" });
-
-      // Finish.
-      await page.click("#finish");
-      await waitFor(() => host.current().state === "none");
-      expect(record.finished).toBe(true);
-      expect(stopExposure).toHaveBeenCalledTimes(1);
-      expect(page.isClosed()).toBe(true);
-      expect(installTabs()).toHaveLength(0);
-
-      // What the MCP server will read back: the session, and the host agent's
-      // config pinned to the claimed account.
-      expect(await (await openSessionStorage()).read(TEST_ACCOUNT)).toMatchObject({
-        account_id: TEST_ACCOUNT,
-        agent_session_token: AGENT_TOKEN,
-        machine_token: "tsm_finish_proof",
-      });
-      const codex = parseToml(await readFile(join(home, ".codex", "config.toml"), "utf8")) as {
-        mcp_servers?: { squire?: { env?: Record<string, string> } };
-      };
-      expect(codex.mcp_servers?.squire?.env).toMatchObject({
-        TRUSTY_SQUIRE_ACCOUNT_ID: TEST_ACCOUNT,
-        TRUSTY_SQUIRE_PROFILE_DIR: profileDir,
-      });
-    },
-  );
+describe("production install Finish in real Chrome", () => {
+  it("saves the claimed session and closes sign-in after the production Finish button", {
+    timeout: 180_000,
+  }, async () => {
+    const { buildServer } = await import(`${apiDir}server.ts`);
+    const { buildInMemoryDeps } = await import(`${apiDir}services/deps.ts`);
+    const { issueSession, signSessionJwt, SESSION_COOKIE_NAME } = await import(`${apiDir}auth/session.ts`);
+    const deps = buildInMemoryDeps({ sessionSecret: SESSION_SECRET });
+    await deps.oauthIdentityStore.create({
+      account_id: TEST_ACCOUNT, provider: "google", provider_user_id: "finish-proof-google",
+      email: "finish@example.test",
+    });
+    const { record, jwt } = issueSession({
+      account_id: TEST_ACCOUNT, ip: null, user_agent: null, now: new Date(),
+    });
+    await deps.sessionStore.insert(record);
+    const app = await buildServer({ deps });
+    closeApi = () => app.close();
+    const apiOrigin = await app.listen({ port: 0, host: "127.0.0.1" });
+    const port = await unusedPort();
+    const origin = `http://127.0.0.1:${port}`;
+    const requireWeb = createRequire(join(webDir, "package.json"));
+    let logs = "";
+    web = spawn(process.execPath, [requireWeb.resolve("next/dist/bin/next"), "dev", "--hostname", "127.0.0.1", "--port", String(port)], {
+      cwd: webDir,
+      env: { ...process.env, NODE_ENV: "development", API_PROXY_TARGET: apiOrigin, NEXT_TELEMETRY_DISABLED: "1" },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    web.stdout!.on("data", (chunk) => { logs += String(chunk); });
+    web.stderr!.on("data", (chunk) => { logs += String(chunk); });
+    await waitFor(async () => {
+      if (web!.exitCode !== null) throw new Error(logs);
+      return fetch(`${origin}/install`).then((res) => res.ok).catch(() => false);
+    }, 120_000);
+    const initiate = await fetch(`${apiOrigin}/v1/mcp/install/initiate`, { method: "POST" });
+    expect(initiate.status).toBe(201);
+    const { setup_code: code } = await initiate.json() as { setup_code: string };
+    const profileDir = join(home, ".trusty-squire", "chrome-profile");
+    browser = await chromium.launch({ channel: "chrome", headless: true });
+    const context = await browser.newContext();
+    await context.addCookies([{
+      name: SESSION_COOKIE_NAME, value: signSessionJwt(jwt, SESSION_SECRET), url: origin,
+    }]);
+    const openTab = async (url: string): Promise<CeremonyTab> => {
+      const page = await context.newPage();
+      await page.goto(url);
+      return { command: async () => ({}), close: async () => page.close() };
+    };
+    const stopExposure = vi.fn(async () => undefined);
+    host = new BrokerCeremonyHost({
+      profileDir, openTab, logoutProviders: async () => undefined,
+      expose: async () => ({ kind: "exposed", url: "https://novnc.invalid/#p=pw", stop: stopExposure }),
+      pollStatus: pollInstallStatus, finalize: finalizeCeremonyClaim,
+      writeAgentConfigs: writeCeremonyAgentConfigs, detectProviders: async () => ["google"],
+      log: () => undefined, pollIntervalMs: 100,
+    });
+    const confirmUrl = `${origin}/install?token=${code}&claim=1`;
+    await host.call({
+      action: "start", confirmUrl, setupCode: code, apiBase: apiOrigin,
+      ttlMs: 120_000, callerHasDisplay: false,
+      finalize: {
+        baseSession: { api_base_url: apiOrigin, saved_at: new Date().toISOString(), machine_token: "tsm_finish_proof" },
+        applyServerPrefs: true,
+        agentConfigs: [{ target: "codex", profileDir, agentIdentity: "codex" }],
+      },
+    });
+    const page = context.pages()[0]!;
+    await waitFor(async () => (await (await openSessionStorage()).read(TEST_ACCOUNT)) !== null);
+    expect(page.isClosed()).toBe(false);
+    expect(stopExposure).not.toHaveBeenCalled();
+    await expect(host.call({ action: "join", agentConfigs: [{ target: "hermes" }] })).resolves.toMatchObject({
+      state: "live", confirm_url: confirmUrl, reused: true,
+    });
+    expect(context.pages()).toHaveLength(1);
+    await page.route("**/v1/mcp/install/*/finish", (route) => route.fulfill({ status: 503, body: "unavailable" }));
+    await page.getByRole("button", { name: "Finish", exact: true }).click();
+    await page.getByRole("alert").waitFor();
+    expect(await page.getByRole("alert").textContent()).toContain("press Finish to retry");
+    expect(page.url()).not.toContain("/install/done");
+    expect(stopExposure).not.toHaveBeenCalled();
+    await page.unroute("**/v1/mcp/install/*/finish");
+    await page.getByRole("button", { name: "Finish", exact: true }).click();
+    await waitFor(() => page.isClosed());
+    expect(host.current()).toEqual({ state: "none" });
+    expect(stopExposure).toHaveBeenCalledOnce();
+    expect((await deps.pairingTokenStore.find(code)).finished_at).toBeInstanceOf(Date);
+    expect(await (await openSessionStorage()).read(TEST_ACCOUNT)).toMatchObject({
+      account_id: TEST_ACCOUNT, agent_session_token: expect.any(String), machine_token: "tsm_finish_proof",
+    });
+    const codex = parseToml(await readFile(join(home, ".codex", "config.toml"), "utf8")) as {
+      mcp_servers?: { squire?: { env?: Record<string, string> } };
+    };
+    expect(codex.mcp_servers?.squire?.env).toMatchObject({
+      TRUSTY_SQUIRE_ACCOUNT_ID: TEST_ACCOUNT, TRUSTY_SQUIRE_PROFILE_DIR: profileDir,
+    });
+  });
 });

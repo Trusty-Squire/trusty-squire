@@ -23,6 +23,7 @@ const agentTargets = Object.keys(AGENTS) as [AgentTarget, ...AgentTarget[]];
 export const agentConfigPlanSchema = z
   .object({
     target: z.enum(agentTargets),
+    configPath: z.string().min(1).optional(),
     agentIdentity: z.string().min(1).optional(),
     profileDir: z.string().min(1).optional(),
   })
@@ -104,8 +105,10 @@ export async function writeAgentConfig(
   // non-personal signup recipes.
   if (!noRegistry) env.TRUSTY_SQUIRE_REGISTRY_URL = DEFAULT_REGISTRY_URL;
   const launch = resolveServerLaunch();
-  await agent.writeConfig({ command: launch.command, args: launch.args, env });
-  ui.success(`Wrote ${agent.display_name} MCP config at ${ui.code(agent.config_path())}`);
+  await agent.writeConfig({ command: launch.command, args: launch.args, env,
+    ...(plan.configPath !== undefined ? { configPath: plan.configPath } : {}),
+  });
+  ui.success(`Wrote ${agent.display_name} MCP config at ${ui.code(plan.configPath ?? agent.config_path())}`);
   // Claude Code: also pre-allow the safe credential tools so the agent
   // isn't prompted on every use_credential / list / poll / store call.
   if (plan.target === "claude-code") {
@@ -135,6 +138,7 @@ export async function storeTwoCaptchaKey(key: string, session: SessionData): Pro
   try {
     const res = await fetch(`${session.api_base_url}/v1/vault/credentials`, {
       method: "POST",
+      signal: AbortSignal.timeout(3_000),
       headers: {
         "content-type": "application/json",
         authorization: `Bearer ${session.agent_session_token}`,

@@ -22,6 +22,7 @@ import type { OAuthProviderId } from "../oauth-providers.js";
 import type { SessionData } from "../../session.js";
 import {
   ceremonyFinalizePlanSchema,
+  agentConfigPlanSchema,
   type AgentConfigPlan,
   type CeremonyFinalizePlan,
   type InstallClaim,
@@ -63,6 +64,7 @@ export type CeremonyStartRequest = z.infer<typeof ceremonyStartSchema>;
 const ceremonyRequestSchema = z.union([
   ceremonyStartSchema,
   z.object({ action: z.literal("get") }).strict(),
+  z.object({ action: z.literal("join"), agentConfigs: z.array(agentConfigPlanSchema).min(1) }).strict(),
 ]);
 export type CeremonyRequest = z.infer<typeof ceremonyRequestSchema>;
 
@@ -144,7 +146,10 @@ const POLL_INTERVAL_MS = 3_000;
 const POLL_TIMEOUT_MS = 15_000;
 
 function sameConfig(a: AgentConfigPlan, b: AgentConfigPlan): boolean {
-  return a.target === b.target;
+  return (
+    a.target === b.target && a.configPath === b.configPath &&
+    a.agentIdentity === b.agentIdentity && a.profileDir === b.profileDir
+  );
 }
 
 function validClip(clip: unknown): clip is CeremonyDisplayClip {
@@ -178,6 +183,10 @@ export class BrokerCeremonyHost {
   async call(params: Record<string, unknown>): Promise<CeremonyView> {
     const request = ceremonyRequestSchema.parse(params);
     if (request.action === "get") return this.current();
+    if (request.action === "join") {
+      await this.starting?.catch(() => undefined);
+      return this.live === null ? { state: "none" } : await this.join(this.live, request.agentConfigs);
+    }
     return await this.start(request);
   }
 
@@ -187,10 +196,14 @@ export class BrokerCeremonyHost {
 
   /** Start the ceremony, or join the one already running. */
   async start(request: CeremonyStartRequest): Promise<CeremonyView> {
-    if (this.live !== null) return await this.join(this.live, request);
+    if (this.live !== null) {
+      return await this.join(this.live, request.finalize.agentConfigs, request.finalize.twoCaptchaKey);
+    }
     if (this.starting !== null) {
       const view = await this.starting.catch(() => null);
-      if (this.live !== null) return await this.join(this.live, request);
+      if (this.live !== null) {
+        return await this.join(this.live, request.finalize.agentConfigs, request.finalize.twoCaptchaKey);
+      }
       if (view !== null && view.state === "unshowable") return view;
     }
     const starting = this.open(request);
@@ -210,22 +223,21 @@ export class BrokerCeremonyHost {
 
   // A later connect may be for another host agent; its config is written with
   // the same claim. Its other choices do not override the running ceremony.
-  private async join(live: LiveCeremony, request: CeremonyStartRequest): Promise<CeremonyView> {
-    const added = request.finalize.agentConfigs.filter(
+  private async join(
+    live: LiveCeremony, configs: readonly AgentConfigPlan[], twoCaptchaKey?: string,
+  ): Promise<CeremonyView> {
+    const added = configs.filter(
       (config) => !live.finalize.agentConfigs.some((known) => sameConfig(known, config)),
     );
+    if (live.session !== null && added.length > 0) {
+      await this.deps.writeAgentConfigs(added, live.session);
+    }
     live.finalize = {
       ...live.finalize,
       agentConfigs: [...live.finalize.agentConfigs, ...added],
-      ...(live.finalize.twoCaptchaKey === undefined && request.finalize.twoCaptchaKey !== undefined
-        ? { twoCaptchaKey: request.finalize.twoCaptchaKey }
-        : {}),
+      ...(live.finalize.twoCaptchaKey === undefined && twoCaptchaKey !== undefined
+        ? { twoCaptchaKey } : {}),
     };
-    if (live.session !== null && added.length > 0) {
-      await this.deps.writeAgentConfigs(added, live.session).catch((error: unknown) => {
-        this.deps.log(`[ceremony] writing a joined host agent's config failed: ${String(error)}`);
-      });
-    }
     this.deps.log("[ceremony] a later connect joined the live sign-in");
     return { ...live.view, reused: true };
   }
@@ -332,7 +344,7 @@ export class BrokerCeremonyHost {
         status !== null &&
         (status.status === "claimed" || status.status === "delivered") &&
         status.finished;
-      if (finished && (await this.requestedProviderPresent(live))) {
+      if (finished && live.session !== null && (await this.requestedProviderPresent(live))) {
         await this.end(live, "finished");
         return;
       }
@@ -346,7 +358,18 @@ export class BrokerCeremonyHost {
   private async landClaim(live: LiveCeremony): Promise<void> {
     if (live.claim === null || live.session !== null) return;
     try {
-      live.session = await this.deps.finalize(live.finalize, live.claim, this.deps.profileDir);
+      const plan = live.finalize;
+      const session = await this.deps.finalize(plan, live.claim, this.deps.profileDir);
+      let written = plan.agentConfigs;
+      while (true) {
+        const pending = live.finalize.agentConfigs.filter(
+          (config) => !written.some((known) => sameConfig(known, config)),
+        );
+        if (pending.length === 0) break;
+        await this.deps.writeAgentConfigs(pending, session);
+        written = [...written, ...pending];
+      }
+      live.session = session;
       this.deps.log("[ceremony] session written");
     } catch (error) {
       this.deps.log(

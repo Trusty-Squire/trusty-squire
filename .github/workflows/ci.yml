@@ -87,6 +87,7 @@ jobs:
           while IFS= read -r path; do
             case "$path" in
               apps/api/*)
+                mcp=true
                 api=true
                 ;;
               apps/mcp/*)
@@ -99,6 +100,7 @@ jobs:
                 registry=true
                 ;;
               apps/web/*)
+                mcp=true
                 web=true
                 ;;
               packages/skill-schema/*)
@@ -411,3 +413,7 @@ jobs:
             fi
             echo "::endgroup::"
           done
+
+      - name: Prove production install Finish in Chrome
+        if: needs.secret-scan.outputs.mcp == 'true'
+        run: pnpm --filter '@trusty-squire/mcp' exec vitest run src/bot/__tests__/connect-finish-real-chrome.test.ts

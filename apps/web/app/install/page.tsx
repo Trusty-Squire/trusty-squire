@@ -86,6 +86,8 @@ export default function InstallPage() {
   const [installClaimed, setInstallClaimed] = useState(false);
   const [skippedGithub, setSkippedGithub] = useState(false);
   const [errorText, setErrorText] = useState("");
+  const [finishing, setFinishing] = useState(false);
+  const [finishError, setFinishError] = useState("");
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [preferences, setPreferences] = useState<InstallPreferences>(readStoredInstallPreferences);
   const registryEnabled = preferences.registry_enabled;
@@ -273,16 +275,20 @@ export default function InstallPage() {
     setSkippedGithub(true);
   }, []);
 
-  const finish = useCallback(() => {
-    if (token === null) return;
-    try {
-      window.localStorage.removeItem(`ts-install-prefs:${token}`);
-    } catch {
-      /* ignore */
-    }
-    clearInstallCompletionProviders(token);
-    void finishInstallCeremony(token, () => router.push("/install/done"), apiPost);
-  }, [router, token]);
+  const finish = useCallback(async () => {
+    if (token === null || finishing) return;
+    setFinishing(true);
+    setFinishError("");
+    const recorded = await finishInstallCeremony(token, () => {
+      try {
+        window.localStorage.removeItem(`ts-install-prefs:${token}`);
+      } catch {}
+      clearInstallCompletionProviders(token);
+      router.push("/install/done");
+    }, apiPost);
+    if (!recorded) setFinishError("Couldn't finish setup. Please press Finish to retry.");
+    setFinishing(false);
+  }, [router, token, finishing]);
 
   // ---- Render branches -----------------------------------------------
 
@@ -426,8 +432,9 @@ export default function InstallPage() {
         </WizardStep>
       </ol>
 
+      {finishError && <p role="alert">{finishError}</p>}
       {canFinish && (
-        <button className="btn-primary wizard-finish" type="button" onClick={finish}>
+        <button className="btn-primary wizard-finish" type="button" onClick={finish} disabled={finishing}>
           Finish
         </button>
       )}

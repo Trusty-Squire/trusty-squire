@@ -73,8 +73,8 @@ function harness(overrides: Partial<CeremonyHostDeps> = {}): Harness {
     agent_session_token: "agent-token",
     account_id: "acct-1",
   };
-  const finalize = vi.fn(async () => session);
-  const writeAgentConfigs = vi.fn(async () => undefined);
+  const finalize = vi.fn<CeremonyHostDeps["finalize"]>(async () => session);
+  const writeAgentConfigs = vi.fn<CeremonyHostDeps["writeAgentConfigs"]>(async () => undefined);
   const deps: CeremonyHostDeps = {
     profileDir: "/profiles/fixture",
     openTab: async () => {
@@ -174,6 +174,50 @@ describe("broker-owned connect ceremony", () => {
     await h.host.call(startRequest());
     await vi.waitFor(() => expect(h.tabs[0]!.close).toHaveBeenCalled());
     expect(h.finalize).toHaveBeenCalledTimes(1);
+  });
+
+  it("retains an early Finish claim until its failed finalization succeeds", async () => {
+    let release!: () => void;
+    const retry = new Promise<void>((resolve) => { release = resolve; });
+    const h = harness();
+    h.finalize.mockRejectedValueOnce(new Error("disk unavailable"));
+    h.finalize.mockImplementationOnce(async () => {
+      await retry;
+      return { api_base_url: "https://api.invalid", saved_at: "t", account_id: "acct-1" };
+    });
+    h.setStatus({ ...CLAIMED, finished: true });
+    await h.host.call(startRequest());
+    await vi.waitFor(() => expect(h.finalize).toHaveBeenCalledTimes(2));
+    expect(h.tabs[0]!.close).not.toHaveBeenCalled();
+    release();
+    await vi.waitFor(() => expect(h.tabs[0]!.close).toHaveBeenCalledOnce());
+    expect(h.statuses.filter((status) => status.status === "claimed")).toHaveLength(1);
+  });
+
+  it("lands config plans joining during finalization and config draining", async () => {
+    let release!: () => void;
+    let releaseWrite!: () => void;
+    const finalizing = new Promise<void>((resolve) => { release = resolve; });
+    const writing = new Promise<void>((resolve) => { releaseWrite = resolve; });
+    const h = harness();
+    h.finalize.mockImplementationOnce(async () => {
+      await finalizing;
+      return { api_base_url: "https://api.invalid", saved_at: "t", account_id: "acct-1" };
+    });
+    h.writeAgentConfigs.mockImplementationOnce(async () => { await writing; });
+    h.setStatus({ ...CLAIMED, finished: true });
+    await h.host.call(startRequest());
+    await vi.waitFor(() => expect(h.finalize).toHaveBeenCalledOnce());
+    const hermes = { target: "hermes", configPath: "/custom/hermes.yaml" } as const;
+    await h.host.call({ action: "join", agentConfigs: [hermes] });
+    release();
+    await vi.waitFor(() => expect(h.writeAgentConfigs).toHaveBeenCalledOnce());
+    const codex = { target: "codex", configPath: "/custom/codex.toml" } as const;
+    await h.host.call({ action: "join", agentConfigs: [codex] });
+    expect(h.tabs[0]!.close).not.toHaveBeenCalled();
+    releaseWrite();
+    await vi.waitFor(() => expect(h.tabs[0]!.close).toHaveBeenCalledOnce());
+    expect(h.writeAgentConfigs.mock.calls.map(([configs]) => configs)).toEqual([[hermes], [codex]]);
   });
 
   it("hands a second connect the same window instead of opening a competing tab", async () => {
