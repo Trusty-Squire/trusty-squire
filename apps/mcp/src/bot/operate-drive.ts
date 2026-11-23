@@ -460,7 +460,6 @@ export function resetDriveGoalMemory(drive: SessionDriveState): void {
   drive.exhaustedActionKeys = [];
   drive.failedActionKeys = [];
   drive.waitingControls = [];
-  drive.staleClickRefs = [];
   drive.staleNonWait = 0;
   drive.consumedActionKey = null;
   drive.boundFingerprint = null;
@@ -501,7 +500,6 @@ export function emptyDriveState(goal: string, facts: Record<string, string>): Se
     lastFingerprint: null,
     jevCalls: 0,
     staleNonWait: 0,
-    staleClickRefs: [],
     exhaustedProgressKey: null,
     exhaustedActionKeys: [],
     failedActionKeys: [],
@@ -1024,17 +1022,13 @@ type RefusedDecisionMemory = Pick<
 type RefusedDecision = { action: { kind: string }; actionKey: string; confidence: number };
 
 export function recordUndeliveredDecision(
-  drive: RefusedDecisionMemory & Pick<SessionDriveState, "failedActionKeys" | "staleClickRefs">,
+  drive: RefusedDecisionMemory & Pick<SessionDriveState, "failedActionKeys">,
   rows: readonly WireRow[],
   decision: RefusedDecision,
   url: string,
   reason: string,
 ): void {
   rememberFailedAction(drive, rows, decision.actionKey, url);
-  drive.staleClickRefs ??= [];
-  if (!drive.staleClickRefs.includes(decision.actionKey)) {
-    drive.staleClickRefs.push(decision.actionKey);
-  }
   recordRefusedDecision(drive, rows, decision, url, reason);
 }
 
@@ -5946,7 +5940,6 @@ export async function runOperateDrive(
   if (!Array.isArray(drive.expiryShortWrittenRefs)) drive.expiryShortWrittenRefs = [];
   if (!Array.isArray(drive.expiryLongAttemptedRefs)) drive.expiryLongAttemptedRefs = [];
   if (typeof drive.staleNonWait !== "number") drive.staleNonWait = 0;
-  if (!Array.isArray(drive.staleClickRefs)) drive.staleClickRefs = [];
   if (drive.exhaustedProgressKey === undefined) drive.exhaustedProgressKey = null;
   if (!Array.isArray(drive.exhaustedActionKeys)) drive.exhaustedActionKeys = [];
   if (!Array.isArray(drive.failedActionKeys)) drive.failedActionKeys = [];
@@ -7317,10 +7310,6 @@ async function driveLoop(input: {
       // covering it.
       const occluded = acted.reason === "occluded";
       if (!occluded) {
-        drive.staleClickRefs ??= [];
-        if (!drive.staleClickRefs.includes(decision.actionKey)) {
-          drive.staleClickRefs.push(decision.actionKey);
-        }
         rememberFailedAction(drive, rows, decision.actionKey, observation.url);
       }
       const staleSnap = await withinOAuthCallerDeadline(
@@ -7406,10 +7395,6 @@ async function driveLoop(input: {
         actDispatched = false;
         drive.lastDispatchFailure = safe.dispatchFailure;
         drive.consumedActionKey = null;
-        drive.staleClickRefs ??= [];
-        if (!drive.staleClickRefs.includes(decision.actionKey)) {
-          drive.staleClickRefs.push(decision.actionKey);
-        }
         rememberFailedAction(drive, rows, decision.actionKey, observation.url);
       } else {
         dispatchedActs += 1;
@@ -8281,7 +8266,6 @@ async function driveLoop(input: {
           drive.failedActionKeys = (drive.failedActionKeys ?? []).filter(
             (key) => !refs.has(key) && !keys.has(key),
           );
-          drive.staleClickRefs = (drive.staleClickRefs ?? []).filter((ref) => !refs.has(ref));
           drive.lastDispatchFailure = null;
           continue;
         }
@@ -8420,12 +8404,7 @@ async function driveLoop(input: {
 
     const prepareStarted = Date.now();
     const fingerprint = driveProgressFingerprint(observation, rows, drive, session);
-    if (drive.lastFingerprint !== null && drive.lastFingerprint !== fingerprint) {
-      drive.staleClickRefs = [];
-    }
-    const skippedActions = [
-      ...new Set([...(drive.exhaustedActionKeys ?? []), ...(drive.staleClickRefs ?? [])]),
-    ];
+    const skippedActions = drive.exhaustedActionKeys ?? [];
     await detectOfferedProviderSessions();
     const sets = driveTargetSets(
       rows,
