@@ -4133,31 +4133,59 @@ export function buildDriveQuestions(
     (entry): entry is [string, Extract<JevQuestion, { type: "choice" }>] =>
       entry[1].type === "choice",
   );
-  let remaining = DRIVE_MAX_CRITERIA;
+  // Fields that can take a supplied value. A form-value or goal-value question
+  // is only usable when its field is still a TYPE_TEXT_target choice.
+  const valueFieldSlugs = new Set(
+    sets.TYPE_TEXT.filter(
+      (candidate) =>
+        matchingFactKeys(facts, candidate.row).length > 0 ||
+        (isFormValueField(candidate.row, rows, goal) &&
+          Object.keys(formValueCriteria(goal, facts)).length > 1) ||
+        (allowsGoalValueAssignment(candidate.row) && DRIVE_VALUE_QUESTION in questions),
+    ).map((candidate) => candidate.slug),
+  );
+  // The budget is shared in three passes: every question keeps a floor, then
+  // the supplied-value choices, then everything else in question order. A long
+  // click list (one checkbox per model, say) must not crowd out the facts the
+  // caller supplied for the form beside it.
+  const sizes = choices.map(([, question]) => Object.keys(question.criteria).length);
+  const quotas = choices.map(([name], index) =>
+    Math.min(sizes[index]!, name === "SCROLL_target" ? 4 : name === DRIVE_VALUE_QUESTION ? 2 : 1),
+  );
+  const valueShares = choices.map(([name, question], index) =>
+    name.startsWith("form_value_") || name === DRIVE_VALUE_QUESTION
+      ? sizes[index]!
+      : name === "TYPE_TEXT_target"
+        ? Object.keys(question.criteria).filter((slug) => valueFieldSlugs.has(slug)).length
+        : 0,
+  );
+  let budget = DRIVE_MAX_CRITERIA - quotas.reduce((total, quota) => total + quota, 0);
+  for (const wanted of [valueShares, sizes]) {
+    for (const index of quotas.keys()) {
+      const extra = Math.max(0, Math.min(wanted[index]! - quotas[index]!, budget));
+      quotas[index]! += extra;
+      budget -= extra;
+    }
+  }
   for (const [index, [name, question]] of choices.entries()) {
-    const reserved = choices
-      .slice(index + 1)
-      .reduce(
-        (total, [laterName, later]) =>
-          total +
-          Math.min(
-            Object.keys(later.criteria).length,
-            laterName === "SCROLL_target" ? 4 : laterName === DRIVE_VALUE_QUESTION ? 2 : 1,
-          ),
-        0,
-      );
     const entries = Object.entries(question.criteria);
-    const limit = remaining - reserved;
+    const limit = quotas[index]!;
     if (entries.length > limit) {
       const none = entries.find(([key]) => key === DRIVE_FIXED_NONE);
-      const kept =
-        none === undefined
-          ? entries.slice(0, limit)
-          : [...entries.filter(([key]) => key !== DRIVE_FIXED_NONE).slice(0, limit - 1), none];
-      question.criteria = Object.fromEntries(kept);
+      const preferred = (key: string) => name === "TYPE_TEXT_target" && valueFieldSlugs.has(key);
+      const keep = new Set(
+        [
+          ...entries.filter(([key]) => preferred(key)),
+          ...entries.filter(([key]) => !preferred(key)),
+        ]
+          .filter(([key]) => key !== DRIVE_FIXED_NONE)
+          .slice(0, none === undefined ? limit : limit - 1)
+          .map(([key]) => key),
+      );
+      const kept = entries.filter(([key]) => keep.has(key));
+      question.criteria = Object.fromEntries(none === undefined ? kept : [...kept, none]);
       question.instructions += " Some choices were omitted to fit the decision budget.";
     }
-    remaining -= Object.keys(question.criteria).length;
     if (name === "SELECT_target") {
       const omittedRefs = new Set(
         sets.SELECT.filter(
