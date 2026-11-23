@@ -44,16 +44,20 @@ export function readInstallCompletionProviders(token: string): InstallCompletion
 export async function finishInstallCeremony(
   token: string,
   navigateDone: () => void,
-  post: (path: string) => Promise<unknown>,
+  post: (path: string, body?: unknown, signal?: AbortSignal) => Promise<unknown>,
   sleep: (ms: number) => Promise<void> = (ms) => new Promise((r) => setTimeout(r, ms)),
 ): Promise<boolean> {
   const path = `/v1/mcp/install/${encodeURIComponent(token)}/finish`;
   for (let attempt = 1; attempt <= FINISH_ATTEMPTS; attempt += 1) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5_000);
     try {
-      await post(path);
+      await post(path, undefined, controller.signal);
     } catch {
       if (attempt < FINISH_ATTEMPTS) await sleep(FINISH_RETRY_MS);
       continue;
+    } finally {
+      clearTimeout(timeout);
     }
     navigateDone();
     return true;

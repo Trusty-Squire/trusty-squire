@@ -127,7 +127,6 @@ export interface CeremonyHostDeps {
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
   pollIntervalMs?: number;
-  pollTimeoutMs?: number;
 }
 
 interface LiveCeremony {
@@ -143,7 +142,6 @@ interface LiveCeremony {
 }
 
 const POLL_INTERVAL_MS = 3_000;
-const POLL_TIMEOUT_MS = 15_000;
 
 function sameConfig(a: AgentConfigPlan, b: AgentConfigPlan): boolean {
   return (
@@ -170,13 +168,11 @@ export class BrokerCeremonyHost {
   private readonly now: () => number;
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly pollIntervalMs: number;
-  private readonly pollTimeoutMs: number;
 
   constructor(private readonly deps: CeremonyHostDeps) {
     this.now = deps.now ?? Date.now;
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.pollIntervalMs = deps.pollIntervalMs ?? POLL_INTERVAL_MS;
-    this.pollTimeoutMs = deps.pollTimeoutMs ?? POLL_TIMEOUT_MS;
   }
 
   /** The broker wire's `ceremony` method. */
@@ -308,49 +304,54 @@ export class BrokerCeremonyHost {
   }
 
   private async run(live: LiveCeremony): Promise<void> {
-    let lastError = "";
-    while (this.live === live && this.now() < live.deadline) {
-      let status: InstallStatus | null = null;
-      try {
-        status = await this.withinPollTimeout(
-          this.deps.pollStatus(live.request.apiBase, live.request.setupCode),
-        );
-        lastError = "";
-      } catch (error) {
-        // A dropped request is not the end of a sign-in the person is still
-        // doing. Say so once, keep polling until the pairing deadline.
-        const message = error instanceof Error ? error.message : String(error);
-        if (message !== lastError)
-          this.deps.log(`[ceremony] install status poll failed: ${message}`);
-        lastError = message;
+    const expiry = setTimeout(() => {
+      void this.end(live, "the pairing window closed");
+    }, Math.max(0, live.deadline - this.now()));
+    try {
+      let lastError = "";
+      while (this.live === live && this.now() < live.deadline) {
+        let status: InstallStatus | null = null;
+        try {
+          status = await this.deps.pollStatus(live.request.apiBase, live.request.setupCode);
+          lastError = "";
+        } catch (error) {
+          // A dropped request is not the end of a sign-in the person is still
+          // doing. Say so once, keep polling until the pairing deadline.
+          const message = error instanceof Error ? error.message : String(error);
+          if (message !== lastError)
+            this.deps.log(`[ceremony] install status poll failed: ${message}`);
+          lastError = message;
+        }
+        if (this.live !== live) return;
+        if (status?.status === "expired") {
+          await this.end(live, live.session === null ? "the install link expired" : "finished");
+          return;
+        }
+        if (status?.status === "claimed") {
+          live.claim = {
+            token: status.agent_session_token,
+            account_id: status.account_id,
+            ...(status.install_preferences !== undefined
+              ? { preferences: status.install_preferences }
+              : {}),
+          };
+          this.deps.log("[ceremony] account claimed");
+        }
+        await this.landClaim(live);
+        const finished =
+          status !== null &&
+          (status.status === "claimed" || status.status === "delivered") &&
+          status.finished;
+        if (finished && live.session !== null && (await this.requestedProviderPresent(live))) {
+          await this.end(live, "finished");
+          return;
+        }
+        await this.sleep(this.pollIntervalMs);
       }
-      if (this.live !== live) return;
-      if (status?.status === "expired") {
-        await this.end(live, live.session === null ? "the install link expired" : "finished");
-        return;
-      }
-      if (status?.status === "claimed") {
-        live.claim = {
-          token: status.agent_session_token,
-          account_id: status.account_id,
-          ...(status.install_preferences !== undefined
-            ? { preferences: status.install_preferences }
-            : {}),
-        };
-        this.deps.log("[ceremony] account claimed");
-      }
-      await this.landClaim(live);
-      const finished =
-        status !== null &&
-        (status.status === "claimed" || status.status === "delivered") &&
-        status.finished;
-      if (finished && live.session !== null && (await this.requestedProviderPresent(live))) {
-        await this.end(live, "finished");
-        return;
-      }
-      await this.sleep(this.pollIntervalMs);
+      if (this.live === live) await this.end(live, "the pairing window closed");
+    } finally {
+      clearTimeout(expiry);
     }
-    if (this.live === live) await this.end(live, "the pairing window closed");
   }
 
   // The token is delivered exactly once, so a failed write is retried on every
@@ -384,23 +385,6 @@ export class BrokerCeremonyHost {
       .detectProviders(this.deps.profileDir)
       .catch((): readonly OAuthProviderId[] => []);
     return providers.includes("github");
-  }
-
-  private async withinPollTimeout<T>(work: Promise<T>): Promise<T> {
-    let timer: NodeJS.Timeout | undefined;
-    try {
-      return await Promise.race([
-        work,
-        new Promise<never>((_, reject) => {
-          timer = setTimeout(
-            () => reject(new Error("the install status check stopped responding")),
-            this.pollTimeoutMs,
-          );
-        }),
-      ]);
-    } finally {
-      if (timer !== undefined) clearTimeout(timer);
-    }
   }
 
   private end(live: LiveCeremony, reason: string): Promise<void> {

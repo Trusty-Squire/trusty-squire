@@ -220,6 +220,40 @@ describe("broker-owned connect ceremony", () => {
     expect(h.writeAgentConfigs.mock.calls.map(([configs]) => configs)).toEqual([[hermes], [codex]]);
   });
 
+  it("retains a delayed single-use claim without overlapping polls", async () => {
+    vi.useFakeTimers();
+    let delayed: Harness | undefined;
+    try {
+      let deliver!: (status: InstallStatus) => void;
+      const response = new Promise<InstallStatus>((resolve) => { deliver = resolve; });
+      const pollStatus = vi.fn(async () => await response);
+      delayed = harness({ pollStatus });
+      await delayed.host.call(startRequest());
+      await vi.advanceTimersByTimeAsync(15_001);
+      expect(pollStatus).toHaveBeenCalledOnce();
+      expect(delayed.finalize).not.toHaveBeenCalled();
+      deliver({ ...CLAIMED, finished: true });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(delayed.tabs[0]!.close).toHaveBeenCalledOnce();
+      expect(pollStatus).toHaveBeenCalledOnce();
+      expect(delayed.finalize).toHaveBeenCalledWith(expect.anything(), {
+        token: "agent-token", account_id: "acct-1",
+      }, "/profiles/fixture");
+    } finally {
+      await delayed?.host.shutdown();
+      vi.useRealTimers();
+    }
+  });
+
+  it("closes at expiry even while the only status poll is stalled", async () => {
+    const pollStatus = vi.fn(() => new Promise<InstallStatus>(() => undefined));
+    const h = harness({ pollStatus });
+    await h.host.call(startRequest({ ttlMs: 30 }));
+    await vi.waitFor(() => expect(h.tabs[0]!.close).toHaveBeenCalledOnce());
+    expect(pollStatus).toHaveBeenCalledOnce();
+    expect(h.finalize).not.toHaveBeenCalled();
+  });
+
   it("hands a second connect the same window instead of opening a competing tab", async () => {
     const h = harness();
     const first = await h.host.call(startRequest());

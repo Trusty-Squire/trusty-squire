@@ -414,6 +414,9 @@ jobs:
             echo "::endgroup::"
           done
 
+      - name: Install production sign-in display helpers
+        if: needs.secret-scan.outputs.mcp == 'true'
+        run: sudo apt-get update && sudo apt-get install -y xvfb x11vnc novnc websockify
       - name: Prove production install Finish in Chrome
         if: needs.secret-scan.outputs.mcp == 'true'
         run: pnpm --filter '@trusty-squire/mcp' exec vitest run src/bot/__tests__/connect-finish-real-chrome.test.ts

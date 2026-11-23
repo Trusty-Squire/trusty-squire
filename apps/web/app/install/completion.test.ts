@@ -23,7 +23,7 @@ describe("install Finish", () => {
     expect(navigateDone).not.toHaveBeenCalled();
     await expect(recorded).resolves.toBe(true);
     expect(navigateDone).toHaveBeenCalledOnce();
-    expect(post).toHaveBeenCalledWith("/v1/mcp/install/set%20up%2F1/finish");
+    expect(post).toHaveBeenCalledWith("/v1/mcp/install/set%20up%2F1/finish", undefined, expect.any(AbortSignal));
     // A relative path is same-origin: no loopback or cross-network request.
     expect(post.mock.calls[0]![0]).toMatch(/^\/v1\//);
   });
@@ -54,6 +54,26 @@ describe("install Finish", () => {
     post.mockResolvedValueOnce({ ok: true });
     await expect(finishInstallCeremony("setup", navigateDone, post)).resolves.toBe(true);
     expect(navigateDone).toHaveBeenCalledOnce();
+  });
+
+  it("aborts stalled Finish attempts and allows a later retry", async () => {
+    vi.useFakeTimers();
+    try {
+      const post = vi.fn((_path: string, _body?: unknown, signal?: AbortSignal) =>
+        new Promise((_, reject) => signal!.addEventListener("abort", () => reject(new Error("aborted")))),
+      );
+      const navigateDone = vi.fn();
+      const result = finishInstallCeremony("setup", navigateDone, post);
+      await vi.advanceTimersByTimeAsync(17_000);
+      await expect(result).resolves.toBe(false);
+      expect(post).toHaveBeenCalledTimes(3);
+      expect(post.mock.calls.every(([, , signal]) => signal!.aborted)).toBe(true);
+      expect(navigateDone).not.toHaveBeenCalled();
+      await expect(finishInstallCeremony("setup", navigateDone, async () => ({ ok: true }))).resolves.toBe(true);
+      expect(navigateDone).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("retains earned Google completion across a later GitHub OAuth return", () => {

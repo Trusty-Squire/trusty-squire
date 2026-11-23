@@ -1,7 +1,7 @@
 import { createServer } from "node:net";
 import { createRequire } from "node:module";
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,8 +9,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { chromium, type Browser } from "playwright";
 import { parse as parseToml } from "smol-toml";
 import { openSessionStorage } from "../../session.js";
-import { BrokerCeremonyHost, pollInstallStatus, type CeremonyTab } from "../broker/ceremony.js";
-import { finalizeCeremonyClaim, writeCeremonyAgentConfigs } from "../../install/ceremony-finalize.js";
+import type { CeremonyView } from "../broker/ceremony.js";
+import { BrokerClient } from "../broker/transport.js";
 
 const TEST_ACCOUNT = "01TESTACCOUNTFINISHPROOF00";
 const SESSION_SECRET = "finish-proof-session-secret";
@@ -19,7 +19,8 @@ const apiDir = fileURLToPath(new URL("../../../../api/src/", import.meta.url));
 let browser: Browser | undefined;
 let web: ChildProcess | undefined;
 let closeApi: (() => Promise<void>) | undefined;
-let host: BrokerCeremonyHost | undefined;
+let daemon: ChildProcess | undefined;
+let client: BrokerClient | undefined;
 let home: string;
 
 beforeEach(async () => {
@@ -29,21 +30,28 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  await host?.shutdown();
-  host = undefined;
-  await browser?.close();
+  await client?.release().catch(() => undefined);
+  client = undefined;
+  await stopChild(daemon);
+  daemon = undefined;
+  await browser?.close().catch(() => undefined);
   browser = undefined;
-  if (web !== undefined && web.exitCode === null) {
-    const exited = new Promise<void>((resolve) => web!.once("exit", () => resolve()));
-    web.kill("SIGTERM");
-    await exited;
-  }
+  await stopChild(web);
   web = undefined;
   await closeApi?.();
   closeApi = undefined;
   vi.unstubAllEnvs();
   await rm(home, { recursive: true, force: true });
 });
+
+async function stopChild(child: ChildProcess | undefined): Promise<void> {
+  if (child === undefined || child.exitCode !== null || child.signalCode !== null) return;
+  await new Promise<void>((resolve) => {
+    const timer = setTimeout(() => child.kill("SIGKILL"), 15_000);
+    child.once("exit", () => { clearTimeout(timer); resolve(); });
+    child.kill("SIGTERM");
+  });
+}
 
 async function waitFor(predicate: () => boolean | Promise<boolean>, timeoutMs = 30_000) {
   const deadline = Date.now() + timeoutMs;
@@ -101,26 +109,33 @@ describe("production install Finish in real Chrome", () => {
     expect(initiate.status).toBe(201);
     const { setup_code: code } = await initiate.json() as { setup_code: string };
     const profileDir = join(home, ".trusty-squire", "chrome-profile");
-    browser = await chromium.launch({ channel: "chrome", headless: true });
-    const context = await browser.newContext();
-    await context.addCookies([{
-      name: SESSION_COOKIE_NAME, value: signSessionJwt(jwt, SESSION_SECRET), url: origin,
-    }]);
-    const openTab = async (url: string): Promise<CeremonyTab> => {
-      const page = await context.newPage();
-      await page.goto(url);
-      return { command: async () => ({}), close: async () => page.close() };
-    };
-    const stopExposure = vi.fn(async () => undefined);
-    host = new BrokerCeremonyHost({
-      profileDir, openTab, logoutProviders: async () => undefined,
-      expose: async () => ({ kind: "exposed", url: "https://novnc.invalid/#p=pw", stop: stopExposure }),
-      pollStatus: pollInstallStatus, finalize: finalizeCeremonyClaim,
-      writeAgentConfigs: writeCeremonyAgentConfigs, detectProviders: async () => ["google"],
-      log: () => undefined, pollIntervalMs: 100,
+    const socket = join(home, "broker.sock");
+    const vncPort = await unusedPort();
+    await mkdir(join(home, ".trusty-squire"), { recursive: true, mode: 0o700 });
+    const requireMcp = createRequire(import.meta.url);
+    let daemonLogs = "";
+    daemon = spawn(process.execPath, [
+      "--import", requireMcp.resolve("tsx"),
+      fileURLToPath(new URL("../../bin.ts", import.meta.url)), "broker",
+    ], {
+      env: {
+        ...process.env, NODE_ENV: "test", DISPLAY: "", WAYLAND_DISPLAY: "", BOT_CDP_ENDPOINT: "",
+        TRUSTY_SQUIRE_ACCOUNT_ID: "", TRUSTY_SQUIRE_BROKER_UNIT: "",
+        TRUSTY_SQUIRE_PROFILE_DIR: profileDir, TRUSTY_SQUIRE_BROKER_SOCKET: socket,
+        TS_LOGIN_PUBLIC_HOSTNAME: "finish-proof.invalid", TS_LOGIN_LOCAL_PORT: String(vncPort),
+        UNIVERSAL_BOT_CHANNEL: "chrome", DBUS_SESSION_BUS_ADDRESS: "",
+        XDG_RUNTIME_DIR: join(home, "runtime"),
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    daemon.stderr!.on("data", (chunk) => { daemonLogs += String(chunk); });
+    daemon.stdout!.on("data", (chunk) => { daemonLogs += String(chunk); });
+    await waitFor(async () => {
+      if (daemon!.exitCode !== null) throw new Error(daemonLogs);
+      try { client = await BrokerClient.connect(socket); return true; } catch { return false; }
     });
     const confirmUrl = `${origin}/install?token=${code}&claim=1`;
-    await host.call({
+    const view = await client!.call("ceremony", {
       action: "start", confirmUrl, setupCode: code, apiBase: apiOrigin,
       ttlMs: 120_000, callerHasDisplay: false,
       finalize: {
@@ -129,25 +144,31 @@ describe("production install Finish in real Chrome", () => {
         agentConfigs: [{ target: "codex", profileDir, agentIdentity: "codex" }],
       },
     });
-    const page = context.pages()[0]!;
+    expect(view, daemonLogs).toMatchObject({ state: "live", browser_location: { kind: "virtual" } });
+    const activePort = await readFile(join(profileDir, "DevToolsActivePort"), "utf8");
+    browser = await chromium.connectOverCDP(`http://127.0.0.1:${activePort.split("\n")[0]}`);
+    const context = browser.contexts()[0]!;
+    const page = context.pages().find((candidate) => candidate.url().includes(`/install?token=${code}`));
+    expect(page).toBeDefined();
+    if (page === undefined) throw new Error(daemonLogs);
+    await context.addCookies([{
+      name: SESSION_COOKIE_NAME, value: signSessionJwt(jwt, SESSION_SECRET), url: origin,
+    }]);
+    await page.goto(confirmUrl);
     await waitFor(async () => (await (await openSessionStorage()).read(TEST_ACCOUNT)) !== null);
     expect(page.isClosed()).toBe(false);
-    expect(stopExposure).not.toHaveBeenCalled();
-    await expect(host.call({ action: "join", agentConfigs: [{ target: "hermes" }] })).resolves.toMatchObject({
+    const noVncOrigin = `http://127.0.0.1:${vncPort}`;
+    expect((await fetch(noVncOrigin)).ok).toBe(true);
+    await expect(client!.call("ceremony", { action: "join", agentConfigs: [{ target: "hermes" }] })).resolves.toMatchObject({
       state: "live", confirm_url: confirmUrl, reused: true,
     });
-    expect(context.pages()).toHaveLength(1);
-    await page.route("**/v1/mcp/install/*/finish", (route) => route.fulfill({ status: 503, body: "unavailable" }));
-    await page.getByRole("button", { name: "Finish", exact: true }).click();
-    await page.getByRole("alert").waitFor();
-    expect(await page.getByRole("alert").textContent()).toContain("press Finish to retry");
-    expect(page.url()).not.toContain("/install/done");
-    expect(stopExposure).not.toHaveBeenCalled();
-    await page.unroute("**/v1/mcp/install/*/finish");
+    expect(context.pages().filter((candidate) => candidate.url().includes(`/install?token=${code}`))).toHaveLength(1);
+
     await page.getByRole("button", { name: "Finish", exact: true }).click();
     await waitFor(() => page.isClosed());
-    expect(host.current()).toEqual({ state: "none" });
-    expect(stopExposure).toHaveBeenCalledOnce();
+    expect(await client!.call("ceremony", { action: "get" }) as CeremonyView).toEqual({ state: "none" });
+    await waitFor(async () => fetch(noVncOrigin).then(() => false).catch(() => true));
+    expect(daemon!.exitCode).toBeNull();
     expect((await deps.pairingTokenStore.find(code)).finished_at).toBeInstanceOf(Date);
     expect(await (await openSessionStorage()).read(TEST_ACCOUNT)).toMatchObject({
       account_id: TEST_ACCOUNT, agent_session_token: expect.any(String), machine_token: "tsm_finish_proof",

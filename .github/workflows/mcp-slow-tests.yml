@@ -51,6 +51,8 @@ jobs:
       # The headed operator-upload cases launch through Patchright.
       - name: Install Patchright Chromium for headed MCP tests
         run: pnpm --filter '@trusty-squire/mcp' exec patchright install chromium
+      - name: Install production sign-in display helpers
+        run: sudo apt-get update && sudo apt-get install -y xvfb x11vnc novnc websockify
       - name: Build MCP workspace dependencies
         run: pnpm --filter '@trusty-squire/skill-schema' --filter '@trusty-squire/recipe-schema' --filter '@trusty-squire/sdk' --filter '@trusty-squire/vault' build
       - name: Run slow integration tier after merge
