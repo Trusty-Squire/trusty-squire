@@ -299,7 +299,8 @@ const claudeCode: AgentDefinition = {
   detect: async () => exists(path.join(home(), ".claude")),
   readConfigEnv: async () =>
     readMappedServerEnv(claudeCode.config_path(), parseJsonConfig, "mcpServers", "env"),
-  writeConfig: async (input) => mergeMcpServersJson(input.configPath ?? claudeCode.config_path(), input),
+  writeConfig: async (input) =>
+    mergeMcpServersJson(input.configPath ?? claudeCode.config_path(), input),
 };
 
 // Claude Code matches permission rules on `mcp__<mcpServers-key>__<tool>`,
@@ -345,7 +346,8 @@ const cursor: AgentDefinition = {
   detect: async () => exists(path.join(home(), ".cursor")),
   readConfigEnv: async () =>
     readMappedServerEnv(cursor.config_path(), parseJsonConfig, "mcpServers", "env"),
-  writeConfig: async (input) => mergeMcpServersJson(input.configPath ?? cursor.config_path(), input),
+  writeConfig: async (input) =>
+    mergeMcpServersJson(input.configPath ?? cursor.config_path(), input),
 };
 
 // ── goose ───────────────────────────────────────────────────
@@ -724,7 +726,8 @@ const opencode: AgentDefinition = {
     executableOnPath("opencode"),
   readConfigEnv: async () =>
     readMappedServerEnv(opencode.config_path(), parseJsoncConfig, "mcp", "environment"),
-  writeConfig: async (input) => writeOpenCodeConfig(input.configPath ?? opencode.config_path(), input),
+  writeConfig: async (input) =>
+    writeOpenCodeConfig(input.configPath ?? opencode.config_path(), input),
 };
 
 export const AGENTS: Record<AgentTarget, AgentDefinition> = {

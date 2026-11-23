@@ -310,20 +310,29 @@ broker or touching sibling operator tabs.
 An unreadable snapshot or failed live check reports `unverified`; a rejected
 Google session enters the ordinary Google refresh ceremony on plain `connect`.
 
-An in-profile ceremony's successful Google claim establishes the Google
-session in the bot's Chrome. Connect reports it directly: a post-ceremony
-cookie snapshot can still be empty while the broker holds Chrome and must not
-turn that claim into a negative. No provider list is persisted in the account
-session file. A scoped GitHub refresh waits for its provider session during
-the ceremony and reports a missing requested session. The broker daemon owns
-the ceremony end to end (`apps/mcp/src/bot/broker/ceremony.ts`): `connect` sends
-one `ceremony` request and returns once the daemon holds the sign-in. The
-daemon polls the install `/status`, writes the session and host-agent config
-when the claim is delivered, and closes its tab and noVNC exposure when
-`/status` reports `finished` — the wizard's same-origin
-`POST /v1/mcp/install/:code/finish` — or at the pairing deadline. No loopback
-callback and no tab observation take part. A `connect` while a ceremony is live
-gets the same window back instead of a competing tab. A broker started before
+The broker daemon owns the ceremony end to end
+(`apps/mcp/src/bot/broker/ceremony.ts`): `connect` starts or joins a live
+ceremony and returns once the daemon holds the sign-in. Joining also registers
+the caller's host-agent config destination, including a custom
+`OPENCODE_CONFIG`, for the same claim. The daemon polls the install `/status`,
+retains its single-use claim, and retries session/config finalization after a
+failure until the pairing deadline. Configs joined during finalization are
+written before it completes. A successful in-profile Google claim establishes
+the Google session; a post-claim cookie snapshot can still be empty while the
+broker holds Chrome and must not override that evidence. No provider list is
+persisted in the account session file. The optional 2Captcha vault write is best-effort with a
+three-second timeout.
+
+The wizard records Finish through the same-origin
+`POST /v1/mcp/install/:code/finish`; it navigates to Connected only after an
+acknowledgement. Each request has a five-second timeout, with up to three
+attempts; a failure leaves a retryable Finish control. `/status` reports
+`finished` even after the claim's token has been delivered. The daemon closes
+the tab and noVNC exposure only after successful finalization and Finish; a
+scoped GitHub refresh also requires that provider session. The pairing deadline
+ends the ceremony regardless. Starts remain serialized with terminal cleanup,
+so a new exposure cannot compete with helpers that are still closing. No
+loopback callback and no tab observation take part. A broker started before
 this ceremony existed answers `ceremony` with `unknown_method`; `connect`
 reports that as an outdated service to restart.
 With `--skip-browser`, the claim happens in a different browser, so

@@ -105,10 +105,15 @@ export async function writeAgentConfig(
   // non-personal signup recipes.
   if (!noRegistry) env.TRUSTY_SQUIRE_REGISTRY_URL = DEFAULT_REGISTRY_URL;
   const launch = resolveServerLaunch();
-  await agent.writeConfig({ command: launch.command, args: launch.args, env,
+  await agent.writeConfig({
+    command: launch.command,
+    args: launch.args,
+    env,
     ...(plan.configPath !== undefined ? { configPath: plan.configPath } : {}),
   });
-  ui.success(`Wrote ${agent.display_name} MCP config at ${ui.code(plan.configPath ?? agent.config_path())}`);
+  ui.success(
+    `Wrote ${agent.display_name} MCP config at ${ui.code(plan.configPath ?? agent.config_path())}`,
+  );
   // Claude Code: also pre-allow the safe credential tools so the agent
   // isn't prompted on every use_credential / list / poll / store call.
   if (plan.target === "claude-code") {

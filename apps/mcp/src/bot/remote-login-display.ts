@@ -143,6 +143,7 @@ export function remoteLoginEnvironment(
   // A display started without access control (Xvfb -ac) has no Xauthority.
   if (rig.authFile === undefined) {
     const { XAUTHORITY: _unused, ...rest } = baseEnv;
+    void _unused;
     return { ...rest, DISPLAY: rig.display };
   }
   return { ...baseEnv, DISPLAY: rig.display, XAUTHORITY: rig.authFile };

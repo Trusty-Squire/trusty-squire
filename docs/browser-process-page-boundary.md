@@ -9,9 +9,8 @@ Each session's `BrowserController` shares its process owner and has an independe
   bounded teardown. Page initialization is awaited at the original point after
   process ownership is established and cancellation checked.
 - `apps/mcp/src/bot/browser-process-runtime.ts` holds the existing launch helpers,
-  launcher singleton, process tracking, and proxy resolution. Helpers shared with
-  the self-launched connect ceremony remain shared. Their existing exports are
-  re-exported by `browser.ts`.
+  launcher singleton, process tracking, and proxy resolution. Its existing exports
+  are re-exported by `browser.ts`.
 - `apps/mcp/src/bot/page-driver.ts` owns primary/current/OAuth page references,
   PR1's `OwnedPages` registry, document subscriptions, navigation, and adoption.
   Disposing its registrations does not terminate Chrome.
@@ -54,10 +53,9 @@ owner manifests or process-marker watchdog. Connect ceremony custody is defined 
 
 `browser-process-page-boundary.test.ts` executes the facade against controlled
 transports to pin close ordering, orphan failure, late attachment cancellation,
-and independent page disposal. `google-login.test.ts` also drives cancellation
-through the facade, with its private launch fixtures now injected into the process
-owner. The existing real process, page adoption, OAuth, and payment suites remain
-required; `pnpm --filter @trusty-squire/mcp test:fast` runs that tier.
+and independent page disposal. Test tier membership is defined in
+`apps/mcp/vitest.tiers.ts`; `.github/workflows/ci.yml` also runs the production
+Finish proof as a separate required browser check.
 
 ## Identity runtime (Step 3 — Chrome lifetime independent of one session)
 

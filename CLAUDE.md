@@ -152,9 +152,9 @@ silent failures.
   three things in one command:
   1. Issues a machine token (bot-internal credential for the operator
      inbox-OTP service).
-  2. Opens a browser so the user signs in (Google/GitHub) and confirms
-     the machine — binds the install to the account, writes the
-     account-bound `agent_session_token` to the local session file.
+  2. Hands sign-in to the broker daemon and returns. The daemon binds the
+     install and writes the session/config; see the
+     [ceremony contract](docs/browser-broker.md) for completion and cleanup.
   3. Establishes the provider session in the bot's Chrome profile as part of
      that same sign-in. A successful in-profile Google claim establishes the
      Google session without a post-sign-in probe. A `--skip-browser` ceremony

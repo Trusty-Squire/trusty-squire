@@ -279,13 +279,17 @@ export default function InstallPage() {
     if (token === null || finishing) return;
     setFinishing(true);
     setFinishError("");
-    const recorded = await finishInstallCeremony(token, () => {
-      try {
-        window.localStorage.removeItem(`ts-install-prefs:${token}`);
-      } catch {}
-      clearInstallCompletionProviders(token);
-      router.push("/install/done");
-    }, apiPost);
+    const recorded = await finishInstallCeremony(
+      token,
+      () => {
+        try {
+          window.localStorage.removeItem(`ts-install-prefs:${token}`);
+        } catch {}
+        clearInstallCompletionProviders(token);
+        router.push("/install/done");
+      },
+      apiPost,
+    );
     if (!recorded) setFinishError("Couldn't finish setup. Please press Finish to retry.");
     setFinishing(false);
   }, [router, token, finishing]);
@@ -434,7 +438,12 @@ export default function InstallPage() {
 
       {finishError && <p role="alert">{finishError}</p>}
       {canFinish && (
-        <button className="btn-primary wizard-finish" type="button" onClick={finish} disabled={finishing}>
+        <button
+          className="btn-primary wizard-finish"
+          type="button"
+          onClick={finish}
+          disabled={finishing}
+        >
           Finish
         </button>
       )}

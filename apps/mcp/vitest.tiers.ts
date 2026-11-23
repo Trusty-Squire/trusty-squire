@@ -17,9 +17,10 @@ export const SLOW_POST_MERGE_FILES = [
 // Test files that launch a real browser (Chromium via playwright/patchright
 // directly, or real Chrome through the broker/self-launch child processes).
 // They are the slowest, flakiest part of the suite, so they do NOT gate pull
-// requests or prerelease publishes: they run post-merge (mcp-slow-tests.yml)
-// and gate only a stable/`latest` release (release.yml checks that workflow
-// run for the promoted SHA).
+// requests or prerelease publishes as a tier: they run post-merge
+// (mcp-slow-tests.yml) and gate a stable/`latest` release (release.yml checks
+// that workflow run for the promoted SHA). The production Finish proof is the
+// explicit PR exception, run separately by ci.yml.
 // Disjoint from SLOW_POST_MERGE_FILES (widget-corpus-eval is also real-browser
 // but stays in the slow tier; the full `vitest run` nightly suite covers
 // everything regardless).

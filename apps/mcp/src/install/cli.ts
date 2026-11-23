@@ -541,11 +541,20 @@ async function connect(args: Argv, argv: readonly string[] = []): Promise<void> 
         });
         if (!args.skipBrowser) {
           const live = await liveBrokerCeremony(canonicalProfileDir, {
-            target, configPath: agent.config_path(),
-            profileDir: canonicalProfileDir, agentIdentity: context.agentIdentity,
+            target,
+            configPath: agent.config_path(),
+            profileDir: canonicalProfileDir,
+            agentIdentity: context.agentIdentity,
           });
           if (live !== null) {
-            reportCeremonyHandedOff(args, agent, canonicalProfileDir, wantInteractive, live, placed);
+            reportCeremonyHandedOff(
+              args,
+              agent,
+              canonicalProfileDir,
+              wantInteractive,
+              live,
+              placed,
+            );
             return;
           }
         }
@@ -1043,7 +1052,10 @@ async function liveBrokerCeremony(
   // No listening broker, no live ceremony: do not wait for one to start.
   if (!(await liveUnixSocket(resolveBrokerSocket(profileDir)))) return null;
   try {
-    const view = await requestBrokerCeremony(profileDir, { action: "join", agentConfigs: [agentConfig] });
+    const view = await requestBrokerCeremony(profileDir, {
+      action: "join",
+      agentConfigs: [agentConfig],
+    });
     // From this connect's side, a ceremony that was already running is reused.
     return view.state === "live" ? { ...view, reused: true } : null;
   } catch (err) {

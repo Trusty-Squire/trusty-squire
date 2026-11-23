@@ -530,8 +530,8 @@ never select or shard individual test names.
   in `.github/workflows/mcp-slow-tests.yml` and gates ONLY a stable/`latest`
   release (release.yml dispatch checks that workflow run for the promoted SHA
   succeeded; skipped for rc/`next` prereleases and PRs).
-  Never re-add these files to a PR or prerelease gate — they are the slow,
-  flaky tail that made rc cuts painful.
+  The production Finish proof is the explicit PR exception run separately in
+  `.github/workflows/ci.yml`; other files remain outside the PR/prerelease gate.
 - **slow (`test:slow`)** — genuinely slow NON-behavioral files only (corpus
   evals, packaging smoke, replay harness). Never move non-browser
   card-sealing, payment-safety, or operator behavior coverage here.

@@ -64,7 +64,9 @@ export type CeremonyStartRequest = z.infer<typeof ceremonyStartSchema>;
 const ceremonyRequestSchema = z.union([
   ceremonyStartSchema,
   z.object({ action: z.literal("get") }).strict(),
-  z.object({ action: z.literal("join"), agentConfigs: z.array(agentConfigPlanSchema).min(1) }).strict(),
+  z
+    .object({ action: z.literal("join"), agentConfigs: z.array(agentConfigPlanSchema).min(1) })
+    .strict(),
 ]);
 export type CeremonyRequest = z.infer<typeof ceremonyRequestSchema>;
 
@@ -145,8 +147,10 @@ const POLL_INTERVAL_MS = 3_000;
 
 function sameConfig(a: AgentConfigPlan, b: AgentConfigPlan): boolean {
   return (
-    a.target === b.target && a.configPath === b.configPath &&
-    a.agentIdentity === b.agentIdentity && a.profileDir === b.profileDir
+    a.target === b.target &&
+    a.configPath === b.configPath &&
+    a.agentIdentity === b.agentIdentity &&
+    a.profileDir === b.profileDir
   );
 }
 
@@ -182,7 +186,9 @@ export class BrokerCeremonyHost {
     if (request.action === "join") {
       await this.starting?.catch(() => undefined);
       while (this.live?.ended) await this.live.ended;
-      return this.live === null ? { state: "none" } : await this.join(this.live, request.agentConfigs);
+      return this.live === null
+        ? { state: "none" }
+        : await this.join(this.live, request.agentConfigs);
     }
     return await this.start(request);
   }
@@ -195,7 +201,11 @@ export class BrokerCeremonyHost {
   async start(request: CeremonyStartRequest): Promise<CeremonyView> {
     while (this.live?.ended) await this.live.ended;
     if (this.live !== null) {
-      return await this.join(this.live, request.finalize.agentConfigs, request.finalize.twoCaptchaKey);
+      return await this.join(
+        this.live,
+        request.finalize.agentConfigs,
+        request.finalize.twoCaptchaKey,
+      );
     }
     if (this.starting !== null) {
       const view = await this.starting.catch(() => null);
@@ -220,7 +230,9 @@ export class BrokerCeremonyHost {
   // A later connect may be for another host agent; its config is written with
   // the same claim. Its other choices do not override the running ceremony.
   private async join(
-    live: LiveCeremony, configs: readonly AgentConfigPlan[], twoCaptchaKey?: string,
+    live: LiveCeremony,
+    configs: readonly AgentConfigPlan[],
+    twoCaptchaKey?: string,
   ): Promise<CeremonyView> {
     const added = configs.filter(
       (config) => !live.finalize.agentConfigs.some((known) => sameConfig(known, config)),
@@ -232,7 +244,8 @@ export class BrokerCeremonyHost {
       ...live.finalize,
       agentConfigs: [...live.finalize.agentConfigs, ...added],
       ...(live.finalize.twoCaptchaKey === undefined && twoCaptchaKey !== undefined
-        ? { twoCaptchaKey } : {}),
+        ? { twoCaptchaKey }
+        : {}),
     };
     this.deps.log("[ceremony] a later connect joined the live sign-in");
     return { ...live.view, reused: true };
@@ -304,9 +317,12 @@ export class BrokerCeremonyHost {
   }
 
   private async run(live: LiveCeremony): Promise<void> {
-    const expiry = setTimeout(() => {
-      void this.end(live, "the pairing window closed");
-    }, Math.max(0, live.deadline - this.now()));
+    const expiry = setTimeout(
+      () => {
+        void this.end(live, "the pairing window closed");
+      },
+      Math.max(0, live.deadline - this.now()),
+    );
     try {
       let lastError = "";
       while (this.live === live && live.ended === null && this.now() < live.deadline) {
