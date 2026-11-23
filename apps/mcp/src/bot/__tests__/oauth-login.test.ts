@@ -3020,20 +3020,15 @@ describe("BrowserController OAuth popup lifecycle", () => {
           body: `<script>location.replace(${JSON.stringify(oauthReturnUrl)})</script>`,
         }),
       );
-      let releaseOrdinaryPopup!: () => void;
-      const ordinaryPopupResponse = new Promise<void>((resolve) => {
-        releaseOrdinaryPopup = resolve;
-      });
-      await context.route("https://console.product.test/**", async (route) => {
-        if (route.request().url() === ordinaryUrl) await ordinaryPopupResponse;
-        return route.fulfill({
+      await context.route("https://console.product.test/**", (route) =>
+        route.fulfill({
           contentType: "text/html",
           body:
             route.request().url() === ordinaryUrl
               ? "<main>Ordinary tab</main>"
               : "<main>OAuth return tab</main>",
-        });
-      });
+        }),
+      );
       await product.goto(productUrl);
       const controller = BrowserController.fromHarnessPage(product);
       const started = await startHarnessProvisionSession({
@@ -3067,13 +3062,8 @@ describe("BrowserController OAuth popup lifecycle", () => {
           return await originalAdopt(graceMs);
         });
 
-      const ordinaryPopup = product.waitForEvent("popup");
       const ordinary = act(sessionId, { kind: "click", target: ordinaryRef! });
       await ordinaryAdoption;
-      // Playwright emits popup only after its initial response. Consume the
-      // ordinary popup before watching for an incorrectly dispatched OAuth click.
-      releaseOrdinaryPopup();
-      await ordinaryPopup;
       const popupBeforeRelease = product
         .waitForEvent("popup")
         .then(() => true)

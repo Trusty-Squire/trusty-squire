@@ -169,9 +169,7 @@ it.skipIf(!systemdUserAvailable())(
     });
     const call = async (id: number, method: string, params: Record<string, unknown> = {}) => {
       relay.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
-      // Starting the relay imports the CLI before it can answer initialize.
-      // Match the broker connection budget instead of waitFor's 1s default.
-      await vi.waitFor(() => expect(replies.has(id)).toBe(true), { timeout: 10_000 });
+      await vi.waitFor(() => expect(replies.has(id)).toBe(true));
       const frame = replies.get(id)!;
       if (frame.error) throw new Error(frame.error.message);
       return frame.result;

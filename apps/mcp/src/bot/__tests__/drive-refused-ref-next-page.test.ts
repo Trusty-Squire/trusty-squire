@@ -1,7 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { chromium, type Browser } from "playwright";
-import { writeFile } from "node:fs/promises";
-import { join } from "node:path";
 import { dispatchDriveAct } from "../act/act.js";
 import type { ApiClient } from "../../api-client.js";
 import { BrowserController } from "../browser.js";
@@ -97,7 +95,6 @@ describe("a refused act on one page", () => {
       const refused: string[] = [];
       const dispatched: string[] = [];
       const menus: string[][] = [];
-      const outcomes: unknown[] = [];
       let attemptedRefusal = false;
       try {
         const deps: DriveDependencies = {
@@ -106,7 +103,9 @@ describe("a refused act on one page", () => {
             menus.push(target?.type === "choice" ? Object.values(target.criteria) : []);
             const wanted = !attemptedRefusal
               ? "Continue with Google"
-              : scenario === "next-page" ? "Methoxine" : "Help";
+              : scenario === "next-page"
+                ? "Methoxine"
+                : "Help";
             return vote(questions, wanted);
           },
           act,
@@ -126,7 +125,6 @@ describe("a refused act on one page", () => {
               await tab.locator("#google").evaluate((node) => node.replaceWith(node.cloneNode(true)));
             }
             const outcome = await dispatchDriveAct(sessionId, action, deadline);
-            outcomes.push({ target, outcome });
             if (first) {
               expect(outcome.kind).toBe("stale");
               refused.push(target);
@@ -144,7 +142,7 @@ describe("a refused act on one page", () => {
             undefined,
             deps,
           );
-        const firstResult = await drive();
+        await drive();
         expect(refused).toHaveLength(1);
         expect(await tab.locator("#selected").textContent()).toBe("No account selected");
         if (scenario === "next-page") await tab.goto(chooser);
@@ -160,7 +158,7 @@ describe("a refused act on one page", () => {
             node.after(sibling);
           });
         }
-        const secondResult = await drive();
+        await drive();
         const nextTargets = menus[1]!;
         if (scenario === "next-page") {
           for (const tile of tiles) {
@@ -177,17 +175,6 @@ describe("a refused act on one page", () => {
           expect(nextTargets.some((text) => text.includes("Help"))).toBe(true);
           expect(nextTargets.some((text) => text.includes("BeatAPI home"))).toBe(true);
           expect(await tab.locator("#selected").textContent()).toBe("Help clicked");
-        }
-        const evidenceDir = process.env.SQUIRE_DRIVE_EVIDENCE_DIR;
-        if (evidenceDir) {
-          await tab.screenshot({ path: join(evidenceDir, `${scenario}.png`), fullPage: true });
-          await writeFile(
-            join(evidenceDir, `${scenario}.json`),
-            JSON.stringify({
-              scenario, menus, outcomes, firstResult, secondResult,
-              selected: await tab.locator("#selected").textContent(),
-            }, null, 2),
-          );
         }
       } finally {
         await finishProvisionSession(started.session_id);
