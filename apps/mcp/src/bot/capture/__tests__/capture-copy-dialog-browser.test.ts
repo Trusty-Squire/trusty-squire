@@ -202,19 +202,21 @@ it.each([false, true])(
   },
 );
 
-it.each(["plain", "wrapped", "icon", "replaced icon", "replaced source"])("vaults a Zro key with control: %s", async (variant) => {
-  const wrapped = variant !== "plain";
-  // Zro 23 Nov (run after Grunt #182, trace rows 9-11): Create closed the form
-  // dialog and /api-keys showed the key once in an inline, non-modal panel with
-  // Dismiss / Copy key / Done, plus a setup snippet carrying its own
-  // credential-shaped value beside Copy setup. Nothing on the page was covered.
-  const key = "zro_Hk3Lm9Np2Qr8St4Uv7Wx1Yz5Ab6Cd0Ef";
-  const setupToken = "zsetup_Gh2Jk4Lm6Np8Qr0St3Uv5Wx7Yz9Ab1";
-  await context.clearPermissions();
-  await page.evaluate(() => navigator.clipboard.writeText("")).catch(() => undefined);
-  const html = `<!doctype html><main><h1>API keys</h1><button>Create key</button>
+it.each(["plain", "wrapped", "icon", "replaced icon", "replaced source"])(
+  "vaults a Zro key with control: %s",
+  async (variant) => {
+    const wrapped = variant !== "plain";
+    // Zro 23 Nov (run after Grunt #182, trace rows 9-11): Create closed the form
+    // dialog and /api-keys showed the key once in an inline, non-modal panel with
+    // Dismiss / Copy key / Done, plus a setup snippet carrying its own
+    // credential-shaped value beside Copy setup. Nothing on the page was covered.
+    const key = "zro_Hk3Lm9Np2Qr8St4Uv7Wx1Yz5Ab6Cd0Ef";
+    const setupToken = "zsetup_Gh2Jk4Lm6Np8Qr0St3Uv5Wx7Yz9Ab1";
+    await context.clearPermissions();
+    await page.evaluate(() => navigator.clipboard.writeText("")).catch(() => undefined);
+    const html = `<!doctype html><main><h1>API keys</h1><button>Create key</button>
     <section class="panel"><h2>Your new key</h2>
-      <div>${wrapped ? "<span>" : ""}<code id="key">${key}</code>${wrapped ? "</span>" : ""}<button type="button" id="copy-key">${variant.includes("icon") ? "⧉" : "Copy key"}</button></div>
+      <div>${wrapped ? "<span>" : ""}<code id="key">${key}</code>${wrapped ? "</span>" : ""}<button type="button" id="new-key-control">${variant.includes("icon") ? "⧉" : "Copy key"}</button></div>
       <button type="button">Dismiss</button><button type="button">Done</button>
       <h3>Use Zro from npm</h3>
       <div><code id="setup">ZRO_SETUP=${setupToken}</code>
@@ -223,7 +225,7 @@ it.each(["plain", "wrapped", "icon", "replaced icon", "replaced source"])("vault
     <h2>Active keys</h2><ul><li>grunt-20261123-1809 <button>Revoke grunt-20261123-1809</button></li></ul>
   </main>
   <script>
-    document.getElementById('copy-key').addEventListener('click', async (event) => {
+    document.getElementById('new-key-control').addEventListener('click', async (event) => {
       await navigator.clipboard.writeText(document.getElementById('key').textContent);
       event.target.textContent = 'Copied';
       if (${variant.startsWith("replaced")}) event.target.replaceWith(event.target.cloneNode(true));
@@ -231,30 +233,35 @@ it.each(["plain", "wrapped", "icon", "replaced icon", "replaced source"])("vault
     document.getElementById('copy-setup').addEventListener('click', () =>
       navigator.clipboard.writeText(document.getElementById('setup').textContent));
   </script>`;
-  await page.route("**/*", (route) => route.fulfill({ contentType: "text/html", body: html }));
-  await page.goto("http://127.0.0.1/api-keys");
+    await page.route("**/*", (route) => route.fulfill({ contentType: "text/html", body: html }));
+    await page.goto("http://127.0.0.1/api-keys");
 
-  if (variant.includes("icon") || variant === "replaced source") {
-    await context.grantPermissions(["clipboard-read", "clipboard-write"]);
-    if (variant.includes("icon"))
-      expect((await extractCredentials("fixture-session")).credentials).toEqual({});
-    await page.evaluate(() => {
-      (window as Window & { __tsDriveRegistry?: { nodes: Map<string, Element | null> } }).__tsDriveRegistry = { nodes: new Map([["key", document.getElementById("copy-key")]]) };
-    });
-    expect(await copySourceClick(page, "key")).toBe(
-      variant === "replaced source" ? "source" : "candidate",
-    );
-    await page.locator("#copy-key").click();
-  }
-  const result = await extractCredentials("fixture-session");
-  expect(result.credentials).toEqual({ api_key: key });
-  expect(await page.locator("#copy-key").textContent()).toBe("Copied");
-  // A retry after a failed store finds the same control under its new label;
-  // "Copied" beside "Copy setup" no longer names a key on its own.
-  await page.evaluate(() => navigator.clipboard.writeText(""));
-  const retried = await extractCredentials("fixture-session");
-  expect(retried.credentials).toEqual(variant.startsWith("replaced") ? {} : { api_key: key });
-});
+    if (variant.includes("icon") || variant === "replaced source") {
+      await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+      if (variant.includes("icon"))
+        expect((await extractCredentials("fixture-session")).credentials).toEqual({});
+      await page.evaluate(() => {
+        (
+          window as Window & { __tsDriveRegistry?: { nodes: Map<string, Element | null> } }
+        ).__tsDriveRegistry = {
+          nodes: new Map([["key", document.getElementById("new-key-control")]]),
+        };
+      });
+      expect(await copySourceClick(page, "key")).toBe(
+        variant === "replaced source" ? "source" : "candidate",
+      );
+      await page.locator("#new-key-control").click();
+    }
+    const result = await extractCredentials("fixture-session");
+    expect(result.credentials).toEqual({ api_key: key });
+    expect(await page.locator("#new-key-control").textContent()).toBe("Copied");
+    // A retry after a failed store finds the same control under its new label;
+    // "Copied" beside "Copy setup" no longer names a key on its own.
+    await page.evaluate(() => navigator.clipboard.writeText(""));
+    const retried = await extractCredentials("fixture-session");
+    expect(retried.credentials).toEqual(variant.startsWith("replaced") ? {} : { api_key: key });
+  },
+);
 
 it("does not take a highlighted code sample's Copy for the revealed key", async () => {
   // A syntax highlighter puts the key in its own span inside the curl sample,
@@ -280,7 +287,6 @@ it("does not take a highlighted code sample's Copy for the revealed key", async 
   expect(result.credentials).toEqual({ api_key: key });
 });
 
-
 it("does not promote an icon candidate from another holder's stale clipboard value", async () => {
   const key = "kn-Q7wE3rT9yU2iO5pA8sD1fG4hJ6kL0zX3cV7bN9mQ2wE5rT8y";
   const oldKey = "zro_Hk3Lm9Np2Qr8St4Uv7Wx1Yz5Ab6Cd0Ef";
@@ -292,13 +298,14 @@ it("does not promote an icon candidate from another holder's stale clipboard val
   await context.grantPermissions(["clipboard-read", "clipboard-write"]);
   await page.evaluate(async (value) => {
     await navigator.clipboard.writeText(value);
-    (window as Window & { __tsDriveRegistry?: { nodes: Map<string, Element | null> } }).__tsDriveRegistry = { nodes: new Map([["new", document.getElementById("new")]]) };
+    (
+      window as Window & { __tsDriveRegistry?: { nodes: Map<string, Element | null> } }
+    ).__tsDriveRegistry = { nodes: new Map([["new", document.getElementById("new")]]) };
   }, oldKey);
   expect(await copySourceClick(page, "new")).toBe("candidate");
   await page.locator("#new").click();
   expect((await extractCredentials("fixture-session")).credentials).toEqual({});
 });
-
 
 it("copies the bare key instead of a closer setup assignment containing the same token", async () => {
   const key = "zro_Hk3Lm9Np2Qr8St4Uv7Wx1Yz5Ab6Cd0Ef";
@@ -325,9 +332,13 @@ it("requires an inline source and its remembered retry to copy the associated ba
   await page.route("**/*", (route) => route.fulfill({ contentType: "text/html", body: html }));
   await page.goto("http://127.0.0.1/api-keys");
   expect((await extractCredentials("fixture-session")).credentials).toEqual({});
-  await page.evaluate((value) => { Reflect.set(window, "copiedValue", value); }, key);
+  await page.evaluate((value) => {
+    Reflect.set(window, "copiedValue", value);
+  }, key);
   expect((await extractCredentials("fixture-session")).credentials).toEqual({ api_key: key });
-  await page.evaluate((value) => { Reflect.set(window, "copiedValue", value); }, `API_KEY=${key}`);
+  await page.evaluate((value) => {
+    Reflect.set(window, "copiedValue", value);
+  }, `API_KEY=${key}`);
   expect((await extractCredentials("fixture-session")).credentials).toEqual({});
 });
 
@@ -336,18 +347,36 @@ it.each(["⧉", '<svg width="16" height="16"><rect width="12" height="12" /></sv
   async (icon) => {
     const key = "zro_Hk3Lm9Np2Qr8St4Uv7Wx1Yz5Ab6Cd0Ef";
     const html = `<!doctype html><h1>API keys</h1>
-      <div>API key: <span>${key}</span><button id="copy">${icon}</button></div>
-      <script>document.getElementById('copy').onclick = () => navigator.clipboard.writeText('${key}');</script>`;
+      <div>API key: <span>${key}</span><button id="icon-control">${icon}</button></div>
+      <script>document.getElementById('icon-control').onclick = () => navigator.clipboard.writeText('${key}');</script>`;
     await page.route("**/*", (route) => route.fulfill({ contentType: "text/html", body: html }));
     await page.goto("http://127.0.0.1/api-keys");
     expect((await extractCredentials("fixture-session")).credentials).toEqual({});
     await page.evaluate(() => {
-      (window as Window & { __tsDriveRegistry?: { nodes: Map<string, Element | null> } }).__tsDriveRegistry = {
-        nodes: new Map([["copy", document.getElementById("copy")]]),
+      (
+        window as Window & { __tsDriveRegistry?: { nodes: Map<string, Element | null> } }
+      ).__tsDriveRegistry = {
+        nodes: new Map([["copy", document.getElementById("icon-control")]]),
       };
     });
     expect(await copySourceClick(page, "copy")).toBe("candidate");
-    await page.locator("#copy").click();
+    await page.locator("#icon-control").click();
     expect((await extractCredentials("fixture-session")).credentials).toEqual({ api_key: key });
   },
 );
+
+it("vaults a key written as plain text directly beside its Salin button", async () => {
+  // The key is a bare text child of the same element as its Copy control, so
+  // that element's whole text reads "<key>Salin".
+  const key = "kn-Q7wE3rT9yU2iO5pA8sD1fG4hJ6kL0zX3cV7bN9mQ2wE5rT8y";
+  await context.clearPermissions();
+  await page.evaluate(() => navigator.clipboard.writeText("")).catch(() => undefined);
+  const html = `<!doctype html><h1>API Keys</h1><div id="row">${key}<button type="button">Salin</button></div>
+  <script>document.querySelector('button').addEventListener('click', () =>
+    navigator.clipboard.writeText('${key}'));</script>`;
+  await page.route("**/*", (route) => route.fulfill({ contentType: "text/html", body: html }));
+  await page.goto("http://127.0.0.1/keys");
+
+  const result = await extractCredentials("fixture-session");
+  expect(result.credentials).toEqual({ api_key: key });
+});

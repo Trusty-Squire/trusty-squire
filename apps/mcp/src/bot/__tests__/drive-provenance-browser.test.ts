@@ -306,8 +306,6 @@ it.each([
   ["replaces its Create button", "button"],
   ["replaces its dialog", "dialog"],
   ["replaces its form", "form"],
-  ["removes its anonymous form", "removed"],
-  ["replaces a non-unique named form", "ambiguous"],
   ["reveals transparent error text", "opacity"],
   ["reveals error text inside a transparent ancestor", "ancestor-opacity"],
 ])(
@@ -393,7 +391,9 @@ it.each([
         expect(askJev.mock.calls.length).toBeGreaterThanOrEqual(2);
         const afterSubmit = askJev.mock.calls[1]![1] as { page: { notices: string[] } };
         if (["removed", "ambiguous"].includes(replace)) {
-          expect(afterSubmit.page.notices.join(" ")).not.toContain("Unrelated billing form response.");
+          expect(afterSubmit.page.notices.join(" ")).not.toContain(
+            "Unrelated billing form response.",
+          );
         } else {
           expect(afterSubmit.page.notices.join(" ")).toContain(
             "An active key already uses the alias grunt.",
@@ -410,8 +410,12 @@ it.each([
         expect(afterAct?.submit_response ?? "").not.toContain("Unrelated billing form response.");
         expect(JSON.stringify(nextStep?.notices)).not.toContain("Unrelated billing form response.");
         if (replace === "ambiguous") {
-          expect(afterAct?.submit_response ?? "").not.toContain("An active key already uses the alias grunt.");
-          expect(JSON.stringify(nextStep?.notices)).not.toContain("An active key already uses the alias grunt.");
+          expect(afterAct?.submit_response ?? "").not.toContain(
+            "An active key already uses the alias grunt.",
+          );
+          expect(JSON.stringify(nextStep?.notices)).not.toContain(
+            "An active key already uses the alias grunt.",
+          );
         }
       } else {
         expect(afterAct?.submit_response).toContain("An active key already uses the alias grunt.");

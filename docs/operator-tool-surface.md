@@ -650,8 +650,9 @@ tokens. `operate_extract` without
 that click writes to the clipboard, as `api_key`. When no dialog holds one, it
 clicks the Copy button nearest a key shown inline on the page, as on a list page
 that reveals the new key once its dialog closes. The shown key only locates that
-button and is never stored itself. When several shown keys each have an equally
-near Copy button, nothing is clicked. Copy controls are recognized by English
+button and is never stored itself; that click must write exactly that key. When
+Copy buttons beside different shown keys compete, only one whose label names a
+key (such as `Copy key`) is clicked, otherwise none. Copy controls are recognized by English
 cues and common localized labels such as Indonesian `Salin`. When no Copy click
 yields a value it stores nothing and returns
 an `error` telling the agent to read the page with `operate_observe` and point
