@@ -2786,8 +2786,10 @@ describe("Compact V2 action-map boundary", () => {
     const result = await observeQuery(started.session_id, "Acme Pro");
 
     expect(result.safe_table).toHaveLength(1);
-    expect(JSON.stringify(result)).not.toContain("Acme");
-    expect(JSON.stringify(result)).not.toContain("Pro");
+    // Query terms select the Pro control, not Basic. Opaque handles may
+    // coincidentally contain query text, so assert the resolved click target.
+    await act(started.session_id, { kind: "click", target: domRefs(result)[0]! });
+    expect(h.dispatchTargets).toEqual(["#pro"]);
   });
 
   it("uses four-digit private query terms to distinguish sealed controls", async () => {
