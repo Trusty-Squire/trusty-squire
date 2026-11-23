@@ -283,11 +283,10 @@ function typeInto(rows: WireRow[], field: WireRow, factKey: keyof typeof facts) 
 describe("drive budget keeps supplied facts beside a long checkbox list", () => {
   it("keeps operation and email-code choices when form values exhaust the budget", () => {
     const rows: WireRow[] = [
-      ...Array.from({ length: 12 }, (_, index): WireRow => [
-        `@e:field-${index}`,
-        "t",
-        `Bidang ${index}|fm=1`,
-      ]),
+      ...Array.from(
+        { length: 12 },
+        (_, index): WireRow => [`@e:field-${index}`, "t", `Bidang ${index}|fm=1`],
+      ),
       ["@e:submit", "b", "Kirim|a=submit|fm=1"],
     ];
     const suppliedFacts = Object.fromEntries(

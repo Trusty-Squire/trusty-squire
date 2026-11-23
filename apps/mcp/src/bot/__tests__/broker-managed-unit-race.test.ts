@@ -58,11 +58,19 @@ afterEach(async () => {
 
 function systemdUserAvailable(): boolean {
   const unit = `trusty-squire-broker-probe-${process.pid}-${randomUUID().slice(0, 8)}`;
-  const started = spawnSync("systemd-run", [
-    "--user", "--quiet", "--collect", "--unit", unit, "/bin/true",
-  ], { stdio: "ignore", timeout: 3_000 });
-  spawnSync("systemctl", ["--user", "stop", `${unit}.service`], { stdio: "ignore", timeout: 3_000 });
-  spawnSync("systemctl", ["--user", "reset-failed", `${unit}.service`], { stdio: "ignore", timeout: 3_000 });
+  const started = spawnSync(
+    "systemd-run",
+    ["--user", "--quiet", "--collect", "--unit", unit, "/bin/true"],
+    { stdio: "ignore", timeout: 3_000 },
+  );
+  spawnSync("systemctl", ["--user", "stop", `${unit}.service`], {
+    stdio: "ignore",
+    timeout: 3_000,
+  });
+  spawnSync("systemctl", ["--user", "reset-failed", `${unit}.service`], {
+    stdio: "ignore",
+    timeout: 3_000,
+  });
   return started.status === 0;
 }
 
@@ -113,22 +121,33 @@ it.skipIf(!systemdUserAvailable())(
     const stub = join(root, "stub.mjs");
     writeFileSync(stub, STUB);
     const unit = `trusty-squire-broker-race-${process.pid}-${randomUUID().slice(0, 8)}`;
-    const started = spawnSync("systemd-run", [
-      "--user",
-      "--unit", unit,
-      "--property=Restart=always",
-      "--property=RestartSec=1",
-      `--setenv=HOME=${root}`,
-      `--setenv=TRUSTY_SQUIRE_PROFILE_DIR=${profile}`,
-      `--setenv=STUB_MCP_SOCKET=${socket}`,
-      process.execPath,
-      stub,
-      "broker",
-    ], { encoding: "utf8", timeout: 5_000 });
+    const started = spawnSync(
+      "systemd-run",
+      [
+        "--user",
+        "--unit",
+        unit,
+        "--property=Restart=always",
+        "--property=RestartSec=1",
+        `--setenv=HOME=${root}`,
+        `--setenv=TRUSTY_SQUIRE_PROFILE_DIR=${profile}`,
+        `--setenv=STUB_MCP_SOCKET=${socket}`,
+        process.execPath,
+        stub,
+        "broker",
+      ],
+      { encoding: "utf8", timeout: 5_000 },
+    );
     expect(started.status, started.stderr).toBe(0);
     cleanup.push(async () => {
-      spawnSync("systemctl", ["--user", "stop", `${unit}.service`], { stdio: "ignore", timeout: 5_000 });
-      spawnSync("systemctl", ["--user", "reset-failed", `${unit}.service`], { stdio: "ignore", timeout: 5_000 });
+      spawnSync("systemctl", ["--user", "stop", `${unit}.service`], {
+        stdio: "ignore",
+        timeout: 5_000,
+      });
+      spawnSync("systemctl", ["--user", "reset-failed", `${unit}.service`], {
+        stdio: "ignore",
+        timeout: 5_000,
+      });
       killLeakedBrokers(profile);
     });
 
@@ -180,7 +199,9 @@ it.skipIf(!systemdUserAvailable())(
       capabilities: {},
       clientInfo: { name: "race", version: "1" },
     });
-    relay.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n");
+    relay.stdin.write(
+      JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n",
+    );
     expect(await call(2, "tools/list")).toEqual({ tools: [{ name: "operate_start" }] });
 
     const restart = spawnSync("systemctl", ["--user", "restart", `${unit}.service`], {
