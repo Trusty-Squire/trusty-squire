@@ -6,7 +6,11 @@ import {
   passwordMeetsRequirements,
 } from "../drive-password.js";
 import { emailCodeCandidates, newAccountPasswordTargets, type WireRow } from "../operate-drive.js";
-import { driveRowsFromSnapshot, type DriveSnapshotElement } from "../drive-snapshot.js";
+import {
+  driveRowsFromSnapshot,
+  inferFieldFromControl,
+  type DriveSnapshotElement,
+} from "../drive-snapshot.js";
 import { storeInventedLogin } from "../../tools/provision-drive.js";
 import type { ApiClient } from "../../api-client.js";
 import { withOperatorRequestContext } from "../request-cancellation.js";
@@ -545,6 +549,30 @@ describe("sign-up passwords named by the input type", () => {
     ]);
     expect(newAccountPasswordTargets(signin, { email }, [])).toBeUndefined();
   });
+
+  it.each([undefined, "text", "number"])(
+    "preserves ordinary field inference for input type %j",
+    (inputType) => {
+      for (const label of ["Verification code", "PIN", ""]) {
+        expect(
+          inferFieldFromControl({
+            role: "textbox",
+            label,
+            placeholder: "Verification code",
+            inputType,
+          }),
+        ).toBeUndefined();
+      }
+      expect(
+        inferFieldFromControl({
+          role: "textbox",
+          label: "Verification code",
+          placeholder: "Enter here",
+          inputType,
+        }),
+      ).toBe("otp");
+    },
+  );
 
   it.each(["Verification code", "PIN", ""])(
     "offers a masked code with label %j and a meaningful placeholder for inbox verification",
