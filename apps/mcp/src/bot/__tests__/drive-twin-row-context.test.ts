@@ -83,4 +83,29 @@ describe("identically labeled controls carry their row", () => {
     );
     expect(rows.filter((row) => row[2] === "Copy")).toHaveLength(2);
   });
+
+  it.skipIf(!available)("preserves word order when key names share every word", async () => {
+    const rows = await rowsOf(
+      `<main>${card("Production US", "sk_same", "2d")}${card("US Production", "sk_same", "2d")}</main>`,
+    );
+    for (const label of ["Edit secret key", "Delete secret key"]) {
+      const twins = rows.filter((row) => row[2]?.startsWith(`${label}|`));
+      expect(twins).toHaveLength(2);
+      expect(twins[0]?.[2]).toContain("ctx=Secret key Production US");
+      expect(twins[1]?.[2]).toContain("ctx=Secret key US Production");
+    }
+  });
+
+  it.skipIf(!available)("keeps distinctions beyond the reduced context limit", async () => {
+    const prefix = "x".repeat(65);
+    const rows = await rowsOf(
+      `<main><div><p>${prefix}A</p><button>Copy</button></div>
+       <div><p>${prefix}B</p><button>Copy</button></div></main>`,
+    );
+    const twins = rows.filter((row) => row[2]?.startsWith("Copy|"));
+    expect(twins.map((row) => row[2])).toEqual([
+      `Copy|ctx=${prefix}A`,
+      `Copy|ctx=${prefix}B`,
+    ]);
+  });
 });

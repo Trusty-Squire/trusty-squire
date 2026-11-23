@@ -238,12 +238,16 @@ it("resumes a budget-ended inbox poll and fills newly arrived mail", async () =>
 // input is type=password, so after the inbox read typed the code the row showed
 // only that it held a value. The drive offered the field again and re-read the
 // inbox eight times instead of pressing Verify.
-it("submits a code typed into a masked field instead of re-reading the inbox", async () => {
+it.each([
+  '<label>Verification code <input type="password" inputmode="numeric" maxlength="6" pattern="[0-9]*"></label>',
+  '<input type="password" placeholder="Verification code" inputmode="numeric" maxlength="6" pattern="[0-9]*">',
+])("submits and re-arms a masked code field: %s", async (control) => {
   const codePage = `<meta charset="utf-8"><main><h1>API keys</h1>
     <div role="dialog" aria-label="Show plaintext key">
       <p>We sent a verification code to your email.</p>
-      <label>Verification code <input type="password" inputmode="numeric" maxlength="6" pattern="[0-9]*"></label>
+      ${control}
       <button type="button">Cancel</button>
+      <button type="button" onclick="document.querySelector('input').value = ''">Resend PIN</button>
       <button type="button" onclick="document.body.dataset.verified = document.querySelector('input').value">Verify</button>
     </div></main>`;
   const keysUrl = "https://tokenharbor.ai/dashboard/api-keys";
@@ -293,6 +297,31 @@ it("submits a code typed into a masked field instead of re-reading the inbox", a
     expect(awaitVerification).toHaveBeenCalledTimes(1);
     expect(result.trajectory.some((step) => step.action === "type_otp")).toBe(true);
     expect(await page.evaluate(() => document.body.dataset.verified)).toBe("482619");
+    await page.getByRole("button", { name: "Resend PIN" }).click();
+    awaitVerification.mockResolvedValue({
+      session_id: sessionId,
+      found: true,
+      code: "739152",
+      link: null,
+    });
+    const resumed = await runOperateDrive(
+      { session_id: sessionId, goal: revealGoal, max_steps: 1, max_seconds: 30 },
+      api,
+      undefined,
+      {
+        act,
+        observe,
+        startSession: async () => {
+          throw new Error("existing session");
+        },
+        awaitVerification,
+        injectCard: async () => ({ status: "unused" }),
+        askJev: pick,
+      },
+    );
+    expect(awaitVerification).toHaveBeenCalledTimes(2);
+    expect(await page.locator("input").inputValue()).toBe("739152");
+    expect(resumed.trajectory.some((step) => step.action === "type_otp")).toBe(true);
   } finally {
     await finishProvisionSession(sessionId);
     await context.close();

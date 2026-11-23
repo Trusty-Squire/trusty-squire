@@ -7085,11 +7085,9 @@ async function driveLoop(input: {
           text: driveInboxValue(verification).code!,
         };
         const acted = await actDriveSafely(session, sessionId, typed, dependencies);
-        let landed = acted.kind === "ok";
         if (acted.kind !== "ok") {
           const safe = await actSafely(dependencies, sessionId, typed);
           if (safe.dispatchFailure === undefined) dispatchedActs += 1;
-          landed = safe.dispatchFailure === undefined;
           drive.lastDispatchFailure = safe.dispatchFailure ?? null;
           drive.lastOauthBounceReason = null;
           observation = safe.observation;
@@ -7098,12 +7096,6 @@ async function driveLoop(input: {
           const page = session.browser.page;
           if (page !== null)
             await waitForPageReady(page, { kind: "drive-action", combobox: acted.combobox });
-        }
-        // The typed code is a filled field like any typed fact. A masked code
-        // input shows no value, so without this the next decision offers the
-        // field again and re-reads the inbox instead of submitting the code.
-        if (landed && !drive.filledRefs.includes(typed.target)) {
-          drive.filledRefs.push(typed.target);
         }
       } else if (inboxNext === "goto_link" && driveInboxValue(verification).link !== null) {
         const safe = await actSafely(dependencies, sessionId, {

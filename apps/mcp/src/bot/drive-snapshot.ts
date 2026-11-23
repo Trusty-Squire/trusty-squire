@@ -172,10 +172,7 @@ export function inferFieldFromControl(input: {
   }
   const fromName = inferFieldFromLabel(input.name ?? "", input.role);
   if (fromName !== undefined) return fromName;
-  const fromLabel =
-    (input.placeholder ?? "").length > 0 && input.label === input.placeholder
-      ? undefined
-      : inferFieldFromLabel(input.label, input.role);
+  const fromLabel = inferFieldFromLabel(input.label, input.role);
   // A masked input whose words name nothing (a placeholder of dots, a label
   // in another language) is a password; one whose words name a field, such
   // as a masked verification code, stays that field.
@@ -205,7 +202,7 @@ export function distinguishingRowContexts(
   for (const group of groups.values()) {
     if (group.length < 2) continue;
     const wordsOf = (element: DriveSnapshotElement): string[] =>
-      (element.rowContext ?? "").split(/\s+/).filter((word) => word.length > 0);
+      (element.rowContext ?? "").replace(/\|/g, " ").split(/\s+/).filter((word) => word.length > 0);
     const shared = group
       .map((element) => new Set(wordsOf(element)))
       .reduce((common, words) => new Set([...common].filter((word) => words.has(word))));
@@ -216,9 +213,14 @@ export function distinguishingRowContexts(
         .slice(0, 60)
         .trim(),
     );
+    const labels = own.every(
+      (text) => text.length > 0 && own.filter((other) => other === text).length === 1,
+    )
+      ? own
+      : group.map((element) => wordsOf(element).join(" ").slice(0, 200).trim());
     group.forEach((element, index) => {
-      const text = own[index]!;
-      if (text.length > 0 && own.filter((other) => other === text).length === 1) {
+      const text = labels[index]!;
+      if (text.length > 0 && labels.filter((other) => other === text).length === 1) {
         contexts.set(element.ref, text);
       }
     });
