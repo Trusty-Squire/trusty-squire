@@ -99,8 +99,8 @@ describe("identically labeled controls carry their row", () => {
   it.skipIf(!available)("keeps distinctions beyond the reduced context limit", async () => {
     const prefix = "x".repeat(65);
     const rows = await rowsOf(
-      `<main><div><p>${prefix}A</p><button>Copy</button></div>
-       <div><p>${prefix}B</p><button>Copy</button></div></main>`,
+      `<main><div><p>${prefix}A</p><button type="button">Copy</button></div>
+       <div><p>${prefix}B</p><button type="button">Copy</button></div></main>`,
     );
     const twins = rows.filter((row) => row[2]?.startsWith("Copy|"));
     expect(twins.map((row) => row[2])).toEqual([
