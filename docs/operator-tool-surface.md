@@ -187,10 +187,9 @@ verification code or link before reading mail.
 After the inbox poll window expires with no matching mail, that miss remains
 in the outcome trail and suppresses the emailed-code question while it is the latest outcome
 on that page. A later action or a different page makes the question eligible
-again. A code the drive types from the inbox counts as a filled field, and a
-masked (`type=password`) field that holds a value is not empty and is marked
-`filled` in the decider's element list, so the drive submits the code instead
-of reading the inbox for it again.
+again. A populated masked (`type=password`) field is marked `filled` in the
+decider's element list and is not offered for another inbox code. This uses
+the field's live populated state; clearing it makes it eligible again.
 
 WAIT and BLOCKED are offered only while no listed work remains: an enabled
 fill, select, choice, or non-OAuth submit that is actually offered keeps both
@@ -390,12 +389,16 @@ offscreen targets in proportion to their own click votes, visible targets keep
 only their CLICK share, and the merged target confidence must reach 0.6.
 Fixed operation choices and invalid answers do not take this fallback.
 
-Click controls that share a role and label (one "Edit" per key) carry the words of
-their own row that the twins' rows do not share, read from the largest
-ancestor holding no twin, as the row's `ctx=` fact; their options and element
-descriptions name that row. Twins whose rows read the same stay identical.
+Click controls that share a frame, role, and label (one "Edit" per key) carry
+row context in the `ctx=` fact; their options and element descriptions name
+that row. The snapshot reads up to 200 characters of visible row text from
+the largest ancestor holding no twin. Context uses up to 60 characters of
+words the other rows do not share; if those do not distinguish every twin,
+it falls back to the ordered row text. Only nonempty, unique contexts are
+included. Twins whose captured row text reads the same stay identical.
 Checked/unchecked state (`s=c`/`s=u`) covers checkboxes, radios, switches
-(`aria-checked`), and toggle buttons (`aria-pressed`).
+(`aria-checked`), and toggle buttons (`aria-pressed`); ARIA `mixed` is reported
+as checked.
 
 For an admitted CLICK operation, a valid target vote that would otherwise return
 `low_confidence` is admitted when its chosen candidate is the only CLICK candidate

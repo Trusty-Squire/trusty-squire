@@ -184,9 +184,9 @@ export function inferFieldFromControl(input: {
 }
 
 /**
- * What tells each identically named control apart: the words of its own row
- * that the other twins' rows do not share (a key's name beside its "Edit").
- * A twin whose row text names nothing of its own gets no context.
+ * Prefer the row's unique words (a key's name beside its "Edit"); preserve
+ * word order with full row text when reducing words loses distinctions.
+ * Omit context that still cannot distinguish a twin.
  */
 export function distinguishingRowContexts(
   elements: readonly DriveSnapshotElement[],
@@ -206,7 +206,10 @@ export function distinguishingRowContexts(
   for (const group of groups.values()) {
     if (group.length < 2) continue;
     const wordsOf = (element: DriveSnapshotElement): string[] =>
-      (element.rowContext ?? "").replace(/\|/g, " ").split(/\s+/).filter((word) => word.length > 0);
+      (element.rowContext ?? "")
+        .replace(/\|/g, " ")
+        .split(/\s+/)
+        .filter((word) => word.length > 0);
     const shared = group
       .map((element) => new Set(wordsOf(element)))
       .reduce((common, words) => new Set([...common].filter((word) => words.has(word))));
