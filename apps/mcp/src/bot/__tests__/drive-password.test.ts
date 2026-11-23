@@ -559,7 +559,7 @@ describe("sign-up passwords named by the input type", () => {
             role: "textbox",
             label,
             placeholder: "Verification code",
-            inputType,
+            ...(inputType === undefined ? {} : { inputType }),
           }),
         ).toBeUndefined();
       }
@@ -568,7 +568,7 @@ describe("sign-up passwords named by the input type", () => {
           role: "textbox",
           label: "Verification code",
           placeholder: "Enter here",
-          inputType,
+          ...(inputType === undefined ? {} : { inputType }),
         }),
       ).toBe("otp");
     },
