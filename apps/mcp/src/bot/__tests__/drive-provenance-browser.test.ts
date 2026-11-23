@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { afterAll, beforeAll, expect, it, vi } from "vitest";
 import { chromium, type BrowserContext } from "playwright";
@@ -210,3 +210,116 @@ it.each([
   },
   30_000,
 );
+
+it("stores a Kenari key shown inline after its dialog closed, through its Salin button", async () => {
+  // Kenari 23 Nov (trace rows 15-17): after "Buat Key" the dialog closed and
+  // /keys showed the new key once inline with "Salin"/"Tutup" beside it. The
+  // drive's revealed-key capture found no Copy source and the key was lost.
+  const key = "kn-Q7wE3rT9yU2iO5pA8sD1fG4hJ6kL0zX3cV7bN9mQ2wE5rT8y";
+  const html = `<!doctype html><main><h1>API Keys</h1><button>Buat API Key</button>
+    <section><p>Simpan key ini sekarang.</p><code id="revealed">${key}</code>
+      <button type="button" id="salin">Salin</button><button type="button">Tutup</button></section>
+    <table><tr><td>kn-08d5677c grunt 23</td><td><button>Ganti key</button>
+      <button>Cabut key</button></td></tr></table></main>
+    <script>document.getElementById('salin').addEventListener('click', async (event) => {
+      await navigator.clipboard.writeText(document.getElementById('revealed').textContent);
+      event.target.textContent = 'Tersalin';
+    });</script>`;
+  await withPage(html, async (sessionId) => {
+    sessionForCall(sessionId)!.drive = emptyDriveState(goal, {});
+    const persistCredentials = vi.fn<NonNullable<DriveCallContext["persistCredentials"]>>(
+      async () => ({ reference: "vault://ref", service: "kenari", label: undefined }),
+    );
+    const result = await runOperateDrive(
+      { session_id: sessionId, goal, max_steps: 3, max_seconds: 5 },
+      api,
+      { persistCredentials },
+      dependencies(doneJev()),
+    );
+    expect(result.status, `${result.reason} | ${JSON.stringify(result.trajectory)}`).toBe(
+      "complete",
+    );
+    expect(persistCredentials).toHaveBeenCalledWith(
+      expect.objectContaining({ credentials: { api_key: key } }),
+    );
+  });
+}, 30_000);
+
+it("reports a submitted form's inline error text to the model and the trace", async () => {
+  // Zro 23 Nov (trace rows 24-26): Create left its dialog open and created no
+  // key; the trace carried interactive rows only, so nothing said why. The
+  // page's own text fills the snapshot's text budget before the dialog.
+  const filler = Array.from({ length: 300 }, (_, index) => `Usage line ${index} for the account.`);
+  const html = `<!doctype html><main><h1>API keys</h1>
+    <div style="font-size:6px">${filler.map((line) => `<span>${line} </span>`).join("")}</div></main>
+    <div role="dialog" aria-label="Create API key" style="position:fixed;top:20px;left:20px;background:#fff">
+      <form id="create"><label>Alias <input name="alias" value="grunt"></label>
+        <p id="error"></p><button type="submit">Create</button></form></div>
+    <script>document.getElementById('create').addEventListener('submit', (event) => {
+      event.preventDefault();
+      document.getElementById('error').textContent = 'An active key already uses the alias grunt.';
+    });</script>`;
+  const traceDir = await mkdtemp(join(process.cwd(), ".drive-form-error-trace-"));
+  const tracePath = join(traceDir, "trace.jsonl");
+  vi.stubEnv("DRIVE_TRACE_PATH", tracePath);
+  try {
+    await withPage(html, async (sessionId) => {
+      sessionForCall(sessionId)!.drive = emptyDriveState("create an API key", {});
+      let calls = 0;
+      const askJev = vi.fn<DriveDependencies["askJev"]>(async (_api, _state, questions) => {
+        calls += 1;
+        const answers = Object.fromEntries(
+          Object.entries(questions).flatMap(([name, question]) => {
+            if (question.type !== "choice") return [];
+            const keys = Object.keys(question.criteria);
+            const choice =
+              name === "operation"
+                ? calls === 1
+                  ? "CLICK"
+                  : "BLOCKED"
+                : name === "CLICK_target"
+                  ? (keys.find((slug) => /create/.test(slug)) ?? keys[0]!)
+                  : keys[0]!;
+            return [
+              [
+                name,
+                {
+                  choice,
+                  confidence: 1,
+                  probabilities: Object.fromEntries(
+                    keys.map((key) => [key, key === choice ? 1 : 0]),
+                  ),
+                },
+              ],
+            ];
+          }),
+        );
+        return { attempts: 1, elapsedMs: 1, result: { answers } };
+      });
+      await runOperateDrive(
+        { session_id: sessionId, goal: "create an API key", max_steps: 2, max_seconds: 10 },
+        api,
+        undefined,
+        dependencies(askJev),
+      );
+      expect(askJev.mock.calls.length).toBeGreaterThanOrEqual(2);
+      const afterSubmit = askJev.mock.calls[1]![1] as { page: { notices: string[] } };
+      expect(afterSubmit.page.notices.join(" ")).toContain(
+        "An active key already uses the alias grunt.",
+      );
+    });
+    const rows = (await readFile(tracePath, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    const afterAct = rows.find((row) => row.at === "after_act");
+    expect(afterAct?.submit_response).toContain("An active key already uses the alias grunt.");
+    const nextStep = rows.filter((row) => row.at === "step")[1];
+    expect(JSON.stringify(nextStep?.notices)).toContain(
+      "An active key already uses the alias grunt.",
+    );
+  } finally {
+    vi.unstubAllEnvs();
+    await rm(traceDir, { recursive: true, force: true });
+  }
+}, 30_000);

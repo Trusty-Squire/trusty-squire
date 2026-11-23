@@ -227,6 +227,8 @@ export interface SessionDriveState {
   /** Visible text kept from the last submit-like click, for the page's answer. */
   submitBeforeText?: string | null;
   submitExcludeLabels?: string[];
+  /** Text that appeared inside the submitted form itself after that click. */
+  submitFormResponse?: string | null;
   lastSubmitResponse?: string | null;
   /** Wall clock when post-submit in-flight waiting started. */
   inFlightStartedAt?: number | null;

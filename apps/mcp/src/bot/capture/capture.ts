@@ -8,13 +8,14 @@
 // re-exporting the tool layer's import surface; this module imports only from
 // the rest of the tree, never from provision-session.
 
-import type { ElementHandle, Page } from "playwright";
+import type { ElementHandle, Locator, Page } from "playwright";
 import type { CaptureSource, ElementCaptureSource } from "../credential-capture.js";
 import type { Session } from "../session/model.js";
 import { audit, sessionForCall } from "../session/lifecycle.js";
 import { invalidateCompactV2Snapshot, operationPageForSession } from "../observe/observe.js";
 import { waitForPageReady } from "../page-ready.js";
 import { captureFrameSnapshot } from "../drive-snapshot.js";
+import { findCredentialTokens } from "../credential-shape.js";
 
 // ── extraction (the `extract` thick tool) ──
 
@@ -661,6 +662,131 @@ async function ensureCaptureClipboardPermission(page: Page | undefined): Promise
   }
 }
 
+/** Copy-control cues: English plus the common localized labels (Kenari's
+ * Indonesian "Salin"/"Tersalin"). A source string because `page.evaluate`
+ * code cannot import; each in-page reader compiles it with the `iu` flags. */
+const COPY_CUE_SOURCE = String.raw`cop(?:y|ied)|clipboard|(?<!\p{L})(?:salin|tersalin|disalin|copiar|copiado|copiada|copia|copiato|copier|copié|copiée|kopieren|kopiert|kopiëren|gekopieerd|kopiuj|skopiuj|kopiera|kopierad|kopier|kopioi|kopyala|sao chép)(?!\p{L})|копировать|скопировать|скопировано|コピー|复制|複製|복사|คัดลอก`;
+
+/** A created key shown inline once its dialog has closed: find the element
+ * whose visible text (or value) is that key and the nearest Copy control
+ * around it. The key's own text is the anchor, so a page with no revealed
+ * key, or a Copy button beside a code sample, never qualifies. */
+async function copyButtonBesideRevealedKey(page: Page): Promise<Locator | null> {
+  // One line per text node: innerText runs an adjacent "Copy" label into the
+  // key ("…EfCopy key") when the markup has no whitespace between them.
+  const shown: unknown = await page
+    .evaluate(() => {
+      const lines = Array.from(document.querySelectorAll("input, textarea")).map(
+        (field) => (field as HTMLInputElement | HTMLTextAreaElement).value,
+      );
+      if (document.body === null) return lines.join("\n");
+      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+      for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
+        if (node.parentElement?.closest("script, style, noscript, template") === null)
+          lines.push(node.textContent ?? "");
+      }
+      return lines.join("\n");
+    })
+    .catch(() => "");
+  const tokens = typeof shown === "string" ? findCredentialTokens(shown) : [];
+  if (tokens.length === 0) return null;
+  const buttonIndex = await page.evaluate(
+    ({ tokens, copyCue }) => {
+      const cue = new RegExp(copyCue, "iu");
+      const visible = (element: Element): boolean => {
+        const rect = element.getBoundingClientRect();
+        const style = getComputedStyle(element);
+        return (
+          rect.width > 2 &&
+          rect.height > 2 &&
+          style.display !== "none" &&
+          style.visibility !== "hidden" &&
+          Number(style.opacity) > 0.01
+        );
+      };
+      const cuesOf = (button: Element): string =>
+        [button, button.querySelector("svg")]
+          .filter((element): element is Element => element !== null)
+          .map((element) =>
+            [
+              element.textContent,
+              element.getAttribute("aria-label"),
+              element.getAttribute("title"),
+              element.id,
+              element.getAttribute("class"),
+              element.getAttribute("data-testid"),
+              element.getAttribute("data-icon"),
+            ].join(" "),
+          )
+          .join(" ");
+      // The key is the holder's whole text, give or take a short caption
+      // ("Key: …"); a key inside a longer code sample is not a reveal.
+      const keyIn = (text: string): string | undefined =>
+        tokens.find((token) => text.includes(token) && text.replace(token, "").trim().length <= 20);
+      const holders: Array<{ element: Element; token: string }> = [];
+      for (const field of Array.from(document.querySelectorAll("input, textarea"))) {
+        const token = keyIn((field as HTMLInputElement | HTMLTextAreaElement).value.trim());
+        if (token !== undefined && visible(field)) holders.push({ element: field, token });
+      }
+      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+      for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
+        const parent = node.parentElement;
+        if (parent === null || parent.closest("script, style, noscript, template") !== null)
+          continue;
+        const token = keyIn((node.textContent ?? "").trim());
+        if (token !== undefined && visible(parent)) holders.push({ element: parent, token });
+      }
+      const buttons = Array.from(document.querySelectorAll('button, [role="button"]'));
+      const copyButtons = buttons.filter(
+        (button) =>
+          visible(button) &&
+          !(button instanceof HTMLButtonElement && button.disabled) &&
+          cue.test(cuesOf(button)),
+      );
+      // Each holder's nearest Copy control: the smallest ancestor that has one,
+      // then the closest on screen.
+      const nearest: Array<{ level: number; distance: number; button: Element; token: string }> =
+        [];
+      for (const holder of holders) {
+        const at = holder.element.getBoundingClientRect();
+        let scope: Element | null = holder.element;
+        for (let level = 0; scope !== null && level <= 6; level++, scope = scope.parentElement) {
+          const near = copyButtons.filter((button) => scope!.contains(button));
+          if (near.length === 0) continue;
+          for (const button of near) {
+            const rect = button.getBoundingClientRect();
+            const distance = Math.hypot(rect.left - at.left, rect.top - at.top);
+            nearest.push({ level, distance, button, token: holder.token });
+          }
+          break;
+        }
+      }
+      nearest.sort((a, b) => a.level - b.level || a.distance - b.distance);
+      const best = nearest[0];
+      if (best === undefined) return null;
+      // Several different keys, each with its own equally near Copy control
+      // (a list of unmasked keys), leave no way to tell which one is new —
+      // unless exactly one of those controls names a key ("Copy key" beside
+      // Zro's "Copy setup").
+      const tied = nearest.filter((entry) => entry.level === best.level);
+      if (!tied.some((entry) => entry.token !== best.token && entry.button !== best.button))
+        return buttons.indexOf(best.button);
+      const naming = new Set(
+        tied
+          .map((entry) => entry.button)
+          .filter((button) =>
+            /\b(?:api[\s_-]*key|key|token|secret)\b/i.test(
+              `${button.textContent ?? ""} ${button.getAttribute("aria-label") ?? ""}`,
+            ),
+          ),
+      );
+      return naming.size === 1 ? buttons.indexOf([...naming][0]!) : null;
+    },
+    { tokens, copyCue: COPY_CUE_SOURCE },
+  );
+  return buttonIndex === null ? null : page.locator('button, [role="button"]').nth(buttonIndex);
+}
+
 /** A created-key dialog may render its readable value outside DOM text (for
  * example in generated content) while keeping a stale mask in the DOM. Its
  * adjacent Copy control is then the page's authoritative value source. */
@@ -670,7 +796,8 @@ async function copyCredentialFromDialog(
 ): Promise<string | null> {
   if (page === undefined) return null;
   const modalSelector = 'dialog[open], [role="dialog"], [role="alertdialog"], [aria-modal="true"]';
-  const target = await page.evaluate(() => {
+  const target = await page.evaluate((copyCue) => {
+    const cue = new RegExp(copyCue, "iu");
     const dialogs = Array.from(
       document.querySelectorAll(
         'dialog[open], [role="dialog"], [role="alertdialog"], [aria-modal="true"]',
@@ -709,11 +836,11 @@ async function copyCredentialFromDialog(
             ].join(" "),
           )
           .join(" ");
-        if (/cop(?:y|ied)|clipboard/i.test(cues)) return { dialogIndex, buttonIndex };
+        if (cue.test(cues)) return { dialogIndex, buttonIndex };
       }
     }
     return null;
-  });
+  }, COPY_CUE_SOURCE);
   let copyButton =
     target === null
       ? null
@@ -727,7 +854,8 @@ async function copyCredentialFromDialog(
     // viewport's topmost hit and walk its positioned ancestors: this limits
     // the search to the covering layer instead of any key settings behind it.
     // Snapshot occlusion alone can be empty when no background control is rowed.
-    const buttonIndex = await page.evaluate(() => {
+    const buttonIndex = await page.evaluate((copyCue) => {
+      const cue = new RegExp(copyCue, "iu");
       const buttons = Array.from(document.querySelectorAll('button, [role="button"]'));
       let layer = document.elementFromPoint(innerWidth / 2, innerHeight / 2);
       while (layer !== null) {
@@ -774,69 +902,77 @@ async function copyCredentialFromDialog(
                 ].join(" "),
               )
               .join(" ");
-            if (/cop(?:y|ied)|clipboard/i.test(cues)) return buttons.indexOf(button);
+            if (cue.test(cues)) return buttons.indexOf(button);
           }
         }
         layer = layer.parentElement;
       }
       return null;
-    });
+    }, COPY_CUE_SOURCE);
     if (buttonIndex !== null) copyButton = page.locator('button, [role="button"]').nth(buttonIndex);
   }
   if (copyButton === null) {
     // The drive snapshot already hit-tests controls against covering layers.
     // Use that same evidence for a visually modal surface with no dialog role.
     const snapshot = await captureFrameSnapshot(page, [], 0);
-    if (
-      snapshot === null ||
-      snapshot.timedOut ||
-      !snapshot.elements.some(
+    const covered =
+      snapshot !== null &&
+      !snapshot.timedOut &&
+      snapshot.elements.some(
         (element) => element.occludedBy === "overlay" || element.occludedBy === "dialog",
-      ) ||
-      !/\b(?:api\s*key|secret|token|credential|key)\b/i.test(snapshot.text)
-    )
-      return null;
-    const candidates = snapshot.elements.filter(
+      ) &&
+      /\b(?:api\s*key|secret|token|credential|key)\b/i.test(snapshot.text);
+    const candidates = (covered ? snapshot.elements : []).filter(
       (element) =>
         element.role === "button" &&
         element.occludedBy === undefined &&
         !element.offscreen &&
         element.selector !== undefined,
     );
-    const selector = await page.evaluate(
-      (refs) => {
-        const registry = (
-          window as Window & {
-            __tsDriveRegistry?: { nodes: Map<string, Element> };
-          }
-        ).__tsDriveRegistry;
-        for (const candidate of refs) {
-          const button = registry?.nodes.get(candidate.ref);
-          if (button === undefined || !button.isConnected) continue;
-          const icon = button.querySelector("svg");
-          const cues = [button, icon]
-            .filter((element): element is Element => element !== null)
-            .map((element) =>
-              [
-                element.textContent,
-                element.getAttribute("aria-label"),
-                element.getAttribute("title"),
-                element.id,
-                element.getAttribute("class"),
-                element.getAttribute("data-testid"),
-                element.getAttribute("data-icon"),
-              ].join(" "),
-            )
-            .join(" ");
-          if (/cop(?:y|ied)|clipboard/i.test(cues)) return candidate.selector;
-        }
-        return null;
-      },
-      candidates.map(({ ref, selector }) => ({ ref, selector: selector! })),
-    );
-    if (selector === null) return null;
-    copyButton = page.locator(selector);
+    const selector =
+      candidates.length === 0
+        ? null
+        : await page.evaluate(
+            ({ refs, copyCue }) => {
+              const cue = new RegExp(copyCue, "iu");
+              const registry = (
+                window as Window & {
+                  __tsDriveRegistry?: { nodes: Map<string, Element> };
+                }
+              ).__tsDriveRegistry;
+              for (const candidate of refs) {
+                const button = registry?.nodes.get(candidate.ref);
+                if (button === undefined || !button.isConnected) continue;
+                const icon = button.querySelector("svg");
+                const cues = [button, icon]
+                  .filter((element): element is Element => element !== null)
+                  .map((element) =>
+                    [
+                      element.textContent,
+                      element.getAttribute("aria-label"),
+                      element.getAttribute("title"),
+                      element.id,
+                      element.getAttribute("class"),
+                      element.getAttribute("data-testid"),
+                      element.getAttribute("data-icon"),
+                    ].join(" "),
+                  )
+                  .join(" ");
+                if (cue.test(cues)) return candidate.selector;
+              }
+              return null;
+            },
+            {
+              refs: candidates.map(({ ref, selector }) => ({ ref, selector: selector! })),
+              copyCue: COPY_CUE_SOURCE,
+            },
+          );
+    if (selector !== null) copyButton = page.locator(selector);
   }
+  // Some providers close the creation dialog and show the new key inline on
+  // the list page (Kenari); its Copy control then sits beside the key itself.
+  copyButton ??= await copyButtonBesideRevealedKey(page);
+  if (copyButton === null) return null;
   // Empty the clipboard first: a value present after the click was written by
   // this click, even when it equals what an earlier Copy click left there.
   const before = await browser.readClipboard(page).catch(() => "");

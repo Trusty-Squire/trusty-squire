@@ -87,7 +87,7 @@ import {
   type DriveSnapshot,
   type DriveSnapshotElement,
 } from "./drive-snapshot.js";
-import { evaluateBound } from "./drive-evaluate.js";
+import { DriveEvaluateTimeout, evaluateBound } from "./drive-evaluate.js";
 import { DriveRefBridge } from "./drive-ref-bridge.js";
 import type { Frame } from "playwright";
 import type { BrowserController } from "./browser.js";
@@ -3616,6 +3616,62 @@ export function submitResponseText(
   return fresh.join(" ").replace(/\s+/g, " ").trim().slice(0, SUBMIT_RESPONSE_REASON_MAX);
 }
 
+/** Visible static text inside the form (or dialog) that holds a drive
+ * control: the place a site writes "alias already taken" next to a Create
+ * button without an alert role. Interactive controls are excluded; the rows
+ * already carry them. Null when the control or its form is gone. */
+function inPageSubmittedFormText(arg: { ref: string }): string | null {
+  const registry = (window as Window & { __tsDriveRegistry?: { nodes: Map<string, Element> } })
+    .__tsDriveRegistry;
+  const control = registry?.nodes.get(arg.ref);
+  if (control === undefined || !control.isConnected) return null;
+  let form = control.closest(
+    'form, dialog, [role="dialog"], [role="alertdialog"], [aria-modal="true"]',
+  );
+  for (
+    let ancestor = control.parentElement, depth = 0;
+    form === null && ancestor !== null && depth < 6;
+    ancestor = ancestor.parentElement, depth++
+  ) {
+    if (ancestor.querySelector("input, textarea, select") !== null) form = ancestor;
+  }
+  if (form === null) return null;
+  const skip =
+    'script, style, noscript, template, button, a[href], input, textarea, select, option, [role="button"], [role="link"], [role="option"], [role="menuitem"], [role="tab"], [role="checkbox"], [role="radio"], [role="switch"], [role="combobox"], [role="textbox"]';
+  const lines: string[] = [];
+  let length = 0;
+  const walker = document.createTreeWalker(form, NodeFilter.SHOW_TEXT);
+  for (let node = walker.nextNode(); node !== null && length < 2000; node = walker.nextNode()) {
+    const value = (node.textContent ?? "").replace(/\s+/g, " ").trim();
+    const parent = node.parentElement;
+    if (value.length === 0 || parent === null || parent.closest(skip) !== null) continue;
+    const style = getComputedStyle(parent);
+    const rect = parent.getBoundingClientRect();
+    if (style.display === "none" || style.visibility === "hidden") continue;
+    if (rect.width <= 0 || rect.height <= 0) continue;
+    lines.push(value);
+    length += value.length;
+  }
+  return lines.join("\n");
+}
+
+async function submittedFormText(
+  session: Session,
+  drive: SessionDriveState,
+  ref: string,
+): Promise<string | null> {
+  const page = session.browser.page;
+  const identity = drive.identities?.get(ref);
+  if (page === null || identity === undefined) return null;
+  try {
+    const scope = await resolveIdentityScope(page, ref, identity);
+    return scope === null ? null : await evaluateBound(scope, inPageSubmittedFormText, { ref });
+  } catch (error) {
+    if (error instanceof DriveEvaluateTimeout) throw error;
+    return null;
+  }
+}
+
 export function pageTextFromObservation(
   observation: {
     semantic?: { title?: string; headings?: string[]; blockers?: Array<{ text: string }> };
@@ -5557,6 +5613,7 @@ async function captureDriveSession(
     drive.captchaDeliveredProgressKey = null;
     drive.submitBeforeText = null;
     drive.submitExcludeLabels = [];
+    drive.submitFormResponse = null;
     drive.lastSubmitResponse = null;
     drive.inFlightStartedAt = null;
   }
@@ -6327,7 +6384,10 @@ async function driveLoop(input: {
       submitResponseText(
         drive.submitBeforeText,
         observation.dom ?? "",
-        observationNoticeTexts(observation),
+        [
+          ...observationNoticeTexts(observation),
+          ...(typeof drive.submitFormResponse === "string" ? [drive.submitFormResponse] : []),
+        ],
         drive.submitExcludeLabels ?? [],
       ) ?? null;
     if (typeof drive.lastSubmitResponse === "string") {
@@ -6359,6 +6419,7 @@ async function driveLoop(input: {
     if (pagePathKey(observation.url) !== priorPath) {
       drive.submitBeforeText = null;
       drive.submitExcludeLabels = [];
+      drive.submitFormResponse = null;
       drive.lastSubmitResponse = null;
     }
     drive.pendingRevealScan = false;
@@ -7198,6 +7259,11 @@ async function driveLoop(input: {
     if (clickedBefore !== undefined && isRevealOrCopyRow(clickedBefore)) {
       drive.pendingRevealScan = true;
     }
+    const formTextBeforeClick =
+      shouldInspectSubmitResponse(decision.action, clickedBefore) &&
+      !isKeyCreateOpener(clickedBefore)
+        ? await submittedFormText(session, drive, decision.actionKey)
+        : null;
     // Set when this action's OAuth hand-off came back to where it started, so
     // the trail can name the bounce instead of calling it a fresh page.
     let oauthBouncedThisAction = false;
@@ -7509,6 +7575,7 @@ async function driveLoop(input: {
           captchaAfterSubmit = true;
           drive.submitBeforeText = textBeforeClick;
           drive.submitExcludeLabels = excludeBeforeClick;
+          drive.submitFormResponse = null;
         }
       }
       const snap = await withinOAuthCallerDeadline(
@@ -7553,6 +7620,26 @@ async function driveLoop(input: {
           observationNoticeTexts(observation),
         );
         if (fresh !== undefined && isPageLevelSiteAnswer(fresh)) drive.lastSubmitResponse = fresh;
+        // The page-wide text is capped and an inline form error need not be an
+        // alert, so read the submitted form itself for what appeared in it.
+        const formTextAfterClick =
+          formTextBeforeClick === null
+            ? null
+            : await submittedFormText(session, drive, decision.actionKey);
+        const formResponse =
+          formTextBeforeClick === null || formTextAfterClick === null
+            ? undefined
+            : submitResponseText(formTextBeforeClick, formTextAfterClick, [], excludeBeforeClick);
+        if (formResponse !== undefined) {
+          drive.submitFormResponse = formResponse;
+          const last = drive.lastSubmitResponse ?? "";
+          if (!last.includes(formResponse)) {
+            drive.lastSubmitResponse = `${last} ${formResponse}`
+              .trim()
+              .slice(0, SUBMIT_RESPONSE_REASON_MAX);
+          }
+          observation = attachObservationNotice(observation, formResponse);
+        }
         const afterFingerprint =
           session.browser.page === null ? "" : await pageFingerprintOf(session.browser.page);
         const rerendered =
@@ -7703,6 +7790,7 @@ async function driveLoop(input: {
       result: "ok",
       url_after: observation.url,
       fingerprint_after: nextFingerprint,
+      submit_response: drive.lastSubmitResponse ?? null,
       ...(driveTraceEnabled()
         ? {
             native_selects_after: await withinOAuthCallerDeadline(
@@ -8596,6 +8684,9 @@ async function driveLoop(input: {
       url_before: observation.url,
       fingerprint_before: fingerprint,
       rows,
+      // Non-interactive page answers (alerts, a submitted form's inline error)
+      // that the rows alone cannot show.
+      notices: observationNoticeTexts(observation),
       question_count: questionCount,
       state_bytes: stateBytes,
       operation_criteria:
