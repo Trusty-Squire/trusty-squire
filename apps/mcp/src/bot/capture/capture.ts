@@ -667,16 +667,10 @@ async function ensureCaptureClipboardPermission(page: Page | undefined): Promise
  * code cannot import; each in-page reader compiles it with the `iu` flags. */
 const COPY_CUE_SOURCE = String.raw`cop(?:y|ied)|clipboard|(?<!\p{L})(?:salin|tersalin|disalin|copiar|copiado|copiada|copia|copiato|copier|copié|copiée|kopieren|kopiert|kopiëren|gekopieerd|kopiuj|skopiuj|kopiera|kopierad|kopier|kopioi|kopyala|sao chép)(?!\p{L})|копировать|скопировать|скопировано|コピー|复制|複製|복사|คัดลอก`;
 
-/** A created key shown inline once its dialog has closed: find the element
- * whose visible text (or value) is that key and the nearest Copy control
- * around it. The key's own text is the anchor, so a page with no revealed
- * key, or a Copy button beside a code sample, never qualifies. */
-async function copyButtonBesideRevealedKey(
-  page: Page,
-  requireCopyCue = true,
-): Promise<Locator | null> {
-  // One line per text node: innerText runs an adjacent "Copy" label into the
-  // key ("…EfCopy key") when the markup has no whitespace between them.
+/** Credential-shaped values the page shows, one text node per line: innerText
+ * runs an adjacent "Copy" label into the key ("…EfCopy key") when the markup
+ * has no whitespace between them. */
+async function shownCredentialTokens(page: Page): Promise<string[]> {
   const shown: unknown = await page
     .evaluate(() => {
       const lines = Array.from(document.querySelectorAll("input, textarea")).map(
@@ -691,10 +685,23 @@ async function copyButtonBesideRevealedKey(
       return lines.join("\n");
     })
     .catch(() => "");
-  const tokens = typeof shown === "string" ? findCredentialTokens(shown) : [];
+  return typeof shown === "string" ? findCredentialTokens(shown) : [];
+}
+
+/** A created key shown inline once its dialog has closed: find the element
+ * whose visible text (or value) is that key and the nearest Copy control
+ * around it. The key's own text is the anchor, so a page with no revealed
+ * key, or a Copy button beside a code sample, never qualifies. With
+ * `clickedRef`, answer by place alone: the drive ref's control if it is one of
+ * the controls nearest a shown key, whatever its label. */
+async function copyButtonBesideRevealedKey(
+  page: Page,
+  clickedRef?: string,
+): Promise<Locator | null> {
+  const tokens = await shownCredentialTokens(page);
   if (tokens.length === 0) return null;
   const buttonIndex = await page.evaluate(
-    ({ tokens, copyCue, requireCopyCue }) => {
+    ({ tokens, copyCue, clickedRef }) => {
       const cue = new RegExp(copyCue, "iu");
       const visible = (element: Element): boolean => {
         const rect = element.getBoundingClientRect();
@@ -736,15 +743,25 @@ async function copyButtonBesideRevealedKey(
         const parent = node.parentElement;
         if (parent === null || parent.closest("script, style, noscript, template") !== null)
           continue;
-        const token = keyIn((node.textContent ?? "").trim());
-        if (token !== undefined && visible(parent)) holders.push({ element: parent, token });
+        // A highlighter splits a code sample into spans; judge the whole sample.
+        const holder = parent.closest("pre, code") ?? parent;
+        const token = keyIn((holder.textContent ?? "").trim());
+        if (token !== undefined && visible(holder) && !holders.some((h) => h.element === holder))
+          holders.push({ element: holder, token });
       }
       const buttons = Array.from(document.querySelectorAll('button, [role="button"]'));
+      const clicked =
+        clickedRef === undefined
+          ? undefined
+          : (
+              window as Window & { __tsDriveRegistry?: { nodes: Map<string, Element> } }
+            ).__tsDriveRegistry?.nodes.get(clickedRef);
+      if (clickedRef !== undefined && clicked === undefined) return null;
       const copyButtons = buttons.filter(
         (button) =>
           visible(button) &&
           !(button instanceof HTMLButtonElement && button.disabled) &&
-          (!requireCopyCue || cue.test(cuesOf(button))),
+          (clicked !== undefined || cue.test(cuesOf(button))),
       );
       // Each holder's nearest Copy control: the smallest ancestor that has one,
       // then the closest on screen.
@@ -763,6 +780,8 @@ async function copyButtonBesideRevealedKey(
           break;
         }
       }
+      if (clicked !== undefined)
+        return nearest.some((entry) => entry.button === clicked) ? buttons.indexOf(clicked) : null;
       nearest.sort((a, b) => a.distance - b.distance);
       const best = nearest[0];
       if (best === undefined) return null;
@@ -783,13 +802,14 @@ async function copyButtonBesideRevealedKey(
       );
       return naming.size === 1 ? buttons.indexOf([...naming][0]!) : null;
     },
-    { tokens, copyCue: COPY_CUE_SOURCE, requireCopyCue },
+    { tokens, copyCue: COPY_CUE_SOURCE, clickedRef },
   );
   return buttonIndex === null ? null : page.locator('button, [role="button"]').nth(buttonIndex);
 }
 
 type CopySourceWindow = Window & {
   __tsCopySource?: Element;
+  __tsCopyCandidate?: Element;
   __tsDriveRegistry?: { nodes: Map<string, Element> };
 };
 
@@ -811,27 +831,43 @@ async function rememberedCopySource(page: Page): Promise<Locator | null> {
     : null;
 }
 
-/** Whether a click on drive ref `ref` dispatches the page's Copy source: the
- * remembered or cue-matched Copy control, or the control nearest a shown key
- * whatever its label (Salin, Tersalin, Copied, an icon). Skips the occlusion
- * snapshot, which would re-register drive refs just before the act. */
-export async function isCopySourceClick(page: Page, ref: string): Promise<boolean> {
-  for (const find of [
-    () => findCopySource(page, false),
-    () => copyButtonBesideRevealedKey(page, false),
-  ]) {
-    const source = await find().catch(() => null);
-    if (source === null) continue;
-    const same = await source
+/** The one decision on what a click on drive ref `ref` is to capture:
+ * - `source`: the page's Copy control — the remembered one, or the one
+ *   extraction picks itself by its Copy cue in any language (Salin, Copied).
+ *   It is remembered, so the retry it arms clicks the same control.
+ * - `candidate`: a control nearest a shown key whatever its label (an icon).
+ *   Place alone cannot tell Copy from Revoke beside the same key, so it only
+ *   arms a retry; extraction keeps it as the source only once the clipboard
+ *   holds the shown key itself.
+ * Skips the occlusion snapshot, which would re-register drive refs just
+ * before the act. */
+export async function copySourceClick(
+  page: Page,
+  ref: string,
+): Promise<"source" | "candidate" | null> {
+  const mark = async (
+    source: Locator | null,
+    slot: "__tsCopySource" | "__tsCopyCandidate",
+  ): Promise<boolean> =>
+    source !== null &&
+    (await source
       .evaluate(
-        (element, ref) =>
-          (window as CopySourceWindow).__tsDriveRegistry?.nodes.get(ref) === element,
-        ref,
+        (element, { ref, slot }) => {
+          const sourceWindow = window as CopySourceWindow;
+          if (sourceWindow.__tsDriveRegistry?.nodes.get(ref) !== element) return false;
+          sourceWindow[slot] = element;
+          return true;
+        },
+        { ref, slot },
       )
-      .catch(() => false);
-    if (same) return true;
-  }
-  return false;
+      .catch(() => false)) === true;
+  if (await mark(await findCopySource(page, false).catch(() => null), "__tsCopySource"))
+    return "source";
+  if (
+    await mark(await copyButtonBesideRevealedKey(page, ref).catch(() => null), "__tsCopyCandidate")
+  )
+    return "candidate";
+  return null;
 }
 
 /** The page's Copy control for a revealed key: the remembered source, then one
@@ -1026,6 +1062,42 @@ async function copyCredentialFromDialog(
   browser: Session["browser"],
 ): Promise<string | null> {
   if (page === undefined) return null;
+  const copied = await copyFromSource(page, browser);
+  if (copied !== null) return copied;
+  // A remembered control (one the model clicked) that writes nothing is not a
+  // Copy source after all; forget it and look again.
+  const forgot = await page
+    .evaluate(() => {
+      const sourceWindow = window as CopySourceWindow;
+      if (sourceWindow.__tsCopySource === undefined) return false;
+      delete sourceWindow.__tsCopySource;
+      return true;
+    })
+    .catch(() => false);
+  if (forgot === true) {
+    const again = await copyFromSource(page, browser);
+    if (again !== null) return again;
+  }
+  // A control the model clicked beside a shown key, whatever its label: its
+  // click already ran, so the clipboard is the evidence. Only the shown key
+  // itself is taken, and that control becomes the source for later retries.
+  const clipboard = (await browser.readClipboard(page).catch(() => "")).trim();
+  if (clipboard.length === 0 || !(await shownCredentialTokens(page)).includes(clipboard))
+    return null;
+  const promoted = await page
+    .evaluate(() => {
+      const sourceWindow = window as CopySourceWindow;
+      const candidate = sourceWindow.__tsCopyCandidate;
+      if (candidate === undefined || !candidate.isConnected) return false;
+      sourceWindow.__tsCopySource = candidate;
+      delete sourceWindow.__tsCopyCandidate;
+      return true;
+    })
+    .catch(() => false);
+  return promoted === true ? clipboard : null;
+}
+
+async function copyFromSource(page: Page, browser: Session["browser"]): Promise<string | null> {
   const copyButton = await findCopySource(page);
   if (copyButton === null) return null;
   // Empty the clipboard first: a value present after the click was written by

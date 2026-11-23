@@ -301,12 +301,20 @@ it.each(["Salin", "Tersalin"])(
   30_000,
 );
 
-it("reports a submitted form's inline error text to the model and the trace", async () => {
-  // Zro 23 Nov (trace rows 24-26): Create left its dialog open and created no
-  // key; the trace carried interactive rows only, so nothing said why. The
-  // page's own text fills the snapshot's text budget before the dialog.
-  const filler = Array.from({ length: 300 }, (_, index) => `Usage line ${index} for the account.`);
-  const html = `<!doctype html><main><h1>API keys</h1>
+it.each([
+  ["keeps its Create button", false],
+  ["replaces its Create button", true],
+])(
+  "reports a submitted form's inline error text when the form %s",
+  async (_name, replace) => {
+    // Zro 23 Nov (trace rows 24-26): Create left its dialog open and created no
+    // key; the trace carried interactive rows only, so nothing said why. The
+    // page's own text fills the snapshot's text budget before the dialog.
+    const filler = Array.from(
+      { length: 300 },
+      (_, index) => `Usage line ${index} for the account.`,
+    );
+    const html = `<!doctype html><main><h1>API keys</h1>
     <div style="font-size:6px">${filler.map((line) => `<span>${line} </span>`).join("")}</div></main>
     <div role="dialog" aria-label="Create API key" style="position:fixed;top:20px;left:20px;background:#fff">
       <form id="create"><label>Alias <input name="alias" value="grunt"></label>
@@ -314,71 +322,77 @@ it("reports a submitted form's inline error text to the model and the trace", as
     <script>document.getElementById('create').addEventListener('submit', (event) => {
       event.preventDefault();
       document.getElementById('error').textContent = 'An active key already uses the alias grunt.';
+      if (${replace}) {
+        const button = event.target.querySelector('button');
+        button.replaceWith(button.cloneNode(true));
+      }
     });</script>`;
-  const traceDir = await mkdtemp(join(process.cwd(), ".drive-form-error-trace-"));
-  const tracePath = join(traceDir, "trace.jsonl");
-  vi.stubEnv("DRIVE_TRACE_PATH", tracePath);
-  try {
-    await withPage(html, async (sessionId) => {
-      sessionForCall(sessionId)!.drive = emptyDriveState("create an API key", {});
-      let calls = 0;
-      const askJev = vi.fn<DriveDependencies["askJev"]>(async (_api, _state, questions) => {
-        calls += 1;
-        const answers = Object.fromEntries(
-          Object.entries(questions).flatMap(([name, question]) => {
-            if (question.type !== "choice") return [];
-            const keys = Object.keys(question.criteria);
-            const choice =
-              name === "operation"
-                ? calls === 1
-                  ? "CLICK"
-                  : "BLOCKED"
-                : name === "CLICK_target"
-                  ? (keys.find((slug) => /create/.test(slug)) ?? keys[0]!)
-                  : keys[0]!;
-            return [
-              [
-                name,
-                {
-                  choice,
-                  confidence: 1,
-                  probabilities: Object.fromEntries(
-                    keys.map((key) => [key, key === choice ? 1 : 0]),
-                  ),
-                },
-              ],
-            ];
-          }),
+    const traceDir = await mkdtemp(join(process.cwd(), ".drive-form-error-trace-"));
+    const tracePath = join(traceDir, "trace.jsonl");
+    vi.stubEnv("DRIVE_TRACE_PATH", tracePath);
+    try {
+      await withPage(html, async (sessionId) => {
+        sessionForCall(sessionId)!.drive = emptyDriveState("create an API key", {});
+        let calls = 0;
+        const askJev = vi.fn<DriveDependencies["askJev"]>(async (_api, _state, questions) => {
+          calls += 1;
+          const answers = Object.fromEntries(
+            Object.entries(questions).flatMap(([name, question]) => {
+              if (question.type !== "choice") return [];
+              const keys = Object.keys(question.criteria);
+              const choice =
+                name === "operation"
+                  ? calls === 1
+                    ? "CLICK"
+                    : "BLOCKED"
+                  : name === "CLICK_target"
+                    ? (keys.find((slug) => /create/.test(slug)) ?? keys[0]!)
+                    : keys[0]!;
+              return [
+                [
+                  name,
+                  {
+                    choice,
+                    confidence: 1,
+                    probabilities: Object.fromEntries(
+                      keys.map((key) => [key, key === choice ? 1 : 0]),
+                    ),
+                  },
+                ],
+              ];
+            }),
+          );
+          return { attempts: 1, elapsedMs: 1, result: { answers } };
+        });
+        await runOperateDrive(
+          { session_id: sessionId, goal: "create an API key", max_steps: 2, max_seconds: 10 },
+          api,
+          undefined,
+          dependencies(askJev),
         );
-        return { attempts: 1, elapsedMs: 1, result: { answers } };
+        expect(askJev.mock.calls.length).toBeGreaterThanOrEqual(2);
+        const afterSubmit = askJev.mock.calls[1]![1] as { page: { notices: string[] } };
+        expect(afterSubmit.page.notices.join(" ")).toContain(
+          "An active key already uses the alias grunt.",
+        );
       });
-      await runOperateDrive(
-        { session_id: sessionId, goal: "create an API key", max_steps: 2, max_seconds: 10 },
-        api,
-        undefined,
-        dependencies(askJev),
-      );
-      expect(askJev.mock.calls.length).toBeGreaterThanOrEqual(2);
-      const afterSubmit = askJev.mock.calls[1]![1] as { page: { notices: string[] } };
-      expect(afterSubmit.page.notices.join(" ")).toContain(
+      const rows = (await readFile(tracePath, "utf8"))
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+      const afterAct = rows.find((row) => row.at === "after_act");
+      expect(afterAct?.submit_response).toContain("An active key already uses the alias grunt.");
+      const nextStep = rows.filter((row) => row.at === "step")[1];
+      expect(JSON.stringify(nextStep?.notices)).toContain(
         "An active key already uses the alias grunt.",
       );
-    });
-    const rows = (await readFile(tracePath, "utf8"))
-      .trim()
-      .split("\n")
-      .map((line) => JSON.parse(line) as Record<string, unknown>);
-    const afterAct = rows.find((row) => row.at === "after_act");
-    expect(afterAct?.submit_response).toContain("An active key already uses the alias grunt.");
-    const nextStep = rows.filter((row) => row.at === "step")[1];
-    expect(JSON.stringify(nextStep?.notices)).toContain(
-      "An active key already uses the alias grunt.",
-    );
-  } finally {
-    vi.unstubAllEnvs();
-    await rm(traceDir, { recursive: true, force: true });
-  }
-}, 30_000);
+    } finally {
+      vi.unstubAllEnvs();
+      await rm(traceDir, { recursive: true, force: true });
+    }
+  },
+  30_000,
+);
 
 it("retries a failed Zro store after the model clicks Copied", async () => {
   // review-1: the drive's own capture turns "Copy key" into "Copied"; when that
@@ -445,6 +459,107 @@ it("retries a failed Zro store after the model clicks Copied", async () => {
       "complete",
     );
     expect(persistCredentials).toHaveBeenCalledTimes(2);
+    expect(persistCredentials).toHaveBeenLastCalledWith(
+      expect.objectContaining({ credentials: { api_key: key } }),
+    );
+  });
+}, 30_000);
+
+/** A Jev stub that always clicks, choosing the CLICK target `pick` selects. */
+function clickJev(
+  pick: (slugs: string[]) => string | undefined,
+): ReturnType<typeof vi.fn<DriveDependencies["askJev"]>> {
+  return vi.fn<DriveDependencies["askJev"]>(async (_api, _state, questions) => ({
+    attempts: 1,
+    elapsedMs: 1,
+    result: {
+      answers: Object.fromEntries(
+        Object.entries(questions).flatMap(([name, question]) => {
+          if (question.type !== "choice") return [];
+          const keys = Object.keys(question.criteria);
+          const choice =
+            name === "operation"
+              ? "CLICK"
+              : name === "CLICK_target"
+                ? (pick(keys) ?? keys[0]!)
+                : keys[0]!;
+          return [
+            [
+              name,
+              {
+                choice,
+                confidence: 1,
+                probabilities: Object.fromEntries(
+                  keys.map((entry) => [entry, entry === choice ? 1 : 0]),
+                ),
+              },
+            ],
+          ];
+        }),
+      ),
+    },
+  }));
+}
+
+it("retries a failed store after the model clicks Salin on a Kenari key row", async () => {
+  // R2: on a key list the row showing the new key marks its Salin control
+  // credential=1. A label-only read exception refused that click as a key
+  // mutation, so a failed store could never be retried.
+  const key = "kn-Q7wE3rT9yU2iO5pA8sD1fG4hJ6kL0zX3cV7bN9mQ2wE5rT8y";
+  const html = `<!doctype html><main><h1>API Keys</h1><ul>
+    <li><code id="revealed">${key}</code> grunt 23 <button type="button" id="salin">Salin</button>
+      <button type="button">Ganti key</button></li>
+    <li>kn-15a068f0 22 <button type="button">Ganti key</button></li>
+    <li>kn-9512aba2 21 <button type="button">Ganti key</button></li></ul></main>
+    <script>document.getElementById('salin').addEventListener('click', async (event) => {
+      await navigator.clipboard.writeText(document.getElementById('revealed').textContent);
+      event.target.textContent = 'Tersalin';
+    });</script>`;
+  await withPage(html, async (sessionId) => {
+    sessionForCall(sessionId)!.drive = emptyDriveState(goal, {});
+    const persistCredentials = vi
+      .fn<NonNullable<DriveCallContext["persistCredentials"]>>()
+      .mockResolvedValueOnce(null)
+      .mockResolvedValue({ reference: "vault://retry", service: "kenari", label: undefined });
+    const result = await runOperateDrive(
+      { session_id: sessionId, goal, max_steps: 3, max_seconds: 10 },
+      api,
+      { persistCredentials },
+      dependencies(clickJev((slugs) => slugs.find((slug) => /salin/.test(slug)))),
+    );
+    expect(result.status, `${result.reason} | ${JSON.stringify(result.trajectory)}`).toBe(
+      "complete",
+    );
+    expect(persistCredentials).toHaveBeenCalledTimes(2);
+    expect(persistCredentials).toHaveBeenLastCalledWith(
+      expect.objectContaining({ credentials: { api_key: key } }),
+    );
+  });
+}, 30_000);
+
+it("stores a key through an icon-only Copy control once the model clicks it", async () => {
+  // R3: no label or metadata says "copy", so capture cannot find the control by
+  // itself; the model's click beside the key identifies it, and the retry it
+  // arms must click that same control.
+  const key = "kn-Q7wE3rT9yU2iO5pA8sD1fG4hJ6kL0zX3cV7bN9mQ2wE5rT8y";
+  const html = `<!doctype html><h1>API Keys</h1>
+    <div><code id="revealed">${key}</code><button type="button" id="icon">⧉</button></div>
+    <script>document.getElementById('icon').addEventListener('click', () =>
+      navigator.clipboard.writeText(document.getElementById('revealed').textContent));</script>`;
+  await withPage(html, async (sessionId) => {
+    sessionForCall(sessionId)!.drive = emptyDriveState(goal, {});
+    const persistCredentials = vi.fn<NonNullable<DriveCallContext["persistCredentials"]>>(
+      async () => ({ reference: "vault://icon", service: "kenari", label: undefined }),
+    );
+    const result = await runOperateDrive(
+      { session_id: sessionId, goal, max_steps: 3, max_seconds: 10 },
+      api,
+      { persistCredentials },
+      dependencies(clickJev((slugs) => slugs.find((slug) => slug.includes("⧉")))),
+    );
+    expect(result.status, `${result.reason} | ${JSON.stringify(result.trajectory)}`).toBe(
+      "complete",
+    );
     expect(persistCredentials).toHaveBeenLastCalledWith(
       expect.objectContaining({ credentials: { api_key: key } }),
     );

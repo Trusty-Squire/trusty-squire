@@ -241,3 +241,27 @@ it.each([false, true])("vaults a Zro key with an extra wrapper: %s", async (wrap
   const retried = await extractCredentials("fixture-session");
   expect(retried.credentials).toEqual({ api_key: key });
 });
+
+it("does not take a highlighted code sample's Copy for the revealed key", async () => {
+  // A syntax highlighter puts the key in its own span inside the curl sample,
+  // and that sample's Salin sits closer to the span than the banner's Salin
+  // sits to the banner's key. Only the banner shows the key by itself.
+  const key = "kn-Q7wE3rT9yU2iO5pA8sD1fG4hJ6kL0zX3cV7bN9mQ2wE5rT8y";
+  await context.clearPermissions();
+  await page.evaluate(() => navigator.clipboard.writeText("")).catch(() => undefined);
+  const html = `<!doctype html><main><h1>API Keys</h1>
+    <div style="display:flex;align-items:center"><pre style="margin:0"><code><span>curl</span> https://kenari.id/v1/chat -H <span>"Authorization: Bearer</span> <span>${key}</span>"</code></pre><button type="button" id="sample">Salin</button></div>
+    <section style="margin-top:40px"><code id="revealed">${key}</code>
+      <div style="margin:200px 0 0 700px"><button type="button" id="salin">Salin</button></div></section></main>
+  <script>
+    document.getElementById('salin').addEventListener('click', () =>
+      navigator.clipboard.writeText(document.getElementById('revealed').textContent));
+    document.getElementById('sample').addEventListener('click', () =>
+      navigator.clipboard.writeText(document.querySelector('pre').textContent));
+  </script>`;
+  await page.route("**/*", (route) => route.fulfill({ contentType: "text/html", body: html }));
+  await page.goto("http://127.0.0.1/keys");
+
+  const result = await extractCredentials("fixture-session");
+  expect(result.credentials).toEqual({ api_key: key });
+});

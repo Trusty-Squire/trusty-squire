@@ -672,6 +672,10 @@ With a destination and an authenticated vault client, a revealed-secret row
 (`@key-value` or `secret=1`) or a successfully dispatched Copy click triggers
 extraction and storage before the next model decision. The Copy evidence
 survives a button changing its label to “Copied!” on the same document and URL.
+A click counts as a Copy dispatch by what the control is, not its wording: the
+Copy control extraction itself would use (in any language), or any control
+nearest a shown key. Only the former passes the credential-mutation stop. From
+the latter, extraction takes the clipboard only when it holds the shown key.
 Extraction still uses the Copy source described above; a revealed-secret row
 does not itself supply the credential value. Successful storage returns
 `complete` without waiting for the model to choose DONE. Each page state gets

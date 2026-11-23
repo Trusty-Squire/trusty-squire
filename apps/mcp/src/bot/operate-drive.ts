@@ -122,7 +122,7 @@ import type { CaptchaSolveResult } from "./captcha.js";
 import { findCredentialTokens, isMaskedDisplay } from "./credential-shape.js";
 import {
   extractCredentials,
-  isCopySourceClick,
+  copySourceClick,
   storableCredentials,
   type ExtractResult,
 } from "./capture/capture.js";
@@ -3624,11 +3624,19 @@ export function submitResponseText(
 /** Visible static text inside the form (or dialog) that holds a drive
  * control: the place a site writes "alias already taken" next to a Create
  * button without an alert role. Interactive controls are excluded; the rows
- * already carry them. Null when the control or its form is gone. */
-function inPageSubmittedFormText(arg: { ref: string }): string | null {
-  const registry = (window as Window & { __tsDriveRegistry?: { nodes: Map<string, Element> } })
-    .__tsDriveRegistry;
-  const control = registry?.nodes.get(arg.ref);
+ * already carry them. With a ref, the surface is found from that control and
+ * remembered; without one, the remembered surface is read again, since a
+ * submit may replace the button itself. Null when the surface is gone. */
+function inPageSubmittedFormText(arg: { ref: string | null }): string | null {
+  const scope = window as Window & {
+    __tsDriveRegistry?: { nodes: Map<string, Element> };
+    __tsSubmitSurface?: Element;
+  };
+  if (arg.ref === null) {
+    const surface = scope.__tsSubmitSurface;
+    return surface === undefined || !surface.isConnected ? null : textOf(surface);
+  }
+  const control = scope.__tsDriveRegistry?.nodes.get(arg.ref);
   if (control === undefined || !control.isConnected) return null;
   let form =
     control.closest('dialog, [role="dialog"], [role="alertdialog"], [aria-modal="true"]') ??
@@ -3641,36 +3649,54 @@ function inPageSubmittedFormText(arg: { ref: string }): string | null {
     if (ancestor.querySelector("input, textarea, select") !== null) form = ancestor;
   }
   if (form === null) return null;
-  const skip =
-    'script, style, noscript, template, button, a[href], input, textarea, select, option, [role="button"], [role="link"], [role="option"], [role="menuitem"], [role="tab"], [role="checkbox"], [role="radio"], [role="switch"], [role="combobox"], [role="textbox"]';
-  const lines: string[] = [];
-  let length = 0;
-  const walker = document.createTreeWalker(form, NodeFilter.SHOW_TEXT);
-  for (let node = walker.nextNode(); node !== null && length < 2000; node = walker.nextNode()) {
-    const value = (node.textContent ?? "").replace(/\s+/g, " ").trim();
-    const parent = node.parentElement;
-    if (value.length === 0 || parent === null || parent.closest(skip) !== null) continue;
-    const style = getComputedStyle(parent);
-    const rect = parent.getBoundingClientRect();
-    if (style.display === "none" || style.visibility === "hidden") continue;
-    if (rect.width <= 0 || rect.height <= 0) continue;
-    lines.push(value);
-    length += value.length;
+  scope.__tsSubmitSurface = form;
+  return textOf(form);
+
+  function textOf(surface: Element): string {
+    const skip =
+      'script, style, noscript, template, button, a[href], input, textarea, select, option, [role="button"], [role="link"], [role="option"], [role="menuitem"], [role="tab"], [role="checkbox"], [role="radio"], [role="switch"], [role="combobox"], [role="textbox"]';
+    const lines: string[] = [];
+    let length = 0;
+    const walker = document.createTreeWalker(surface, NodeFilter.SHOW_TEXT);
+    for (let node = walker.nextNode(); node !== null && length < 2000; node = walker.nextNode()) {
+      const value = (node.textContent ?? "").replace(/\s+/g, " ").trim();
+      const parent = node.parentElement;
+      if (value.length === 0 || parent === null || parent.closest(skip) !== null) continue;
+      const style = getComputedStyle(parent);
+      const rect = parent.getBoundingClientRect();
+      if (style.display === "none" || style.visibility === "hidden") continue;
+      if (rect.width <= 0 || rect.height <= 0) continue;
+      lines.push(value);
+      length += value.length;
+    }
+    return lines.join("\n");
   }
-  return lines.join("\n");
 }
 
+/** Read the submission surface around drive ref `ref` before its click; the
+ * frame comes back so the same surface can be read again afterwards. */
 async function submittedFormText(
   session: Session,
   drive: SessionDriveState,
   ref: string,
-): Promise<string | null> {
+): Promise<{ text: string; frame: Frame } | null> {
   const page = session.browser.page;
   const identity = drive.identities?.get(ref);
   if (page === null || identity === undefined) return null;
   try {
-    const scope = await resolveIdentityScope(page, ref, identity);
-    return scope === null ? null : await evaluateBound(scope, inPageSubmittedFormText, { ref });
+    const frame = await resolveIdentityScope(page, ref, identity);
+    if (frame === null) return null;
+    const text = await evaluateBound(frame, inPageSubmittedFormText, { ref });
+    return text === null ? null : { text, frame };
+  } catch (error) {
+    if (error instanceof DriveEvaluateTimeout) throw error;
+    return null;
+  }
+}
+
+async function resubmittedFormText(frame: Frame): Promise<string | null> {
+  try {
+    return await evaluateBound(frame, inPageSubmittedFormText, { ref: null });
   } catch (error) {
     if (error instanceof DriveEvaluateTimeout) throw error;
     return null;
@@ -6997,9 +7023,18 @@ async function driveLoop(input: {
       automaticDecisionRefused = true;
       return "continue";
     }
+    // The one Copy-source decision for this click (see copySourceClick). Only a
+    // confirmed Copy source — Kenari's "Salin" on a key row, Zro's "Copied" —
+    // passes the credential-mutation stop below: a control that merely sits
+    // beside the key may be its Revoke.
+    const copyClick =
+      decision.action.kind === "click" && liveRow !== undefined && session.browser.page !== null
+        ? await copySourceClick(session.browser.page, decision.actionKey)
+        : null;
     if (
       (decision.action.kind === "click" || decision.action.kind === "select") &&
       liveRow !== undefined &&
+      copyClick !== "source" &&
       (isExistingCredentialMutationRow(liveRow) ||
         isCredentialMutationConfirmRow(liveRow, observation.url, drive.lastActBinding))
     ) {
@@ -7261,13 +7296,7 @@ async function driveLoop(input: {
       decision.action.kind === "click" || decision.action.kind === "oauth_login"
         ? findRow(rows, decision.actionKey, observation.url)
         : undefined;
-    // A Copy dispatch is identified by the control's place beside the key, not
-    // its label: Kenari's "Salin"/"Tersalin" and Zro's "Copied" both count.
-    const copyDispatched =
-      decision.action.kind === "click" &&
-      clickedBefore !== undefined &&
-      session.browser.page !== null &&
-      (await isCopySourceClick(session.browser.page, decision.actionKey));
+    const copyDispatched = copyClick !== null && clickedBefore !== undefined;
     if (clickedBefore !== undefined && (isRevealOrCopyRow(clickedBefore) || copyDispatched)) {
       drive.pendingRevealScan = true;
     }
@@ -7633,11 +7662,16 @@ async function driveLoop(input: {
         const formTextAfterClick =
           formTextBeforeClick === null
             ? null
-            : await submittedFormText(session, drive, decision.actionKey);
+            : await resubmittedFormText(formTextBeforeClick.frame);
         const formResponse =
           formTextBeforeClick === null || formTextAfterClick === null
             ? undefined
-            : submitResponseText(formTextBeforeClick, formTextAfterClick, [], excludeBeforeClick);
+            : submitResponseText(
+                formTextBeforeClick.text,
+                formTextAfterClick,
+                [],
+                excludeBeforeClick,
+              );
         if (formResponse !== undefined) {
           drive.submitFormResponse = formResponse;
           const last = drive.lastSubmitResponse ?? "";
