@@ -4150,7 +4150,9 @@ export function buildDriveQuestions(
   // caller supplied for the form beside it.
   const sizes = choices.map(([, question]) => Object.keys(question.criteria).length);
   const quotas = choices.map(([name], index) =>
-    Math.min(sizes[index]!, name === "SCROLL_target" ? 4 : name === DRIVE_VALUE_QUESTION ? 2 : 1),
+    name === "operation" || name === DRIVE_EMAIL_CODE_QUESTION
+      ? sizes[index]!
+      : Math.min(sizes[index]!, name === "SCROLL_target" ? 4 : name === DRIVE_VALUE_QUESTION ? 2 : 1),
   );
   const valueShares = choices.map(([name, question], index) =>
     name.startsWith("form_value_") || name === DRIVE_VALUE_QUESTION

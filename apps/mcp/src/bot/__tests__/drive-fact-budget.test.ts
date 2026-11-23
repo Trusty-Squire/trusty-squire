@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildDriveQuestions,
   decideAfterJev,
+  DRIVE_EMAIL_CODE_QUESTION,
   DRIVE_FIXED_NONE,
   DRIVE_MAX_CRITERIA,
   driveTargetSets,
@@ -280,6 +281,72 @@ function typeInto(rows: WireRow[], field: WireRow, factKey: keyof typeof facts) 
 }
 
 describe("drive budget keeps supplied facts beside a long checkbox list", () => {
+  it("keeps operation and email-code choices when form values exhaust the budget", () => {
+    const rows: WireRow[] = [
+      ...Array.from({ length: 12 }, (_, index): WireRow => [
+        `@e:field-${index}`,
+        "t",
+        `Bidang ${index}|fm=1`,
+      ]),
+      ["@e:submit", "b", "Kirim|a=submit|fm=1"],
+    ];
+    const suppliedFacts = Object.fromEntries(
+      Array.from({ length: 10 }, (_, index) => [`provided_${index}`, `value-${index}`]),
+    );
+    const formGoal = "Complete and submit the form using the supplied values.";
+    const sets = driveTargetSets(
+      rows,
+      suppliedFacts,
+      false,
+      [],
+      pageUrl,
+      new Map(),
+      (text) => text,
+      [],
+      { goal: formGoal },
+    );
+    const questions = buildDriveQuestions(
+      rows,
+      suppliedFacts,
+      formGoal,
+      false,
+      [],
+      pageUrl,
+      new Map(),
+      sets,
+    );
+    const total = Object.values(questions).reduce(
+      (n, question) => n + (question.type === "choice" ? Object.keys(question.criteria).length : 0),
+      0,
+    );
+    expect(total).toBeLessThanOrEqual(DRIVE_MAX_CRITERIA);
+    expect(Object.keys(choiceCriteria(questions.operation))).toContain("TYPE_TEXT");
+    expect(Object.keys(choiceCriteria(questions[DRIVE_EMAIL_CODE_QUESTION]))).toHaveLength(13);
+    const target = sets.TYPE_TEXT.find((candidate) => candidate.ref === "@e:field-0")!;
+    expect(target).toBeDefined();
+    expect(
+      decideAfterJev({
+        rows,
+        facts: suppliedFacts,
+        goal: formGoal,
+        fingerprint: "localized-form",
+        lastFingerprint: null,
+        lastActionKey: null,
+        pageUrl,
+        sets,
+        questions,
+        answers: {
+          operation: answer(choiceCriteria(questions.operation), "TYPE_TEXT"),
+          TYPE_TEXT_target: answer(choiceCriteria(questions.TYPE_TEXT_target), target.slug),
+          form_value_1: answer(choiceCriteria(questions.form_value_1), "provided_0"),
+        },
+      }),
+    ).toMatchObject({
+      kind: "act",
+      action: { kind: "type", target: "@e:field-0", text: "value-0" },
+    });
+  });
+
   it("offers every supplied fact for each form field on the Kenari model list", () => {
     const rows = modelListRows();
     expect(rows).toHaveLength(139);
