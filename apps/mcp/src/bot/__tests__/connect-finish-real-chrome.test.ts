@@ -1,7 +1,7 @@
 import { createServer } from "node:net";
 import { createRequire } from "node:module";
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdtemp, mkdir, readFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -20,6 +20,7 @@ let browser: Browser | undefined;
 let web: ChildProcess | undefined;
 let closeApi: (() => Promise<void>) | undefined;
 let daemon: ChildProcess | undefined;
+let connect: ChildProcess | undefined;
 let client: BrokerClient | undefined;
 let home: string;
 
@@ -32,6 +33,8 @@ beforeEach(async () => {
 afterEach(async () => {
   await client?.release().catch(() => undefined);
   client = undefined;
+  await stopChild(connect);
+  connect = undefined;
   await stopChild(daemon);
   daemon = undefined;
   await browser?.close().catch(() => undefined);
@@ -147,6 +150,28 @@ describe("production install Finish in real Chrome", () => {
       },
     });
     expect(view, daemonLogs).toMatchObject({ state: "live", browser_location: { kind: "virtual" } });
+    const evidenceDir = process.env.TS_FINISH_EVIDENCE_DIR;
+    let connectOutput = "";
+    connect = spawn(process.execPath, [
+      "--import", requireMcp.resolve("tsx"),
+      fileURLToPath(new URL("../../bin.ts", import.meta.url)), "connect", "--target=codex", "--json",
+    ], {
+      env: {
+        ...process.env, NODE_ENV: "test", TRUSTY_SQUIRE_PROFILE_DIR: profileDir,
+        TRUSTY_SQUIRE_BROKER_SOCKET: socket, TRUSTY_SQUIRE_API_BASE: apiOrigin,
+        DBUS_SESSION_BUS_ADDRESS: "", XDG_RUNTIME_DIR: join(home, "runtime"),
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    connect.stdout!.on("data", (chunk) => { connectOutput += String(chunk); });
+    connect.stderr!.on("data", (chunk) => { connectOutput += String(chunk); });
+    await waitFor(() => connect!.exitCode !== null || connect!.signalCode !== null);
+    expect(connect.exitCode, connectOutput).toBe(0);
+    expect(view).toMatchObject({ state: "live", browser_location: { kind: "virtual" } });
+    const vncUrl = (view as Extract<CeremonyView, { state: "live" }>).browser_location;
+    if (vncUrl.kind !== "virtual") throw new Error("missing noVNC URL");
+    expect(connectOutput).toContain(vncUrl.url);
+    if (evidenceDir) await writeFile(join(evidenceDir, "finish-connect.txt"), connectOutput);
     const activePort = await readFile(join(profileDir, "DevToolsActivePort"), "utf8");
     browser = await chromium.connectOverCDP(`http://127.0.0.1:${activePort.split("\n")[0]}`);
     const context = browser.contexts()[0]!;
@@ -161,11 +186,38 @@ describe("production install Finish in real Chrome", () => {
     expect(page.isClosed()).toBe(false);
     const noVncOrigin = `http://127.0.0.1:${vncPort}`;
     expect((await fetch(noVncOrigin)).ok).toBe(true);
-    await expect(client!.call("ceremony", { action: "join", agentConfigs: [{ target: "hermes" }] })).resolves.toMatchObject({
+    // The foreground client may exit before the person presses Finish. The
+    // daemon must retain both the ceremony and the persisted claim on its own.
+    await client!.release();
+    client = await BrokerClient.connect(socket);
+    const joined = await client!.call("ceremony", { action: "join", agentConfigs: [{ target: "hermes" }] }) as CeremonyView;
+    expect(joined).toMatchObject({
       state: "live", confirm_url: confirmUrl, reused: true,
     });
     expect(context.pages().filter((candidate) => candidate.url().includes(`/install?token=${code}`))).toHaveLength(1);
 
+    if (evidenceDir) await page.screenshot({ path: join(evidenceDir, "finish-ready.png"), fullPage: true });
+    // Simulate a transport outage at the browser boundary, using the real
+    // wizard and its retry UI. No acknowledgement means no success navigation
+    // and no server-side completion; retry must still reach the real route.
+    let failedPosts = 0;
+    const finishPath = `**/v1/mcp/install/${code}/finish`;
+    await page.route(finishPath, async (route) => {
+      failedPosts += 1;
+      await route.fulfill({ status: 503, contentType: "application/json", body: '{"error":"temporary outage"}' });
+    });
+    await page.getByRole("button", { name: "Finish", exact: true }).click();
+    const retryAlert = page.getByRole("alert").filter({ hasText: "Please press Finish to retry" });
+    await retryAlert.waitFor();
+    expect(await retryAlert.textContent()).toContain("Please press Finish to retry");
+    expect(failedPosts).toBe(3);
+    expect(new URL(page.url()).pathname).toBe("/install");
+    expect(new URL(page.url()).searchParams.get("token")).toBe(code);
+    expect(page.isClosed()).toBe(false);
+    expect((await deps.pairingTokenStore.find(code)).finished_at).toBeNull();
+    expect(await page.getByRole("button", { name: "Finish", exact: true }).isEnabled()).toBe(true);
+    if (evidenceDir) await page.screenshot({ path: join(evidenceDir, "finish-retry.png"), fullPage: true });
+    await page.unroute(finishPath);
     await page.getByRole("button", { name: "Finish", exact: true }).click();
     await waitFor(() => page.isClosed());
     expect(await client!.call("ceremony", { action: "get" }) as CeremonyView).toEqual({ state: "none" });
@@ -181,5 +233,21 @@ describe("production install Finish in real Chrome", () => {
     expect(codex.mcp_servers?.squire?.env).toMatchObject({
       TRUSTY_SQUIRE_ACCOUNT_ID: TEST_ACCOUNT, TRUSTY_SQUIRE_PROFILE_DIR: profileDir,
     });
+    if (evidenceDir) await writeFile(join(evidenceDir, "finish-result.json"), JSON.stringify({
+      observedAt: new Date().toISOString(),
+      surface: "production daemon, Chrome, noVNC, Next install wizard and Fastify install route; disposable in-memory account",
+      foregroundClientDisconnectedBeforeFinish: true,
+      connectExitBeforeClaim: connect.exitCode,
+      reused: joined.state === "live" && joined.reused,
+      failedFinishPosts: failedPosts,
+      retryAlert: "Couldn't finish setup. Please press Finish to retry.",
+      serverFinishedAt: (await deps.pairingTokenStore.find(code)).finished_at,
+      signInPageClosed: page.isClosed(),
+      ceremony: await client!.call("ceremony", { action: "get" }),
+      noVncReachable: await fetch(noVncOrigin).then(() => true).catch(() => false),
+      daemonStillRunning: daemon!.exitCode === null,
+      savedAccount: (await (await openSessionStorage()).read(TEST_ACCOUNT))?.account_id,
+      codexAccount: codex.mcp_servers?.squire?.env?.TRUSTY_SQUIRE_ACCOUNT_ID,
+    }, null, 2));
   });
 });
