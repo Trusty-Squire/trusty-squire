@@ -103,9 +103,6 @@ describe("identically labeled controls carry their row", () => {
        <div><p>${prefix}B</p><button type="button">Copy</button></div></main>`,
     );
     const twins = rows.filter((row) => row[2]?.startsWith("Copy|"));
-    expect(twins.map((row) => row[2])).toEqual([
-      `Copy|ctx=${prefix}A`,
-      `Copy|ctx=${prefix}B`,
-    ]);
+    expect(twins.map((row) => row[2])).toEqual([`Copy|ctx=${prefix}A`, `Copy|ctx=${prefix}B`]);
   });
 });
