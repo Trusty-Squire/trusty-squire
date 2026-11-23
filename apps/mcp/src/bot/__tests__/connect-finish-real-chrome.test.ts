@@ -119,7 +119,9 @@ describe("production install Finish in real Chrome", () => {
       fileURLToPath(new URL("../../bin.ts", import.meta.url)), "broker",
     ], {
       env: {
-        ...process.env, NODE_ENV: "test", DISPLAY: "", WAYLAND_DISPLAY: "", BOT_CDP_ENDPOINT: "",
+        ...process.env, NODE_ENV: "test", DISPLAY: "", BOT_CDP_ENDPOINT: "",
+        // x11vnc detects even an empty WAYLAND_DISPLAY as Wayland; this rig uses Xvfb.
+        WAYLAND_DISPLAY: undefined, XDG_SESSION_TYPE: "x11",
         TRUSTY_SQUIRE_ACCOUNT_ID: "", TRUSTY_SQUIRE_BROKER_UNIT: "",
         TRUSTY_SQUIRE_PROFILE_DIR: profileDir, TRUSTY_SQUIRE_BROKER_SOCKET: socket,
         TS_LOGIN_PUBLIC_HOSTNAME: "finish-proof.invalid", TS_LOGIN_LOCAL_PORT: String(vncPort),
