@@ -173,10 +173,11 @@ export function inferFieldFromControl(input: {
   const fromName = inferFieldFromLabel(input.name ?? "", input.role);
   if (fromName !== undefined) return fromName;
   const fromLabel = inferFieldFromLabel(input.label, input.role);
+  const fromPlaceholder = inferFieldFromLabel(input.placeholder ?? "", input.role);
   // A masked input whose words name nothing (a placeholder of dots, a label
   // in another language) is a password; one whose words name a field, such
   // as a masked verification code, stays that field.
-  return fromLabel ?? (type === "password" ? "password" : undefined);
+  return fromLabel ?? fromPlaceholder ?? (type === "password" ? "password" : undefined);
 }
 
 /**

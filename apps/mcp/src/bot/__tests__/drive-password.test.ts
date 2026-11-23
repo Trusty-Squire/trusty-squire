@@ -546,17 +546,20 @@ describe("sign-up passwords named by the input type", () => {
     expect(newAccountPasswordTargets(signin, { email }, [])).toBeUndefined();
   });
 
-  it("offers a masked code named only by its placeholder for inbox verification", () => {
-    const code = rowsOf([
-      element("@e:code", "textbox", "Verification code", {
-        inputType: "password",
-        placeholder: "Verification code",
-      }),
-    ]);
-    expect(code[0]?.[2]).toContain("f=otp");
-    expect(emailCodeCandidates(code).map((candidate) => candidate.ref)).toEqual(["@e:code"]);
-    expect(newAccountPasswordTargets(code, { email }, [])).toBeUndefined();
-  });
+  it.each(["Verification code", "PIN", ""])(
+    "offers a masked code with label %j and a meaningful placeholder for inbox verification",
+    (label) => {
+      const code = rowsOf([
+        element("@e:code", "textbox", label, {
+          inputType: "password",
+          placeholder: "Verification code",
+        }),
+      ]);
+      expect(code[0]?.[2]).toContain("f=otp");
+      expect(emailCodeCandidates(code).map((candidate) => candidate.ref)).toEqual(["@e:code"]);
+      expect(newAccountPasswordTargets(code, { email }, [])).toBeUndefined();
+    },
+  );
 });
 
 describe("storeInventedLogin", () => {
