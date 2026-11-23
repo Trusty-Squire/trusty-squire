@@ -660,8 +660,8 @@ process.exit(1);
     expect(set).toHaveBeenLastCalledWith(true);
   });
 
-  // Every other lifetime test hands in a short `lifetimeMs`, so the value a
-  // real `connect` actually arms — the only one that ships — is exercised
+  // Every other lifetime test hands in a short `lifetimeMs`, so the value the
+  // broker's ceremony actually arms — the only one that ships — is exercised
   // nowhere else. A rig that fires early tears the display down mid-ceremony;
   // one that fires late is not a bound at all.
   it("arms the pairing-token window plus grace when the caller names no lifetime", async () => {
@@ -681,10 +681,12 @@ process.exit(1);
       }
 
       await vi.advanceTimersByTimeAsync(1);
-      expect(runtime.exit).toHaveBeenCalledWith(1);
       for (const child of processes) {
         expect(child.kill).toHaveBeenCalledWith("SIGTERM");
       }
+      // The rig lives in the broker daemon: its bound reaps the helpers and
+      // never ends the process that serves every other session.
+      expect(runtime.exit).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
     }
@@ -699,16 +701,15 @@ process.exit(1);
       set: vi.fn(),
     });
     expect(processes[0]?.kill).not.toHaveBeenCalled();
-    await vi.waitFor(() => expect(runtime.exit).toHaveBeenCalledWith(1));
-    // Reported BEFORE the exit: a caller reading the machine channel must not
-    // have to infer this run's outcome from the exit code alone.
+    await vi.waitFor(() => {
+      for (const child of processes) expect(child.kill).toHaveBeenCalledWith("SIGTERM");
+    });
+    // Reported before the teardown, so the ceremony that owns the rig ends too.
     expect(onExpired).toHaveBeenCalledTimes(1);
     expect(onExpired.mock.invocationCallOrder[0]).toBeLessThan(
-      vi.mocked(runtime.exit).mock.invocationCallOrder[0] ?? 0,
+      vi.mocked(processes[0]!.kill).mock.invocationCallOrder[0] ?? 0,
     );
-    for (const child of processes) {
-      expect(child.kill).toHaveBeenCalledWith("SIGTERM");
-    }
+    expect(runtime.exit).not.toHaveBeenCalled();
   });
 
   it("does not fire the owned lifetime after cleanup is removed", async () => {

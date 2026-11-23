@@ -30,6 +30,17 @@ import { listenSharedMcp } from "./mcp-socket.js";
 import { readBrokerUnitMarkerSync } from "./managed-marker.js";
 import { sharedMcpSocketPath } from "./mcp-socket-path.js";
 import { stopOperateShareGateway, warmOperateShareGateway } from "../live-share.js";
+import { BrokerCeremonyHost, operatorCeremonyTab, pollInstallStatus } from "./ceremony.js";
+import {
+  detectProviderSessionsFromProfile,
+  exposeSharedBrokerCeremonyDisplay,
+  logoutProvidersThroughSession,
+} from "../google-login.js";
+import {
+  finalizeCeremonyClaim,
+  writeCeremonyAgentConfigs,
+} from "../../install/ceremony-finalize.js";
+import { namedTunnelConfig } from "../remote-login-display.js";
 
 /**
  * Wire connections that hold a claim on the browser. Status probes are reads
@@ -366,6 +377,25 @@ export async function runBrokerDaemon(): Promise<void> {
     registryBaseUrl: process.env.ADAPTER_REGISTRY_URL ?? "https://registry.trustysquire.ai",
   });
   const clients = new BrokerClientRegistry();
+  // connect's sign-in runs here, in the process that outlives it.
+  const ceremony = new BrokerCeremonyHost({
+    profileDir: CHROME_PROFILE_DIR,
+    openTab: operatorCeremonyTab(operator),
+    logoutProviders: logoutProvidersThroughSession,
+    expose: async ({ profileDir, callerHasDisplay, namedTunnel, onExpired, windowControl }) =>
+      await exposeSharedBrokerCeremonyDisplay(
+        profileDir,
+        onExpired,
+        windowControl,
+        callerHasDisplay,
+        namedTunnel ?? namedTunnelConfig(),
+      ),
+    pollStatus: async (apiBase, setupCode) => await pollInstallStatus(apiBase, setupCode),
+    finalize: finalizeCeremonyClaim,
+    writeAgentConfigs: writeCeremonyAgentConfigs,
+    detectProviders: detectProviderSessionsFromProfile,
+    log: (line) => process.stderr.write(`${line}\n`),
+  });
   // The wire listener can accept a connection before the MCP listener finishes
   // starting and the shutdown runner is installed below.
   let shutdown: ReturnType<typeof retryableBrokerShutdown> | undefined;
@@ -404,6 +434,9 @@ export async function runBrokerDaemon(): Promise<void> {
             ...runtime.custodyStatus(),
             profileHolder: readLockHolder(profilePathIdentity(CHROME_PROFILE_DIR)),
           });
+        // Enrollment has no account yet, so the account-session check below
+        // has nothing to say about the ceremony.
+        if (method === "ceremony") return await ceremony.call(params);
         if (method === "command") {
           const busy = operator.busyReadResult(principal, params);
           if (busy !== undefined) return busy;
@@ -437,6 +470,7 @@ export async function runBrokerDaemon(): Promise<void> {
     // A signal is an explicit stop even with live relay clients. Let an
     // in-flight call finish briefly, then abort the rest and close their tabs.
     await new Promise((resolve) => setTimeout(resolve, 750));
+    await ceremony.shutdown();
     await operator.shutdown();
     if (!(await runtime.close())) {
       process.stderr.write("[browser-broker] cleanup unproven; retaining physical custody\n");

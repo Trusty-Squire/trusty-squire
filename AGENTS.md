@@ -768,17 +768,20 @@ The agent chooses the relevant message. `into_slot` requires its `pick` index;
 The session consent and live Google identity gates still apply. A worktree
 change is invisible to a running broker until that broker is rebuilt.
 
-### 23. A claimed enrollment waits for Finish, and the shared-display warning prints only where it is true
+### 23. The broker daemon owns the sign-in, and the shared-display warning prints only where it is true
 
-`connect` requires both the account claim and the person's Finish action, so
-the browser stays open for optional GitHub sign-in. `shouldCompleteInstallClaim`
-in `apps/mcp/src/install/cli.ts` owns that gate. Finish has two independent
-signals: the CLI's nonce-scoped loopback callback and the broker's observation
-of the ceremony tab at `/install/done`. The wizard must navigate to that page
-even if callback delivery fails; navigating to an unreachable callback URL
-first can strand a delivered claim. The CLI checks an arrived callback before
-asking the broker for another observation. Do not "fix" a missed Finish by
-extending the pairing deadline — a longer window is still a window.
+`connect` asks the broker daemon to start (or report) the sign-in ceremony and
+returns as soon as the daemon holds it; nothing in `connect` waits on a human.
+`BrokerCeremonyHost` in `apps/mcp/src/bot/broker/ceremony.ts` completes it on
+server-side facts only: `/status` delivering the claim makes the daemon write
+the session and host-agent config (`apps/mcp/src/install/ceremony-finalize.ts`),
+and `/status` reporting `finished` — recorded by the wizard's same-origin
+`POST /v1/mcp/install/:code/finish` — closes the noVNC exposure and the tab. The
+window stays open between the claim and Finish for the optional GitHub step. A
+second `connect` while a ceremony is live gets the same window back. Do not
+reintroduce a loopback callback (Chrome's Local Network Access gate blocks it)
+or a tab observation, and do not "fix" a missed Finish by extending the pairing
+deadline — a longer window is still a window.
 
 The shared-browser disclosure prints only where it is a real disclosure: a
 real human-facing display, with the login tab in the browser the person is

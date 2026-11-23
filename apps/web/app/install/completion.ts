@@ -1,95 +1,12 @@
-const COMPLETION_FRAGMENT_KEY = "ts_install_complete";
-const COMPLETION_ACK_FRAGMENT_KEY = "ts_install_complete_ack";
-const COMPLETION_STORAGE_PREFIX = "ts-install-completion:";
-const COMPLETION_ACK_STORAGE_PREFIX = "ts-install-completion-ack:";
 const COMPLETION_PROVIDER_STORAGE_PREFIX = "ts-install-completion-provider:";
-const COMPLETION_PATH = /^\/\.well-known\/trusty-squire\/install-complete\/[a-f0-9]{48}$/;
 type InstallCompletionProvider = "google" | "github";
 const INSTALL_COMPLETION_PROVIDERS: readonly InstallCompletionProvider[] = ["google", "github"];
+const FINISH_ATTEMPTS = 3;
+const FINISH_RETRY_MS = 1_000;
 
-export function normalizeInstallCompletionUrl(raw: string | null): string | null {
-  if (raw === null) return null;
-  try {
-    const url = new URL(raw);
-    const port = Number(url.port);
-    if (
-      url.protocol !== "http:" ||
-      url.hostname !== "127.0.0.1" ||
-      !Number.isInteger(port) ||
-      port < 1024 ||
-      port > 65_535 ||
-      url.username.length > 0 ||
-      url.password.length > 0 ||
-      url.search.length > 0 ||
-      url.hash.length > 0 ||
-      !COMPLETION_PATH.test(url.pathname)
-    ) {
-      return null;
-    }
-    return url.toString();
-  } catch {
-    return null;
-  }
-}
-
-export function readInstallCompletionUrl(token: string): string | null {
-  if (typeof window === "undefined") return null;
-  const storageKey = `${COMPLETION_STORAGE_PREFIX}${token}`;
-  const fromFragment = normalizeInstallCompletionUrl(
-    new URLSearchParams(window.location.hash.slice(1)).get(COMPLETION_FRAGMENT_KEY),
-  );
-  if (fromFragment !== null) {
-    try {
-      window.sessionStorage.setItem(storageKey, fromFragment);
-      return fromFragment;
-    } catch {
-      // OAuth removes the fragment on its redirect back to this page. Do not
-      // acknowledge callback support unless the callback survived into
-      // session storage, because Finish cannot deliver a callback after the
-      // fragment disappears.
-      return null;
-    }
-  }
-  try {
-    return normalizeInstallCompletionUrl(window.sessionStorage.getItem(storageKey));
-  } catch {
-    return null;
-  }
-}
-
-export function installCompletionAcknowledgementUrl(
-  token: string,
-  callbackUrl: string,
-): string | null {
-  if (typeof window === "undefined") return null;
-  const storageKey = `${COMPLETION_ACK_STORAGE_PREFIX}${token}`;
-  const acknowledged =
-    new URLSearchParams(window.location.hash.slice(1)).get(COMPLETION_ACK_FRAGMENT_KEY) === "1";
-  if (acknowledged) {
-    try {
-      window.sessionStorage.setItem(storageKey, "1");
-    } catch {
-      // The current acknowledgement remains usable without storage.
-    }
-    return null;
-  }
-  try {
-    if (window.sessionStorage.getItem(storageKey) === "1") return null;
-  } catch {
-    // Retry the handshake when storage is unavailable.
-  }
-  const normalized = normalizeInstallCompletionUrl(callbackUrl);
-  if (normalized === null) return null;
-  const acknowledgement = new URL(normalized);
-  acknowledgement.pathname = `${acknowledgement.pathname}/ack`;
-  return acknowledgement.toString();
-}
-
-export function clearInstallCompletionUrl(token: string): void {
+export function clearInstallCompletionProviders(token: string): void {
   if (typeof window === "undefined") return;
   try {
-    window.sessionStorage.removeItem(`${COMPLETION_STORAGE_PREFIX}${token}`);
-    window.sessionStorage.removeItem(`${COMPLETION_ACK_STORAGE_PREFIX}${token}`);
     for (const provider of INSTALL_COMPLETION_PROVIDERS) {
       window.sessionStorage.removeItem(`${COMPLETION_PROVIDER_STORAGE_PREFIX}${token}:${provider}`);
     }
@@ -124,35 +41,30 @@ export function readInstallCompletionProviders(token: string): InstallCompletion
   }
 }
 
-export function installCompletionProviderUrl(
-  callbackUrl: string,
-  providers: readonly InstallCompletionProvider[],
-): string | null {
-  const normalized = normalizeInstallCompletionUrl(callbackUrl);
-  if (normalized === null) return null;
-  const callback = new URL(normalized);
-  for (const provider of providers) callback.searchParams.append("provider", provider);
-  return callback.toString();
-}
-
-// Finish is visible to the broker as /install/done even if its loopback
-// callback is unreachable. A callback failure must not strand the wizard on
-// a browser error page before the CLI can observe the person's Finish click.
+// Finish is recorded on the server, same-origin, and the broker that owns the
+// sign-in window reads it from there. A loopback call to the local machine
+// would need Chrome's Local Network Access permission, which nobody is asked
+// for, so the server is the only channel. The page moves to /install/done at
+// once; the record is retried briefly in the background so one dropped
+// request does not leave the window open until the pairing deadline.
 export function finishInstallCeremony(
-  callbackUrl: string | null,
-  providers: readonly InstallCompletionProvider[],
+  token: string,
   navigateDone: () => void,
-  send: typeof fetch = fetch,
-): void {
-  const callback =
-    callbackUrl === null ? null : installCompletionProviderUrl(callbackUrl, providers);
-  try {
-    if (callback !== null) {
-      void send(callback, { mode: "no-cors", keepalive: true }).catch(() => undefined);
+  post: (path: string) => Promise<unknown>,
+  sleep: (ms: number) => Promise<void> = (ms) => new Promise((r) => setTimeout(r, ms)),
+): Promise<boolean> {
+  const path = `/v1/mcp/install/${encodeURIComponent(token)}/finish`;
+  const recorded = (async () => {
+    for (let attempt = 1; attempt <= FINISH_ATTEMPTS; attempt += 1) {
+      try {
+        await post(path);
+        return true;
+      } catch {
+        if (attempt < FINISH_ATTEMPTS) await sleep(FINISH_RETRY_MS);
+      }
     }
-  } catch {
-    // Navigation remains the independent Finish signal.
-  } finally {
-    navigateDone();
-  }
+    return false;
+  })();
+  navigateDone();
+  return recorded;
 }

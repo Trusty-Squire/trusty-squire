@@ -3,18 +3,23 @@
 //
 //   POST /v1/mcp/install/initiate         CLI mints a setup_code +
 //                                         browser confirm_url.
-//   GET  /v1/mcp/install/:code/status     CLI polls; once `claimed`,
-//                                         delivers the raw bearer token
-//                                         exactly once.
+//   GET  /v1/mcp/install/:code/status     Broker daemon polls; once
+//                                         `claimed`, delivers the raw
+//                                         bearer token exactly once, then
+//                                         reports `delivered`. Both carry
+//                                         `finished`.
 //   GET  /v1/mcp/install/:code/state      Browser polls; status only —
 //                                         never delivers the token.
 //   POST /v1/mcp/install/:code/claim      PWA (web auth) marks the
 //                                         setup_code claimed, creates
 //                                         an AgentSession, returns ok.
+//   POST /v1/mcp/install/:code/finish     PWA records the person's Finish
+//                                         press, so the broker daemon can
+//                                         close the sign-in window.
 //
-// Initiate + status + state are unauthenticated by design (the CLI has
-// no credentials yet). The TTL + single-use semantics bound the attack
-// surface.
+// Initiate + status + state + finish are unauthenticated by design (the CLI
+// has no credentials yet, and Finish only says the window may close). The
+// TTL + single-use semantics bound the attack surface.
 
 import { z } from "zod";
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
@@ -110,9 +115,18 @@ export const registerMcpInstallRoute: FastifyPluginAsync<{
         agent_session_token: raw,
         account_id: record.account_id,
         install_preferences: installPreferences(record),
+        finished: record.finished_at !== null,
       });
     }
-    // delivered / expired
+    // The token already went out; the poller still needs to learn when the
+    // person presses Finish.
+    if (record.status === "delivered") {
+      return reply.code(200).send({
+        status: "delivered",
+        account_id: record.account_id,
+        finished: record.finished_at !== null,
+      });
+    }
     reply.code(410).send({ status: "expired" });
   });
 
@@ -138,6 +152,22 @@ export const registerMcpInstallRoute: FastifyPluginAsync<{
     }
     // claimed or delivered — install is confirmed from the browser's POV.
     return reply.code(200).send({ status: record.status });
+  });
+
+  // Finish arrives from the install page itself, same-origin, so no browser
+  // permission prompt stands between the press and the record.
+  fastify.post<{ Params: { code: string } }>("/v1/mcp/install/:code/finish", async (req, reply) => {
+    const now = opts.deps.now?.() ?? new Date();
+    const record = await opts.deps.pairingTokenStore.find(req.params.code);
+    if (record === null) {
+      reply.code(404).send({ error: "not_found" });
+      return;
+    }
+    if (!(await opts.deps.pairingTokenStore.markFinished(req.params.code, now))) {
+      reply.code(409).send({ error: "not_claimed" });
+      return;
+    }
+    return reply.code(200).send({ ok: true });
   });
 
   fastify.post<{ Params: { code: string } }>(

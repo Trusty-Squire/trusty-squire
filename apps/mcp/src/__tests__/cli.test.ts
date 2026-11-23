@@ -8,12 +8,8 @@
 
 import { describe, expect, it, vi } from "vitest";
 import { captureMachineChannel } from "./machine-channel.js";
-import {
-  parseArgs,
-  applyInstallPreferences,
-  resolveConnectTargetContext,
-  runCli,
-} from "../install/cli.js";
+import { parseArgs, resolveConnectTargetContext, runCli } from "../install/cli.js";
+import { applyInstallPreferences } from "../install/ceremony-finalize.js";
 import type { SessionData } from "../session.js";
 import type { AgentDefinition } from "../install/agents.js";
 import { CHROME_PROFILE_DIR } from "../bot/profile.js";

@@ -21,11 +21,15 @@
 //
 // The session id is the only handle that crosses the wire; the broker keeps the
 // Page and Browser. Notifications travel on the originating command's stream.
+//
+// `ceremony` is connect's one method: the daemon runs the install sign-in end
+// to end (broker/ceremony.ts defines its request and its answer), so connect
+// starts or reads it and returns without holding a session of its own.
 
 import type { Observation } from "../provision-session.js";
 
 /** The four operations the wire expresses, plus the read that answers for them. */
-export type BrokerWireMethod = "connect" | "open" | "command" | "close" | "status";
+export type BrokerWireMethod = "connect" | "open" | "command" | "close" | "status" | "ceremony";
 
 /**
  * The account a call acts as. It is named by the call that spends that

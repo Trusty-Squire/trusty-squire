@@ -121,6 +121,106 @@ describe("single-tier install handshake", () => {
     expect(status.json().install_preferences).not.toHaveProperty("proxy_url");
   });
 
+  it("records Finish server-side and reports it on /status before and after delivery", async () => {
+    const initiate = await app.inject({
+      method: "POST",
+      url: "/v1/mcp/install/initiate",
+      headers: JSON_HEADERS,
+      payload: { agent_identity: "codex" },
+    });
+    const { setup_code } = initiate.json() as { setup_code: string };
+
+    // Finish means nothing before the account claim.
+    const early = await app.inject({
+      method: "POST",
+      url: `/v1/mcp/install/${setup_code}/finish`,
+    });
+    expect(early.statusCode).toBe(409);
+    expect(early.json()).toEqual({ error: "not_claimed" });
+
+    const cookie = await makeWebSession(deps, "acct-finish");
+    const claim = await app.inject({
+      method: "POST",
+      url: `/v1/mcp/install/${setup_code}/claim`,
+      headers: { ...JSON_HEADERS, cookie },
+      payload: {},
+    });
+    expect(claim.statusCode).toBe(200);
+
+    const delivered = await app.inject({
+      method: "GET",
+      url: `/v1/mcp/install/${setup_code}/status`,
+    });
+    expect(delivered.json()).toMatchObject({ status: "claimed", finished: false });
+    expect(delivered.json().agent_session_token).toEqual(expect.any(String));
+
+    const waiting = await app.inject({
+      method: "GET",
+      url: `/v1/mcp/install/${setup_code}/status`,
+    });
+    expect(waiting.statusCode).toBe(200);
+    expect(waiting.json()).toEqual({
+      status: "delivered",
+      account_id: "acct-finish",
+      finished: false,
+    });
+
+    const finish = await app.inject({
+      method: "POST",
+      url: `/v1/mcp/install/${setup_code}/finish`,
+    });
+    expect(finish.statusCode).toBe(200);
+    expect(finish.json()).toEqual({ ok: true });
+    // A second press is harmless.
+    const again = await app.inject({
+      method: "POST",
+      url: `/v1/mcp/install/${setup_code}/finish`,
+    });
+    expect(again.statusCode).toBe(200);
+
+    const finished = await app.inject({
+      method: "GET",
+      url: `/v1/mcp/install/${setup_code}/status`,
+    });
+    expect(finished.json()).toEqual({
+      status: "delivered",
+      account_id: "acct-finish",
+      finished: true,
+    });
+    expect(finished.json()).not.toHaveProperty("agent_session_token");
+  });
+
+  it("reports a Finish pressed before the first poll alongside the token", async () => {
+    const initiate = await app.inject({
+      method: "POST",
+      url: "/v1/mcp/install/initiate",
+      headers: JSON_HEADERS,
+      payload: {},
+    });
+    const { setup_code } = initiate.json() as { setup_code: string };
+    await deps.pairingTokenStore.claim(setup_code, "acct-fast", "agent_raw", new Date());
+    const finish = await app.inject({
+      method: "POST",
+      url: `/v1/mcp/install/${setup_code}/finish`,
+    });
+    expect(finish.statusCode).toBe(200);
+
+    const status = await app.inject({
+      method: "GET",
+      url: `/v1/mcp/install/${setup_code}/status`,
+    });
+    expect(status.json()).toMatchObject({
+      status: "claimed",
+      agent_session_token: "agent_raw",
+      finished: true,
+    });
+  });
+
+  it("answers Finish for an unknown setup code with not_found", async () => {
+    const finish = await app.inject({ method: "POST", url: "/v1/mcp/install/nope/finish" });
+    expect(finish.statusCode).toBe(404);
+  });
+
   it("install/status returns the bound account_id", async () => {
     const issue = await app.inject({ method: "POST", url: "/v1/install" });
     const { machine_token } = issue.json() as { machine_token: string };

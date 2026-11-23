@@ -7,9 +7,11 @@
 //   2. Browser hits /install?token=<>, PWA POSTs /v1/mcp/install/:code/
 //      claim with the user's web session. Server creates an
 //      AgentSession and stashes the raw bearer on the setup record.
-//   3. CLI polls GET /v1/mcp/install/:code/status. Once `claimed`, the
-//      response carries the raw bearer exactly once; subsequent polls
-//      return `expired`.
+//   3. The broker daemon polls GET /v1/mcp/install/:code/status. Once
+//      `claimed`, the response carries the raw bearer exactly once;
+//      subsequent polls report `delivered` without it.
+//   4. The wizard's Finish POSTs /v1/mcp/install/:code/finish, which sets
+//      `finished_at`; /status reports it as `finished`.
 //
 // 10-minute TTL; single-use claim. The model name is "PairingToken"
 // for now — internal-only, can be renamed in a follow-up DB migration.
@@ -44,6 +46,9 @@ export interface PairingTokenRecord {
   // chose in the web wizard.
   registry_enabled: boolean | null;
   consent_operator_inbox_otp: boolean | null;
+  // Set when the person presses Finish in the wizard: they are done with the
+  // sign-in window, so the broker may close it.
+  finished_at: Date | null;
 }
 
 export interface PairingTokenStore {
@@ -60,6 +65,9 @@ export interface PairingTokenStore {
   // agent token exactly once. Returns the raw token; subsequent calls
   // return null.
   deliverAndMarkUsed(token: string, now: Date): Promise<string | null>;
+  // Records Finish on a claimed or delivered record. Returns false when the
+  // record is missing or has not been claimed.
+  markFinished(token: string, now: Date): Promise<boolean>;
 }
 
 export interface InstallPreferences {
@@ -83,6 +91,7 @@ export function issuePairingToken(
     machine_token: machineToken,
     registry_enabled: null,
     consent_operator_inbox_otp: null,
+    finished_at: null,
   };
 }
 
@@ -132,5 +141,12 @@ export class InMemoryPairingTokenStore implements PairingTokenStore {
     r.status = "delivered";
     r.agent_session_raw_token = null;
     return raw;
+  }
+
+  async markFinished(token: string, now: Date): Promise<boolean> {
+    const r = this.rows.get(token);
+    if (r === undefined || (r.status !== "claimed" && r.status !== "delivered")) return false;
+    r.finished_at ??= now;
+    return true;
   }
 }

@@ -159,10 +159,7 @@ describe("sharedBrowserDisclosureWarning", () => {
   // other tab belongs to the same owner acting for the same account on a link
   // handed to themselves, so there is nothing to disclose and nothing prints.
   it("prints one short sentence when the tab is in the browser the person uses", () => {
-    const warning = sharedBrowserDisclosureWarning({
-      kind: "already_visible",
-      reason: "it runs on this machine's own screen, which you are signed in at",
-    });
+    const warning = sharedBrowserDisclosureWarning({ kind: "host_screen" });
     expect(warning).toMatch(/keep opening tabs in this browser/i);
     expect(
       warning!
@@ -174,13 +171,11 @@ describe("sharedBrowserDisclosureWarning", () => {
 
   it("prints nothing at all on a headless display", () => {
     expect(
-      sharedBrowserDisclosureWarning({
-        kind: "exposed",
-        url: "https://vnc.test/#p=secret",
-        stop: async () => undefined,
-      }),
+      sharedBrowserDisclosureWarning({ kind: "virtual", url: "https://vnc.test/#p=secret" }),
     ).toBeNull();
-    expect(sharedBrowserDisclosureWarning({ kind: "unshowable", reason: "no display" })).toBeNull();
+    expect(
+      sharedBrowserDisclosureWarning({ kind: "unreachable", reason: "no display" }),
+    ).toBeNull();
   });
 });
 
@@ -286,6 +281,25 @@ describe("exposeSharedBrokerCeremonyDisplay", () => {
     });
     expect(mockState.rigCreated).toBe(0);
     expect(mockState.attachAttempts).toBe(0);
+  });
+
+  // The exposure runs in the broker daemon, whose own environment may carry the
+  // machine's DISPLAY while the person who ran connect is over SSH. Only the
+  // caller's answer decides that the screen is in front of them.
+  it("asks the connect caller, not the daemon's own environment, whether the screen is visible", async () => {
+    const profile = await tempProfile();
+    screenedHost();
+    const child = await spawnHolder({
+      PATH: process.env.PATH ?? "",
+      DISPLAY: ":0",
+      XAUTHORITY: "/home/someone/.Xauthority",
+    });
+    await holderOwnsProfile(profile, child);
+    mockState.attachSucceeds = true;
+    const exposure = await exposeSharedBrokerCeremonyDisplay(profile, undefined, undefined, false);
+    expect(exposure).toMatchObject({ kind: "exposed", url: "https://fixture.invalid" });
+    if (exposure.kind === "exposed") await exposure.stop();
+    expect(mockState.attachAttempts).toBe(1);
   });
 
   it("reports unshowable — with the concrete cause — when preparing the noVNC rig fails", async () => {

@@ -317,9 +317,16 @@ export function remoteLoginInstallHint(missing: readonly string[]): string {
   return lines.join("\n");
 }
 
-function namedTunnelConfig(): { hostname: string; port: number } | null {
-  const hostname = process.env.TS_LOGIN_PUBLIC_HOSTNAME?.trim();
-  const rawPort = process.env.TS_LOGIN_LOCAL_PORT?.trim();
+export interface NamedLoginTunnel {
+  hostname: string;
+  port: number;
+}
+
+// The person's own tunnel, named in the environment of the connect they ran.
+// The rig runs in the broker daemon, so connect reads this and sends it along.
+export function namedTunnelConfig(env: NodeJS.ProcessEnv = process.env): NamedLoginTunnel | null {
+  const hostname = env.TS_LOGIN_PUBLIC_HOSTNAME?.trim();
+  const rawPort = env.TS_LOGIN_LOCAL_PORT?.trim();
   if (hostname === undefined || hostname === "" || rawPort === undefined || rawPort === "") {
     return null;
   }
@@ -641,8 +648,9 @@ export function createXvfbDisplayRig({
   };
 }
 
-export function createRemoteLoginRig(): RemoteLoginRig {
-  const namedTunnel = namedTunnelConfig();
+export function createRemoteLoginRig(
+  namedTunnel: NamedLoginTunnel | null = namedTunnelConfig(),
+): RemoteLoginRig {
   const binaries = requireRemoteLoginBinaries(namedTunnel !== null);
   return {
     ...createXvfbDisplayRig(),
@@ -680,6 +688,7 @@ export function generateVncPassword(): string {
 export async function exposeRemoteLoginDisplay(
   rig: RemoteLoginRig,
   clip?: CeremonyDisplayClip,
+  namedTunnel: NamedLoginTunnel | null = namedTunnelConfig(),
 ): Promise<string> {
   if (rig.display === undefined) {
     throw new Error("remote login display has not been started");
@@ -689,7 +698,6 @@ export async function exposeRemoteLoginDisplay(
   if (password === undefined || passFile === undefined) {
     throw new Error("remote login VNC credentials are not ready");
   }
-  const namedTunnel = namedTunnelConfig();
   const plan = planLoginTunnel({
     namedTunnel,
     namedPortAvailable: namedTunnel === null || (await loginPortAvailable(namedTunnel.port)),
@@ -751,7 +759,6 @@ export async function exposeRemoteLoginDisplay(
       publicUrl = `${tunnelUrl}/#p=${password}`;
     }
 
-    printRemoteLoginBanner({ publicUrl, password });
     return publicUrl;
   } catch (error) {
     await teardownExposedLoginHelpers(rig, started);
@@ -759,15 +766,18 @@ export async function exposeRemoteLoginDisplay(
   }
 }
 
-function printRemoteLoginBanner(opts: { publicUrl: string; password: string }): void {
+// The broker daemon builds the URL; `connect` prints it for the person, whose
+// terminal is the one place they look. The password rides in the fragment.
+export function printRemoteLoginBanner(publicUrl: string): void {
+  const password = new URLSearchParams(new URL(publicUrl).hash.slice(1)).get("p") ?? "";
   const width = Math.max(40, Math.min((process.stdout.columns ?? 80) - 2, 78));
   const styledUrl = process.stderr.isTTY
-    ? `\x1b]8;;${opts.publicUrl}\x1b\\${chalk.hex("#cf3a52").underline(opts.publicUrl)}\x1b]8;;\x1b\\`
-    : opts.publicUrl;
+    ? `\x1b]8;;${publicUrl}\x1b\\${chalk.hex("#cf3a52").underline(publicUrl)}\x1b]8;;\x1b\\`
+    : publicUrl;
   const body =
     `Open this on any device, any network:\n\n` +
     `  ${styledUrl}\n\n` +
-    `If asked for a VNC password:  ${chalk.bold(opts.password)}`;
+    `If asked for a VNC password:  ${chalk.bold(password)}`;
   console.error(
     "\n" +
       boxen(body, {
@@ -904,9 +914,7 @@ export interface LoginSignalExitCoordination {
 export interface LoginRigCleanupOptions {
   lifetimeMs?: number;
   // Called once, synchronously, when the owned lifetime expires — before the
-  // teardown-and-exit it triggers. `connect` reports its machine-readable
-  // terminal line here, because this exit never returns through the run's own
-  // reporting frame.
+  // teardown it triggers — so the ceremony that owns the rig can end too.
   onExpired?: () => void;
 }
 
@@ -970,12 +978,22 @@ export function registerRemoteLoginRigCleanup(
     console.error("[login] unhandled rejection; tearing down the login browser", reason);
     exitAfterCleanup(1);
   };
+  // The rig lives in the long-lived broker daemon, so its lifetime bound
+  // reaps the helpers and leaves the process running.
   const onOwnedLifetime = (): void => {
     console.error(
       "[login] ceremony display exceeded its owned lifetime; tearing down the login rig",
     );
     options.onExpired?.();
-    exitAfterCleanup(1);
+    if (finishing) return;
+    finishing = true;
+    const browserTeardown = activeBrowserTeardown();
+    void (browserTeardown?.() ?? Promise.resolve())
+      .catch(() => undefined)
+      .finally(async () => {
+        await teardownRemoteLoginRig(rig);
+        removeListeners();
+      });
   };
 
   runtime.once("exit", onExit);
@@ -991,9 +1009,9 @@ export function registerRemoteLoginRigCleanup(
   }
 
   // The rig owns this deadline from the moment cleanup is registered — that
-  // is when the ceremony claims the display, before pollUntil starts and
-  // even if pollUntil never starts. Pairing-token wait plus grace; override
-  // only for tests.
+  // is when the ceremony claims the display, before it starts polling and
+  // even if it never does. Pairing-token wait plus grace; override only for
+  // tests.
   const lifetimeMs = options.lifetimeMs ?? LOGIN_RIG_OWNED_LIFETIME_MS;
   const lifetimeTimer = setTimeout(onOwnedLifetime, lifetimeMs);
   const cancelLifetime = (): void => {
@@ -1001,9 +1019,7 @@ export function registerRemoteLoginRigCleanup(
   };
   rigLifetimeCancels.set(rig, cancelLifetime);
 
-  return (): void => {
-    cancelRigOwnedLifetime(rig);
-    if (finishing) return;
+  const removeListeners = (): void => {
     runtime.removeListener("exit", onExit);
     if (!ownsTerminationExit) return;
     runtime.removeListener("SIGHUP", onSighup);
@@ -1012,5 +1028,11 @@ export function registerRemoteLoginRigCleanup(
     runtime.removeListener("uncaughtException", onUncaughtException);
     runtime.removeListener("unhandledRejection", onUnhandledRejection);
     restoreSignalExit();
+  };
+
+  return (): void => {
+    cancelRigOwnedLifetime(rig);
+    if (finishing) return;
+    removeListeners();
   };
 }

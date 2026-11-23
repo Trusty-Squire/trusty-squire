@@ -34,22 +34,26 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { loadHarvesterEnvFile } from "../operator-env.js";
 import { installInitiate, installPoll, issueMachineToken } from "../api-client.js";
-import { openSessionStorage, type SessionData } from "../session.js";
 import {
-  AGENTS,
-  detectInstalledAgents,
-  writeClaudeCodePermissions,
-  type AgentDefinition,
-  type AgentTarget,
-} from "./agents.js";
+  applyInstallPreferences,
+  storeTwoCaptchaKey,
+  writeAgentConfig,
+  type AgentConfigPlan,
+  type InstallClaim,
+} from "./ceremony-finalize.js";
+import { openSessionStorage, type SessionData } from "../session.js";
+import { AGENTS, detectInstalledAgents, type AgentDefinition, type AgentTarget } from "./agents.js";
 import { detectAsn } from "../bot/index.js";
 import {
   detectProviderSessionsFromProfile,
   confirmLiveGoogleProviderSnapshot,
-  openInstallConfirmInBotChrome,
+  hasDisplay,
   probeProviderSessionsAfterCeremony,
-  type InstallClaimPollResult,
+  requestBrokerCeremony,
+  sharedBrowserDisclosureWarning,
 } from "../bot/google-login.js";
+import type { CeremonyView } from "../bot/broker/ceremony.js";
+import { namedTunnelConfig, printRemoteLoginBanner } from "../bot/remote-login-display.js";
 import { type OAuthProviderId } from "../bot/oauth-providers.js";
 import { clearBrowserProfile, clearProviderCookies } from "../bot/login-state.js";
 import {
@@ -59,7 +63,11 @@ import {
   profilePathIdentity,
   withProfileOperationGuard,
 } from "../bot/profile.js";
-import { isBrowserContentionRefusal } from "../bot/broker/discovery.js";
+import {
+  isBrowserContentionRefusal,
+  liveUnixSocket,
+  resolveBrokerSocket,
+} from "../bot/broker/discovery.js";
 import { BrokerRefusal } from "../bot/broker/refusal.js";
 import { ensureLatestVersion, VersionUpdateRequiredError } from "./version-check.js";
 import * as ui from "./ui.js";
@@ -86,13 +94,10 @@ import {
   type ConnectBrowserLocation,
   type ConnectOutcome,
 } from "./connect-report.js";
-import { installBrokerService, rebindBrokerProfileAccount } from "./broker-service.js";
+import { installBrokerService } from "./broker-service.js";
 import { PAIRING_TOKEN_TTL_MS } from "../pairing-ttl.js";
 
 const DEFAULT_API_BASE = process.env.TRUSTY_SQUIRE_API_BASE ?? "https://trusty-squire-api.fly.dev";
-// Managed skill-registry URL. Advanced setup decides whether this is written
-// into the MCP config; the URL itself is product-owned and not user-editable.
-const DEFAULT_REGISTRY_URL = "https://registry.trustysquire.ai";
 
 type ProviderArg = "google" | "github";
 
@@ -348,10 +353,6 @@ export function copyNpxNodeModules(src: string, dest: string): void {
   });
 }
 
-function resolveServerLaunch(): { command: string; args: string[] } {
-  return { command: "npx", args: ["-y", "@trusty-squire/mcp@latest", "server"] };
-}
-
 // Historical fallback for GitHub-release tarball installs. The normal install
 // path no longer calls this because RCs are published to npm and host configs
 // must not pin npx cache paths. Kept exported for the regression tests around
@@ -447,47 +448,12 @@ function reportUnparsedConnect(argv: readonly string[], message: string): void {
   emitConnectUsageError(message, true);
 }
 
-// Store the user-supplied 2Captcha key in the vault (encrypted, never written
-// to the MCP config). Idempotent + best-effort: a failure here must never fail
-// the install — the bot just won't have the Tier-3 solver. Runs after pairing,
-// so the session carries a usable agent_session_token. Clears args.twoCaptchaKey
-// on success so the secret doesn't linger in memory longer than needed.
+// Store the advanced-setup 2Captcha key once a session is paired, and drop it
+// from memory once stored. Best-effort: a failure never fails the install.
 async function maybeStoreTwoCaptchaKey(args: Argv, session: SessionData): Promise<void> {
   const key = args.twoCaptchaKey?.trim();
   if (key === undefined || key.length === 0) return;
-  if (session.agent_session_token === undefined) {
-    ui.warn("Couldn't vault the 2Captcha key — no active session yet. Re-run connect to retry.");
-    return;
-  }
-  try {
-    const res = await fetch(`${session.api_base_url}/v1/vault/credentials`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${session.agent_session_token}`,
-      },
-      body: JSON.stringify({
-        service: "2captcha",
-        label: "default",
-        value: key,
-        type: "api_key",
-        // 2Captcha authenticates with the key as the `key` query param
-        // (in.php/res.php). The bot's runtime use_credential calls place the
-        // ${SECRET} explicitly; this records the canonical shape for the vault.
-        auth_shape: "query:key",
-        observed_hosts: ["2captcha.com", "api.2captcha.com"],
-        env_var_suggestion: "TWOCAPTCHA_API_KEY",
-      }),
-    });
-    if (res.ok) {
-      delete args.twoCaptchaKey;
-      ui.success("2Captcha key vaulted — the bot spends it through the injecting proxy.");
-    } else {
-      ui.warn(`Couldn't vault the 2Captcha key (HTTP ${res.status}). Re-run connect to retry.`);
-    }
-  } catch (err) {
-    ui.warn(`Couldn't vault the 2Captcha key: ${err instanceof Error ? err.message : String(err)}`);
-  }
+  if (await storeTwoCaptchaKey(key, session)) delete args.twoCaptchaKey;
 }
 
 async function settings(args: Argv): Promise<void> {
@@ -533,7 +499,7 @@ async function settings(args: Argv): Promise<void> {
     consent_operator_inbox_otp: args.consentOperatorInboxOtp !== false,
   };
   await storage.write(updated);
-  await writeAgentConfig(target, agent, args, updated);
+  await writeAgentConfig({ target }, updated, args.noRegistry);
   await maybeStoreTwoCaptchaKey(args, updated);
   ui.success(`${agent.display_name} settings saved.`);
 }
@@ -785,10 +751,11 @@ async function settleAlreadyConnected(
   await hydrateArgsFromStoredPreferences(args, accountId);
   await ensureConsentRecorded(consentFromArgs(args), args.advancedConfigured === true, accountId);
   if (preflight.kind === "unverified") {
-    await writeAgentConfig(target, agent, args, preflight.session, {
-      profileDir,
-      agentIdentity,
-    });
+    await writeAgentConfig(
+      { target, profileDir, agentIdentity },
+      preflight.session,
+      args.noRegistry,
+    );
     await maybeStoreTwoCaptchaKey(args, preflight.session);
     emitConnectStatus(args, {
       outcome: { kind: "unverified", account_id: preflight.session.account_id ?? null },
@@ -811,10 +778,11 @@ async function settleAlreadyConnected(
   const reconnectGithub =
     !preflight.providers.includes("github") && (await offerGithubReloginIfDead(args));
   if (!reconnectGithub) {
-    await writeAgentConfig(target, agent, args, preflight.session, {
-      profileDir,
-      agentIdentity,
-    });
+    await writeAgentConfig(
+      { target, profileDir, agentIdentity },
+      preflight.session,
+      args.noRegistry,
+    );
     await maybeStoreTwoCaptchaKey(args, preflight.session);
     emitConnectStatus(args, {
       outcome: {
@@ -844,6 +812,16 @@ async function runConnectInstall(
   wantInteractive: boolean,
   placed: BrowserPlacementSlot,
 ): Promise<void> {
+  // A sign-in the browser service is already running is the one this connect
+  // wants: hand back its window instead of opening a competing tab on the same
+  // display, and before a re-login clear could disturb it.
+  if (!args.skipBrowser) {
+    const live = await liveBrokerCeremony(profileDir);
+    if (live !== null) {
+      reportCeremonyHandedOff(args, agent, profileDir, wantInteractive, live, placed);
+      return;
+    }
+  }
   ui.step(
     "Opening the Trusty Squire install page in a browser. " +
       "The page walks you through signing in with Google and (optionally) GitHub.",
@@ -936,9 +914,12 @@ async function runConnectInstall(
     consent_skillify_telemetry: consent.skillifyTelemetry,
     consent_operator_inbox_otp: consent.operatorInboxOtp,
   };
+  const twoCaptchaKey = args.twoCaptchaKey?.trim();
   const claim = await runInstallClaim(args.apiBase, target, baseSession, args.skipBrowser, {
     applyServerPrefs: !wantInteractive,
     profileDir,
+    agentConfig: { target, profileDir, agentIdentity },
+    ...(twoCaptchaKey !== undefined && twoCaptchaKey.length > 0 ? { twoCaptchaKey } : {}),
     placed,
     ...(args.forceReloginProvider === undefined
       ? {}
@@ -950,18 +931,14 @@ async function runConnectInstall(
         browser_location,
         ownBrowserPid: placed.ownBrowserPid,
       }),
-    reportCeremonyExpired: (ownBrowserPid) =>
-      emitConnectStatus(args, {
-        outcome: { kind: "install_expired" },
-        profileDir,
-        browser_location: placed.value ?? {
-          kind: "unreachable",
-          reason: "the ceremony display outlived its own bound without showing the page anywhere",
-        },
-        ownBrowserPid,
-      }),
     ...(deferredReloginProviders.length ? { forceReloginProviders: deferredReloginProviders } : {}),
   });
+  if (claim.kind === "handed_off") {
+    // The daemon holds the key now and vaults it with the claim.
+    delete args.twoCaptchaKey;
+    reportCeremonyHandedOff(args, agent, profileDir, wantInteractive, claim.ceremony, placed);
+    return;
+  }
   if (claim.kind === "confirm_failed") {
     emitConnectStatus(args, {
       outcome: { kind: "install_unclaimed", confirm_url: claim.confirm_url },
@@ -998,61 +975,46 @@ async function runConnectInstall(
     );
     process.exit(1);
   }
+  // Only --skip-browser claims here: the account was claimed in a different
+  // browser, so the bot profile has to be inspected after the claim.
   const session = claim.session;
-
-  // Only the completed claim identifies the account for a connect.
-  // On a busy broker, provider logout ran in its existing browser and the old
-  // profile binding survived; replace that binding before new agent calls.
-  if (!args.skipBrowser && session.account_id) {
-    await rebindBrokerProfileAccount(profileDir, session.account_id);
-  }
-
   const storage = await openSessionStorage();
   await storage.write(session);
   args.noRegistry = session.consent_skillify_telemetry !== true;
   args.consentOperatorInboxOtp = session.consent_operator_inbox_otp !== false;
 
-  // A successful Google claim made inside the bot's Chrome establishes that
-  // profile's Google session. The cookie store can still be uncommitted while
-  // the broker holds Chrome, so a second probe would create a false negative.
-  // --skip-browser claims the account in a different browser; only that path
-  // needs to inspect the bot profile after the claim.
-  let providers: OAuthProviderId[] | null = ["google"];
-  if (claim.requestedProviderObserved) providers.push("github");
-  if (args.skipBrowser) {
-    providers = null;
-    try {
-      providers = await ui.withSpinner({
-        start: "Checking provider sessions",
-        done: "Provider sessions checked",
-        fail: () => "Provider session check failed",
-        task: () =>
-          probeProviderSessionsAfterCeremony(profileDir, {
-            awaitProviders: providersConnectMustAwait(args.forceReloginProvider),
-          }),
-      });
-      if (providers !== null) {
-        providers = await confirmLiveGoogleProviderSnapshot(profileDir, providers);
-      }
-    } catch (err) {
-      ui.warn(`Provider-session check failed: ${err instanceof Error ? err.message : String(err)}`);
+  let providers: OAuthProviderId[] | null = null;
+  try {
+    providers = await ui.withSpinner({
+      start: "Checking provider sessions",
+      done: "Provider sessions checked",
+      fail: () => "Provider session check failed",
+      task: () =>
+        probeProviderSessionsAfterCeremony(profileDir, {
+          awaitProviders: providersConnectMustAwait(args.forceReloginProvider),
+        }),
+    });
+    if (providers !== null) {
+      providers = await confirmLiveGoogleProviderSnapshot(profileDir, providers);
     }
+  } catch (err) {
+    ui.warn(`Provider-session check failed: ${err instanceof Error ? err.message : String(err)}`);
   }
 
-  printProviderState(providers, args.skipBrowser || args.forceReloginProvider === "github");
+  printProviderState(providers);
 
   // Config + key land either way: the session is real and re-running connect
   // must be able to pick up from here. Only the SUCCESS claim is gated.
-  await writeAgentConfig(target, agent, args, session, { profileDir, agentIdentity });
+  await writeAgentConfig({ target, profileDir, agentIdentity }, session, args.noRegistry);
   await maybeStoreTwoCaptchaKey(args, session);
 
-  const complete = decideConnectComplete(providers, args.forceReloginProvider, !args.skipBrowser);
+  const complete = decideConnectComplete(providers, args.forceReloginProvider, false);
   emitConnectStatus(args, {
     outcome: {
       kind: "ceremony_complete",
       account_id: session.account_id ?? "",
       providers,
-      in_profile_ceremony: !args.skipBrowser,
+      in_profile_ceremony: false,
       ...(args.forceReloginProvider !== undefined
         ? { requested_provider: args.forceReloginProvider }
         : {}),
@@ -1063,12 +1025,76 @@ async function runConnectInstall(
   });
   if (!complete.ok) {
     ui.fail(
-      `Session saved (${storage.path}), but setup is incomplete. ${connectIncompleteMessage(complete.reason, args.skipBrowser)}`,
+      `Session saved (${storage.path}), but setup is incomplete. ${connectIncompleteMessage(complete.reason, true)}`,
     );
     process.exit(1);
   }
   ui.success(`Session saved (${storage.path})`);
+  closeConnect(agent, wantInteractive);
+}
 
+// The broker's live ceremony, if any. A broker from before the daemon owned
+// the ceremony cannot be running one, so its refusal is "none", not a failure:
+// an already-connected machine must still settle without it.
+async function liveBrokerCeremony(
+  profileDir: string,
+): Promise<Extract<CeremonyView, { state: "live" }> | null> {
+  // No listening broker, no live ceremony: do not wait for one to start.
+  if (!(await liveUnixSocket(resolveBrokerSocket(profileDir)))) return null;
+  try {
+    const view = await requestBrokerCeremony(profileDir, { action: "get" });
+    // From this connect's side, a ceremony that was already running is reused.
+    return view.state === "live" ? { ...view, reused: true } : null;
+  } catch (err) {
+    if (err instanceof BrokerRefusal && err.code === "broker_outdated") return null;
+    throw err;
+  }
+}
+
+// connect's work ends when the browser service holds the sign-in. Say where
+// it is and that nothing here has to keep running; the daemon writes the
+// session on the claim and closes the window on Finish.
+function reportCeremonyHandedOff(
+  args: Argv,
+  agent: AgentDefinition,
+  profileDir: string,
+  wantInteractive: boolean,
+  ceremony: Extract<CeremonyView, { state: "live" }>,
+  placed: BrowserPlacementSlot,
+): void {
+  placed.value = ceremony.browser_location;
+  emitConnectStatus(args, {
+    outcome: { kind: "sign_in_handed_off", confirm_url: ceremony.confirm_url },
+    profileDir,
+    browser_location: ceremony.browser_location,
+    ownBrowserPid: placed.ownBrowserPid,
+  });
+  if (ceremony.reused) ui.info("A sign-in is already open on this machine — use that window.");
+  if (ceremony.browser_location.kind === "virtual") {
+    printRemoteLoginBanner(ceremony.browser_location.url);
+  } else {
+    console.error(
+      `\n[login] The install page is open as a tab in the shared browser on this ` +
+        `machine's screen — complete the sign-in there.\n`,
+    );
+    const warning = sharedBrowserDisclosureWarning(ceremony.browser_location);
+    if (warning !== null) console.error(`${warning}\n`);
+  }
+  // Nothing is configured yet: the daemon writes the session and the config
+  // when the account is claimed.
+  const closingLine =
+    `Sign in, then press Finish. The browser service saves the session, writes the ` +
+    `${agent.display_name} config and closes the window on its own; this command does not ` +
+    `need to keep running. Afterwards, restart ${agent.display_name} to pick up the new tools.`;
+  if (wantInteractive) {
+    showOutro(closingLine);
+  } else {
+    ui.divider();
+    ui.info(closingLine);
+  }
+}
+
+function closeConnect(agent: AgentDefinition, wantInteractive: boolean): void {
   // Close the interactive picker with its matching clack outro.
   const closingLine =
     `Squire on duty. Restart ${agent.display_name} to pick up the new tools. ` +
@@ -1093,27 +1119,23 @@ async function hydrateArgsFromStoredPreferences(args: Argv, accountId?: string):
   }
 }
 
-function printProviderState(providers: OAuthProviderId[] | null, githubChecked = true): void {
+function printProviderState(providers: OAuthProviderId[] | null): void {
   const have = new Set(providers ?? []);
   const google =
     providers === null ? "not checked" : have.has("google") ? "connected" : "not connected";
   const github =
-    providers === null || !githubChecked
-      ? "not checked"
-      : have.has("github")
-        ? "connected"
-        : "not connected";
+    providers === null ? "not checked" : have.has("github") ? "connected" : "not connected";
   ui.hint(`  Provider sessions: Google ${google}; GitHub ${github}`);
 }
 
 // Runs the browser-based install confirm flow.
 //
-// Default path (`skipBrowser=false`): opens the trustysquire confirm
-// URL in the bot's OWN persistent Chrome profile. The user signs in
+// Default path (`skipBrowser=false`): the broker daemon opens the trustysquire
+// confirm URL in the bot's OWN persistent Chrome profile. The user signs in
 // once — that single sign-in claims the install and establishes the bot's
-// profile with a provider session for future OAuth signups. The
-// pollUntilClaimed closes the ceremony tab after the API claims the install
-// and the person presses Finish.
+// profile with a provider session for future OAuth signups. The daemon writes
+// the session on the claim and closes the ceremony tab after the person
+// presses Finish; connect returns once the daemon holds the sign-in.
 //
 // Fallback (`skipBrowser=true`): prints the URL, attempts a best-
 // effort `open()` to the user's default browser, polls the API for
@@ -1284,92 +1306,6 @@ async function ensureConsentRecorded(
   }
 }
 
-// Writes the host agent's MCP config — extracted so both the normal
-// install path and the preflight-already-provisioned shortcut share
-// one implementation.
-async function writeAgentConfig(
-  target: AgentTarget,
-  agent: (typeof AGENTS)[AgentTarget],
-  args: Argv,
-  session: SessionData,
-  context?: Pick<ConnectTargetContext, "profileDir" | "agentIdentity">,
-): Promise<void> {
-  // Tokens themselves are NOT in the env — the MCP server reads them
-  // from the account's 0600 JSON session file, which keeps them out of
-  // any child-process listing or shell history.
-  const launch = resolveServerLaunch();
-  const env: Record<string, string> = {
-    TRUSTY_SQUIRE_AGENT_IDENTITY: context?.agentIdentity ?? target,
-  };
-  if (context !== undefined) {
-    env.TRUSTY_SQUIRE_PROFILE_DIR = context.profileDir;
-  }
-  // Which account this host agent's server serves. Sessions are stored one per
-  // account, so pinning it here is what keeps an ALREADY-RUNNING server on the
-  // account it was launched for after someone connects a different one: the old
-  // process keeps its launch env, the new config names the new account.
-  const boundAccount = session.account_id;
-  if (boundAccount !== undefined && boundAccount.length > 0) {
-    env.TRUSTY_SQUIRE_ACCOUNT_ID = boundAccount;
-  }
-  // Skill registry URL. The endpoint is not user-configurable; Advanced setup
-  // controls whether it is written at all. Registry participation is also the
-  // user's consent to contribute successful non-personal signup recipes.
-  if (!args.noRegistry) {
-    env.TRUSTY_SQUIRE_REGISTRY_URL = DEFAULT_REGISTRY_URL;
-  }
-  await agent.writeConfig({
-    command: launch.command,
-    args: launch.args,
-    env,
-  });
-  ui.success(`Wrote ${agent.display_name} MCP config at ${ui.code(agent.config_path())}`);
-  // Claude Code: also pre-allow the safe credential tools so the agent
-  // isn't prompted on every use_credential / list / poll / store call.
-  if (target === "claude-code") {
-    try {
-      const settingsPath = await writeClaudeCodePermissions();
-      ui.hint(`  Pre-allowed credential tools in ${ui.code(settingsPath)}`);
-    } catch {
-      ui.hint("  Couldn't write .claude/settings.json permissions (non-fatal)");
-    }
-  }
-  if (args.noRegistry) {
-    ui.hint(
-      "  Skill registry disabled — signups are driven fresh by your agent each time " +
-        "(no shared skill replay).",
-    );
-  }
-}
-
-// The claim records the account binding; Finish records that the person is done
-// with the sign-in window, so the window stays up until then. Finish counts when
-// the loopback callback arrives OR the ceremony tab reaches /install/done, where
-// the wizard's Finish always lands: the page can lose its callback across the
-// sign-in round trip, and gating on the callback alone hung connect after a
-// completed sign-in. A claimed token is still retained at the ceremony deadline.
-export function shouldCompleteInstallClaim(
-  claimed: boolean,
-  wizardCompleted = false,
-  requestedProvider?: OAuthProviderId,
-  observedProviders: readonly OAuthProviderId[] = [],
-): boolean {
-  return (
-    claimed &&
-    wizardCompleted &&
-    (requestedProvider === undefined || observedProviders.includes(requestedProvider))
-  );
-}
-
-// The ceremony reports progress until both the claim and Finish arrive.
-export function claimHeartbeatMessage(claimed: boolean, waitingForGithub = false): string {
-  return claimed
-    ? waitingForGithub
-      ? "Account connected — finish the requested GitHub sign-in, then press Finish in this window."
-      : "Sign-in complete — press Finish in the sign-in window when you're done."
-    : "Still waiting for you to finish signing in — the URL/window above stays live until you do.";
-}
-
 // What the ceremony settled on, with the two facts a machine caller needs
 // when it did not claim: the sign-in URL that is still live, and where the
 // browser actually went.
@@ -1388,8 +1324,11 @@ type InstallClaimResult =
       kind: "claimed";
       session: SessionData;
       browser_location: ConnectBrowserLocation;
-      requestedProviderObserved: boolean;
     }
+  // The broker daemon owns the sign-in from here: it writes the session when
+  // the account is claimed and closes the window when the person presses
+  // Finish. Nothing in this process waits for either.
+  | { kind: "handed_off"; ceremony: Extract<CeremonyView, { state: "live" }> }
   | { kind: "unclaimed"; confirm_url: string; browser_location: ConnectBrowserLocation }
   | { kind: "expired"; browser_location: ConnectBrowserLocation }
   | {
@@ -1412,19 +1351,16 @@ async function runInstallClaim(
     // discarded a fresh inbox-read preference.
     applyServerPrefs: boolean;
     profileDir: string;
+    // The host agent config the claim writes, wherever it lands.
+    agentConfig: AgentConfigPlan;
+    twoCaptchaKey?: string;
     requestedProvider?: OAuthProviderId;
     // Where the ceremony browser went, recorded for whoever reports the run —
     // including a handler above this frame that never sees the claim.
     placed: BrowserPlacementSlot;
     // Writes a non-terminal line naming the live pairing link and where the
-    // browser is, before this run blocks on a human.
+    // browser is, before this run hands off or blocks on a human.
     reportSignInOpen: (confirm_url: string, browser_location: ConnectBrowserLocation) => void;
-    // Writes the run's terminal line when the ceremony rig outlives its own
-    // bound. That path exits the process from inside the rig's cleanup, so
-    // nothing below returns here to report it. The ceremony browser is still
-    // alive when it fires, and `placed` has not recorded it yet, so the pid
-    // arrives with the call rather than off the placement slot.
-    reportCeremonyExpired: (ownBrowserPid: number | null) => void;
     // Providers whose cookie clear busy-failed and now rides the ceremony
     // (see the --force-relogin block in the caller).
     forceReloginProviders?: readonly OAuthProviderId[];
@@ -1437,67 +1373,8 @@ async function runInstallClaim(
   // subtracting a local clock reading from the server's `expires_at` makes the
   // window depend on clock skew, which collapses or overshoots it silently.
   const ceremonyDeadline = Date.now() + PAIRING_TOKEN_TTL_MS;
-  const expired = { value: false };
-  // The link is valid from here on, and everything after this waits. Say so
-  // now rather than at settle, when it is already spent.
+  // The link is valid from here on. Say so now rather than at settle.
   options.reportSignInOpen(initiate.confirm_url, options.placed.value ?? { kind: "none" });
-
-  // Track the claimed token outside the poll closure so the in-Chrome
-  // flow's pollUntilClaimed can read it once the API reports claimed.
-  // Wrapper object so TS can narrow `state.value` after a `=== null`
-  // check at the call site — bare closure-captured `let` doesn't.
-  const state: { value: ClaimResult | null } = { value: null };
-  let requestedProviderObserved = false;
-  // Finish arrives through the nonce-scoped loopback callback or by observing
-  // the ceremony tab at /install/done. The account claim and Finish are both
-  // required; only an explicit GitHub refresh adds a provider-session wait.
-  const pollOnce = async (wizardCompleted: boolean): Promise<InstallClaimPollResult> => {
-    let claimedThisPoll = false;
-    // Keep state.value warm — the install moves to "claimed" the instant the
-    // user finishes signing in.
-    if (state.value === null) {
-      const status = await installPoll(apiBase, initiate.setup_code);
-      if (status.status === "claimed" && status.agent_session_token !== undefined) {
-        state.value = {
-          token: status.agent_session_token,
-          account_id: status.account_id ?? "",
-          ...(status.install_preferences !== undefined
-            ? { preferences: status.install_preferences }
-            : {}),
-        };
-        claimedThisPoll = true;
-      } else if (status.status === "expired") {
-        expired.value = true;
-        return "expired";
-      }
-    }
-    const claimed = state.value !== null;
-    let observedProviders: OAuthProviderId[] = [];
-    if (claimed && options.requestedProvider === "github") {
-      // The account claim follows Google sign-in. A scoped GitHub refresh is
-      // still in progress, so keep its shared-browser ceremony open until the
-      // GitHub session reaches the real profile. Chrome may commit the cookie
-      // after a short delay; poll again rather than closing the noVNC bridge.
-      observedProviders = await detectProviderSessionsFromProfile(options.profileDir).catch(
-        () => [],
-      );
-      requestedProviderObserved = observedProviders.includes("github");
-    }
-    if (
-      shouldCompleteInstallClaim(
-        claimed,
-        wizardCompleted,
-        options.requestedProvider === "github" ? "github" : undefined,
-        observedProviders,
-      )
-    ) {
-      if (claimedThisPoll) {
-        ui.info(claimHeartbeatMessage(true));
-      }
-      return { status: "claimed", provider: null };
-    }
-    return "pending";
-  };
 
   if (skipBrowser) {
     // CI / scripted: best-effort open() into the user's default browser,
@@ -1542,7 +1419,6 @@ async function runInstallClaim(
     return {
       kind: "claimed",
       browser_location: handoff,
-      requestedProviderObserved: false,
       session: {
         ...applyInstallPreferences(baseSession, ok.preferences, options.applyServerPrefs),
         api_base_url: apiBase,
@@ -1553,85 +1429,49 @@ async function runInstallClaim(
     };
   }
 
-  // Default: run the confirm INSIDE the bot's Chrome. The user signs
-  // The wizard page reads provider state from /v1/auth/whoami so no
-  // CLI-side hint is needed.
-  const result = await openInstallConfirmInBotChrome({
+  const namedTunnel = namedTunnelConfig();
+  // Default: the broker daemon runs the confirm INSIDE the bot's Chrome. The
+  // person's one sign-in there claims the install and gives the bot profile
+  // its provider session. The wizard page reads provider state from
+  // /v1/auth/whoami, so no CLI-side hint is needed.
+  const view = await requestBrokerCeremony(options.profileDir, {
+    action: "start",
     confirmUrl: initiate.confirm_url,
-    pollUntilClaimed: pollOnce,
-    heartbeatMessage: () =>
-      claimHeartbeatMessage(state.value !== null, options.requestedProvider === "github"),
-    profileDir: options.profileDir,
-    onBrowserPlacement: (placement, ownBrowserPid) => {
-      options.placed.value = placement;
-      options.placed.ownBrowserPid = ownBrowserPid;
-      options.reportSignInOpen(initiate.confirm_url, placement);
-    },
-    onCeremonyExpired: options.reportCeremonyExpired,
-    deadline: ceremonyDeadline,
+    setupCode: initiate.setup_code,
+    apiBase,
+    ttlMs: Math.max(1, ceremonyDeadline - Date.now()),
+    callerHasDisplay: hasDisplay(),
+    ...(namedTunnel !== null ? { namedTunnel } : {}),
+    ...(options.requestedProvider === "github" ? { requestedProvider: "github" as const } : {}),
     ...(options.forceReloginProviders?.length
-      ? { forceReloginProviders: options.forceReloginProviders }
+      ? { forceReloginProviders: [...options.forceReloginProviders] }
       : {}),
-  });
-  // No path reported a placement, so nothing was shown anywhere — which is
-  // `unreachable`, named with the failure that caused it, not a fourth
-  // spelling a caller has to read English to interpret.
-  const browser_location: ConnectBrowserLocation = options.placed.value ?? {
-    kind: "unreachable",
-    reason: result.detail ?? "the ceremony ended without showing the page anywhere",
-  };
-  options.placed.value = browser_location;
-
-  // rc.33 — surface the underlying error instead of letting the outer
-  // wrapper print a generic "browser confirm step never finished."
-  // Surface the underlying browser-launch error rather than replacing it
-  // with a generic confirmation timeout.
-  if (result.status === "error") {
-    if (expired.value) return { kind: "expired", browser_location };
-    return {
-      kind: "confirm_failed",
-      detail: result.detail ?? "unknown error",
-      confirm_url: initiate.confirm_url,
-      browser_location,
-    };
-  }
-
-  // A claimed account remains claimed even if the optional provider step
-  // outlives the ceremony. Preserve its token and let the post-ceremony provider
-  // gate report that GitHub is still missing.
-  if (state.value === null) {
-    return { kind: "expired", browser_location };
-  }
-
-  return {
-    kind: "claimed",
-    browser_location,
-    requestedProviderObserved,
-    session: {
-      ...applyInstallPreferences(baseSession, state.value.preferences, options.applyServerPrefs),
-      api_base_url: apiBase,
-      saved_at: new Date().toISOString(),
-      agent_session_token: state.value.token,
-      account_id: state.value.account_id,
+    finalize: {
+      baseSession,
+      applyServerPrefs: options.applyServerPrefs,
+      agentConfigs: [options.agentConfig],
+      ...(options.twoCaptchaKey !== undefined ? { twoCaptchaKey: options.twoCaptchaKey } : {}),
     },
-  };
-}
-
-// Overlay the server's stored install_preferences onto the local session. Only
-// when `applyServerPrefs` (the non-interactive path): in the interactive flow the
-// user just answered these questions, so baseSession is authoritative and applying
-// stale server prefs would silently discard a fresh consent choice. Exported for
-// tests.
-export function applyInstallPreferences(
-  baseSession: SessionData,
-  preferences: ClaimResult["preferences"] | undefined,
-  applyServerPrefs: boolean,
-): SessionData {
-  if (!applyServerPrefs || preferences === undefined) return baseSession;
+  });
+  if (view.state === "live") {
+    options.placed.value = view.browser_location;
+    return { kind: "handed_off", ceremony: view };
+  }
+  // A tab no human can see is a tab no human can complete; when it provably
+  // cannot be shown, waiting out the deadline would only burn it.
+  const reason =
+    view.state === "unshowable" ? view.reason : "the browser service opened no sign-in";
+  const browser_location: ConnectBrowserLocation = { kind: "unreachable", reason };
+  options.placed.value = browser_location;
   return {
-    ...baseSession,
-    consent_skillify_telemetry: preferences.registry_enabled === true,
-    consent_operator_inbox_otp: preferences.consent_operator_inbox_otp !== false,
+    kind: "confirm_failed",
+    detail:
+      `the install page opened in the shared browser's private display, which nothing here ` +
+      `can show: ${reason}. Recovery: install the noVNC helpers (x11vnc, websockify, ` +
+      `cloudflared — or set TS_LOGIN_PUBLIC_HOSTNAME and TS_LOGIN_LOCAL_PORT to use your own ` +
+      `tunnel) and run connect again`,
+    confirm_url: initiate.confirm_url,
+    browser_location,
   };
 }
 
@@ -1715,21 +1555,12 @@ function printHelp(): void {
   console.warn("");
 }
 
-interface ClaimResult {
-  token: string;
-  account_id: string;
-  preferences?: {
-    registry_enabled?: boolean;
-    consent_operator_inbox_otp?: boolean;
-  };
-}
-
 async function pollForClaim(
   apiBase: string,
   setupCode: string,
   intervalMsOrOpts: number | { intervalMs?: number; timeoutMs?: number } = {},
   timeoutMsArg?: number,
-): Promise<ClaimResult | "expired" | null> {
+): Promise<InstallClaim | "expired" | null> {
   const opts =
     typeof intervalMsOrOpts === "number"
       ? { intervalMs: intervalMsOrOpts, timeoutMs: timeoutMsArg }
@@ -1754,12 +1585,4 @@ async function pollForClaim(
   return null;
 }
 
-
-export {
-  connect,
-  logout,
-  parseArgs,
-  pollForClaim,
-  resolveCopiedNpxServerLaunch,
-  resolveServerLaunch,
-};
+export { connect, logout, parseArgs, pollForClaim, resolveCopiedNpxServerLaunch };
