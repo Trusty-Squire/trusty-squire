@@ -4,6 +4,7 @@
 
 # Broker daemon ceremony and the connect command
 /apps/mcp/src/bot/broker/ceremony.ts @lunchboxfortwo
+/apps/mcp/src/bot/broker/daemon.ts @lunchboxfortwo
 /apps/mcp/src/install/ceremony-finalize.ts @lunchboxfortwo
 /apps/mcp/src/install/cli.ts @lunchboxfortwo
 /apps/mcp/src/bot/google-login.ts @lunchboxfortwo

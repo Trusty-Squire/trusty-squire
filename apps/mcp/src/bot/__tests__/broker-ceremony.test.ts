@@ -254,6 +254,37 @@ describe("broker-owned connect ceremony", () => {
     expect(h.finalize).not.toHaveBeenCalled();
   });
 
+  it("serializes reconnects behind both helper and tab teardown", async () => {
+    let releaseHelpers!: () => void;
+    let releaseTab!: () => void;
+    const helpers = new Promise<void>((resolve) => { releaseHelpers = resolve; });
+    const tab = new Promise<void>((resolve) => { releaseTab = resolve; });
+    const h = harness();
+    await h.host.call(startRequest());
+    h.stopExposure.mockImplementationOnce(async () => { await helpers; });
+    h.tabs[0]!.close.mockImplementationOnce(async () => { await tab; });
+    h.setStatus({ status: "expired" });
+    await vi.waitFor(() => expect(h.stopExposure).toHaveBeenCalledOnce());
+    expect(h.host.current()).toEqual({ state: "none" });
+    const join = h.host.call({ action: "join", agentConfigs: [{ target: "hermes" }] });
+    await Promise.resolve();
+    const first = h.host.call(startRequest({ setupCode: "next-code" }));
+    const second = h.host.call(startRequest({ setupCode: "concurrent-code" }));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(h.tabs).toHaveLength(1);
+    releaseHelpers();
+    await vi.waitFor(() => expect(h.tabs[0]!.close).toHaveBeenCalledOnce());
+    expect(h.tabs).toHaveLength(1);
+    h.setStatus({ status: "pending" });
+    releaseTab();
+    await expect(join).resolves.toEqual({ state: "none" });
+    const [opened, reused] = await Promise.all([first, second]);
+    expect(opened).toMatchObject({ state: "live", reused: false });
+    expect(reused).toMatchObject({ state: "live", reused: true });
+    expect(h.tabs).toHaveLength(2);
+    await h.host.shutdown();
+  });
+
   it("hands a second connect the same window instead of opening a competing tab", async () => {
     const h = harness();
     const first = await h.host.call(startRequest());

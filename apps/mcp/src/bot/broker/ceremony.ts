@@ -181,26 +181,26 @@ export class BrokerCeremonyHost {
     if (request.action === "get") return this.current();
     if (request.action === "join") {
       await this.starting?.catch(() => undefined);
+      while (this.live?.ended) await this.live.ended;
       return this.live === null ? { state: "none" } : await this.join(this.live, request.agentConfigs);
     }
     return await this.start(request);
   }
 
   current(): CeremonyView {
-    return this.live === null ? { state: "none" } : this.live.view;
+    return this.live === null || this.live.ended !== null ? { state: "none" } : this.live.view;
   }
 
   /** Start the ceremony, or join the one already running. */
   async start(request: CeremonyStartRequest): Promise<CeremonyView> {
+    while (this.live?.ended) await this.live.ended;
     if (this.live !== null) {
       return await this.join(this.live, request.finalize.agentConfigs, request.finalize.twoCaptchaKey);
     }
     if (this.starting !== null) {
       const view = await this.starting.catch(() => null);
-      if (this.live !== null) {
-        return await this.join(this.live, request.finalize.agentConfigs, request.finalize.twoCaptchaKey);
-      }
       if (view !== null && view.state === "unshowable") return view;
+      return await this.start(request);
     }
     const starting = this.open(request);
     this.starting = starting;
@@ -309,7 +309,7 @@ export class BrokerCeremonyHost {
     }, Math.max(0, live.deadline - this.now()));
     try {
       let lastError = "";
-      while (this.live === live && this.now() < live.deadline) {
+      while (this.live === live && live.ended === null && this.now() < live.deadline) {
         let status: InstallStatus | null = null;
         try {
           status = await this.deps.pollStatus(live.request.apiBase, live.request.setupCode);
@@ -322,7 +322,7 @@ export class BrokerCeremonyHost {
             this.deps.log(`[ceremony] install status poll failed: ${message}`);
           lastError = message;
         }
-        if (this.live !== live) return;
+        if (this.live !== live || live.ended !== null) return;
         if (status?.status === "expired") {
           await this.end(live, live.session === null ? "the install link expired" : "finished");
           return;
@@ -338,6 +338,7 @@ export class BrokerCeremonyHost {
           this.deps.log("[ceremony] account claimed");
         }
         await this.landClaim(live);
+        if (live.ended !== null) return;
         const finished =
           status !== null &&
           (status.status === "claimed" || status.status === "delivered") &&
@@ -389,11 +390,11 @@ export class BrokerCeremonyHost {
 
   private end(live: LiveCeremony, reason: string): Promise<void> {
     live.ended ??= (async () => {
-      if (this.live === live) this.live = null;
       // Helpers first (they are the daemon's own children); then the tab.
       // The display and the browser stay with the broker.
       await live.stopExposure?.().catch(() => undefined);
       await live.tab.close().catch(() => undefined);
+      if (this.live === live) this.live = null;
       this.deps.log(
         `[ceremony] sign-in window closed: ${reason}` +
           (live.session === null ? " (no session was written)" : ""),
