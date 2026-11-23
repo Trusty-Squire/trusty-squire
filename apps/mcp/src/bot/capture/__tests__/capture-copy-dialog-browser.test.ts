@@ -202,7 +202,7 @@ it.each([false, true])(
   },
 );
 
-it.each(["plain", "wrapped", "icon"])("vaults a Zro key with control: %s", async (variant) => {
+it.each(["plain", "wrapped", "icon", "replaced icon", "replaced source"])("vaults a Zro key with control: %s", async (variant) => {
   const wrapped = variant !== "plain";
   // Zro 23 Nov (run after Grunt #182, trace rows 9-11): Create closed the form
   // dialog and /api-keys showed the key once in an inline, non-modal panel with
@@ -214,7 +214,7 @@ it.each(["plain", "wrapped", "icon"])("vaults a Zro key with control: %s", async
   await page.evaluate(() => navigator.clipboard.writeText("")).catch(() => undefined);
   const html = `<!doctype html><main><h1>API keys</h1><button>Create key</button>
     <section class="panel"><h2>Your new key</h2>
-      <div>${wrapped ? "<span>" : ""}<code id="key">${key}</code>${wrapped ? "</span>" : ""}<button type="button" id="copy-key">${variant === "icon" ? "⧉" : "Copy key"}</button></div>
+      <div>${wrapped ? "<span>" : ""}<code id="key">${key}</code>${wrapped ? "</span>" : ""}<button type="button" id="copy-key">${variant.includes("icon") ? "⧉" : "Copy key"}</button></div>
       <button type="button">Dismiss</button><button type="button">Done</button>
       <h3>Use Zro from npm</h3>
       <div><code id="setup">ZRO_SETUP=${setupToken}</code>
@@ -226,6 +226,7 @@ it.each(["plain", "wrapped", "icon"])("vaults a Zro key with control: %s", async
     document.getElementById('copy-key').addEventListener('click', async (event) => {
       await navigator.clipboard.writeText(document.getElementById('key').textContent);
       event.target.textContent = 'Copied';
+      if (${variant.startsWith("replaced")}) event.target.replaceWith(event.target.cloneNode(true));
     });
     document.getElementById('copy-setup').addEventListener('click', () =>
       navigator.clipboard.writeText(document.getElementById('setup').textContent));
@@ -233,12 +234,16 @@ it.each(["plain", "wrapped", "icon"])("vaults a Zro key with control: %s", async
   await page.route("**/*", (route) => route.fulfill({ contentType: "text/html", body: html }));
   await page.goto("http://127.0.0.1/api-keys");
 
-  if (variant === "icon") {
-    expect((await extractCredentials("fixture-session")).credentials).toEqual({});
+  if (variant.includes("icon") || variant === "replaced source") {
+    await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+    if (variant.includes("icon"))
+      expect((await extractCredentials("fixture-session")).credentials).toEqual({});
     await page.evaluate(() => {
       (window as Window & { __tsDriveRegistry?: { nodes: Map<string, Element | null> } }).__tsDriveRegistry = { nodes: new Map([["key", document.getElementById("copy-key")]]) };
     });
-    expect(await copySourceClick(page, "key")).toBe("candidate");
+    expect(await copySourceClick(page, "key")).toBe(
+      variant === "replaced source" ? "source" : "candidate",
+    );
     await page.locator("#copy-key").click();
   }
   const result = await extractCredentials("fixture-session");
@@ -248,7 +253,7 @@ it.each(["plain", "wrapped", "icon"])("vaults a Zro key with control: %s", async
   // "Copied" beside "Copy setup" no longer names a key on its own.
   await page.evaluate(() => navigator.clipboard.writeText(""));
   const retried = await extractCredentials("fixture-session");
-  expect(retried.credentials).toEqual({ api_key: key });
+  expect(retried.credentials).toEqual(variant.startsWith("replaced") ? {} : { api_key: key });
 });
 
 it("does not take a highlighted code sample's Copy for the revealed key", async () => {

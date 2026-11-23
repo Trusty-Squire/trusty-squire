@@ -877,16 +877,16 @@ export async function copySourceClick(
           const sourceWindow = window as CopySourceWindow;
           if (sourceWindow.__tsDriveRegistry?.nodes.get(ref) !== element) return false;
           if (slot === "__tsCopySource") sourceWindow.__tsCopySource = element;
-          else if (token !== undefined) sourceWindow.__tsCopyCandidate = { element, token };
-          else return false;
+          else if (token === undefined) return false;
+          if (token !== undefined) sourceWindow.__tsCopyCandidate = { element, token };
           return true;
         },
         { ref, slot, token },
       )
       .catch(() => false)) === true;
-  if (await mark(await findCopySource(page, false).catch(() => null), "__tsCopySource"))
-    return "source";
   const candidate = await copyButtonBesideRevealedKey(page, ref).catch(() => null);
+  if (await mark(await findCopySource(page, false).catch(() => null), "__tsCopySource", candidate?.token))
+    return "source";
   if (
     candidate !== null &&
     await mark(candidate.button, "__tsCopyCandidate", candidate.token)
@@ -1112,9 +1112,8 @@ async function copyCredentialFromDialog(
     .evaluate((clipboard) => {
       const sourceWindow = window as CopySourceWindow;
       const candidate = sourceWindow.__tsCopyCandidate;
-      if (candidate === undefined || !candidate.element.isConnected || candidate.token !== clipboard)
-        return false;
-      sourceWindow.__tsCopySource = candidate.element;
+      if (candidate === undefined || candidate.token !== clipboard) return false;
+      if (candidate.element.isConnected) sourceWindow.__tsCopySource = candidate.element;
       delete sourceWindow.__tsCopyCandidate;
       return true;
     }, clipboard)

@@ -306,6 +306,8 @@ it.each([
   ["replaces its Create button", "button"],
   ["replaces its dialog", "dialog"],
   ["replaces its form", "form"],
+  ["removes its anonymous form", "removed"],
+  ["replaces a non-unique named form", "ambiguous"],
 ])(
   "reports a submitted form's inline error text when the form %s",
   async (_name, replace) => {
@@ -318,10 +320,11 @@ it.each([
     );
     const html = `<!doctype html><main><h1>API keys</h1>
     <div style="font-size:6px">${filler.map((line) => `<span>${line} </span>`).join("")}</div></main>
-    <div ${replace === "form" ? "" : 'role="dialog" aria-label="Create API key"'} style="position:fixed;top:20px;left:20px;background:#fff">
-      <form id="create"><label>Alias <input name="alias" value="grunt"></label>
+    <div ${["form", "removed", "ambiguous"].includes(replace) ? "" : 'role="dialog" aria-label="Create API key"'} style="position:fixed;top:20px;left:20px;background:#fff">
+      <form ${replace === "removed" ? "" : replace === "ambiguous" ? 'name="create"' : 'id="create"'}><label>Alias <input name="alias" value="grunt"></label>
         <button type="submit">Create</button></form><p id="error"></p></div>
-    <script>document.getElementById('create').addEventListener('submit', (event) => {
+    ${["removed", "ambiguous"].includes(replace) ? `<form ${replace === "ambiguous" ? 'name="create"' : ""}><p>Unrelated billing form response.</p><input name="billing"></form>` : ""}
+    <script>document.forms[0].addEventListener('submit', (event) => {
       event.preventDefault();
       document.getElementById('error').textContent = 'An active key already uses the alias grunt.';
       if ('${replace}' === 'button') {
@@ -330,7 +333,9 @@ it.each([
       } else if ('${replace}' === 'dialog') {
         const dialog = event.target.parentElement;
         dialog.replaceWith(dialog.cloneNode(true));
-      } else if ('${replace}' === 'form') {
+      } else if ('${replace}' === 'removed') {
+        event.target.remove();
+      } else if ('${replace}' === 'form' || '${replace}' === 'ambiguous') {
         event.target.appendChild(document.getElementById('error'));
         event.target.replaceWith(event.target.cloneNode(true));
       }
@@ -380,20 +385,33 @@ it.each([
         );
         expect(askJev.mock.calls.length).toBeGreaterThanOrEqual(2);
         const afterSubmit = askJev.mock.calls[1]![1] as { page: { notices: string[] } };
-        expect(afterSubmit.page.notices.join(" ")).toContain(
-          "An active key already uses the alias grunt.",
-        );
+        if (["removed", "ambiguous"].includes(replace)) {
+          expect(afterSubmit.page.notices.join(" ")).not.toContain("Unrelated billing form response.");
+        } else {
+          expect(afterSubmit.page.notices.join(" ")).toContain(
+            "An active key already uses the alias grunt.",
+          );
+        }
       });
       const rows = (await readFile(tracePath, "utf8"))
         .trim()
         .split("\n")
         .map((line) => JSON.parse(line) as Record<string, unknown>);
       const afterAct = rows.find((row) => row.at === "after_act");
-      expect(afterAct?.submit_response).toContain("An active key already uses the alias grunt.");
       const nextStep = rows.filter((row) => row.at === "step")[1];
-      expect(JSON.stringify(nextStep?.notices)).toContain(
-        "An active key already uses the alias grunt.",
-      );
+      if (["removed", "ambiguous"].includes(replace)) {
+        expect(afterAct?.submit_response ?? "").not.toContain("Unrelated billing form response.");
+        expect(JSON.stringify(nextStep?.notices)).not.toContain("Unrelated billing form response.");
+        if (replace === "ambiguous") {
+          expect(afterAct?.submit_response ?? "").not.toContain("An active key already uses the alias grunt.");
+          expect(JSON.stringify(nextStep?.notices)).not.toContain("An active key already uses the alias grunt.");
+        }
+      } else {
+        expect(afterAct?.submit_response).toContain("An active key already uses the alias grunt.");
+        expect(JSON.stringify(nextStep?.notices)).toContain(
+          "An active key already uses the alias grunt.",
+        );
+      }
     } finally {
       vi.unstubAllEnvs();
       await rm(traceDir, { recursive: true, force: true });

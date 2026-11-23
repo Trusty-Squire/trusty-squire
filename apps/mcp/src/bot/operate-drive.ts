@@ -3630,15 +3630,15 @@ export function submitResponseText(
 function inPageSubmittedFormText(arg: { ref: string | null }): string | null {
   const scope = window as Window & {
     __tsDriveRegistry?: { nodes: Map<string, Element> };
-    __tsSubmitSurface?: { element: Element; selector: string; index: number };
+    __tsSubmitSurface?: { element: Element; selector: string | null };
   };
   if (arg.ref === null) {
     const surface = scope.__tsSubmitSurface;
     if (surface === undefined) return null;
-    const element = surface.element.isConnected
-      ? surface.element
-      : document.querySelectorAll(surface.selector)[surface.index];
-    return element === undefined ? null : textOf(element);
+    if (surface.element.isConnected) return textOf(surface.element);
+    if (surface.selector === null) return null;
+    const matches = document.querySelectorAll(surface.selector);
+    return matches.length === 1 ? textOf(matches[0]!) : null;
   }
   const control = scope.__tsDriveRegistry?.nodes.get(arg.ref);
   if (control === undefined || !control.isConnected) return null;
@@ -3653,16 +3653,15 @@ function inPageSubmittedFormText(arg: { ref: string | null }): string | null {
     if (ancestor.querySelector("input, textarea, select") !== null) form = ancestor;
   }
   if (form === null) return null;
-  const selector = form.id.length > 0
-    ? `#${CSS.escape(form.id)}`
-    : form.tagName + ["role", "aria-label"].map((name) => {
-        const value = form.getAttribute(name);
-        return value === null ? "" : `[${name}="${CSS.escape(value)}"]`;
-      }).join("");
+  const identity = ["id", "name", "aria-label", "aria-labelledby"].find(
+    (name) => (form.getAttribute(name) ?? "").trim().length > 0,
+  );
+  const selector = identity === undefined
+    ? null
+    : `${form.tagName}[${identity}="${CSS.escape(form.getAttribute(identity)!)}"]`;
   scope.__tsSubmitSurface = {
     element: form,
-    selector,
-    index: Array.from(document.querySelectorAll(selector)).indexOf(form),
+    selector: selector !== null && document.querySelectorAll(selector).length === 1 ? selector : null,
   };
   return textOf(form);
 
