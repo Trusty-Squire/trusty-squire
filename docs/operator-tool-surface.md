@@ -97,13 +97,19 @@ words or the facts; identity and payment fields still require a fact.
 
 On a new-account form, omit the password fact to let the drive invent a random
 password. Password fields and confirmation controls are recognized from English
-field names or labels, not from input type or autocomplete annotations. Initial
-invention requires explicit Create account, Sign up, or Register evidence;
-English sign-in, reset, and current/old/existing-password cues exclude the form.
-Populated password controls are preserved. Account identifiers and confirmation
-controls are scoped to the password's form and frame. The account identifier
-comes from the form's exact email/username value, or, on a password-only step,
-supplied facts or the session's signup identifier/account email. With an
+field names or labels, and a `type=password` input whose name, label, or
+placeholder names no other field (dots, or words in another language) is a
+password field; a masked input whose words name another field, such as a
+verification code, keeps that field. Initial invention requires explicit
+Create account, Sign up, or Register evidence, or a form that asks for an
+email/username plus at least one more text field (name, username, referral)
+beside the password; English sign-in, reset, and current/old/existing-password
+cues exclude the form. Populated password controls are preserved. Account
+identifiers and confirmation controls are scoped to the password's form and
+frame. The account identifier comes from the form's exact email/username value;
+while that field is still empty, from the supplied fact for it; or, on a
+password-only step, supplied facts or the session's signup identifier/account
+email. With an
 authenticated vault client, the drive saves a new `username_password` credential for the
 password control's frame site before typing from a sealed session slot. It does
 not overwrite an existing saved login or require `store`, which controls key
@@ -181,7 +187,10 @@ verification code or link before reading mail.
 After the inbox poll window expires with no matching mail, that miss remains
 in the outcome trail and suppresses the emailed-code question while it is the latest outcome
 on that page. A later action or a different page makes the question eligible
-again.
+again. A code the drive types from the inbox counts as a filled field, and a
+masked (`type=password`) field that holds a value is not empty and is marked
+`filled` in the decider's element list, so the drive submits the code instead
+of reading the inbox for it again.
 
 WAIT and BLOCKED are offered only while no listed work remains: an enabled
 fill, select, choice, or non-OAuth submit that is actually offered keeps both
@@ -375,8 +384,18 @@ browser-use/jev-ultrafast (MIT) adoptions live in `operate-drive.ts`. Mapping:
 If operation admission returns `low_confidence` with CLICK or SCROLL selected,
 the drive can derive CLICK from a valid CLICK target with confidence at least
 0.6 when the combined CLICK and SCROLL probability is at least 0.6. The click
-executor scrolls an offscreen target into view. Fixed operation choices and
-invalid answers do not take this fallback.
+executor scrolls an offscreen target into view. When the chosen CLICK target is
+offscreen, the SCROLL share also counts for it: it is spread over the
+offscreen targets in proportion to their own click votes, visible targets keep
+only their CLICK share, and the merged target confidence must reach 0.6.
+Fixed operation choices and invalid answers do not take this fallback.
+
+Click controls that share a role and label (one "Edit" per key) carry the words of
+their own row that the twins' rows do not share, read from the largest
+ancestor holding no twin, as the row's `ctx=` fact; their options and element
+descriptions name that row. Twins whose rows read the same stay identical.
+Checked/unchecked state (`s=c`/`s=u`) covers checkboxes, radios, switches
+(`aria-checked`), and toggle buttons (`aria-pressed`).
 
 For an admitted CLICK operation, a valid target vote that would otherwise return
 `low_confidence` is admitted when its chosen candidate is the only CLICK candidate

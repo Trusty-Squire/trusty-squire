@@ -5,7 +5,8 @@ import {
   parsePasswordRequirements,
   passwordMeetsRequirements,
 } from "../drive-password.js";
-import { newAccountPasswordTargets, type WireRow } from "../operate-drive.js";
+import { emailCodeCandidates, newAccountPasswordTargets, type WireRow } from "../operate-drive.js";
+import { driveRowsFromSnapshot, type DriveSnapshotElement } from "../drive-snapshot.js";
 import { storeInventedLogin } from "../../tools/provision-drive.js";
 import type { ApiClient } from "../../api-client.js";
 import { withOperatorRequestContext } from "../request-cancellation.js";
@@ -428,6 +429,121 @@ describe("newAccountPasswordTargets", () => {
       ["@e:save", "b", "Save|a=submit|fm=1"],
     ];
     expect(newAccountPasswordTargets(rows, {}, [])).toBeUndefined();
+  });
+});
+
+// squire-1.1.61 trace: Darus /masuk?mode=register (L69161) and Fikra
+// /account/signup (L155) ended needs_value on their password fields. Neither
+// label says "password", and Darus' buttons are not in English, so the drive
+// never treated the field as a new password to invent.
+describe("sign-up passwords named by the input type", () => {
+  const element = (
+    ref: string,
+    role: string,
+    label: string,
+    extra: Partial<DriveSnapshotElement> = {},
+  ): DriveSnapshotElement => ({
+    ref,
+    role,
+    label,
+    operations: role === "textbox" ? ["fill"] : ["click"],
+    frameOrdinal: 0,
+    formId: 1,
+    ...extra,
+  });
+  const rowsOf = (elements: DriveSnapshotElement[]): WireRow[] =>
+    driveRowsFromSnapshot({
+      url: "https://signup.example.test/",
+      title: "",
+      headings: [],
+      text: "",
+      fingerprint: "",
+      documentEpoch: "",
+      elements,
+      omittedValues: 0,
+      scriptMs: 0,
+      wallMs: 0,
+    });
+  const email = "grunt@example.test";
+  // Darus: name and username typed, email still empty, password labelled only
+  // by its placeholder, Indonesian submit.
+  const darus = rowsOf([
+    element("@e:f0d80", "textbox", "Nama Anda", {
+      placeholder: "Nama Anda",
+      required: true,
+      value: "grunt",
+    }),
+    element("@e:f0d81", "textbox", email, {
+      placeholder: email,
+      inputType: "email",
+      required: true,
+    }),
+    element("@e:f0d82", "button", "Kirim OTP", { disabled: true }),
+    element("@e:f0d83", "textbox", "username", {
+      placeholder: "username",
+      required: true,
+      value: "grunt",
+    }),
+    element("@e:f0d84", "textbox", "Min. 12 karakter, kuat", {
+      placeholder: "Min. 12 karakter, kuat",
+      inputType: "password",
+      required: true,
+      populated: false,
+    }),
+    element("@e:f0d86", "textbox", "Mis. 5UHRWNL8", { placeholder: "Mis. 5UHRWNL8" }),
+    element("@e:f0d87", "button", "Daftar sekarang", { submit: true, disabled: true }),
+  ]);
+
+  it("marks a masked field whose words name nothing as the password", () => {
+    expect(darus.find((row) => row[0] === "@e:f0d84")?.[2]).toContain("f=password");
+    // The masked field is not offered as a place for an emailed code.
+    expect(emailCodeCandidates(darus, ["@e:f0d80", "@e:f0d83"]).map((c) => c.ref)).not.toContain(
+      "@e:f0d84",
+    );
+  });
+
+  it("invents the password of a non-English sign-up form, saved under the email fact", () => {
+    const targets = newAccountPasswordTargets(darus, { email }, ["@e:f0d80", "@e:f0d83"]);
+    expect(targets?.password[0]).toBe("@e:f0d84");
+    expect(targets?.login).toBe(email);
+    // Without a fact for the empty email field there is no login to save yet.
+    expect(newAccountPasswordTargets(darus, {}, ["@e:f0d80", "@e:f0d83"])).toBeUndefined();
+  });
+
+  it("invents the password beside a filled email on an English sign-up", () => {
+    const fikra = rowsOf([
+      element("@e:f0d7", "button", "Create Account with $0.50 free-model credit", {
+        submit: true,
+      }),
+      element("@e:f0d4", "textbox", email, {
+        placeholder: email,
+        inputType: "email",
+        required: true,
+        value: email,
+      }),
+      element("@e:f0d5", "textbox", "••••••••", {
+        placeholder: "••••••••",
+        inputType: "password",
+        required: true,
+        populated: false,
+      }),
+    ]);
+    const targets = newAccountPasswordTargets(fikra, {}, ["@e:f0d4"]);
+    expect(targets?.password[0]).toBe("@e:f0d5");
+    expect(targets?.identity?.[0]).toBe("@e:f0d4");
+  });
+
+  it("keeps a masked code field a code and leaves a bare sign-in alone", () => {
+    const code = rowsOf([
+      element("@e:f0d44", "textbox", "Verification code", { inputType: "password" }),
+    ]);
+    expect(code[0]?.[2]).toContain("f=otp");
+    const signin = rowsOf([
+      element("@e:e", "textbox", "Surel", { inputType: "email", value: email }),
+      element("@e:p", "textbox", "Kata sandi", { inputType: "password", required: true }),
+      element("@e:go", "button", "Masuk", { submit: true }),
+    ]);
+    expect(newAccountPasswordTargets(signin, { email }, [])).toBeUndefined();
   });
 });
 

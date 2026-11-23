@@ -5,8 +5,11 @@ import {
   admitsChoice,
   buildDriveQuestions,
   candidateDestinations,
+  DRIVE_EMAIL_CODE_QUESTION,
   decideAfterJev,
   driveTargetSets,
+  elementState,
+  emailCodeCandidates,
   emptyDriveState,
   isCredentialMutationConfirmRow,
   isExistingCredentialMutationRow,
@@ -330,6 +333,171 @@ describe("a confident target derives the operation", () => {
     expect(decide({ DONE: 0.45, CLICK: 0.3, SCROLL: 0.25 })).toMatchObject({
       kind: "low_confidence",
     });
+  });
+});
+
+describe("an offscreen click target takes the SCROLL share", () => {
+  // Openference /user/tokens (squire-1.1.61 L69137, §25 v4.1/v5 replay):
+  // CLICK .47 vs SCROLL .39, and "Reveal full key" below the fold .58 vs the
+  // visible "New Key" .38, so neither the operation nor the target reached .6.
+  const url = "https://openference.com/user/tokens";
+  const rows: WireRow[] = [
+    ["@e:f0d50", "l", "API Keys|u=https://openference.com/user/tokens"],
+    ["@e:f0d69", "b", "Copy"],
+    ["@e:f0d85", "b", "I've saved my key"],
+    ["@e:f0d70", "b", "New Key"],
+    ["@e:f0d86", "t", "Search by name...|f=search|v=offscreen|ph=Search by name..."],
+    ["@e:f0d87", "b", "Reveal full key|v=offscreen|credential=1"],
+    ["@e:f0d88", "b", "Key actions|v=offscreen|credential=1"],
+  ];
+  const goal = "capture the key named Grunt Free into Squire";
+  const sets = driveTargetSets(rows, {}, false, [], url);
+  const questions = buildDriveQuestions(rows, {}, goal, false, [], url, new Map(), sets);
+  const ops = choiceCriteria(questions, "operation");
+  const targets = choiceCriteria(questions, "CLICK_target");
+  const decide = (operation: Record<string, number>, target: Record<string, number>) =>
+    decideAfterJev({
+      answers: {
+        operation: answer(ops, operation),
+        CLICK_target: answer(
+          targets,
+          Object.fromEntries(
+            Object.entries(target).map(([label, value]) => [slugFor(targets, label), value]),
+          ),
+        ),
+      },
+      rows,
+      facts: {},
+      lastFingerprint: null,
+      lastActionKey: null,
+      fingerprint: "fp",
+      goal,
+      pageUrl: url,
+      sets,
+      questions,
+    });
+
+  it("clicks the offscreen target the split operation points at", () => {
+    expect(
+      decide(
+        { CLICK: 0.47, SCROLL: 0.39, WAIT: 0.07, TYPE_TEXT: 0.07 },
+        { "Reveal full key": 0.58, "New Key": 0.38, Copy: 0.04 },
+      ),
+    ).toMatchObject({ kind: "act", action: { kind: "click", target: "@e:f0d87" } });
+    expect(
+      decide(
+        { CLICK: 0.49, SCROLL: 0.33, TYPE_TEXT: 0.09, WAIT: 0.09 },
+        { "Reveal full key": 0.51, "New Key": 0.46, Copy: 0.03 },
+      ),
+    ).toMatchObject({ kind: "act", action: { kind: "click", target: "@e:f0d87" } });
+  });
+
+  it("gives a visible target no SCROLL share and keeps the bar on acting", () => {
+    // The split target is the visible control: SCROLL voters did not ask for it.
+    expect(
+      decide(
+        { CLICK: 0.47, SCROLL: 0.39, WAIT: 0.14 },
+        { "New Key": 0.55, "Reveal full key": 0.4, Copy: 0.05 },
+      ),
+    ).toMatchObject({ kind: "low_confidence" });
+    // CLICK + SCROLL under the bar still refuses.
+    expect(
+      decide(
+        { CLICK: 0.35, SCROLL: 0.2, DONE: 0.45 },
+        { "Reveal full key": 0.58, "New Key": 0.38, Copy: 0.04 },
+      ),
+    ).toMatchObject({ kind: "low_confidence" });
+  });
+});
+
+describe("a masked field holding a value reads as filled", () => {
+  // Token Harbor's code dialog (squire-1.1.61 L69255): the typed code sits in
+  // a type=password input, so the row says only s=p. Jev saw an empty field and
+  // kept voting INBOX instead of Verify.
+  const url = "https://tokenharbor.ai/dashboard/api-keys";
+  const rows: WireRow[] = [
+    ["@e:f0d44", "t", "Verification code|f=otp|s=p|w=6|pt=[0-9]*|im=numeric|dialog=@e:f0d41"],
+    ["@e:f0d42", "b", "Cancel|dialog=@e:f0d41"],
+    ["@e:f0d43", "b", "Verify|dialog=@e:f0d41"],
+  ];
+
+  it("is no longer offered for the emailed code and tells Jev it is filled", () => {
+    expect(emailCodeCandidates(rows, [])).toEqual([]);
+    const questions = buildDriveQuestions(rows, {}, "show the key", false, [], url);
+    expect(questions).not.toHaveProperty(DRIVE_EMAIL_CODE_QUESTION);
+    const field = driveTargetSets(rows, {}, false, [], url).TYPE_TEXT.find(
+      (candidate) => candidate.ref === "@e:f0d44",
+    );
+    expect(field === undefined ? undefined : elementState(field).filled).toBe(true);
+    const empty: WireRow = ["@e:x", "t", "Verification code|f=otp|w=6"];
+    expect(
+      elementState({ ref: "@e:x", role: "t", slug: "x", description: "", row: empty }).filled,
+    ).toBeUndefined();
+  });
+});
+
+describe("identically labeled controls name their own row", () => {
+  // Pollinations /keys (squire-1.1.61 L1): two "Edit secret key" and two
+  // "Delete secret key" buttons, one pair per key card, and no key name on
+  // either. Openference's key overlay (L69136) has two plain "Copy" buttons.
+  const element = (ref: string, label: string, rowContext?: string) => ({
+    ref,
+    role: "button",
+    label,
+    operations: ["click" as const],
+    frameOrdinal: 0,
+    ...(rowContext === undefined ? {} : { rowContext }),
+  });
+  const snapshot = (elements: DriveSnapshot["elements"]): DriveSnapshot => ({
+    url: "https://enter.pollinations.ai/keys",
+    title: "Keys",
+    headings: [],
+    text: "",
+    fingerprint: "fp",
+    documentEpoch: "1|https://enter.pollinations.ai/keys",
+    elements,
+    omittedValues: 0,
+    scriptMs: 0,
+    wallMs: 0,
+  });
+  const first = "Secret key grunt-free-pollinations sk_8Qm Created: 2d Used: never";
+  const second = "Secret key Default sk_Zt4 Created: 9d Used: 3h";
+  const rows = driveRowsFromSnapshot(
+    snapshot([
+      element("@e:f0d28", "Create"),
+      element("@e:f0d29", "Edit secret key", first),
+      element("@e:f0d30", "Delete secret key", first),
+      element("@e:f0d31", "Edit secret key", second),
+      element("@e:f0d32", "Delete secret key", second),
+    ]),
+  );
+  const url = "https://enter.pollinations.ai/keys";
+  const goal = "Edit the key named grunt-free-pollinations and save it";
+
+  it("labels each twin with the words only its row has", () => {
+    const questions = buildDriveQuestions(rows, {}, goal, false, [], url);
+    const targets = choiceCriteria(questions, "CLICK_target");
+    const labels = Object.values(targets);
+    expect(labels).toContain("Edit secret key (row: grunt-free-pollinations sk_8Qm 2d never)");
+    expect(labels).toContain("Edit secret key (row: Default sk_Zt4 9d 3h)");
+    expect(new Set(labels).size).toBe(labels.length);
+    // The Jev state's candidate descriptions name the row too.
+    const sets = driveTargetSets(rows, {}, false, [], url);
+    expect(sets.CLICK.find((c) => c.ref === "@e:f0d31")?.description).toBe(
+      'click the button labeled "Edit secret key" in the row "Default sk_Zt4 9d 3h"',
+    );
+  });
+
+  it("adds nothing when the rows do not tell the twins apart", () => {
+    const same = driveRowsFromSnapshot(
+      snapshot([
+        element("@e:a", "Copy", "Key shown once"),
+        element("@e:b", "Copy", "Key shown once"),
+      ]),
+    );
+    expect(same.map((row) => row[2])).toEqual(["Copy", "Copy"]);
+    const unique = driveRowsFromSnapshot(snapshot([element("@e:c", "Create", "Keys")]));
+    expect(unique[0]?.[2]).toBe("Create");
   });
 });
 

@@ -233,3 +233,68 @@ it("resumes a budget-ended inbox poll and fills newly arrived mail", async () =>
     await context.close();
   }
 }, 20_000);
+
+// 1.1.61 Token Harbor drive, run 2 (trace L69254-L69265): the code dialog's
+// input is type=password, so after the inbox read typed the code the row showed
+// only that it held a value. The drive offered the field again and re-read the
+// inbox eight times instead of pressing Verify.
+it("submits a code typed into a masked field instead of re-reading the inbox", async () => {
+  const codePage = `<meta charset="utf-8"><main><h1>API keys</h1>
+    <div role="dialog" aria-label="Show plaintext key">
+      <p>We sent a verification code to your email.</p>
+      <label>Verification code <input type="password" inputmode="numeric" maxlength="6" pattern="[0-9]*"></label>
+      <button type="button">Cancel</button>
+      <button type="button" onclick="document.body.dataset.verified = document.querySelector('input').value">Verify</button>
+    </div></main>`;
+  const keysUrl = "https://tokenharbor.ai/dashboard/api-keys";
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  await page.route("**/*", (route) => route.fulfill({ contentType: "text/html", body: codePage }));
+  await page.goto(keysUrl);
+  const started = await startHarnessProvisionSession({
+    browser: BrowserController.fromHarnessPage(page),
+    serviceUrl: keysUrl,
+    format: "compact",
+    initialObservation: "drive",
+  });
+  const sessionId = started.session_id;
+  const revealGoal = "Show the plaintext key: type the emailed code and press Verify.";
+  sessionForCall(sessionId)!.drive = emptyDriveState(revealGoal, { email: "person@example.test" });
+  const awaitVerification = vi.fn<DriveDependencies["awaitVerification"]>(async () => ({
+    session_id: sessionId,
+    found: true,
+    code: "482619",
+    link: null,
+  }));
+  const pick: DriveDependencies["askJev"] = async (client, state, questions) =>
+    await answering((name) => {
+      if (name === DRIVE_EMAIL_CODE_QUESTION) return "code_field_1";
+      if (name === "operation") return "CLICK";
+      const question = questions[name];
+      if (name !== "CLICK_target" || question?.type !== "choice") return undefined;
+      return Object.keys(question.criteria).find((key) => question.criteria[key] === "Verify");
+    })(client, state, questions);
+  try {
+    const result = await runOperateDrive(
+      { session_id: sessionId, goal: revealGoal, max_steps: 3, max_seconds: 30 },
+      api,
+      undefined,
+      {
+        act,
+        observe,
+        startSession: async () => {
+          throw new Error("existing session");
+        },
+        awaitVerification,
+        injectCard: async () => ({ status: "unused" }),
+        askJev: pick,
+      },
+    );
+    expect(awaitVerification).toHaveBeenCalledTimes(1);
+    expect(result.trajectory.some((step) => step.action === "type_otp")).toBe(true);
+    expect(await page.evaluate(() => document.body.dataset.verified)).toBe("482619");
+  } finally {
+    await finishProvisionSession(sessionId);
+    await context.close();
+  }
+}, 20_000);
