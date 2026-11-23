@@ -14,6 +14,9 @@ on:
     branches: [main]
     paths:
       - "apps/mcp/**"
+      - "apps/api/**"
+      - "apps/web/**"
+      - "packages/vault/**"
       - "packages/recipe-schema/**"
       - "packages/skill-schema/**"
       - "pnpm-lock.yaml"
@@ -41,15 +44,17 @@ jobs:
           node-version: 20.11.0
           cache: pnpm
       - name: Install MCP dependency tree
-        run: pnpm install --frozen-lockfile --filter '@trusty-squire/mcp...'
+        run: pnpm install --frozen-lockfile --filter '@trusty-squire/mcp...' --filter '@trusty-squire/api...' --filter '@trusty-squire/web...'
       - name: Install Chromium for browser-backed MCP tests
         run: pnpm --filter '@trusty-squire/mcp' exec playwright install --with-deps chromium
       # Patchright pins its own Chromium revision, separate from Playwright's.
       # The headed operator-upload cases launch through Patchright.
       - name: Install Patchright Chromium for headed MCP tests
         run: pnpm --filter '@trusty-squire/mcp' exec patchright install chromium
+      - name: Install production sign-in display helpers
+        run: sudo apt-get update && sudo apt-get install -y xvfb x11vnc novnc websockify
       - name: Build MCP workspace dependencies
-        run: pnpm --filter '@trusty-squire/skill-schema' --filter '@trusty-squire/recipe-schema' --filter '@trusty-squire/sdk' build
+        run: pnpm --filter '@trusty-squire/skill-schema' --filter '@trusty-squire/recipe-schema' --filter '@trusty-squire/sdk' --filter '@trusty-squire/vault' build
       - name: Run slow integration tier after merge
         if: github.event_name == 'push'
         env:

@@ -17,11 +17,13 @@
 // browser — close it first" and, because the install never finished, a pairing
 // code that does not exist and a `not_found` sign-in page.
 //
-// The fixture is a real separate process: it holds the profile's SQLite lock
-// through an open transaction, and it speaks the
-// connect/open/close wire contract over a real unix socket. Nothing here
-// launches Chrome — and crucially, the lock is NEVER released: attaching
-// means tab-sharing the broker's browser, not taking the profile from it.
+// The broker daemon now runs the ceremony itself (broker/ceremony.ts), so the
+// attach is one `ceremony` call on the target profile's socket. The fixture is
+// a real separate process: it holds the profile's SQLite lock through an open
+// transaction and speaks the connect/ceremony wire contract over a real unix
+// socket. Nothing here launches Chrome — and crucially, the lock is NEVER
+// released: attaching means asking the broker that owns the browser, not
+// taking the profile from it.
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
@@ -29,10 +31,10 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { controlLabelV2 } from "../compact-observation-v2.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { brokerAccountBindingPath } from "../broker/account-binding.js";
 import { writeBrokerUnitMarker } from "../broker/managed-marker.js";
+import type { CeremonyRequest } from "../broker/ceremony.js";
 
 vi.mock("../../session-guard.js", () => ({
   createSessionGuard: () => ({
@@ -44,46 +46,27 @@ vi.mock("../../session-guard.js", () => ({
 }));
 
 const require = createRequire(import.meta.url);
-const CONFIRM_URL = "https://trustysquire.ai/install/confirm?install=fixture";
-// Minted by the same function the real observation uses, so the fixture can
-// never encode a label shape production does not emit.
-const SIGN_OUT_LABEL = controlLabelV2("Sign out")!;
+const CONFIRM_URL = "https://trustysquire.ai/install?token=fixture";
+const TUNNEL_URL = "https://tunnel.invalid/#p=fixture";
 
 /**
  * A real broker fixture: a separate process that
  *
  * - holds the profile's kernel SQLite lock for as long as it lives — like `BrokerRuntime`, which
  *   keeps the election guard across its whole custody,
- * - answers the connect handshake and then one `open` with a session id,
- *   recording what it was asked to open,
- * - records the session `close` and answers it (the lease-boundary close).
+ * - answers the connect handshake and then `ceremony`, recording what it was asked,
+ * - can stand in for an older release (no token-less handshake, or no `ceremony` method).
  */
 const BROKER_FIXTURE_SCRIPT = `
 const fs = require("node:fs");
 const net = require("node:net");
-const os = require("node:os");
-const path = require("node:path");
-const [marker, socketPath, lockPath, connectMode, openNeedsUser, profileDir, finishAfterObserves] = process.argv.slice(2);
-const CONFIRM_URL = ${JSON.stringify(CONFIRM_URL)};
+const [marker, socketPath, lockPath, mode] = process.argv.slice(2);
 if (marker !== "broker") process.exit(78);
-// The ceremony's exposure helper discovers the shared display from the
-// browser process's OWN environment via the profile's SingletonLock symlink
-// — so the fixture holder must look exactly like that: a live pid owning the
-// SingletonLock, running on a display this repo did not create (a foreign
-// XAUTHORITY), which the helper must report as already_visible rather than
-// starting any noVNC rig for.
-try {
-  if (profileDir)
-    fs.symlinkSync(
-      os.hostname() + "-" + process.pid,
-      path.join(profileDir, "SingletonLock"),
-    );
-} catch {}
 const lockDb = new (require(process.env.TS_SQLITE))(lockPath, { timeout: 0 });
 lockDb.exec("BEGIN EXCLUSIVE");
 process.on("exit", () => lockDb.close());
-const seen = { openUrl: null, openCeremony: false, closedSession: null, commands: [] };
-let observeCalls = 0;
+const seen = { ceremony: [] };
+const persist = () => fs.writeFileSync(lockPath + ".seen", JSON.stringify(seen), { mode: 0o600 });
 const server = net.createServer((socket) => {
   let buffered = "";
   socket.on("data", (chunk) => {
@@ -102,10 +85,7 @@ const server = net.createServer((socket) => {
       }
       const reply = (payload) => socket.write(JSON.stringify({ id: request.id, ...payload }) + "\\n");
       if (request.method === "connect") {
-        // A current-contract fixture admits the connection with no credential
-        // at all; the "legacy" stand-in refuses it exactly as every release
-        // before the token-less handshake did.
-        if (connectMode === "legacy") {
+        if (mode === "legacy") {
           reply({
             error: { code: "unauthorized", message: "Authenticate before issuing commands" },
           });
@@ -114,75 +94,27 @@ const server = net.createServer((socket) => {
         reply({ result: { version: 1, clientId: "fixture" } });
         continue;
       }
-      if (request.method === "open") {
-        seen.openUrl = request.params?.serviceUrl ?? null;
-        seen.openCeremony = request.params?.ceremony === true;
-        if (openNeedsUser === "needs-user") {
-          // A documented needs_user hand-back (OpenResult): the broker
-          // minted no live session — the observation still carries its own
-          // session id, and there is no tab for the ceremony to close.
-          reply({
-            result: {
-              observation: {
-                session_id: "obs-1",
-                url: CONFIRM_URL,
-                guidance: "No live Google session — sign in first",
-              },
-            },
-          });
+      if (request.method === "ceremony") {
+        seen.ceremony.push(request.params);
+        persist();
+        if (mode === "outdated") {
+          reply({ error: { code: "unknown_method", message: "Unknown broker method" } });
           continue;
         }
-        reply({ result: { sessionId: "tab-1" } });
-        continue;
-      }
-      if (request.method === "command") {
-        // Mirror OperatorBroker.command: the operator schema REQUIRES
-        // args.session_id and a mismatch is a stale_lease refusal. A caller
-        // that omits the id (or guesses a different one) never gets past
-        // this point, so the recorded sequence below proves the connect
-        // shape sends the real id on every verb.
-        const args = request.params?.args ?? {};
-        if (args.session_id !== "tab-1") {
-          reply({ error: { code: "stale_lease", message: "An owned session is required" } });
-          continue;
-        }
-        seen.commands = seen.commands || [];
-        seen.commands.push({
-          name: request.params?.name ?? null,
-          args,
-        });
-        if (request.params?.name === "operate_observe") observeCalls += 1;
-        // GitHub's logout page renders its confirm control; the observe-then-
-        // click drive must find a Sign out row in the returned action map.
-        // Rows travel the REAL wire shape — positional tuples [ref, role,
-        // facts?] with a wire role letter and the @slug alias first in the
-        // |-joined facts — not the object shape no observation emits.
-        // The daemon's command dispatch returns the CommandResult envelope
-        // "{ result: <tool payload> }" and the transport sends THAT as the
-        // frame's result field -- mirror it exactly, or the caller's unwrap
-        // of .result sees nothing.
         reply({
-          result: {
-            result:
-              request.params?.name === "operate_observe"
-                ? {
-                    url:
-                      Number(finishAfterObserves) > 0 && observeCalls >= Number(finishAfterObserves)
-                        ? "https://trustysquire.ai/install/done"
-                        : CONFIRM_URL,
-                    safe_table: [
-                      [${JSON.stringify(SIGN_OUT_LABEL)}, "b", ${JSON.stringify(SIGN_OUT_LABEL)}],
-                    ],
-                  }
-                : { ok: true },
-          },
+          result:
+            request.params.action === "get"
+              ? { state: "none" }
+              : {
+                  state: "live",
+                  confirm_url: request.params.confirmUrl,
+                  browser_location: { kind: "virtual", url: ${JSON.stringify(TUNNEL_URL)} },
+                  reused: false,
+                },
         });
         continue;
       }
       if (request.method === "close") {
-        // The connection-level close (release) carries no session id; only
-        // the session-tab close is worth recording.
-        if (request.params?.sessionId != null) seen.closedSession = request.params.sessionId;
         reply({ result: { closed: true } });
         continue;
       }
@@ -190,17 +122,11 @@ const server = net.createServer((socket) => {
     }
   });
 });
-// Like runBrokerDaemon, remove a dead predecessor's socket after claiming the
-// profile lock: the kernel-released lock proves any prior listener is gone, and
-// the profile's device identity can repeat across recreations (so a stale
-// socket path must not block this fixture's bind).
 try {
   fs.rmSync(socketPath, { force: true });
 } catch {}
 server.listen(socketPath);
-fs.writeFileSync(lockPath + ".seen", JSON.stringify(seen), { mode: 0o600 });
-const persist = () => fs.writeFileSync(lockPath + ".seen", JSON.stringify(seen), { mode: 0o600 });
-setInterval(persist, 50);
+persist();
 `;
 
 const cleanup: { dirs: string[]; children: ChildProcess[] } = { dirs: [], children: [] };
@@ -234,7 +160,20 @@ async function waitFor(predicate: () => boolean, timeoutMs = 10_000): Promise<vo
   throw new Error("fixture did not become ready");
 }
 
-/** The fixture uses the same stable lock path as production. */
+const START = {
+  action: "start" as const,
+  confirmUrl: CONFIRM_URL,
+  setupCode: "fixture",
+  apiBase: "https://api.invalid",
+  ttlMs: 600_000,
+  callerHasDisplay: false,
+  finalize: {
+    baseSession: { api_base_url: "https://api.invalid", saved_at: "2026-11-22T00:00:00.000Z" },
+    applyServerPrefs: true,
+    agentConfigs: [{ target: "codex" as const }],
+  },
+} satisfies CeremonyRequest;
+
 /**
  * The `connect` shape: `withConnectTargetEnvironment` re-points
  * `TRUSTY_SQUIRE_PROFILE_DIR` at the target's recorded profile BEFORE any
@@ -242,24 +181,11 @@ async function waitFor(predicate: () => boolean, timeoutMs = 10_000): Promise<vo
  * `CHROME_PROFILE_DIR` still names the process default.
  */
 async function connectFixture(
-  opts: {
-    forceReloginProviders?: readonly string[];
-    /** Stand in for a resident from an older release, which gated `connect`
-     * on a credential this release no longer sends. */
-    legacyConnect?: boolean;
-    openNeedsUser?: boolean;
-    finishAfterObserves?: number;
-    pollUntilDone?: (tabFinished: boolean) => Promise<boolean>;
-    boundAccount?: string;
-  } = {},
+  opts: { mode?: "current" | "legacy" | "outdated"; boundAccount?: string } = {},
 ): Promise<{
   result: unknown;
-  profileIdentity: string;
   lockNeverReleased: boolean;
-  openUrl: string | null;
-  openCeremony: boolean;
-  closedSession: string | null;
-  commands: { name: string | null; args: Record<string, unknown> | null }[];
+  ceremony: Record<string, unknown>[];
 }> {
   const root = await tempDir();
   const lockRoot = join(root, "locks");
@@ -269,15 +195,6 @@ async function connectFixture(
   // The profile lock machinery and the broker fixture both keep their lock
   // files under the temp root, so this test never touches the real /tmp.
   vi.stubEnv("TMPDIR", lockRoot);
-  // This test describes connect run AT the machine, which is half of the
-  // ceremony's visibility answer — the other half is the holder's display,
-  // spawned below. Pin it instead of inheriting the host's: a headless runner
-  // would otherwise send the ceremony down the noVNC path and assert nothing
-  // this test is about.
-  vi.stubEnv("DISPLAY", ":0");
-  vi.stubEnv("XDG_SESSION_TYPE", "x11");
-  vi.stubEnv("SSH_CONNECTION", "");
-  vi.stubEnv("SSH_TTY", "");
 
   // Imported here so `CHROME_PROFILE_DIR` freezes on the process default
   // (the isolated sandbox profile) BEFORE the connect shape re-points the
@@ -292,7 +209,7 @@ async function connectFixture(
   process.env.TRUSTY_SQUIRE_PROFILE_DIR = targetProfile;
 
   const discovery = await import("../broker/discovery.js");
-  const { runCeremonyInSharedBroker } = await import("../google-login.js");
+  const { requestBrokerCeremony } = await import("../google-login.js");
 
   const socketPath = discovery.defaultBrokerSocket(targetProfile);
   if (opts.boundAccount !== undefined) {
@@ -315,191 +232,68 @@ async function connectFixture(
   await writeFile(scriptPath, BROKER_FIXTURE_SCRIPT, { mode: 0o600 });
   const child = spawn(
     process.execPath,
-    [
-      scriptPath,
-      "broker",
-      socketPath,
-      lockPath,
-      opts.legacyConnect === true ? "legacy" : "current",
-      opts.openNeedsUser === true ? "needs-user" : "",
-      targetProfile,
-      String(opts.finishAfterObserves ?? 0),
-    ],
+    [scriptPath, "broker", socketPath, lockPath, opts.mode ?? "current"],
     {
       stdio: ["ignore", "ignore", "pipe"],
-      // The exposure helper reads the holder's exec-time environment: a
-      // foreign XAUTHORITY names the machine's own display, so the real
-      // helper resolves already_visible without spawning any helpers.
-      env: {
-        ...process.env,
-        DISPLAY: ":0",
-        XAUTHORITY: "/tmp/fixture-foreign-Xauthority",
-        TS_SQLITE: require.resolve("better-sqlite3"),
-      },
+      env: { ...process.env, TS_SQLITE: require.resolve("better-sqlite3") },
     },
   );
   child.stderr?.on("data", (chunk) => process.stderr.write(`[broker fixture] ${String(chunk)}`));
   cleanup.children.push(child);
-  await waitFor(() => existsSync(lockPath) && existsSync(socketPath));
+  await waitFor(() => existsSync(lockPath + ".seen") && existsSync(socketPath));
 
-  await waitFor(() => existsSync(lockPath + ".seen"), 5_000).catch(() => undefined);
-  const result = await runCeremonyInSharedBroker({
-    profileDir: targetProfile,
-    url: CONFIRM_URL,
-    deadline: Date.now() + 5_000,
-    pollUntilDone: opts.pollUntilDone ?? (async () => true),
-    bannerLabel: "fixture",
-    ...(opts.forceReloginProviders
-      ? { forceReloginProviders: opts.forceReloginProviders as ("google" | "github")[] }
-      : {}),
-  }).catch((error: unknown) => error);
-  // The fixture persists its record on a short interval; wait for the close
-  // so the assertion below cannot race the last persist tick.
-  await waitFor(() => {
-    try {
-      return JSON.parse(readFileSync(lockPath + ".seen", "utf8")).closedSession !== null;
-    } catch {
-      return false;
-    }
-  }, 5_000).catch(() => undefined);
-  const seen = ((): {
-    openUrl: string | null;
-    openCeremony: boolean;
-    closedSession: string | null;
-    commands: { name: string | null; args: Record<string, unknown> | null }[];
-  } => {
-    try {
-      return JSON.parse(readFileSync(lockPath + ".seen", "utf8"));
-    } catch {
-      return {
-        openUrl: null,
-        openCeremony: false,
-        closedSession: null,
-        commands: [],
-      };
-    }
-  })();
+  const result = await requestBrokerCeremony(targetProfile, START).catch((error: unknown) => error);
+  const seen = JSON.parse(readFileSync(lockPath + ".seen", "utf8")) as {
+    ceremony: Record<string, unknown>[];
+  };
   return {
     result,
-    profileIdentity: profileModule.profilePathIdentity(targetProfile),
     // Attaching never released the broker's custody of the profile, not even
     // momentarily: the ceremony is a tab in the broker's browser.
     lockNeverReleased: profileModule.profileOperationIsLocked(targetProfile),
-    openUrl: seen.openUrl,
-    openCeremony: seen.openCeremony === true,
-    closedSession: seen.closedSession,
-    commands: seen.commands,
+    ceremony: seen.ceremony,
   };
 }
 
 describe("connect attaches to the live broker for the profile it is connecting", () => {
-  it.each([
-    ["plain connect", undefined],
-    ["force re-login", ["google", "github"]],
-  ])(
-    "%s reaches the sign-in tab even when the profile is bound to another account",
-    async (_name, forceReloginProviders) => {
-      const outcome = await connectFixture({
-        boundAccount: "previous-account",
-        ...(forceReloginProviders ? { forceReloginProviders } : {}),
-      });
-      expect(outcome.result).toEqual({ status: "satisfied", closeState: "closed" });
-      expect(outcome.openUrl).toBe(CONFIRM_URL);
-      expect(outcome.lockNeverReleased).toBe(true);
-    },
-    30_000,
-  );
   it(
-    "uses an arrived Finish callback without waiting for a broker tab observation",
-    { timeout: 30_000 },
-    async () => {
-      const outcome = await connectFixture({ pollUntilDone: async () => true });
-      expect(outcome.result).toEqual({ status: "satisfied", closeState: "closed" });
-      expect(outcome.commands.filter((command) => command.name === "operate_observe")).toEqual([]);
-    },
-  );
-
-  it(
-    "opens the confirm tab through the broker that owns the TARGET profile, not the process default",
+    "asks the broker that owns the TARGET profile, not the process default, for the ceremony",
     { timeout: 30_000 },
     async () => {
       const outcome = await connectFixture();
-      expect(outcome.result).toEqual({ status: "satisfied", closeState: "closed" });
-      // The confirm URL went to the broker whose socket belongs to the target
-      // profile — the fixture is the only listener on it, and it received the
-      // tab open.
-      expect(outcome.openUrl).toBe(CONFIRM_URL);
-      // The open names itself as the ceremony — Contract B's ONE optional
-      // field. It keeps this identity-creating open distinct from an operator
-      // action that depends on Google, and it is what makes the open
-      // identity-neutral (the ceremony reuses whatever identity the shared
-      // browser is live under rather than requesting a bare one;
-      // deriveOpenToolArgs pins that rule).
-      expect(outcome.openCeremony).toBe(true);
-      // The session tab is closed at the lease boundary.
-      expect(outcome.closedSession).toBe("tab-1");
-      // The profile lease was never touched: no drain, no guard, no second
-      // Chrome, no wait.
-      expect(outcome.lockNeverReleased).toBe(true);
-    },
-  );
-
-  it(
-    "drives the deferred --force-relogin logout through the shared session's own commands",
-    { timeout: 30_000 },
-    async () => {
-      const outcome = await connectFixture({ forceReloginProviders: ["google", "github"] });
-      expect(outcome.result).toEqual({ status: "satisfied", closeState: "closed" });
-      expect(outcome.openUrl).toBe(CONFIRM_URL);
-      // The logout drive rode the SAME session tab the ceremony opened — plain
-      // operate_* commands on the wire, no extra session, no CDP attach:
-      // Google's GET logout, GitHub's logout navigation, an observation whose
-      // action map names the Sign out control, the click on THAT OBSERVED REF
-      // (a bare text selector never resolves — operate_click only accepts a
-      // ref a prior observation minted), then back to the confirm page for
-      // the fresh sign-in.
-      expect(outcome.commands).toEqual([
-        {
-          name: "operate_navigate",
-          args: { url: "https://accounts.google.com/Logout", session_id: "tab-1" },
-        },
-        {
-          name: "operate_navigate",
-          args: { url: "https://github.com/logout", session_id: "tab-1" },
-        },
-        { name: "operate_observe", args: { session_id: "tab-1" } },
-        {
-          name: "operate_click",
-          args: { ref: SIGN_OUT_LABEL, session_id: "tab-1" },
-        },
-        { name: "operate_navigate", args: { url: CONFIRM_URL, session_id: "tab-1" } },
-      ]);
-      expect(outcome.lockNeverReleased).toBe(true);
-    },
-  );
-
-  it(
-    "completes a delivered claim after Finish in a busy broker tab without a loopback callback",
-    { timeout: 30_000 },
-    async () => {
-      let claimDelivered = false;
-      const outcome = await connectFixture({
-        forceReloginProviders: ["google", "github"],
-        // First observe is GitHub's logout control; the first ceremony poll
-        // sees the wizard, then the human's Finish changes this owned tab to
-        // /install/done. No loopback callback is delivered in this fixture.
-        finishAfterObserves: 3,
-        pollUntilDone: async (tabFinished) => {
-          claimDelivered = true; // installPoll returned the delivered token
-          return claimDelivered && tabFinished;
-        },
+      expect(outcome.result).toEqual({
+        state: "live",
+        confirm_url: CONFIRM_URL,
+        browser_location: { kind: "virtual", url: TUNNEL_URL },
+        reused: false,
       });
-      expect(outcome.result).toEqual({ status: "satisfied", closeState: "closed" });
-      expect(outcome.commands.filter((command) => command.name === "operate_observe")).toHaveLength(
-        3,
-      );
-      expect(outcome.closedSession).toBe("tab-1");
+      // The fixture is the only listener on the target profile's socket, and
+      // it received the whole start request.
+      expect(outcome.ceremony).toEqual([START]);
       expect(outcome.lockNeverReleased).toBe(true);
+    },
+  );
+
+  it(
+    "reaches the ceremony even when the profile is bound to another account",
+    { timeout: 30_000 },
+    async () => {
+      const outcome = await connectFixture({ boundAccount: "previous-account" });
+      expect(outcome.result).toMatchObject({ state: "live" });
+      expect(outcome.lockNeverReleased).toBe(true);
+    },
+  );
+
+  it(
+    "names the restart when the resident broker predates the daemon-owned ceremony",
+    { timeout: 30_000 },
+    async () => {
+      const outcome = await connectFixture({ mode: "outdated" });
+      expect(outcome.result).toBeInstanceOf(Error);
+      const refusal = outcome.result as Error & { code?: string };
+      expect(refusal.code).toBe("broker_outdated");
+      expect(refusal.message).toMatch(/restart/i);
+      expect(refusal.message).toContain("run connect again");
     },
   );
 
@@ -508,49 +302,13 @@ describe("connect attaches to the live broker for the profile it is connecting",
     { timeout: 30_000 },
     async () => {
       // A live resident from an older release refuses the token-less
-      // handshake, the reclaim paths decline (the profile carries no account
-      // binding naming this account), and connectBroker throws. The
-      // old ceremony caught that and returned null — connect then raced the
-      // profile the resident still holds and reported the generic "another
-      // Trusty Squire session is already using the browser", discarding the
-      // refusal that names the resident and its recovery step. The refusal
-      // must surface verbatim.
-      const outcome = await connectFixture({ legacyConnect: true });
+      // handshake. The refusal names the resident and its recovery step, so
+      // it must surface verbatim.
+      const outcome = await connectFixture({ mode: "legacy" });
       expect(outcome.result).toBeInstanceOf(Error);
       const refusal = outcome.result as Error & { code?: string };
       expect(refusal.message).toContain("Authenticate before issuing commands");
       expect(refusal.code).toBe("unauthorized");
-    },
-  );
-
-  it(
-    "a needs-user hand-back (no session, no tab) fails immediately instead of polling to the deadline",
-    { timeout: 30_000 },
-    async () => {
-      // OpenResult: sessionId is absent when the broker minted no live
-      // session — no tab to expose, no session to close, and nothing any
-      // retry inside this run could change. Polling to the deadline (the
-      // round-12 review-1 deadlock) just burned the whole window; the
-      // ceremony must stop immediately with the broker's own words and the
-      // recovery step.
-      let polls = 0;
-      const outcome = await connectFixture({
-        openNeedsUser: true,
-        pollUntilDone: async () => {
-          polls += 1;
-          return false;
-        },
-      });
-      expect(outcome.result).toBeInstanceOf(Error);
-      const message = (outcome.result as Error).message;
-      expect(message).toContain("opened no ceremony tab");
-      // The broker's own guidance travels verbatim.
-      expect(message).toContain("No live Google session — sign in first");
-      // The recovery step and where to look when it repeats.
-      expect(message).toContain("connect");
-      expect(message).toContain("broker.log");
-      // No deadline wait: not one poll.
-      expect(polls).toBe(0);
     },
   );
 });

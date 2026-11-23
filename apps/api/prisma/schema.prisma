@@ -125,6 +125,9 @@ model PairingToken {
   registry_enabled           Boolean?
   consent_operator_inbox_otp Boolean?
   proxy_url                  String?
+  // When the person pressed Finish in the install wizard. The broker daemon
+  // reads it through /status and only then closes the sign-in window.
+  finished_at                DateTime?
 
   @@index([machine_token])
   @@index([status, expires_at])

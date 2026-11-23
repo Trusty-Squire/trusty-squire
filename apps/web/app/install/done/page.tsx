@@ -1,8 +1,7 @@
 // /install/done — the install wizard's standalone success view.
 //
-// A current web installer reaches this page through the nonce-scoped loopback
-// completion callback. Direct navigation remains a terminal signal only for
-// legacy/CDP completion paths; it cannot complete a forced provider relogin.
+// The wizard lands here after Finish, once it has recorded Finish on the
+// server; the broker reads that record, not this page, to close the window.
 //
 // The page also stands alone as a normal success view for users who
 // hit it directly (e.g. via browser history): a friendly confirmation

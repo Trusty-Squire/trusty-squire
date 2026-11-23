@@ -2,83 +2,87 @@
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  clearInstallCompletionUrl,
+  clearInstallCompletionProviders,
   finishInstallCeremony,
-  installCompletionAcknowledgementUrl,
-  installCompletionProviderUrl,
-  normalizeInstallCompletionUrl,
   readInstallCompletionProviders,
-  readInstallCompletionUrl,
   recordInstallCompletionProvider,
 } from "./completion";
 
-describe("install completion callback validation", () => {
+describe("install Finish", () => {
   beforeEach(() => {
     window.sessionStorage.clear();
     window.history.replaceState({}, "", "/install?token=setup");
   });
 
-  it("accepts only the per-run Trusty Squire loopback callback shape", () => {
-    const callback =
-      "http://127.0.0.1:49152/.well-known/trusty-squire/install-complete/" + "a".repeat(48);
-    expect(normalizeInstallCompletionUrl(callback)).toBe(callback);
-  });
-
-  it("adds only providers completed in this install ceremony", () => {
-    const callback =
-      "http://127.0.0.1:49152/.well-known/trusty-squire/install-complete/" + "e".repeat(48);
-    const completed = installCompletionProviderUrl(callback, ["google", "github"]);
-    const url = new URL(completed!);
-
-    expect(url.searchParams.getAll("provider")).toEqual(["google", "github"]);
-    expect(url.pathname).toBe(new URL(callback).pathname);
-  });
-
-  it("lands on the done page even when the loopback Finish callback cannot be delivered", async () => {
-    const callback =
-      "http://127.0.0.1:49152/.well-known/trusty-squire/install-complete/" + "e".repeat(48);
-    const send = vi.fn().mockRejectedValue(new TypeError("Failed to fetch"));
+  it("records Finish on the same-origin install route and lands on the done page", async () => {
+    const post = vi.fn<[string], Promise<unknown>>(async () => ({ ok: true }));
     const navigateDone = vi.fn();
 
-    finishInstallCeremony(callback, ["google", "github"], navigateDone, send);
+    const recorded = finishInstallCeremony("set up/1", navigateDone, post);
 
-    expect(send).toHaveBeenCalledWith(
-      `${callback}?provider=google&provider=github`,
-      expect.objectContaining({ mode: "no-cors", keepalive: true }),
-    );
+    expect(navigateDone).not.toHaveBeenCalled();
+    await expect(recorded).resolves.toBe(true);
     expect(navigateDone).toHaveBeenCalledOnce();
-    await Promise.resolve();
-  });
-
-  it.each([
-    "https://127.0.0.1:49152/.well-known/trusty-squire/install-complete/" + "a".repeat(48),
-    "http://localhost:49152/.well-known/trusty-squire/install-complete/" + "a".repeat(48),
-    "http://127.0.0.1:80/.well-known/trusty-squire/install-complete/" + "a".repeat(48),
-    "http://127.0.0.1:49152/delete-everything",
-    "http://127.0.0.1:49152/.well-known/trusty-squire/install-complete/" +
-      "a".repeat(48) +
-      "?extra=1",
-  ])("rejects unsafe callback URL %s", (callback) => {
-    expect(normalizeInstallCompletionUrl(callback)).toBeNull();
-  });
-
-  it("retains the per-run callback across Google and GitHub OAuth returns", () => {
-    const callback =
-      "http://127.0.0.1:49152/.well-known/trusty-squire/install-complete/" + "b".repeat(48);
-    window.history.replaceState(
-      {},
-      "",
-      `/install?token=setup#ts_install_complete=${encodeURIComponent(callback)}`,
+    expect(post).toHaveBeenCalledWith(
+      "/v1/mcp/install/set%20up%2F1/finish",
+      undefined,
+      expect.any(AbortSignal),
     );
-    expect(readInstallCompletionUrl("setup")).toBe(callback);
+    // A relative path is same-origin: no loopback or cross-network request.
+    expect(post.mock.calls[0]![0]).toMatch(/^\/v1\//);
+  });
 
-    window.history.replaceState({}, "", "/install?token=setup&claim=1");
-    expect(readInstallCompletionUrl("setup")).toBe(callback);
-    window.history.replaceState({}, "", "/install?token=setup&gh=1");
-    expect(readInstallCompletionUrl("setup")).toBe(callback);
+  it("retries a dropped Finish record before navigating", async () => {
+    const post = vi
+      .fn()
+      .mockRejectedValueOnce(new TypeError("Failed to fetch"))
+      .mockResolvedValueOnce({ ok: true });
+    const navigateDone = vi.fn();
+    const sleep = vi.fn(async () => undefined);
 
-    clearInstallCompletionUrl("setup");
-    expect(readInstallCompletionUrl("setup")).toBeNull();
+    const recorded = finishInstallCeremony("setup", navigateDone, post, sleep);
+
+    expect(navigateDone).not.toHaveBeenCalled();
+    await expect(recorded).resolves.toBe(true);
+    expect(navigateDone).toHaveBeenCalledOnce();
+    expect(post).toHaveBeenCalledTimes(2);
+  });
+
+  it("gives up after bounded attempts without throwing", async () => {
+    const post = vi.fn().mockRejectedValue(new TypeError("Failed to fetch"));
+    const navigateDone = vi.fn();
+    const recorded = finishInstallCeremony("setup", navigateDone, post, async () => undefined);
+    await expect(recorded).resolves.toBe(false);
+    expect(post).toHaveBeenCalledTimes(3);
+    expect(navigateDone).not.toHaveBeenCalled();
+    post.mockResolvedValueOnce({ ok: true });
+    await expect(finishInstallCeremony("setup", navigateDone, post)).resolves.toBe(true);
+    expect(navigateDone).toHaveBeenCalledOnce();
+  });
+
+  it("aborts stalled Finish attempts and allows a later retry", async () => {
+    vi.useFakeTimers();
+    try {
+      const post = vi.fn(
+        (_path: string, _body?: unknown, signal?: AbortSignal) =>
+          new Promise((_, reject) =>
+            signal!.addEventListener("abort", () => reject(new Error("aborted"))),
+          ),
+      );
+      const navigateDone = vi.fn();
+      const result = finishInstallCeremony("setup", navigateDone, post);
+      await vi.advanceTimersByTimeAsync(17_000);
+      await expect(result).resolves.toBe(false);
+      expect(post).toHaveBeenCalledTimes(3);
+      expect(post.mock.calls.every(([, , signal]) => signal!.aborted)).toBe(true);
+      expect(navigateDone).not.toHaveBeenCalled();
+      await expect(
+        finishInstallCeremony("setup", navigateDone, async () => ({ ok: true })),
+      ).resolves.toBe(true);
+      expect(navigateDone).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("retains earned Google completion across a later GitHub OAuth return", () => {
@@ -91,37 +95,7 @@ describe("install completion callback validation", () => {
     expect(readInstallCompletionProviders("setup")).toEqual(["google", "github"]);
     expect(readInstallCompletionProviders("different-install")).toEqual([]);
 
-    clearInstallCompletionUrl("setup");
+    clearInstallCompletionProviders("setup");
     expect(readInstallCompletionProviders("setup")).toEqual([]);
-  });
-
-  it("does not advertise callback support when the callback cannot survive OAuth", () => {
-    const callback =
-      "http://127.0.0.1:49152/.well-known/trusty-squire/install-complete/" + "d".repeat(48);
-    window.history.replaceState(
-      {},
-      "",
-      `/install?token=setup#ts_install_complete=${encodeURIComponent(callback)}`,
-    );
-    const setItem = vi.spyOn(window.sessionStorage, "setItem").mockImplementation(() => {
-      throw new DOMException("storage disabled", "SecurityError");
-    });
-    try {
-      expect(readInstallCompletionUrl("setup")).toBeNull();
-    } finally {
-      setItem.mockRestore();
-    }
-  });
-
-  it("acknowledges callback support once and retains it across OAuth returns", () => {
-    const callback =
-      "http://127.0.0.1:49152/.well-known/trusty-squire/install-complete/" + "c".repeat(48);
-    expect(installCompletionAcknowledgementUrl("setup", callback)).toBe(`${callback}/ack`);
-
-    window.history.replaceState({}, "", "/install?token=setup#ts_install_complete_ack=1");
-    expect(installCompletionAcknowledgementUrl("setup", callback)).toBeNull();
-
-    window.history.replaceState({}, "", "/install?token=setup&claim=1");
-    expect(installCompletionAcknowledgementUrl("setup", callback)).toBeNull();
   });
 });

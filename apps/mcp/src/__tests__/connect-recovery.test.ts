@@ -2,8 +2,6 @@
 //  #1 — `connect` must not short-circuit on a present-but-EXPIRED agent
 //       token (agent sessions have a 24h absolute cap). agentTokenStillValid
 //       probes the server; only an auth rejection counts as invalid.
-//  #3 — the confirm browser's completion is the account claim; the wizard's
-//       explicit Finish only closes the page early and must never gate it.
 
 import {
   existsSync,
@@ -18,11 +16,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import {
-  agentTokenStillValid,
-  claimHeartbeatMessage,
-  shouldCompleteInstallClaim,
-} from "../install/cli.js";
+import { agentTokenStillValid } from "../install/cli.js";
 import { decideProvisioned } from "../install/connect-report.js";
 import { clearBrowserProfile } from "../bot/login-state.js";
 import { profilePathIdentity, withProfileOperationGuard } from "../bot/profile.js";
@@ -114,7 +108,7 @@ describe("decideProvisioned (fast-path gate: write config without a re-claim)", 
   });
 });
 
-describe("shouldCompleteInstallClaim (claim plus Finish)", () => {
+describe("connect profile identity", () => {
   it("canonicalizes a symlinked profile before touching it", async () => {
     // connect resolves the target profile's realpath identity BEFORE any
     // browser or lease work, so a reset through the alias clears the same
@@ -138,37 +132,5 @@ describe("shouldCompleteInstallClaim (claim plus Finish)", () => {
     } finally {
       rmSync(base, { recursive: true, force: true });
     }
-  });
-
-  it("completes once the account is claimed and Finish has happened", () => {
-    // Finish reaches the gate either as the loopback callback or as the ceremony
-    // tab reaching /install/done, so a claim waits for the person to press Finish.
-    expect(shouldCompleteInstallClaim(false, false)).toBe(false);
-    expect(shouldCompleteInstallClaim(false, true)).toBe(false);
-    expect(shouldCompleteInstallClaim(true, false)).toBe(false);
-    expect(shouldCompleteInstallClaim(true, true)).toBe(true);
-  });
-
-  it("keeps the explicit GitHub refresh open after Google claims the account", () => {
-    expect(shouldCompleteInstallClaim(true, true, "github", ["google"])).toBe(false);
-    expect(shouldCompleteInstallClaim(true, false, "github", ["google", "github"])).toBe(false);
-    expect(shouldCompleteInstallClaim(true, true, "github", ["google", "github"])).toBe(true);
-  });
-});
-
-describe("claimHeartbeatMessage (ceremony phase copy)", () => {
-  it("asks for sign-in only before the install is claimed", () => {
-    expect(claimHeartbeatMessage(false)).toMatch(/finish signing in/i);
-  });
-
-  it("asks the person to press Finish once the account is claimed", () => {
-    const message = claimHeartbeatMessage(true);
-    expect(message).toMatch(/sign-in complete/i);
-    expect(message).toMatch(/press Finish/i);
-    expect(message).not.toMatch(/waiting.*signing in/i);
-  });
-
-  it("names the pending GitHub step after the account claim", () => {
-    expect(claimHeartbeatMessage(true, true)).toMatch(/finish the requested GitHub sign-in/i);
   });
 });

@@ -11,8 +11,9 @@
 //
 // State is derived from /v1/auth/whoami + /v1/mcp/install/<token>/state,
 // polled every 3s after each redirect-return. The bot's Chrome stays
-// on this page until the user clicks Finish, which navigates to
-// /install/done and sends the per-run loopback callback in the background.
+// on this page until the user clicks Finish, which records Finish on the
+// server (the broker reads it from /status and closes the window) and
+// navigates to /install/done.
 
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
@@ -20,12 +21,10 @@ import { ApiError, apiGet, apiPost } from "../lib/api";
 import { useQueryParam } from "../lib/use-query-param";
 import { Shield } from "../components/Shield";
 import {
-  clearInstallCompletionUrl,
+  clearInstallCompletionProviders,
   finishInstallCeremony,
-  installCompletionAcknowledgementUrl,
-  readInstallCompletionProviders,
-  readInstallCompletionUrl,
   recordInstallCompletionProvider,
+  readInstallCompletionProviders,
 } from "./completion";
 
 type Provider = "google" | "github";
@@ -87,23 +86,12 @@ export default function InstallPage() {
   const [installClaimed, setInstallClaimed] = useState(false);
   const [skippedGithub, setSkippedGithub] = useState(false);
   const [errorText, setErrorText] = useState("");
+  const [finishing, setFinishing] = useState(false);
+  const [finishError, setFinishError] = useState("");
   const [showAdvanced, setShowAdvanced] = useState(false);
-  const [completionUrl, setCompletionUrl] = useState<string | null>(null);
   const [preferences, setPreferences] = useState<InstallPreferences>(readStoredInstallPreferences);
   const registryEnabled = preferences.registry_enabled;
   const otpEnabled = preferences.consent_operator_inbox_otp;
-
-  useEffect(() => {
-    if (token === null) return;
-    const callbackUrl = readInstallCompletionUrl(token);
-    if (callbackUrl === null) return;
-    const acknowledgementUrl = installCompletionAcknowledgementUrl(token, callbackUrl);
-    if (acknowledgementUrl !== null) {
-      window.location.assign(acknowledgementUrl);
-      return;
-    }
-    void Promise.resolve().then(() => setCompletionUrl(callbackUrl));
-  }, [token]);
 
   // Returning from the OAuth round-trip — fire the claim if we
   // weren't already claimed. The wizard then continues to step 2.
@@ -115,22 +103,13 @@ export default function InstallPage() {
   // as done when the OAuth ran here this session, which is what actually
   // (re)establishes the bot's github.com login.
   const returnedFromGithub = useQueryParam("gh") === "1";
-  const [googleSessionFresh, setGoogleSessionFresh] = useState(false);
   const [githubSessionFresh, setGithubSessionFresh] = useState(false);
 
   useEffect(() => {
     if (token === null) return;
-    const completedProviders = readInstallCompletionProviders(token);
-    if (completedProviders.includes("google")) setGoogleSessionFresh(true);
-    if (completedProviders.includes("github")) setGithubSessionFresh(true);
+    if (readInstallCompletionProviders(token).includes("github"))
+      void Promise.resolve().then(() => setGithubSessionFresh(true));
   }, [token]);
-
-  useEffect(() => {
-    if (token !== null && returnedFromAuth && identities.includes("google")) {
-      recordInstallCompletionProvider(token, "google");
-      void Promise.resolve().then(() => setGoogleSessionFresh(true));
-    }
-  }, [token, returnedFromAuth, identities]);
 
   // Initial load: fetch state + whoami in parallel. A missing token is
   // handled at render (see below), so just bail here without touching state.
@@ -296,26 +275,24 @@ export default function InstallPage() {
     setSkippedGithub(true);
   }, []);
 
-  const finish = useCallback(() => {
-    const persistedProviders = token === null ? [] : readInstallCompletionProviders(token);
-    const completedProviders: Provider[] = [
-      ...(googleSessionFresh || persistedProviders.includes("google")
-        ? (["google"] as const)
-        : []),
-      ...(githubSessionFresh || persistedProviders.includes("github")
-        ? (["github"] as const)
-        : []),
-    ];
-    if (token !== null) {
-      try {
-        window.localStorage.removeItem(`ts-install-prefs:${token}`);
-      } catch {
-        /* ignore */
-      }
-      clearInstallCompletionUrl(token);
-    }
-    finishInstallCeremony(completionUrl, completedProviders, () => router.push("/install/done"));
-  }, [completionUrl, githubSessionFresh, googleSessionFresh, router, token]);
+  const finish = useCallback(async () => {
+    if (token === null || finishing) return;
+    setFinishing(true);
+    setFinishError("");
+    const recorded = await finishInstallCeremony(
+      token,
+      () => {
+        try {
+          window.localStorage.removeItem(`ts-install-prefs:${token}`);
+        } catch {}
+        clearInstallCompletionProviders(token);
+        router.push("/install/done");
+      },
+      apiPost,
+    );
+    if (!recorded) setFinishError("Couldn't finish setup. Please press Finish to retry.");
+    setFinishing(false);
+  }, [router, token, finishing]);
 
   // ---- Render branches -----------------------------------------------
 
@@ -459,8 +436,14 @@ export default function InstallPage() {
         </WizardStep>
       </ol>
 
+      {finishError && <p role="alert">{finishError}</p>}
       {canFinish && (
-        <button className="btn-primary wizard-finish" type="button" onClick={finish}>
+        <button
+          className="btn-primary wizard-finish"
+          type="button"
+          onClick={finish}
+          disabled={finishing}
+        >
           Finish
         </button>
       )}

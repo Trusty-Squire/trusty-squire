@@ -310,25 +310,41 @@ broker or touching sibling operator tabs.
 An unreadable snapshot or failed live check reports `unverified`; a rejected
 Google session enters the ordinary Google refresh ceremony on plain `connect`.
 
-An in-profile ceremony's successful Google claim establishes the Google
-session in the bot's Chrome. Connect reports it directly: a post-ceremony
-cookie snapshot can still be empty while the broker holds Chrome and must not
-turn that claim into a negative. No provider list is persisted in the account
-session file. A scoped GitHub refresh waits for its provider session during
-the ceremony and reports a missing requested session. The ceremony closes its
-tab and noVNC exposure after the claim and the person's Finish action. Finish
-reaches the CLI through the nonce-scoped callback or the broker observing
-`/install/done`; the wizard navigates there even if callback delivery fails.
+The broker daemon owns the ceremony end to end
+(`apps/mcp/src/bot/broker/ceremony.ts`): `connect` starts or joins a live
+ceremony and returns once the daemon holds the sign-in. Joining also registers
+the caller's host-agent config destination, including a custom
+`OPENCODE_CONFIG`, for the same claim. The daemon polls the install `/status`,
+retains its single-use claim, and retries session/config finalization after a
+failure until the pairing deadline. Configs joined during finalization are
+written before it completes. A successful in-profile Google claim establishes
+the Google session; a post-claim cookie snapshot can still be empty while the
+broker holds Chrome and must not override that evidence. No provider list is
+persisted in the account session file. The optional 2Captcha vault write is best-effort with a
+three-second timeout.
+
+The wizard records Finish through the same-origin
+`POST /v1/mcp/install/:code/finish`; it navigates to Connected only after an
+acknowledgement. Each request has a five-second timeout, with up to three
+attempts; a failure leaves a retryable Finish control. `/status` reports
+`finished` even after the claim's token has been delivered. The daemon closes
+the tab and noVNC exposure only after successful finalization and Finish; a
+scoped GitHub refresh also requires that provider session. The pairing deadline
+ends the ceremony regardless. Starts remain serialized with terminal cleanup,
+so a new exposure cannot compete with helpers that are still closing. No
+loopback callback and no tab observation take part. A broker started before
+this ceremony existed answers `ceremony` with `unknown_method`; `connect`
+reports that as an outdated service to restart.
 With `--skip-browser`, the claim happens in a different browser, so
 `probeProviderSessionsAfterCeremony` still checks the bot profile afterward.
 It may poll committed-cookie snapshots for up to 45 seconds, awaiting Google
 and any explicitly requested provider. An unreadable snapshot is unknown,
 not proof of sign-out.
 
-When an install does need the login ceremony, the ceremony opens the confirm
-page as a TAB in the shared broker browser — an ordinary `open` on a
-`connectBroker` connection, no drain, no second Chrome, and no touch of
-the broker SQLite lock. **There is no fallback browser.** The broker is the only
+When an install does need the login ceremony, the daemon opens the confirm
+page as a TAB in the shared broker browser — an ordinary operator session it
+opens for itself, no drain, no second Chrome, and no touch of the broker SQLite
+lock. **There is no fallback browser.** The broker is the only
 thing in the product that launches one: with no resident broker the installer first starts its user service (which requires
 no enrollment), whose browser hosts the tab. A host with a screen (`hasDisplay()` in
 `apps/mcp/src/bot/display-env.ts`) launches that Chrome on the machine
@@ -338,16 +354,18 @@ user service) cannot see the GUI session's display and parks its Chrome on a
 private Xvfb. A later connect from a screened terminal keeps the noVNC
 exposure for that Chrome rather than refusing — nothing here can move a live
 Chrome between X displays, and the profile that Chrome holds is the one the
-ceremony needs. Headless hosts likewise use the broker's private Xvfb and
-connect exposes it over noVNC for the ceremony (same x11vnc + websockify +
-tunnel stack as the standalone remote login, reaped at the ceremony's lease
-boundary) — a tab no human can see is a tab no human can complete.
+ceremony needs. Headless hosts likewise use the broker's private Xvfb and the
+daemon exposes it over noVNC for the ceremony (the x11vnc + websockify + tunnel
+helpers are the daemon's own children, reaped when the ceremony ends);
+`connect` prints the URL — a tab no human can see is a tab no human can
+complete.
 The ceremony lands where the PERSON RUNNING CONNECT can see it, and the
 broker's own environment never decides that: its Chrome may sit on the
 machine's screen while connect runs over SSH, or on a private Xvfb while
 connect runs at the desk. The tab counts as already visible only when the
 holder is on the machine's own screen AND this connect has one (`hasDisplay()`
-in `apps/mcp/src/bot/display-env.ts`); every other named display — the
+in `apps/mcp/src/bot/display-env.ts`, evaluated by `connect` and sent as
+`callerHasDisplay`); every other named display — the
 broker's Xvfb, or the host's screen seen from a screenless connect — is
 exposed over noVNC. The noVNC URL therefore shows whatever that display is
 carrying, the machine's own desktop included; the disclosure label says so.
@@ -362,8 +380,8 @@ natively (macOS, Windows), which has no X display to discover and no rig it
 could be hiding on. A failed noVNC exposure stops it immediately too.
 Cleanup removes the ceremony's helpers and tab, preserving the broker's browser
 and display even on setup failure.
-`shared-ceremony-exposure.test.ts` and `broker-connect-attach.test.ts` pin these
-contracts.
+`shared-ceremony-exposure.test.ts`, `broker-ceremony.test.ts`, and
+`broker-connect-attach.test.ts` pin these contracts.
 
 The ceremony adopts the browser's current proxy identity instead of requesting
 a conflicting bare browser. Its `ceremony` open enters the scoped admission
@@ -377,14 +395,13 @@ the ceremony runs (bounded by its deadline), anyone holding the URL can see —
 and, x11vnc not being view-only, drive — every tab the shared browser is
 running, including sibling operator sessions' tabs. The window is the
 ceremony deadline, and the URL is single-use: a fresh VNC password is minted
-per ceremony and the quick tunnel is torn down at the lease boundary. That
-window is held by the exposure helpers themselves, not by whoever is waiting
-on the sign-in: `registerRemoteLoginRigCleanup` arms a rig-owned lifetime —
-`LOGIN_RIG_OWNED_LIFETIME_MS` in `apps/mcp/src/pairing-ttl.ts`, the
-pairing-token window plus a short grace, a constant rather than an
-environment knob — when the rig is registered, so a connect that stops
-polling, wedges, or loses the process that spawned it cannot leave the display
-published past that bound. The
+per ceremony and the quick tunnel is torn down when the ceremony ends. Beyond
+the daemon's own pairing deadline, `registerRemoteLoginRigCleanup` arms a
+rig-owned lifetime — `LOGIN_RIG_OWNED_LIFETIME_MS` in
+`apps/mcp/src/pairing-ttl.ts`, the pairing-token window plus a short grace, a
+constant rather than an environment knob — when the rig is registered, so the
+display is never published past that bound; it reaps the helpers and leaves the
+daemon running. The
 `isOwnedLoginRigXauthority` check keeps real user desktops out of scope —
 this paragraph covers the broker's own rig only. This is a decision, not an
 oversight: do not narrow it without the maintainer's word.

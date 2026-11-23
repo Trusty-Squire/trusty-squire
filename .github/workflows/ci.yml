@@ -87,6 +87,7 @@ jobs:
           while IFS= read -r path; do
             case "$path" in
               apps/api/*)
+                mcp=true
                 api=true
                 ;;
               apps/mcp/*)
@@ -99,6 +100,7 @@ jobs:
                 registry=true
                 ;;
               apps/web/*)
+                mcp=true
                 web=true
                 ;;
               packages/skill-schema/*)
@@ -361,7 +363,8 @@ jobs:
       # REQUIRED_BEHAVIOR_FILES minus REAL_BROWSER_FILES), so behavior
       # breakage fails the PR before merge. The real-browser tests (tests that
       # launch Chromium/Chrome — see vitest.tiers.ts REAL_BROWSER_FILES) do NOT
-      # run on PRs: they are slow and flaky. They run post-merge in
+      # run on PRs as a tier; the production Finish proof runs separately below.
+      # The full tier runs post-merge in
       # mcp-slow-tests.yml; a stable/`latest` promotion in release.yml requires
       # that workflow run to have succeeded for the promoted SHA.
       # Only genuinely slow non-behavioral files (corpus evals, packaging
@@ -411,3 +414,10 @@ jobs:
             fi
             echo "::endgroup::"
           done
+
+      - name: Install production sign-in display helpers
+        if: needs.secret-scan.outputs.mcp == 'true'
+        run: sudo apt-get update && sudo apt-get install -y xvfb x11vnc novnc websockify
+      - name: Prove production install Finish in Chrome
+        if: needs.secret-scan.outputs.mcp == 'true'
+        run: pnpm --filter '@trusty-squire/mcp' exec vitest run src/bot/__tests__/connect-finish-real-chrome.test.ts

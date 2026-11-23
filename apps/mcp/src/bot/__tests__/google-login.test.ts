@@ -24,22 +24,17 @@ import {
 } from "../profile.js";
 import { OPERATOR_BROWSER_MARKER_ENV } from "../browser-launch-marker.js";
 import {
-  installDonePage,
-  openInstallConfirmInBotChrome,
   classifyGoogleAuthState,
   extractGoogleHumanChallenge,
-  checkLoginStatusWithin,
   detectActiveProviderSessions,
   extractGoogleAccountEmail,
   extractGoogleNumberMatch,
   extractOAuthScopes,
   hasDisplay,
-  pollUntil,
   scopesAreBasic,
   scrapeGoogleScopePhrases,
   launchPersistentLoginContext,
   type PersistentLauncher,
-  type RunInBotChromeOpts,
 } from "../google-login.js";
 
 describe("canonical profile operation guard", () => {
@@ -99,64 +94,6 @@ describe("interactive login display detection", () => {
   it("rejects Linux sessions without a display", () => {
     expect(hasDisplay("linux", {})).toBe(false);
     expect(hasDisplay("linux", { DISPLAY: "  " })).toBe(false);
-  });
-});
-
-describe("install completion callback", () => {
-  it("reports the explicit Finish callback as wizardCompleted rather than reading profile files", async () => {
-    const pollUntilClaimed = vi.fn(
-      async () => ({ status: "claimed", provider: "google" }) as const,
-    );
-    const runChrome = vi.fn(async (opts: RunInBotChromeOpts) => {
-      const callback = new URLSearchParams(new URL(opts.url).hash.slice(1)).get(
-        "ts_install_complete",
-      );
-      expect(callback).not.toBeNull();
-      await fetch(`${callback!}?provider=google`, { redirect: "manual" });
-      await expect(opts.pollUntilDone(false)).resolves.toBe(true);
-      return { status: "satisfied" as const, closeState: "closed" as const };
-    });
-
-    await expect(
-      openInstallConfirmInBotChrome(
-        {
-          confirmUrl: "https://example.test/install",
-          pollUntilClaimed,
-          profileDir: "/unused/profile",
-          deadline: Date.now() + 60_000,
-        },
-        runChrome,
-      ),
-    ).resolves.toEqual({ status: "claimed" });
-    expect(pollUntilClaimed).toHaveBeenCalledWith(true);
-  });
-
-  it("counts the ceremony tab reaching /install/done as Finish when the callback never arrives", async () => {
-    // The page can lose its loopback callback across the Google sign-in round
-    // trip; its Finish then only navigates to /install/done. Before this, the
-    // claim waited on a callback that never came and connect hung.
-    const pollUntilClaimed = vi.fn(
-      async (wizardCompleted: boolean) =>
-        wizardCompleted ? ({ status: "claimed", provider: "google" } as const) : ("pending" as const),
-    );
-    const runChrome = vi.fn(async (opts: RunInBotChromeOpts) => {
-      await expect(opts.pollUntilDone(false)).resolves.toBe(false);
-      await expect(opts.pollUntilDone(true)).resolves.toBe(true);
-      return { status: "satisfied" as const, closeState: "closed" as const };
-    });
-
-    await expect(
-      openInstallConfirmInBotChrome(
-        {
-          confirmUrl: "https://example.test/install",
-          pollUntilClaimed,
-          profileDir: "/unused/profile",
-          deadline: Date.now() + 60_000,
-        },
-        runChrome,
-      ),
-    ).resolves.toEqual({ status: "claimed" });
-    expect(pollUntilClaimed).toHaveBeenLastCalledWith(true);
   });
 });
 
@@ -412,113 +349,6 @@ describe("login browser lifecycle guards", () => {
     ).rejects.toThrow(
       "another Trusty Squire session is already using the browser — close it first",
     );
-  });
-});
-
-describe("pollUntil phase-aware heartbeat", () => {
-  it("resolves a heartbeat callback lazily after the wait phase changes", async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-07-14T20:00:00.000Z"));
-    let message = "waiting for sign-in";
-    let done = false;
-    const stderr = vi.spyOn(console, "error").mockImplementation(() => undefined);
-
-    const waiting = pollUntil(
-      Date.now() + 60_000,
-      async () => done,
-      () => message,
-    );
-
-    await vi.advanceTimersByTimeAsync(21_000);
-    expect(stderr.mock.calls.at(-1)?.[0]).toContain("waiting for sign-in");
-
-    message = "sign-in complete — click Finish";
-    await vi.advanceTimersByTimeAsync(21_000);
-    expect(stderr.mock.calls.at(-1)?.[0]).toContain("sign-in complete — click Finish");
-
-    done = true;
-    await vi.advanceTimersByTimeAsync(3_000);
-    await expect(waiting).resolves.toBe(true);
-  });
-
-  it("prints a fixed heartbeat string without invoking callback logic", async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-07-14T20:00:00.000Z"));
-    let done = false;
-    const stderr = vi.spyOn(console, "error").mockImplementation(() => undefined);
-
-    const waiting = pollUntil(Date.now() + 60_000, async () => done, "fixed install heartbeat");
-
-    await vi.advanceTimersByTimeAsync(21_000);
-    expect(stderr.mock.calls.at(-1)?.[0]).toContain("fixed install heartbeat");
-
-    done = true;
-    await vi.advanceTimersByTimeAsync(3_000);
-    await expect(waiting).resolves.toBe(true);
-  });
-
-  it("uses the default sign-in heartbeat when no override is provided", async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-07-14T20:00:00.000Z"));
-    let done = false;
-    const stderr = vi.spyOn(console, "error").mockImplementation(() => undefined);
-
-    const waiting = pollUntil(Date.now() + 60_000, async () => done);
-
-    await vi.advanceTimersByTimeAsync(21_000);
-    expect(stderr.mock.calls.at(-1)?.[0]).toContain("Still waiting for you to finish signing in");
-
-    done = true;
-    await vi.advanceTimersByTimeAsync(3_000);
-    await expect(waiting).resolves.toBe(true);
-  });
-
-  it("returns false when the deadline expires", async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-07-14T20:00:00.000Z"));
-
-    const waiting = pollUntil(Date.now() + 5_000, async () => false);
-
-    await vi.advanceTimersByTimeAsync(6_000);
-    await expect(waiting).resolves.toBe(false);
-  });
-
-  it("fails loudly when the visible plain login browser has closed", async () => {
-    await expect(
-      pollUntil(
-        Date.now() + 60_000,
-        async () => false,
-        "waiting for sign-in",
-        () => {
-          throw new Error("login browser closed");
-        },
-      ),
-    ).rejects.toThrow("login browser closed");
-  });
-
-  it("fails instead of waiting forever when a login status check hangs", async () => {
-    vi.useFakeTimers();
-    const waiting = pollUntil(Date.now() + 60_000, () => new Promise<boolean>(() => undefined));
-    const rejected = expect(waiting).rejects.toThrow("login status check stopped responding");
-
-    await vi.advanceTimersByTimeAsync(15_000);
-
-    await rejected;
-  });
-
-  it("applies the same timeout boundary to a preflight-style status check", async () => {
-    vi.useFakeTimers();
-    const waiting = checkLoginStatusWithin(
-      Date.now() + 60_000,
-      () => new Promise<boolean>(() => undefined),
-      undefined,
-      100,
-    );
-    const rejected = expect(waiting).rejects.toThrow("login status check stopped responding");
-
-    await vi.advanceTimersByTimeAsync(100);
-
-    await rejected;
   });
 });
 
@@ -1053,15 +883,5 @@ describe("scopesAreBasic (T7)", () => {
 
   it("rejects an empty scope list — absence is not confirmation", () => {
     expect(scopesAreBasic([])).toBe(false);
-  });
-});
-
-describe("installDonePage", () => {
-  it("recognizes the wizard's Finish landing page and nothing else", () => {
-    expect(installDonePage("https://trustysquire.ai/install/done")).toBe(true);
-    expect(installDonePage("https://trustysquire.ai/install/done/")).toBe(true);
-    expect(installDonePage("https://trustysquire.ai/install?token=abc&claim=1")).toBe(false);
-    expect(installDonePage("http://127.0.0.1:46165/.well-known/trusty-squire/install-complete/x")).toBe(false);
-    expect(installDonePage("not a url")).toBe(false);
   });
 });

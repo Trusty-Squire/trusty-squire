@@ -23,6 +23,7 @@ export class PrismaPairingTokenStore implements PairingTokenStore {
         machine_token: record.machine_token,
         registry_enabled: record.registry_enabled,
         consent_operator_inbox_otp: record.consent_operator_inbox_otp,
+        finished_at: record.finished_at,
       },
     });
   }
@@ -80,6 +81,19 @@ export class PrismaPairingTokenStore implements PairingTokenStore {
     return raw;
   }
 
+  async markFinished(token: string, now: Date): Promise<boolean> {
+    // Only the first Finish sets the time; a repeated press still succeeds.
+    await this.prisma.pairingToken.updateMany({
+      where: { token, status: { in: ["claimed", "delivered"] }, finished_at: null } as Record<
+        string,
+        unknown
+      >,
+      data: { finished_at: now },
+    });
+    const row = await this.prisma.pairingToken.findUnique({ where: { token } });
+    return row !== null && row.finished_at !== null;
+  }
+
   // Background cleanup. Run from the retention cron; deletes rows
   // older than 1h regardless of status. (Delivered + expired records
   // have no further use; pending past expiry is already dead.)
@@ -102,6 +116,7 @@ export class PrismaPairingTokenStore implements PairingTokenStore {
     machine_token: string | null;
     registry_enabled?: boolean | null;
     consent_operator_inbox_otp?: boolean | null;
+    finished_at?: Date | null;
   }): PairingTokenRecord {
     return {
       token: row.token,
@@ -114,6 +129,7 @@ export class PrismaPairingTokenStore implements PairingTokenStore {
       machine_token: row.machine_token,
       registry_enabled: row.registry_enabled ?? null,
       consent_operator_inbox_otp: row.consent_operator_inbox_otp ?? null,
+      finished_at: row.finished_at ?? null,
     };
   }
 }

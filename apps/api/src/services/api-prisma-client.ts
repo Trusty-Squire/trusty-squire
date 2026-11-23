@@ -348,6 +348,9 @@ export interface ApiPrismaClient {
       agent_session_raw_token: string | null;
       account_id: string | null;
       machine_token: string | null;
+      registry_enabled?: boolean | null;
+      consent_operator_inbox_otp?: boolean | null;
+      finished_at?: Date | null;
     } | null>;
     update(args: { where: { token: string }; data: Record<string, unknown> }): Promise<{
       token: string;

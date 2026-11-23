@@ -106,6 +106,10 @@ export type ConnectOutcome =
   // the browser's placement becomes known, so a caller holds both live
   // addresses while they still reach something.
   | { kind: "sign_in_open"; confirm_url: string }
+  // The broker daemon now holds the sign-in and finishes it on its own; this
+  // run ends here. The link stays open until the person presses Finish or the
+  // pairing window closes.
+  | { kind: "sign_in_handed_off"; confirm_url: string }
   | { kind: "provisioned"; account_id: string; providers: OAuthProviderId[] }
   | { kind: "unverified"; account_id: string | null }
   | {
@@ -174,7 +178,9 @@ export function buildConnectReport(input: ConnectReportInput): ConnectReport {
   // the browser serving this run, not a competing holder of the profile.
   // Keep operation-lease holders visible: they can still block other work.
   if (
-    (input.outcome.kind === "sign_in_open" || input.outcome.kind === "ceremony_complete") &&
+    (input.outcome.kind === "sign_in_open" ||
+      input.outcome.kind === "sign_in_handed_off" ||
+      input.outcome.kind === "ceremony_complete") &&
     (input.browser_location.kind === "virtual" || input.browser_location.kind === "host_screen") &&
     input.holder.kind === "other" &&
     input.holder.code === "singleton_lock"
@@ -195,6 +201,8 @@ export function buildConnectReport(input: ConnectReportInput): ConnectReport {
       };
     case "sign_in_open":
       return signInOutstanding(input, outcome.confirm_url, false);
+    case "sign_in_handed_off":
+      return signInOutstanding(input, outcome.confirm_url, true);
     case "provisioned":
       // The no-ceremony fast path reads the profile's cookie store and opens
       // nothing, so it cannot claim the session is live — the human copy on

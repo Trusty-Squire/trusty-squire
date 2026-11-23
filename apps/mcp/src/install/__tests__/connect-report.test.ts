@@ -201,6 +201,7 @@ describe("buildConnectReport", () => {
       },
       { kind: "profile_busy" },
       { kind: "install_unclaimed", confirm_url: "https://example.test/in" },
+      { kind: "sign_in_handed_off", confirm_url: "https://example.test/in" },
       { kind: "install_expired" },
       { kind: "cookie_clear_failed" },
       { kind: "run_failed" },
@@ -482,6 +483,27 @@ describe("the non-terminal sign-in line", () => {
     expect(report.state).toBe("needs-sign-in");
     expect(report.sign_in_url).toBe(url);
     expect(report.terminal).toBe(false);
+  });
+
+  // connect hands the sign-in to the broker daemon and exits: the link is still
+  // live, the window is placed, and this line is the run's last word.
+  it("ends a handed-off sign-in as a terminal needs-sign-in carrying the window", () => {
+    const url = "https://trustysquire.ai/install?token=live";
+    const browser_location = { kind: "virtual" as const, url: "https://example.test/novnc" };
+    const report = classify({
+      outcome: { kind: "sign_in_handed_off", confirm_url: url },
+      holder: otherHolder,
+      browser_location,
+    });
+    expect(report).toMatchObject({
+      state: "needs-sign-in",
+      terminal: true,
+      sign_in_url: url,
+      reason: null,
+      browser_location,
+    });
+    // The broker's own Chrome serving this sign-in is not a competing holder.
+    expect(report.holder).toEqual(noneHolder);
   });
 
   it("marks every settled outcome terminal", () => {
