@@ -748,8 +748,7 @@ async function copyButtonBesideRevealedKey(
       );
       // Each holder's nearest Copy control: the smallest ancestor that has one,
       // then the closest on screen.
-      const nearest: Array<{ distance: number; button: Element; token: string }> =
-        [];
+      const nearest: Array<{ distance: number; button: Element; token: string }> = [];
       for (const holder of holders) {
         const at = holder.element.getBoundingClientRect();
         let scope: Element | null = holder.element;
@@ -789,26 +788,57 @@ async function copyButtonBesideRevealedKey(
   return buttonIndex === null ? null : page.locator('button, [role="button"]').nth(buttonIndex);
 }
 
-export async function isRevealedKeyCopyTarget(page: Page, ref: string): Promise<boolean> {
-  const button = await copyButtonBesideRevealedKey(page, false);
-  return button === null
-    ? false
-    : await button.evaluate((element, ref) => {
-        const registry = (
-          window as Window & { __tsDriveRegistry?: { nodes: Map<string, Element> } }
-        ).__tsDriveRegistry;
-        return registry?.nodes.get(ref) === element;
-      }, ref);
+type CopySourceWindow = Window & {
+  __tsCopySource?: Element;
+  __tsDriveRegistry?: { nodes: Map<string, Element> };
+};
+
+/** The Copy control whose click last wrote the clipboard on this document,
+ * while it is still shown. Its label may have changed since ("Copy key" →
+ * "Copied"), so a retry must not rediscover it by label. */
+async function rememberedCopySource(page: Page): Promise<Locator | null> {
+  const index: unknown = await page
+    .evaluate(() => {
+      const source = (window as CopySourceWindow).__tsCopySource;
+      if (source === undefined || !source.isConnected) return -1;
+      const rect = source.getBoundingClientRect();
+      if (rect.width <= 2 || rect.height <= 2) return -1;
+      return Array.from(document.querySelectorAll('button, [role="button"]')).indexOf(source);
+    })
+    .catch(() => -1);
+  return typeof index === "number" && index >= 0
+    ? page.locator('button, [role="button"]').nth(index)
+    : null;
 }
 
-/** A created-key dialog may render its readable value outside DOM text (for
- * example in generated content) while keeping a stale mask in the DOM. Its
- * adjacent Copy control is then the page's authoritative value source. */
-async function copyCredentialFromDialog(
-  page: Page | undefined,
-  browser: Session["browser"],
-): Promise<string | null> {
-  if (page === undefined) return null;
+/** Whether a click on drive ref `ref` dispatches the page's Copy source: the
+ * remembered or cue-matched Copy control, or the control nearest a shown key
+ * whatever its label (Salin, Tersalin, Copied, an icon). Skips the occlusion
+ * snapshot, which would re-register drive refs just before the act. */
+export async function isCopySourceClick(page: Page, ref: string): Promise<boolean> {
+  for (const find of [
+    () => findCopySource(page, false),
+    () => copyButtonBesideRevealedKey(page, false),
+  ]) {
+    const source = await find().catch(() => null);
+    if (source === null) continue;
+    const same = await source
+      .evaluate(
+        (element, ref) =>
+          (window as CopySourceWindow).__tsDriveRegistry?.nodes.get(ref) === element,
+        ref,
+      )
+      .catch(() => false);
+    if (same) return true;
+  }
+  return false;
+}
+
+/** The page's Copy control for a revealed key: the remembered source, then one
+ * in a modal or covering layer, then one beside a key shown inline. */
+async function findCopySource(page: Page, withSnapshot = true): Promise<Locator | null> {
+  const remembered = await rememberedCopySource(page);
+  if (remembered !== null) return remembered;
   const modalSelector = 'dialog[open], [role="dialog"], [role="alertdialog"], [aria-modal="true"]';
   const target = await page.evaluate((copyCue) => {
     const cue = new RegExp(copyCue, "iu");
@@ -925,7 +955,7 @@ async function copyCredentialFromDialog(
     }, COPY_CUE_SOURCE);
     if (buttonIndex !== null) copyButton = page.locator('button, [role="button"]').nth(buttonIndex);
   }
-  if (copyButton === null) {
+  if (copyButton === null && withSnapshot) {
     // The drive snapshot already hit-tests controls against covering layers.
     // Use that same evidence for a visually modal surface with no dialog role.
     const snapshot = await captureFrameSnapshot(page, [], 0);
@@ -985,7 +1015,18 @@ async function copyCredentialFromDialog(
   }
   // Some providers close the creation dialog and show the new key inline on
   // the list page (Kenari); its Copy control then sits beside the key itself.
-  copyButton ??= await copyButtonBesideRevealedKey(page);
+  return copyButton ?? (await copyButtonBesideRevealedKey(page));
+}
+
+/** A created-key dialog may render its readable value outside DOM text (for
+ * example in generated content) while keeping a stale mask in the DOM. Its
+ * adjacent Copy control is then the page's authoritative value source. */
+async function copyCredentialFromDialog(
+  page: Page | undefined,
+  browser: Session["browser"],
+): Promise<string | null> {
+  if (page === undefined) return null;
+  const copyButton = await findCopySource(page);
   if (copyButton === null) return null;
   // Empty the clipboard first: a value present after the click was written by
   // this click, even when it equals what an earlier Copy click left there.
@@ -1014,6 +1055,12 @@ async function copyCredentialFromDialog(
     if (cleared && before.length > 0) await writeClipboard(before);
     return null;
   }
+  // This control wrote the clipboard: a retry after a failed store reuses it.
+  await copyButton
+    .evaluate((element) => {
+      (window as CopySourceWindow).__tsCopySource = element;
+    })
+    .catch(() => undefined);
   return copied;
 }
 

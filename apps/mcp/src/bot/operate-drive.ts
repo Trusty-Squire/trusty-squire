@@ -122,7 +122,7 @@ import type { CaptchaSolveResult } from "./captcha.js";
 import { findCredentialTokens, isMaskedDisplay } from "./credential-shape.js";
 import {
   extractCredentials,
-  isRevealedKeyCopyTarget,
+  isCopySourceClick,
   storableCredentials,
   type ExtractResult,
 } from "./capture/capture.js";
@@ -7261,12 +7261,13 @@ async function driveLoop(input: {
       decision.action.kind === "click" || decision.action.kind === "oauth_login"
         ? findRow(rows, decision.actionKey, observation.url)
         : undefined;
+    // A Copy dispatch is identified by the control's place beside the key, not
+    // its label: Kenari's "Salin"/"Tersalin" and Zro's "Copied" both count.
     const copyDispatched =
       decision.action.kind === "click" &&
       clickedBefore !== undefined &&
-      ((isRevealOrCopyRow(clickedBefore) && /^copy\b/i.test(readableLabel(clickedBefore))) ||
-        (session.browser.page !== null &&
-          (await isRevealedKeyCopyTarget(session.browser.page, decision.actionKey))));
+      session.browser.page !== null &&
+      (await isCopySourceClick(session.browser.page, decision.actionKey));
     if (clickedBefore !== undefined && (isRevealOrCopyRow(clickedBefore) || copyDispatched)) {
       drive.pendingRevealScan = true;
     }

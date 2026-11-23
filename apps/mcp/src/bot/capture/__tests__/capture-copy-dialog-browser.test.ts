@@ -176,28 +176,31 @@ it("copies a created key from a dialog whose Copy control is labelled in Spanish
   expect(result.credentials).toEqual({ api_key: key });
 });
 
-it.each([false, true])("refuses competing unmasked keys with unequal wrappers: %s", async (wrapped) => {
-  const keys = [
-    "kn-A1sD2fG3hJ4kL5zX6cV7bN8mQ9wE0rT1yU2iO3pA4sD5fG",
-    "kn-Z9xC8vB7nM6aS5dF4gH3jK2lQ1wE0rT9yU8iO7pL6kJ5hG",
-  ];
-  await context.clearPermissions();
-  await page.evaluate(() => navigator.clipboard.writeText("")).catch(() => undefined);
-  const html = `<!doctype html><h1>API Keys</h1><ul>${keys
-    .map(
-      (key, index) =>
-        `<li>${wrapped && index === 0 ? "<span>" : ""}<code>${key}</code>${wrapped && index === 0 ? "</span>" : ""}<button type="button" data-index="${index}">Copy</button></li>`,
-    )
-    .join("")}</ul>
+it.each([false, true])(
+  "refuses competing unmasked keys with unequal wrappers: %s",
+  async (wrapped) => {
+    const keys = [
+      "kn-A1sD2fG3hJ4kL5zX6cV7bN8mQ9wE0rT1yU2iO3pA4sD5fG",
+      "kn-Z9xC8vB7nM6aS5dF4gH3jK2lQ1wE0rT9yU8iO7pL6kJ5hG",
+    ];
+    await context.clearPermissions();
+    await page.evaluate(() => navigator.clipboard.writeText("")).catch(() => undefined);
+    const html = `<!doctype html><h1>API Keys</h1><ul>${keys
+      .map(
+        (key, index) =>
+          `<li>${wrapped && index === 0 ? "<span>" : ""}<code>${key}</code>${wrapped && index === 0 ? "</span>" : ""}<button type="button" data-index="${index}">Copy</button></li>`,
+      )
+      .join("")}</ul>
   <script>document.querySelectorAll('[data-index]').forEach((button) =>
     button.addEventListener('click', () =>
       navigator.clipboard.writeText(button.previousElementSibling.textContent)));</script>`;
-  await page.route("**/*", (route) => route.fulfill({ contentType: "text/html", body: html }));
-  await page.goto("http://127.0.0.1/keys");
+    await page.route("**/*", (route) => route.fulfill({ contentType: "text/html", body: html }));
+    await page.goto("http://127.0.0.1/keys");
 
-  const result = await extractCredentials("fixture-session");
-  expect(result.credentials).toEqual({});
-});
+    const result = await extractCredentials("fixture-session");
+    expect(result.credentials).toEqual({});
+  },
+);
 
 it.each([false, true])("vaults a Zro key with an extra wrapper: %s", async (wrapped) => {
   // Zro 23 Nov (run after Grunt #182, trace rows 9-11): Create closed the form
@@ -232,4 +235,9 @@ it.each([false, true])("vaults a Zro key with an extra wrapper: %s", async (wrap
   const result = await extractCredentials("fixture-session");
   expect(result.credentials).toEqual({ api_key: key });
   expect(await page.locator("#copy-key").textContent()).toBe("Copied");
+  // A retry after a failed store finds the same control under its new label;
+  // "Copied" beside "Copy setup" no longer names a key on its own.
+  await page.evaluate(() => navigator.clipboard.writeText(""));
+  const retried = await extractCredentials("fixture-session");
+  expect(retried.credentials).toEqual({ api_key: key });
 });
