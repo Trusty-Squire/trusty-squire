@@ -245,6 +245,44 @@ it("stores a Kenari key shown inline after its dialog closed, through its Salin 
   });
 }, 30_000);
 
+it.each(["Salin", "Tersalin", "⧉"])("retries failed storage after a model click on %s", async (label) => {
+  const key = "kn-Q7wE3rT9yU2iO5pA8sD1fG4hJ6kL0zX3cV7bN9mQ2wE5rT8y";
+  const html = `<!doctype html><h1>API Keys</h1><div><code>${key}</code>
+    <button id="copy">${label}</button></div>
+    <script>document.getElementById('copy').addEventListener('click', () =>
+      navigator.clipboard.writeText('${key}'));</script>`;
+  await withPage(html, async (sessionId) => {
+    sessionForCall(sessionId)!.drive = emptyDriveState(goal, {});
+    const persistCredentials = vi.fn<NonNullable<DriveCallContext["persistCredentials"]>>()
+      .mockResolvedValueOnce(null)
+      .mockResolvedValue({ reference: "vault://retry", service: "kenari", label: undefined });
+    const askJev = vi.fn<DriveDependencies["askJev"]>(async (_api, _state, questions) => ({
+      attempts: 1,
+      elapsedMs: 1,
+      result: {
+        answers: Object.fromEntries(Object.entries(questions).flatMap(([name, question]) => {
+          if (question.type !== "choice") return [];
+          const keys = Object.keys(question.criteria);
+          const choice = name === "operation" ? "CLICK" : keys[0]!;
+          return [[name, { choice, confidence: 1,
+            probabilities: Object.fromEntries(keys.map((key) => [key, key === choice ? 1 : 0])),
+          }]];
+        })),
+      },
+    }));
+    const result = await runOperateDrive(
+      { session_id: sessionId, goal, max_steps: 3, max_seconds: 10 },
+      api, { persistCredentials }, dependencies(askJev),
+    );
+    expect(askJev).toHaveBeenCalled();
+    expect(result.status).toBe("complete");
+    expect(persistCredentials).toHaveBeenCalledTimes(2);
+    expect(persistCredentials).toHaveBeenLastCalledWith(
+      expect.objectContaining({ credentials: { api_key: key } }),
+    );
+  });
+}, 30_000);
+
 it("reports a submitted form's inline error text to the model and the trace", async () => {
   // Zro 23 Nov (trace rows 24-26): Create left its dialog open and created no
   // key; the trace carried interactive rows only, so nothing said why. The
@@ -254,7 +292,7 @@ it("reports a submitted form's inline error text to the model and the trace", as
     <div style="font-size:6px">${filler.map((line) => `<span>${line} </span>`).join("")}</div></main>
     <div role="dialog" aria-label="Create API key" style="position:fixed;top:20px;left:20px;background:#fff">
       <form id="create"><label>Alias <input name="alias" value="grunt"></label>
-        <p id="error"></p><button type="submit">Create</button></form></div>
+        <button type="submit">Create</button></form><p id="error"></p></div>
     <script>document.getElementById('create').addEventListener('submit', (event) => {
       event.preventDefault();
       document.getElementById('error').textContent = 'An active key already uses the alias grunt.';

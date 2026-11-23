@@ -120,7 +120,12 @@ import {
 } from "./captcha.js";
 import type { CaptchaSolveResult } from "./captcha.js";
 import { findCredentialTokens, isMaskedDisplay } from "./credential-shape.js";
-import { extractCredentials, storableCredentials, type ExtractResult } from "./capture/capture.js";
+import {
+  extractCredentials,
+  isRevealedKeyCopyTarget,
+  storableCredentials,
+  type ExtractResult,
+} from "./capture/capture.js";
 import {
   inventPassword,
   parsePasswordRequirements,
@@ -3625,9 +3630,9 @@ function inPageSubmittedFormText(arg: { ref: string }): string | null {
     .__tsDriveRegistry;
   const control = registry?.nodes.get(arg.ref);
   if (control === undefined || !control.isConnected) return null;
-  let form = control.closest(
-    'form, dialog, [role="dialog"], [role="alertdialog"], [aria-modal="true"]',
-  );
+  let form =
+    control.closest('dialog, [role="dialog"], [role="alertdialog"], [aria-modal="true"]') ??
+    control.closest("form");
   for (
     let ancestor = control.parentElement, depth = 0;
     form === null && ancestor !== null && depth < 6;
@@ -7256,7 +7261,13 @@ async function driveLoop(input: {
       decision.action.kind === "click" || decision.action.kind === "oauth_login"
         ? findRow(rows, decision.actionKey, observation.url)
         : undefined;
-    if (clickedBefore !== undefined && isRevealOrCopyRow(clickedBefore)) {
+    const copyDispatched =
+      decision.action.kind === "click" &&
+      clickedBefore !== undefined &&
+      ((isRevealOrCopyRow(clickedBefore) && /^copy\b/i.test(readableLabel(clickedBefore))) ||
+        (session.browser.page !== null &&
+          (await isRevealedKeyCopyTarget(session.browser.page, decision.actionKey))));
+    if (clickedBefore !== undefined && (isRevealOrCopyRow(clickedBefore) || copyDispatched)) {
       drive.pendingRevealScan = true;
     }
     const formTextBeforeClick =
@@ -7309,13 +7320,9 @@ async function driveLoop(input: {
     };
     const oauthPageBefore = decision.action.kind === "oauth_login" ? session.browser.page : null;
     if (oauthPageBefore !== null) session.browser.armOpenedTabAdoption();
-    drive.pendingCopyCapture =
-      decision.action.kind === "click" &&
-      clickedBefore !== undefined &&
-      isRevealOrCopyRow(clickedBefore) &&
-      /^copy\b/i.test(readableLabel(clickedBefore))
-        ? { url: urlBeforeClick, documentEpoch: beforeEpoch }
-        : null;
+    drive.pendingCopyCapture = copyDispatched
+      ? { url: urlBeforeClick, documentEpoch: beforeEpoch }
+      : null;
     let acted: DriveActResult;
     try {
       acted = await withinOAuthCallerDeadline(
@@ -8083,7 +8090,7 @@ async function driveLoop(input: {
         drive.filledRefs,
         observation.semantic?.headings ?? [],
       );
-      if (!revealedKeyCaptureAttempts.has(captureKey)) {
+      if (drive.pendingCopyCapture != null || !revealedKeyCaptureAttempts.has(captureKey)) {
         revealedKeyCaptureAttempts.add(captureKey);
         drive.pendingCopyCapture = null;
         const extracted = await extractCredentials(sessionId).catch(() => null);

@@ -671,7 +671,10 @@ const COPY_CUE_SOURCE = String.raw`cop(?:y|ied)|clipboard|(?<!\p{L})(?:salin|ter
  * whose visible text (or value) is that key and the nearest Copy control
  * around it. The key's own text is the anchor, so a page with no revealed
  * key, or a Copy button beside a code sample, never qualifies. */
-async function copyButtonBesideRevealedKey(page: Page): Promise<Locator | null> {
+async function copyButtonBesideRevealedKey(
+  page: Page,
+  requireCopyCue = true,
+): Promise<Locator | null> {
   // One line per text node: innerText runs an adjacent "Copy" label into the
   // key ("…EfCopy key") when the markup has no whitespace between them.
   const shown: unknown = await page
@@ -691,7 +694,7 @@ async function copyButtonBesideRevealedKey(page: Page): Promise<Locator | null> 
   const tokens = typeof shown === "string" ? findCredentialTokens(shown) : [];
   if (tokens.length === 0) return null;
   const buttonIndex = await page.evaluate(
-    ({ tokens, copyCue }) => {
+    ({ tokens, copyCue, requireCopyCue }) => {
       const cue = new RegExp(copyCue, "iu");
       const visible = (element: Element): boolean => {
         const rect = element.getBoundingClientRect();
@@ -741,11 +744,11 @@ async function copyButtonBesideRevealedKey(page: Page): Promise<Locator | null> 
         (button) =>
           visible(button) &&
           !(button instanceof HTMLButtonElement && button.disabled) &&
-          cue.test(cuesOf(button)),
+          (!requireCopyCue || cue.test(cuesOf(button))),
       );
       // Each holder's nearest Copy control: the smallest ancestor that has one,
       // then the closest on screen.
-      const nearest: Array<{ level: number; distance: number; button: Element; token: string }> =
+      const nearest: Array<{ distance: number; button: Element; token: string }> =
         [];
       for (const holder of holders) {
         const at = holder.element.getBoundingClientRect();
@@ -756,23 +759,22 @@ async function copyButtonBesideRevealedKey(page: Page): Promise<Locator | null> 
           for (const button of near) {
             const rect = button.getBoundingClientRect();
             const distance = Math.hypot(rect.left - at.left, rect.top - at.top);
-            nearest.push({ level, distance, button, token: holder.token });
+            nearest.push({ distance, button, token: holder.token });
           }
           break;
         }
       }
-      nearest.sort((a, b) => a.level - b.level || a.distance - b.distance);
+      nearest.sort((a, b) => a.distance - b.distance);
       const best = nearest[0];
       if (best === undefined) return null;
-      // Several different keys, each with its own equally near Copy control
+      // Several different keys, each with its own Copy control
       // (a list of unmasked keys), leave no way to tell which one is new —
       // unless exactly one of those controls names a key ("Copy key" beside
       // Zro's "Copy setup").
-      const tied = nearest.filter((entry) => entry.level === best.level);
-      if (!tied.some((entry) => entry.token !== best.token && entry.button !== best.button))
+      if (!nearest.some((entry) => entry.token !== best.token && entry.button !== best.button))
         return buttons.indexOf(best.button);
       const naming = new Set(
-        tied
+        nearest
           .map((entry) => entry.button)
           .filter((button) =>
             /\b(?:api[\s_-]*key|key|token|secret)\b/i.test(
@@ -782,9 +784,21 @@ async function copyButtonBesideRevealedKey(page: Page): Promise<Locator | null> 
       );
       return naming.size === 1 ? buttons.indexOf([...naming][0]!) : null;
     },
-    { tokens, copyCue: COPY_CUE_SOURCE },
+    { tokens, copyCue: COPY_CUE_SOURCE, requireCopyCue },
   );
   return buttonIndex === null ? null : page.locator('button, [role="button"]').nth(buttonIndex);
+}
+
+export async function isRevealedKeyCopyTarget(page: Page, ref: string): Promise<boolean> {
+  const button = await copyButtonBesideRevealedKey(page, false);
+  return button === null
+    ? false
+    : await button.evaluate((element, ref) => {
+        const registry = (
+          window as Window & { __tsDriveRegistry?: { nodes: Map<string, Element> } }
+        ).__tsDriveRegistry;
+        return registry?.nodes.get(ref) === element;
+      }, ref);
 }
 
 /** A created-key dialog may render its readable value outside DOM text (for

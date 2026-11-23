@@ -176,7 +176,7 @@ it("copies a created key from a dialog whose Copy control is labelled in Spanish
   expect(result.credentials).toEqual({ api_key: key });
 });
 
-it("does not pick between several unmasked keys that each have their own Copy control", async () => {
+it.each([false, true])("refuses competing unmasked keys with unequal wrappers: %s", async (wrapped) => {
   const keys = [
     "kn-A1sD2fG3hJ4kL5zX6cV7bN8mQ9wE0rT1yU2iO3pA4sD5fG",
     "kn-Z9xC8vB7nM6aS5dF4gH3jK2lQ1wE0rT9yU8iO7pL6kJ5hG",
@@ -186,7 +186,7 @@ it("does not pick between several unmasked keys that each have their own Copy co
   const html = `<!doctype html><h1>API Keys</h1><ul>${keys
     .map(
       (key, index) =>
-        `<li><code>${key}</code><button type="button" data-index="${index}">Copy</button></li>`,
+        `<li>${wrapped && index === 0 ? "<span>" : ""}<code>${key}</code>${wrapped && index === 0 ? "</span>" : ""}<button type="button" data-index="${index}">Copy</button></li>`,
     )
     .join("")}</ul>
   <script>document.querySelectorAll('[data-index]').forEach((button) =>
@@ -199,7 +199,7 @@ it("does not pick between several unmasked keys that each have their own Copy co
   expect(result.credentials).toEqual({});
 });
 
-it("vaults a Zro key shown in an inline panel through Copy key, not Copy setup", async () => {
+it.each([false, true])("vaults a Zro key with an extra wrapper: %s", async (wrapped) => {
   // Zro 23 Nov (run after Grunt #182, trace rows 9-11): Create closed the form
   // dialog and /api-keys showed the key once in an inline, non-modal panel with
   // Dismiss / Copy key / Done, plus a setup snippet carrying its own
@@ -210,7 +210,7 @@ it("vaults a Zro key shown in an inline panel through Copy key, not Copy setup",
   await page.evaluate(() => navigator.clipboard.writeText("")).catch(() => undefined);
   const html = `<!doctype html><main><h1>API keys</h1><button>Create key</button>
     <section class="panel"><h2>Your new key</h2>
-      <div><code id="key">${key}</code><button type="button" id="copy-key">Copy key</button></div>
+      <div>${wrapped ? "<span>" : ""}<code id="key">${key}</code>${wrapped ? "</span>" : ""}<button type="button" id="copy-key">Copy key</button></div>
       <button type="button">Dismiss</button><button type="button">Done</button>
       <h3>Use Zro from npm</h3>
       <div><code id="setup">ZRO_SETUP=${setupToken}</code>
