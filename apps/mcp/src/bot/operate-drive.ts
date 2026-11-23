@@ -3656,12 +3656,14 @@ function inPageSubmittedFormText(arg: { ref: string | null }): string | null {
   const identity = ["id", "name", "aria-label", "aria-labelledby"].find(
     (name) => (form.getAttribute(name) ?? "").trim().length > 0,
   );
-  const selector = identity === undefined
-    ? null
-    : `${form.tagName}[${identity}="${CSS.escape(form.getAttribute(identity)!)}"]`;
+  const selector =
+    identity === undefined
+      ? null
+      : `${form.tagName}[${identity}="${CSS.escape(form.getAttribute(identity)!)}"]`;
   scope.__tsSubmitSurface = {
     element: form,
-    selector: selector !== null && document.querySelectorAll(selector).length === 1 ? selector : null,
+    selector:
+      selector !== null && document.querySelectorAll(selector).length === 1 ? selector : null,
   };
   return textOf(form);
 
@@ -3680,7 +3682,11 @@ function inPageSubmittedFormText(arg: { ref: string | null }): string | null {
       if (style.display === "none" || style.visibility === "hidden") continue;
       if (rect.width <= 0 || rect.height <= 0) continue;
       let hidden = false;
-      for (let ancestor: Element | null = parent; ancestor !== null; ancestor = ancestor.parentElement) {
+      for (
+        let ancestor: Element | null = parent;
+        ancestor !== null;
+        ancestor = ancestor.parentElement
+      ) {
         if (Number(getComputedStyle(ancestor).opacity) <= 0.01) {
           hidden = true;
           break;
