@@ -519,7 +519,6 @@ describe("a guard-refused submit stays offered", () => {
     const drive = emptyDriveState("sign up", {});
     recordWaitingDecision(drive, rows, decision, url, rows[0]!, reason);
     expect(drive.failedActionKeys).toEqual([]);
-    expect(drive.staleClickRefs).toEqual([]);
     const waitingFields = waitingFieldsByControl(drive.waitingControls!, rows, [], url);
     const sets = driveTargetSets(rows, {}, false, [], url, new Map(), (text) => text, [], {
       failedKeys: drive.failedActionKeys!,

@@ -204,10 +204,11 @@ and then offers only DONE and BLOCKED.
 
 An action that produced no observable change is not offered again while the
 page's URL, form surface, and filled fields stay the same; WAIT is excluded from
-that budget, and a stale click ref is withheld until the observation
-fingerprint changes. After five such dead actions on one page, or when they
-leave no actionable operation, the drive ends with `no_progress` and a `reason`
-naming them.
+that budget. Refusal memory identifies controls by page origin and
+path, role, normalized label, and form identity, including across remounts.
+Reusing a snapshot ref on another page does not suppress that page's control.
+After five such dead actions on one page, or when they leave no actionable
+operation, the drive ends with `no_progress` and a `reason` naming them.
 
 Negative model feedback alone permits an ordinary control to be retried; a
 key-create control retains that retry guard because the first press may have

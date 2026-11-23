@@ -201,7 +201,6 @@ export interface SessionDriveState {
   lastFingerprint: string | null;
   jevCalls: number;
   staleNonWait: number;
-  staleClickRefs?: string[];
   exhaustedProgressKey?: string | null;
   exhaustedActionKeys?: string[];
   /** Role+label identities that already failed this drive, including remounts. */
