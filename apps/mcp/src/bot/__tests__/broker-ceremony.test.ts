@@ -178,7 +178,9 @@ describe("broker-owned connect ceremony", () => {
 
   it("retains an early Finish claim until its failed finalization succeeds", async () => {
     let release!: () => void;
-    const retry = new Promise<void>((resolve) => { release = resolve; });
+    const retry = new Promise<void>((resolve) => {
+      release = resolve;
+    });
     const h = harness();
     h.finalize.mockRejectedValueOnce(new Error("disk unavailable"));
     h.finalize.mockImplementationOnce(async () => {
@@ -197,14 +199,20 @@ describe("broker-owned connect ceremony", () => {
   it("lands config plans joining during finalization and config draining", async () => {
     let release!: () => void;
     let releaseWrite!: () => void;
-    const finalizing = new Promise<void>((resolve) => { release = resolve; });
-    const writing = new Promise<void>((resolve) => { releaseWrite = resolve; });
+    const finalizing = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const writing = new Promise<void>((resolve) => {
+      releaseWrite = resolve;
+    });
     const h = harness();
     h.finalize.mockImplementationOnce(async () => {
       await finalizing;
       return { api_base_url: "https://api.invalid", saved_at: "t", account_id: "acct-1" };
     });
-    h.writeAgentConfigs.mockImplementationOnce(async () => { await writing; });
+    h.writeAgentConfigs.mockImplementationOnce(async () => {
+      await writing;
+    });
     h.setStatus({ ...CLAIMED, finished: true });
     await h.host.call(startRequest());
     await vi.waitFor(() => expect(h.finalize).toHaveBeenCalledOnce());
@@ -225,7 +233,9 @@ describe("broker-owned connect ceremony", () => {
     let delayed: Harness | undefined;
     try {
       let deliver!: (status: InstallStatus) => void;
-      const response = new Promise<InstallStatus>((resolve) => { deliver = resolve; });
+      const response = new Promise<InstallStatus>((resolve) => {
+        deliver = resolve;
+      });
       const pollStatus = vi.fn(async () => await response);
       delayed = harness({ pollStatus });
       await delayed.host.call(startRequest());
@@ -236,9 +246,14 @@ describe("broker-owned connect ceremony", () => {
       await vi.advanceTimersByTimeAsync(0);
       expect(delayed.tabs[0]!.close).toHaveBeenCalledOnce();
       expect(pollStatus).toHaveBeenCalledOnce();
-      expect(delayed.finalize).toHaveBeenCalledWith(expect.anything(), {
-        token: "agent-token", account_id: "acct-1",
-      }, "/profiles/fixture");
+      expect(delayed.finalize).toHaveBeenCalledWith(
+        expect.anything(),
+        {
+          token: "agent-token",
+          account_id: "acct-1",
+        },
+        "/profiles/fixture",
+      );
     } finally {
       await delayed?.host.shutdown();
       vi.useRealTimers();
@@ -257,12 +272,20 @@ describe("broker-owned connect ceremony", () => {
   it("serializes reconnects behind both helper and tab teardown", async () => {
     let releaseHelpers!: () => void;
     let releaseTab!: () => void;
-    const helpers = new Promise<void>((resolve) => { releaseHelpers = resolve; });
-    const tab = new Promise<void>((resolve) => { releaseTab = resolve; });
+    const helpers = new Promise<void>((resolve) => {
+      releaseHelpers = resolve;
+    });
+    const tab = new Promise<void>((resolve) => {
+      releaseTab = resolve;
+    });
     const h = harness();
     await h.host.call(startRequest());
-    h.stopExposure.mockImplementationOnce(async () => { await helpers; });
-    h.tabs[0]!.close.mockImplementationOnce(async () => { await tab; });
+    h.stopExposure.mockImplementationOnce(async () => {
+      await helpers;
+    });
+    h.tabs[0]!.close.mockImplementationOnce(async () => {
+      await tab;
+    });
     h.setStatus({ status: "expired" });
     await vi.waitFor(() => expect(h.stopExposure).toHaveBeenCalledOnce());
     expect(h.host.current()).toEqual({ state: "none" });

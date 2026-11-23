@@ -467,64 +467,74 @@ describe("connect --target=<agent> writes a valid config", () => {
 
   // The incident had two connects 47s apart, each with its own token and tab on
   // the same display. A connect while a ceremony is live joins it instead.
-  it.each([false, true])("joins a live ceremony before preflight (forceRelogin=%s)", async (forceRelogin) => {
-    const storage = await openSessionStorage();
-    await storage.write({ api_base_url: "https://test.invalid", saved_at: "t",
-      account_id: "acct_test", agent_session_token: "agent-token" });
-    vi.mocked(detectProviderSessionsFromProfile).mockClear();
-    vi.mocked(requestBrokerCeremony).mockImplementation(async (_profileDir, request) => {
-      if (request.action === "join") {
-        return {
-          state: "live",
-          confirm_url: "https://test.invalid/install?token=first_code",
+  it.each([false, true])(
+    "joins a live ceremony before preflight (forceRelogin=%s)",
+    async (forceRelogin) => {
+      const storage = await openSessionStorage();
+      await storage.write({
+        api_base_url: "https://test.invalid",
+        saved_at: "t",
+        account_id: "acct_test",
+        agent_session_token: "agent-token",
+      });
+      vi.mocked(detectProviderSessionsFromProfile).mockClear();
+      vi.mocked(requestBrokerCeremony).mockImplementation(async (_profileDir, request) => {
+        if (request.action === "join") {
+          return {
+            state: "live",
+            confirm_url: "https://test.invalid/install?token=first_code",
+            browser_location: { kind: "virtual", url: TUNNEL_URL },
+            reused: false,
+          };
+        }
+        throw new Error("a second connect must not start a ceremony");
+      });
+      vi.mocked(installInitiate).mockClear();
+      vi.mocked(issueMachineToken).mockClear();
+      // connect only asks a broker that is listening.
+      const socket = path.join(tmpHome, "broker.sock");
+      const listener = createServer();
+      await new Promise<void>((resolve) => listener.listen(socket, resolve));
+      vi.stubEnv("TRUSTY_SQUIRE_BROKER_SOCKET", socket);
+      const channel = captureMachineChannel();
+      const error = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        await connect({
+          command: "connect",
+          target: "hermes",
+          apiBase: "https://test.invalid",
+          skipBrowser: false,
+          forceRelogin,
+          noRegistry: false,
+          noInteractive: true,
+          json: true,
+        });
+        expect(requestBrokerCeremony).toHaveBeenCalledWith(expect.any(String), {
+          action: "join",
+          agentConfigs: [
+            expect.objectContaining({ target: "hermes", configPath: AGENTS.hermes.config_path() }),
+          ],
+        });
+        expect(detectProviderSessionsFromProfile).not.toHaveBeenCalled();
+        expect(installInitiate).not.toHaveBeenCalled();
+        expect(issueMachineToken).not.toHaveBeenCalled();
+        expect(error.mock.calls.flat().join("\n")).toContain(TUNNEL_URL);
+        // Nothing about the live sign-in is disturbed, not even by a re-login.
+        expect(clearProviderCookies).not.toHaveBeenCalled();
+        expect(channel.terminal()).toMatchObject({
+          state: "needs-sign-in",
+          terminal: true,
+          sign_in_url: "https://test.invalid/install?token=first_code",
           browser_location: { kind: "virtual", url: TUNNEL_URL },
-          reused: false,
-        };
+        });
+      } finally {
+        error.mockRestore();
+        channel.restore();
+        vi.unstubAllEnvs();
+        await new Promise<void>((resolve) => listener.close(() => resolve()));
       }
-      throw new Error("a second connect must not start a ceremony");
-    });
-    vi.mocked(installInitiate).mockClear();
-    vi.mocked(issueMachineToken).mockClear();
-    // connect only asks a broker that is listening.
-    const socket = path.join(tmpHome, "broker.sock");
-    const listener = createServer();
-    await new Promise<void>((resolve) => listener.listen(socket, resolve));
-    vi.stubEnv("TRUSTY_SQUIRE_BROKER_SOCKET", socket);
-    const channel = captureMachineChannel();
-    const error = vi.spyOn(console, "error").mockImplementation(() => {});
-    try {
-      await connect({
-        command: "connect",
-        target: "hermes",
-        apiBase: "https://test.invalid",
-        skipBrowser: false,
-        forceRelogin,
-        noRegistry: false,
-        noInteractive: true,
-        json: true,
-      });
-      expect(requestBrokerCeremony).toHaveBeenCalledWith(expect.any(String), {
-        action: "join", agentConfigs: [expect.objectContaining({ target: "hermes", configPath: AGENTS.hermes.config_path() })],
-      });
-      expect(detectProviderSessionsFromProfile).not.toHaveBeenCalled();
-      expect(installInitiate).not.toHaveBeenCalled();
-      expect(issueMachineToken).not.toHaveBeenCalled();
-      expect(error.mock.calls.flat().join("\n")).toContain(TUNNEL_URL);
-      // Nothing about the live sign-in is disturbed, not even by a re-login.
-      expect(clearProviderCookies).not.toHaveBeenCalled();
-      expect(channel.terminal()).toMatchObject({
-        state: "needs-sign-in",
-        terminal: true,
-        sign_in_url: "https://test.invalid/install?token=first_code",
-        browser_location: { kind: "virtual", url: TUNNEL_URL },
-      });
-    } finally {
-      error.mockRestore();
-      channel.restore();
-      vi.unstubAllEnvs();
-      await new Promise<void>((resolve) => listener.close(() => resolve()));
-    }
-  });
+    },
+  );
 
   // The noVNC helpers now run in the broker daemon, whose environment is not
   // the person's. Their own tunnel travels with the request.

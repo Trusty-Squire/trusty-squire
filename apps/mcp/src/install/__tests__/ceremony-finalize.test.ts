@@ -22,9 +22,15 @@ it("writes the caller's resolved OpenCode destination after its environment is g
   vi.stubEnv("OPENCODE_CONFIG", destination);
   const plan = { target: "opencode" as const, configPath: AGENTS.opencode.config_path() };
   vi.stubEnv("OPENCODE_CONFIG", "");
-  await writeAgentConfig(plan, {
-    api_base_url: "https://api.invalid", saved_at: "t", account_id: "account-1",
-  }, true);
+  await writeAgentConfig(
+    plan,
+    {
+      api_base_url: "https://api.invalid",
+      saved_at: "t",
+      account_id: "account-1",
+    },
+    true,
+  );
   const config = JSON.parse(await readFile(destination, "utf8"));
   expect(config.mcp.squire.environment.TRUSTY_SQUIRE_ACCOUNT_ID).toBe("account-1");
   await expect(readFile(AGENTS.opencode.config_path())).rejects.toMatchObject({ code: "ENOENT" });
@@ -36,9 +42,13 @@ it("bounds a vault POST whose server never responds", { timeout: 10_000 }, async
   const address = server.address();
   if (address === null || typeof address === "string") throw new Error("missing address");
   try {
-    await expect(storeTwoCaptchaKey("test-key", {
-      api_base_url: `http://127.0.0.1:${address.port}`, saved_at: "t", agent_session_token: "test-token",
-    })).resolves.toBe(false);
+    await expect(
+      storeTwoCaptchaKey("test-key", {
+        api_base_url: `http://127.0.0.1:${address.port}`,
+        saved_at: "t",
+        agent_session_token: "test-token",
+      }),
+    ).resolves.toBe(false);
   } finally {
     server.closeAllConnections();
     await new Promise<void>((resolve) => server.close(() => resolve()));
