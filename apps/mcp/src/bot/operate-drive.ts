@@ -791,6 +791,19 @@ export function readableLabel(row: WireRow): string {
   return labeled;
 }
 
+/** The words of a control's own row that tell it apart from an identically
+ *  labeled twin (the snapshot's `ctx=`), when it has a twin. */
+export function rowContext(row: WireRow): string | undefined {
+  return /(?:^|\|)ctx=([^|]+)/.exec(row[2] ?? "")?.[1];
+}
+
+/** A label that names its row when an identically labeled twin exists. */
+function labelInRow(row: WireRow): string {
+  const label = readableLabel(row);
+  const context = rowContext(row);
+  return context === undefined ? label : `${label} (row: ${context})`;
+}
+
 export function rowField(row: WireRow): string | undefined {
   const facts = row[2];
   if (facts === undefined) return undefined;
@@ -2212,6 +2225,8 @@ export function isInvalidRow(row: WireRow): boolean {
 }
 
 function rowValueMissing(row: WireRow): boolean {
+  // A masked input never shows its value, only that it holds one (`s=p`).
+  if (/(?:^|\|)s=[^|]*p/.test(row[2] ?? "")) return false;
   const match = /(?:^|\|)n=([^|]*)/.exec(row[2] ?? "");
   return match === null || match[1] === undefined || match[1].length === 0;
 }
@@ -2632,8 +2647,8 @@ export interface NewAccountPasswordTargets {
  * The empty new-password field of a sign-up form, with its confirm field(s),
  * when no password was supplied. A sign-in form's password is the user's
  * existing secret and is never invented. A form whose email/username is still
- * empty waits until that identifier is on the page, so the saved login names
- * the account that was actually created.
+ * empty uses the supplied fact for that field as the saved login (the drive
+ * types that fact there), and waits when no fact names it.
  */
 export function newAccountPasswordTargets(
   rows: readonly WireRow[],
@@ -2681,20 +2696,39 @@ export function newAccountPasswordTargets(
     if (evidence.some((label) => LOGIN_LABEL.test(label) || RESET_PASSWORD_LABEL.test(label))) {
       continue;
     }
-    const signup =
-      (reuseInventedPassword && isConfirmPasswordRow(password)) ||
-      evidence.some((label) => CREATE_ACCOUNT_LABEL.test(label));
-    if (!signup) continue;
     const identity = scope.find(
       (row) =>
         isFillableRow(row) &&
         !isPasswordRow(row) &&
         ["email", "username"].includes(rowField(row) ?? ""),
     );
+    // A sign-in asks for the account and its secret only. A form that also
+    // asks for more text (a name, a username beside the email) makes an
+    // account, whatever language its buttons use.
+    const askedText = scope.filter(
+      (row) =>
+        isFillableRow(row) &&
+        !isSelectRow(row) &&
+        !isPasswordRow(row) &&
+        !isSearchRow(row) &&
+        !isOtpRow(row),
+    );
+    const signup =
+      (reuseInventedPassword && isConfirmPasswordRow(password)) ||
+      (identity !== undefined && askedText.length >= 2) ||
+      evidence.some((label) => CREATE_ACCOUNT_LABEL.test(label));
+    if (!signup) continue;
     if (identity !== undefined) {
       const login = rowCurrentValue(identity);
-      if (login === undefined || login.trim().length === 0) continue;
-      return { password, confirms, identity };
+      if (login !== undefined && login.trim().length > 0) {
+        return { password, confirms, identity };
+      }
+      // The identifier is still empty; the account is made with the fact the
+      // drive types there, so the saved login names that fact.
+      const factKey = matchingFactKeys(facts, identity)[0];
+      const supplied = factKey === undefined ? undefined : facts[factKey]?.trim();
+      if (supplied === undefined || supplied.length === 0) continue;
+      return { password, confirms, login: supplied };
     }
     const supplied = facts.email ?? facts.username;
     return {
@@ -2830,7 +2864,10 @@ export function actionDescription(
   if (field !== undefined && isSuggestionRow(row, rows)) {
     return `click the suggestion "${label}" for the ${field} field`;
   }
-  return `click the ${role} labeled "${label}"`;
+  const context = rowContext(row);
+  return context === undefined
+    ? `click the ${role} labeled "${label}"`
+    : `click the ${role} labeled "${label}" in the row "${context}"`;
 }
 
 export function isSelectRow(row: WireRow): boolean {
@@ -3478,6 +3515,8 @@ export interface DriveStateElement {
   description: string;
   operations: DriveOperation[];
   value?: string;
+  /** A masked input that holds a value it never shows. */
+  filled?: boolean;
   checked?: boolean;
   selected?: boolean;
   expanded?: boolean;
@@ -3658,7 +3697,7 @@ export function elementState(
 ): DriveStateElement {
   const checked = rowChecked(candidate.row);
   const valueMatch = /(?:^|\|)n=([^|]+)/.exec(candidate.row[2] ?? "");
-  const label = readableLabel(candidate.row);
+  const label = labelInRow(candidate.row);
   return {
     id: candidate.slug,
     role: ROLE_WORDS[candidate.row[1]] ?? candidate.role,
@@ -3669,6 +3708,9 @@ export function elementState(
     operations: operationsForRow(candidate.row),
     ...(checked === undefined ? {} : { checked }),
     ...(valueMatch === null ? {} : { value: valueMatch[1] }),
+    ...(valueMatch === null && /(?:^|\|)s=[^|]*p/.test(candidate.row[2] ?? "")
+      ? { filled: true }
+      : {}),
     ...(isDisabledRow(candidate.row) ? { disabled: true } : {}),
     ...(isRequiredRow(candidate.row) ? { required: true } : {}),
     ...(isActedRow(candidate.row) ? { acted: true } : {}),
@@ -3717,7 +3759,7 @@ export function buildJevState(
           ref: row[0],
           role: ROLE_LETTERS[row[1]] ?? row[1],
           slug: row[0],
-          description: readableLabel(row),
+          description: labelInRow(row),
           row,
         },
         {
@@ -3930,7 +3972,7 @@ function criteriaFromCandidates(
         `${readableLabel(candidate.row)} → ${candidate.optionLabel ?? candidate.option}`;
       continue;
     }
-    const label = readableLabel(candidate.row);
+    const label = labelInRow(candidate.row);
     criteria[candidate.slug] =
       operation === "CLICK" && isPickerRow(candidate.row)
         ? `Open ${label}`
@@ -4551,7 +4593,11 @@ export function decideAfterJev(input: {
     if (failure !== undefined && failure !== null && failure.length > 0) return failure;
     return "nothing on the page can advance the goal";
   };
-  const decideChosen = (choice: string, confidence: number): DriveDecision => {
+  const decideChosen = (
+    choice: string,
+    confidence: number,
+    targetOverride?: JevAnswer,
+  ): DriveDecision => {
     if (choice === DRIVE_FIXED_NONE_OF_THESE) {
       return { kind: "none_of_these", confidence, reason: noticeReason() };
     }
@@ -4574,7 +4620,7 @@ export function decideAfterJev(input: {
     const targetName = targetQuestionName(choice as DriveOperation);
     const targetQuestion = questions[targetName];
     const targetCriteria = targetQuestion?.type === "choice" ? targetQuestion.criteria : {};
-    const targetAnswer = input.answers[targetName];
+    const targetAnswer = targetOverride ?? input.answers[targetName];
     const targetInstructions =
       targetQuestion?.type === "choice" ? targetQuestion.instructions : `Which ${choice} target?`;
     if (Object.keys(targetCriteria).length === 0) {
@@ -4831,12 +4877,59 @@ export function decideAfterJev(input: {
     "CLICK" in operationCriteriaMap &&
     (probabilities.CLICK ?? 0) + (probabilities.SCROLL ?? 0) >= threshold &&
     clickQuestion?.type === "choice" &&
-    validateChoiceReason(clickQuestion.criteria, clickTarget) === undefined &&
-    confidenceOf(clickTarget) >= threshold
+    validateChoiceReason(clickQuestion.criteria, clickTarget) === undefined
   ) {
-    return decideChosen("CLICK", confidenceOf(clickTarget));
+    if (confidenceOf(clickTarget) >= threshold) {
+      return decideChosen("CLICK", confidenceOf(clickTarget));
+    }
+    // The SCROLL share wants an offscreen control too. When the click target
+    // is offscreen, those votes back it rather than a visible competitor.
+    const merged = offscreenClickTargetAnswer(
+      sets.CLICK,
+      clickTarget,
+      probabilities.CLICK ?? 0,
+      probabilities.SCROLL ?? 0,
+    );
+    if (merged !== undefined && confidenceOf(merged) >= threshold) {
+      return decideChosen("CLICK", confidenceOf(merged), merged);
+    }
   }
   return refuseAdmission(operationAdmission, instructions, operationCriteriaMap, operation);
+}
+
+/**
+ * The click-target answer with the operation's SCROLL share counted, for a
+ * chosen target that is offscreen. A SCROLL vote asks to reach an offscreen
+ * control, and clicking one scrolls to it first, so the SCROLL share goes to
+ * the offscreen targets in proportion to their own click votes. A visible
+ * target keeps only its CLICK share. Undefined when the chosen target is not
+ * offscreen.
+ */
+export function offscreenClickTargetAnswer(
+  candidates: readonly DriveCandidate[],
+  answer: JevAnswer | undefined,
+  clickShare: number,
+  scrollShare: number,
+): JevAnswer | undefined {
+  const choice = answer?.choice;
+  const probabilities = answer?.probabilities;
+  if (choice === undefined || probabilities === undefined) return undefined;
+  const offscreen = new Set(
+    candidates.filter((candidate) => isOffscreenRow(candidate.row)).map((c) => c.slug),
+  );
+  if (!offscreen.has(choice)) return undefined;
+  const offscreenMass = [...offscreen].reduce((sum, slug) => sum + (probabilities[slug] ?? 0), 0);
+  const share = clickShare + scrollShare;
+  if (offscreenMass <= 0 || share <= 0) return undefined;
+  const merged: Record<string, number> = {};
+  for (const [slug, probability] of Object.entries(probabilities)) {
+    const scrollPart = offscreen.has(slug) ? (scrollShare * probability) / offscreenMass : 0;
+    merged[slug] = (clickShare * probability + scrollPart) / share;
+  }
+  const chosen = probabilities[choice] ?? 0;
+  // Jev's confidence sits a margin below its probability; keep that margin.
+  const margin = chosen > 0 ? confidenceOf(answer) / chosen : 0;
+  return { choice, probabilities: merged, confidence: merged[choice]! * margin };
 }
 
 function takeActProfile(

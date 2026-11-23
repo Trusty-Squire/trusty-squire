@@ -62,6 +62,8 @@ export const REAL_BROWSER_FILES = [
   "src/__tests__/capture-any-shape-e2e.test.ts",
   "src/bot/capture/__tests__/capture-copy-presentation-browser.test.ts",
   "src/bot/__tests__/drive-control-digest.test.ts",
+  "src/bot/__tests__/drive-twin-row-context.test.ts",
+  "src/bot/__tests__/drive-toggle-state.test.ts",
   "src/bot/__tests__/drive-public-handback.test.ts",
   "src/bot/__tests__/ref-reconcile-benchmark.test.ts",
   "src/bot/__tests__/drive-create-key-at-creation.test.ts",

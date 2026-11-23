@@ -62,6 +62,9 @@ export interface DriveSnapshotElement {
   formId?: number;
   entityText?: string;
   entityDisplayText?: string;
+  /** Visible text of the control's own row when another control shares its
+   *  role and label: the largest ancestor that holds no such twin. */
+  rowContext?: string;
   entityHasReadonlyInput?: boolean;
   dialogRef?: string;
   /** Covering control ref, or a region kind when the cover is not a listed control. */
@@ -169,14 +172,72 @@ export function inferFieldFromControl(input: {
   }
   const fromName = inferFieldFromLabel(input.name ?? "", input.role);
   if (fromName !== undefined) return fromName;
-  if ((input.placeholder ?? "").length > 0 && input.label === input.placeholder) {
-    return undefined;
+  const fromLabel =
+    (input.placeholder ?? "").length > 0 && input.label === input.placeholder
+      ? undefined
+      : inferFieldFromLabel(input.label, input.role);
+  if (fromLabel !== undefined || type !== "password") return fromLabel;
+  // A masked input whose words name nothing (a placeholder of dots, a label
+  // in another language) is a password; one whose words name a field, such
+  // as a masked verification code, stays that field.
+  return inferFieldFromLabel(input.placeholder ?? "", input.role) ?? "password";
+}
+
+/**
+ * Prefer the row's unique words (a key's name beside its "Edit"); preserve
+ * word order with full row text when reducing words loses distinctions.
+ * Omit context that still cannot distinguish a twin.
+ */
+export function distinguishingRowContexts(
+  elements: readonly DriveSnapshotElement[],
+): Map<string, string> {
+  const groups = new Map<string, DriveSnapshotElement[]>();
+  for (const element of elements) {
+    if (
+      element.rowContext === undefined ||
+      element.operations.some((operation) => operation !== "click")
+    ) {
+      continue;
+    }
+    const key = `${element.frameOrdinal}\t${element.role}\t${element.label.trim()}`;
+    groups.set(key, [...(groups.get(key) ?? []), element]);
   }
-  return inferFieldFromLabel(input.label, input.role);
+  const contexts = new Map<string, string>();
+  for (const group of groups.values()) {
+    if (group.length < 2) continue;
+    const wordsOf = (element: DriveSnapshotElement): string[] =>
+      (element.rowContext ?? "")
+        .replace(/\|/g, " ")
+        .split(/\s+/)
+        .filter((word) => word.length > 0);
+    const shared = group
+      .map((element) => new Set(wordsOf(element)))
+      .reduce((common, words) => new Set([...common].filter((word) => words.has(word))));
+    const own = group.map((element) =>
+      wordsOf(element)
+        .filter((word) => !shared.has(word))
+        .join(" ")
+        .slice(0, 60)
+        .trim(),
+    );
+    const labels = own.every(
+      (text) => text.length > 0 && own.filter((other) => other === text).length === 1,
+    )
+      ? own
+      : group.map((element) => wordsOf(element).join(" ").slice(0, 200).trim());
+    group.forEach((element, index) => {
+      const text = labels[index]!;
+      if (text.length > 0 && labels.filter((other) => other === text).length === 1) {
+        contexts.set(element.ref, text);
+      }
+    });
+  }
+  return contexts;
 }
 
 export function driveRowsFromSnapshot(snapshot: DriveSnapshot): SnapshotRow[] {
   const rows: SnapshotRow[] = [];
+  const rowContexts = distinguishingRowContexts(snapshot.elements);
   let mainOrigin = "";
   try {
     mainOrigin = new URL(snapshot.url).origin;
@@ -217,9 +278,7 @@ export function driveRowsFromSnapshot(snapshot: DriveSnapshot): SnapshotRow[] {
     if (element.invalid === true) states.push("i");
     if (element.populated === true) states.push("p");
     if (element.checked === true) states.push("c");
-    if (element.checked === false && (element.role === "checkbox" || element.role === "radio")) {
-      states.push("u");
-    }
+    if (element.checked === false) states.push("u");
     if (states.length > 0) facts.push(`s=${states.join("")}`);
     if (element.offscreen === true) facts.push("v=offscreen");
     if (
@@ -260,6 +319,8 @@ export function driveRowsFromSnapshot(snapshot: DriveSnapshot): SnapshotRow[] {
       facts.push("credential=1");
     }
     if (element.dialogRef !== undefined) facts.push(`dialog=${element.dialogRef}`);
+    const rowContext = rowContexts.get(element.ref);
+    if (rowContext !== undefined) facts.push(`ctx=${rowContext.replace(/\|/g, " ")}`);
     if (element.occludedBy !== undefined && element.occludedBy.length > 0) {
       facts.push(`oc=${element.occludedBy.replace(/\|/g, " ").slice(0, 40)}`);
     }
@@ -545,14 +606,17 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
     element.matches(":disabled") ||
     element.closest('[aria-disabled="true"]') !== null ||
     element.getAttribute("aria-disabled") === "true";
-  const checkedOf = (element: Element): boolean | undefined =>
-    element instanceof HTMLInputElement && ["checkbox", "radio"].includes(element.type)
-      ? element.checked
-      : element.getAttribute("aria-checked") === "true"
-        ? true
-        : element.getAttribute("aria-checked") === "false"
-          ? false
-          : undefined;
+  // On/off state of a checkbox, radio, switch, or toggle button
+  // (`aria-pressed`); "mixed" counts as on.
+  const checkedOf = (element: Element): boolean | undefined => {
+    if (element instanceof HTMLInputElement && ["checkbox", "radio"].includes(element.type)) {
+      return element.checked;
+    }
+    const state = element.getAttribute("aria-checked") ?? element.getAttribute("aria-pressed");
+    if (state === "true" || state === "mixed") return true;
+    if (state === "false") return false;
+    return undefined;
+  };
   // The pre-act change signal: the controls the snapshot actually rowed, by
   // identity and actionability. Not their values (a countdown, a token refresh
   // or an input mask reformatting churns those), and not every input in the
@@ -1016,6 +1080,60 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
     if (node === undefined) continue;
     const occludedBy = occluderOf(node, row.ref);
     if (occludedBy !== undefined) row.occludedBy = occludedBy;
+  }
+  // Identically named click controls (one "Edit" per key) differ only by the
+  // row they sit in. Read each twin's row: its largest ancestor holding no twin.
+  const twins = new Map<string, DriveSnapshotElement[]>();
+  for (const row of [...inView, ...offscreenControls]) {
+    // Fields are told apart by their form and placeholder; only controls
+    // that are clicked need their row.
+    if (row.label.trim().length === 0 || row.operations.some((op) => op !== "click")) continue;
+    const key = `${row.role}\t${row.label.trim()}`;
+    twins.set(key, [...(twins.get(key) ?? []), row]);
+  }
+  for (const group of twins.values()) {
+    if (group.length < 2 || expired()) continue;
+    const nodes = group.map((row) => cache.nodes.get(row.ref));
+    group.forEach((row, index) => {
+      const node = nodes[index];
+      if (node === undefined) return;
+      let scope: Element = node;
+      for (
+        let parent = composedParent(scope);
+        parent !== null && parent !== document.body;
+        parent = composedParent(parent)
+      ) {
+        const ancestor = parent;
+        const holdsTwin = nodes.some(
+          (other, otherIndex) =>
+            otherIndex !== index && other !== undefined && composedContains(ancestor, other),
+        );
+        if (holdsTwin) break;
+        scope = parent;
+      }
+      if (scope === node) return;
+      const words: string[] = [];
+      let length = 0;
+      const walker = document.createTreeWalker(scope, NodeFilter.SHOW_TEXT);
+      for (let text = walker.nextNode(); text !== null && length < 200; text = walker.nextNode()) {
+        const parent = text.parentElement;
+        const value = (text.textContent ?? "").replace(/\s+/g, " ").trim();
+        if (
+          value.length === 0 ||
+          parent === null ||
+          !visible(parent) ||
+          parent.closest(
+            'button,a,input,select,textarea,[role="button"],[role="menuitem"],script,style',
+          ) !== null
+        ) {
+          continue;
+        }
+        words.push(value);
+        length += value.length + 1;
+      }
+      const context = words.join(" ").slice(0, 200);
+      if (context.length > 0) row.rowContext = context;
+    });
   }
   // A bounded snapshot must retain native form submits even after long menus.
   // Within each structural/visibility group, controls stay in DOM order.
