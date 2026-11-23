@@ -697,10 +697,10 @@ async function shownCredentialTokens(page: Page): Promise<string[]> {
 async function copyButtonBesideRevealedKey(
   page: Page,
   clickedRef?: string,
-): Promise<Locator | null> {
+): Promise<{ button: Locator; token: string } | null> {
   const tokens = await shownCredentialTokens(page);
   if (tokens.length === 0) return null;
-  const buttonIndex = await page.evaluate(
+  const selected = await page.evaluate(
     ({ tokens, copyCue, clickedRef }) => {
       const cue = new RegExp(copyCue, "iu");
       const visible = (element: Element): boolean => {
@@ -760,12 +760,11 @@ async function copyButtonBesideRevealedKey(
       const copyButtons = buttons.filter(
         (button) =>
           visible(button) &&
-          !(button instanceof HTMLButtonElement && button.disabled) &&
-          (clicked !== undefined || cue.test(cuesOf(button))),
+          !(button instanceof HTMLButtonElement && button.disabled),
       );
       // Each holder's nearest Copy control: the smallest ancestor that has one,
       // then the closest on screen.
-      const nearest: Array<{ distance: number; button: Element; token: string }> = [];
+      const nearest: Array<{ distance: number; button: Element; token: string; holder: Element }> = [];
       for (const holder of holders) {
         const at = holder.element.getBoundingClientRect();
         let scope: Element | null = holder.element;
@@ -775,41 +774,62 @@ async function copyButtonBesideRevealedKey(
           for (const button of near) {
             const rect = button.getBoundingClientRect();
             const distance = Math.hypot(rect.left - at.left, rect.top - at.top);
-            nearest.push({ distance, button, token: holder.token });
+            nearest.push({ distance, button, token: holder.token, holder: holder.element });
           }
           break;
         }
       }
-      if (clicked !== undefined)
-        return nearest.some((entry) => entry.button === clicked) ? buttons.indexOf(clicked) : null;
-      nearest.sort((a, b) => a.distance - b.distance);
-      const best = nearest[0];
+      const associated = nearest.filter((entry) => {
+        const depth = (holder: Element): number => {
+          let ancestor: Element | null = entry.button;
+          let level = 0;
+          while (ancestor !== null && !ancestor.contains(holder)) {
+            ancestor = ancestor.parentElement;
+            level++;
+          }
+          return level;
+        };
+        const level = depth(entry.holder);
+        return !holders.some((other) => {
+          if (other.token === entry.token) return false;
+          const otherLevel = depth(other.element);
+          const rect = other.element.getBoundingClientRect();
+          const buttonRect = entry.button.getBoundingClientRect();
+          const distance = Math.hypot(buttonRect.left - rect.left, buttonRect.top - rect.top);
+          return otherLevel < level || (otherLevel === level && distance <= entry.distance);
+        });
+      });
+      const result = (entry: (typeof associated)[number]) => ({
+        index: buttons.indexOf(entry.button),
+        token: entry.token,
+      });
+      if (clicked !== undefined) {
+        const matches = associated.filter((entry) => entry.button === clicked);
+        return matches.length === 1 ? result(matches[0]!) : null;
+      }
+      associated.sort((a, b) => a.distance - b.distance);
+      const best = associated.find((entry) => cue.test(cuesOf(entry.button)));
       if (best === undefined) return null;
-      // Several different keys, each with its own Copy control
-      // (a list of unmasked keys), leave no way to tell which one is new —
-      // unless exactly one of those controls names a key ("Copy key" beside
-      // Zro's "Copy setup").
-      if (!nearest.some((entry) => entry.token !== best.token && entry.button !== best.button))
-        return buttons.indexOf(best.button);
-      const naming = new Set(
-        nearest
-          .map((entry) => entry.button)
-          .filter((button) =>
-            /\b(?:api[\s_-]*key|key|token|secret)\b/i.test(
-              `${button.textContent ?? ""} ${button.getAttribute("aria-label") ?? ""}`,
-            ),
-          ),
+      if (!associated.some((entry) => entry.token !== best.token))
+        return result(best);
+      const naming = associated.filter((entry) =>
+        cue.test(cuesOf(entry.button)) &&
+        /\b(?:api[\s_-]*key|key|token|secret)\b/i.test(
+          `${entry.button.textContent ?? ""} ${entry.button.getAttribute("aria-label") ?? ""}`,
+        ),
       );
-      return naming.size === 1 ? buttons.indexOf([...naming][0]!) : null;
+      return naming.length === 1 ? result(naming[0]!) : null;
     },
     { tokens, copyCue: COPY_CUE_SOURCE, clickedRef },
   );
-  return buttonIndex === null ? null : page.locator('button, [role="button"]').nth(buttonIndex);
+  return selected === null
+    ? null
+    : { button: page.locator('button, [role="button"]').nth(selected.index), token: selected.token };
 }
 
 type CopySourceWindow = Window & {
   __tsCopySource?: Element;
-  __tsCopyCandidate?: Element;
+  __tsCopyCandidate?: { element: Element; token: string };
   __tsDriveRegistry?: { nodes: Map<string, Element> };
 };
 
@@ -848,23 +868,28 @@ export async function copySourceClick(
   const mark = async (
     source: Locator | null,
     slot: "__tsCopySource" | "__tsCopyCandidate",
+    token?: string,
   ): Promise<boolean> =>
     source !== null &&
     (await source
       .evaluate(
-        (element, { ref, slot }) => {
+        (element, { ref, slot, token }) => {
           const sourceWindow = window as CopySourceWindow;
           if (sourceWindow.__tsDriveRegistry?.nodes.get(ref) !== element) return false;
-          sourceWindow[slot] = element;
+          if (slot === "__tsCopySource") sourceWindow.__tsCopySource = element;
+          else if (token !== undefined) sourceWindow.__tsCopyCandidate = { element, token };
+          else return false;
           return true;
         },
-        { ref, slot },
+        { ref, slot, token },
       )
       .catch(() => false)) === true;
   if (await mark(await findCopySource(page, false).catch(() => null), "__tsCopySource"))
     return "source";
+  const candidate = await copyButtonBesideRevealedKey(page, ref).catch(() => null);
   if (
-    await mark(await copyButtonBesideRevealedKey(page, ref).catch(() => null), "__tsCopyCandidate")
+    candidate !== null &&
+    await mark(candidate.button, "__tsCopyCandidate", candidate.token)
   )
     return "candidate";
   return null;
@@ -1051,7 +1076,7 @@ async function findCopySource(page: Page, withSnapshot = true): Promise<Locator 
   }
   // Some providers close the creation dialog and show the new key inline on
   // the list page (Kenari); its Copy control then sits beside the key itself.
-  return copyButton ?? (await copyButtonBesideRevealedKey(page));
+  return copyButton ?? (await copyButtonBesideRevealedKey(page))?.button ?? null;
 }
 
 /** A created-key dialog may render its readable value outside DOM text (for
@@ -1082,17 +1107,17 @@ async function copyCredentialFromDialog(
   // click already ran, so the clipboard is the evidence. Only the shown key
   // itself is taken, and that control becomes the source for later retries.
   const clipboard = (await browser.readClipboard(page).catch(() => "")).trim();
-  if (clipboard.length === 0 || !(await shownCredentialTokens(page)).includes(clipboard))
-    return null;
+  if (clipboard.length === 0) return null;
   const promoted = await page
-    .evaluate(() => {
+    .evaluate((clipboard) => {
       const sourceWindow = window as CopySourceWindow;
       const candidate = sourceWindow.__tsCopyCandidate;
-      if (candidate === undefined || !candidate.isConnected) return false;
-      sourceWindow.__tsCopySource = candidate;
+      if (candidate === undefined || !candidate.element.isConnected || candidate.token !== clipboard)
+        return false;
+      sourceWindow.__tsCopySource = candidate.element;
       delete sourceWindow.__tsCopyCandidate;
       return true;
-    })
+    }, clipboard)
     .catch(() => false);
   return promoted === true ? clipboard : null;
 }

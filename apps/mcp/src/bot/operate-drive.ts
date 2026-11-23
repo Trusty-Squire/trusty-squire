@@ -3630,11 +3630,15 @@ export function submitResponseText(
 function inPageSubmittedFormText(arg: { ref: string | null }): string | null {
   const scope = window as Window & {
     __tsDriveRegistry?: { nodes: Map<string, Element> };
-    __tsSubmitSurface?: Element;
+    __tsSubmitSurface?: { element: Element; selector: string; index: number };
   };
   if (arg.ref === null) {
     const surface = scope.__tsSubmitSurface;
-    return surface === undefined || !surface.isConnected ? null : textOf(surface);
+    if (surface === undefined) return null;
+    const element = surface.element.isConnected
+      ? surface.element
+      : document.querySelectorAll(surface.selector)[surface.index];
+    return element === undefined ? null : textOf(element);
   }
   const control = scope.__tsDriveRegistry?.nodes.get(arg.ref);
   if (control === undefined || !control.isConnected) return null;
@@ -3649,7 +3653,17 @@ function inPageSubmittedFormText(arg: { ref: string | null }): string | null {
     if (ancestor.querySelector("input, textarea, select") !== null) form = ancestor;
   }
   if (form === null) return null;
-  scope.__tsSubmitSurface = form;
+  const selector = form.id.length > 0
+    ? `#${CSS.escape(form.id)}`
+    : form.tagName + ["role", "aria-label"].map((name) => {
+        const value = form.getAttribute(name);
+        return value === null ? "" : `[${name}="${CSS.escape(value)}"]`;
+      }).join("");
+  scope.__tsSubmitSurface = {
+    element: form,
+    selector,
+    index: Array.from(document.querySelectorAll(selector)).indexOf(form),
+  };
   return textOf(form);
 
   function textOf(surface: Element): string {

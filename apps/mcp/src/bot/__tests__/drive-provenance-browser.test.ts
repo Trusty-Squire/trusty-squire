@@ -302,8 +302,10 @@ it.each(["Salin", "Tersalin"])(
 );
 
 it.each([
-  ["keeps its Create button", false],
-  ["replaces its Create button", true],
+  ["keeps its Create button", "none"],
+  ["replaces its Create button", "button"],
+  ["replaces its dialog", "dialog"],
+  ["replaces its form", "form"],
 ])(
   "reports a submitted form's inline error text when the form %s",
   async (_name, replace) => {
@@ -316,15 +318,21 @@ it.each([
     );
     const html = `<!doctype html><main><h1>API keys</h1>
     <div style="font-size:6px">${filler.map((line) => `<span>${line} </span>`).join("")}</div></main>
-    <div role="dialog" aria-label="Create API key" style="position:fixed;top:20px;left:20px;background:#fff">
+    <div ${replace === "form" ? "" : 'role="dialog" aria-label="Create API key"'} style="position:fixed;top:20px;left:20px;background:#fff">
       <form id="create"><label>Alias <input name="alias" value="grunt"></label>
         <button type="submit">Create</button></form><p id="error"></p></div>
     <script>document.getElementById('create').addEventListener('submit', (event) => {
       event.preventDefault();
       document.getElementById('error').textContent = 'An active key already uses the alias grunt.';
-      if (${replace}) {
+      if ('${replace}' === 'button') {
         const button = event.target.querySelector('button');
         button.replaceWith(button.cloneNode(true));
+      } else if ('${replace}' === 'dialog') {
+        const dialog = event.target.parentElement;
+        dialog.replaceWith(dialog.cloneNode(true));
+      } else if ('${replace}' === 'form') {
+        event.target.appendChild(document.getElementById('error'));
+        event.target.replaceWith(event.target.cloneNode(true));
       }
     });</script>`;
     const traceDir = await mkdtemp(join(process.cwd(), ".drive-form-error-trace-"));

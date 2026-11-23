@@ -5,7 +5,7 @@ import { chromium, type BrowserContext, type Page } from "playwright";
 import { BrowserController } from "../../browser.js";
 import * as lifecycle from "../../session/lifecycle.js";
 import type { Session } from "../../session/model.js";
-import { extractCredentials } from "../capture.js";
+import { copySourceClick, extractCredentials } from "../capture.js";
 
 let profile: string;
 let context: BrowserContext;
@@ -202,7 +202,8 @@ it.each([false, true])(
   },
 );
 
-it.each([false, true])("vaults a Zro key with an extra wrapper: %s", async (wrapped) => {
+it.each(["plain", "wrapped", "icon"])("vaults a Zro key with control: %s", async (variant) => {
+  const wrapped = variant !== "plain";
   // Zro 23 Nov (run after Grunt #182, trace rows 9-11): Create closed the form
   // dialog and /api-keys showed the key once in an inline, non-modal panel with
   // Dismiss / Copy key / Done, plus a setup snippet carrying its own
@@ -213,7 +214,7 @@ it.each([false, true])("vaults a Zro key with an extra wrapper: %s", async (wrap
   await page.evaluate(() => navigator.clipboard.writeText("")).catch(() => undefined);
   const html = `<!doctype html><main><h1>API keys</h1><button>Create key</button>
     <section class="panel"><h2>Your new key</h2>
-      <div>${wrapped ? "<span>" : ""}<code id="key">${key}</code>${wrapped ? "</span>" : ""}<button type="button" id="copy-key">Copy key</button></div>
+      <div>${wrapped ? "<span>" : ""}<code id="key">${key}</code>${wrapped ? "</span>" : ""}<button type="button" id="copy-key">${variant === "icon" ? "⧉" : "Copy key"}</button></div>
       <button type="button">Dismiss</button><button type="button">Done</button>
       <h3>Use Zro from npm</h3>
       <div><code id="setup">ZRO_SETUP=${setupToken}</code>
@@ -232,6 +233,14 @@ it.each([false, true])("vaults a Zro key with an extra wrapper: %s", async (wrap
   await page.route("**/*", (route) => route.fulfill({ contentType: "text/html", body: html }));
   await page.goto("http://127.0.0.1/api-keys");
 
+  if (variant === "icon") {
+    expect((await extractCredentials("fixture-session")).credentials).toEqual({});
+    await page.evaluate(() => {
+      (window as Window & { __tsDriveRegistry?: { nodes: Map<string, Element | null> } }).__tsDriveRegistry = { nodes: new Map([["key", document.getElementById("copy-key")]]) };
+    });
+    expect(await copySourceClick(page, "key")).toBe("candidate");
+    await page.locator("#copy-key").click();
+  }
   const result = await extractCredentials("fixture-session");
   expect(result.credentials).toEqual({ api_key: key });
   expect(await page.locator("#copy-key").textContent()).toBe("Copied");
@@ -264,4 +273,23 @@ it("does not take a highlighted code sample's Copy for the revealed key", async 
 
   const result = await extractCredentials("fixture-session");
   expect(result.credentials).toEqual({ api_key: key });
+});
+
+
+it("does not promote an icon candidate from another holder's stale clipboard value", async () => {
+  const key = "kn-Q7wE3rT9yU2iO5pA8sD1fG4hJ6kL0zX3cV7bN9mQ2wE5rT8y";
+  const oldKey = "zro_Hk3Lm9Np2Qr8St4Uv7Wx1Yz5Ab6Cd0Ef";
+  const html = `<!doctype html><h1>API keys</h1>
+    <div><code>${key}</code><button id="new">⧉</button></div>
+    <div><code>${oldKey}</code><button>⧉</button></div>`;
+  await page.route("**/*", (route) => route.fulfill({ contentType: "text/html", body: html }));
+  await page.goto("http://127.0.0.1/api-keys");
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await page.evaluate(async (value) => {
+    await navigator.clipboard.writeText(value);
+    (window as Window & { __tsDriveRegistry?: { nodes: Map<string, Element | null> } }).__tsDriveRegistry = { nodes: new Map([["new", document.getElementById("new")]]) };
+  }, oldKey);
+  expect(await copySourceClick(page, "new")).toBe("candidate");
+  await page.locator("#new").click();
+  expect((await extractCredentials("fixture-session")).credentials).toEqual({});
 });
