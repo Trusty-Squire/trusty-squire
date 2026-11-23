@@ -418,6 +418,7 @@ describe("connect --target=<agent> writes a valid config", () => {
         agentConfigs: [
           {
             target: "hermes",
+            configPath: AGENTS.hermes.config_path(),
             agentIdentity: "hermes",
             profileDir: process.env.TRUSTY_SQUIRE_PROFILE_DIR,
           },
@@ -753,7 +754,12 @@ describe("connect --target=<agent> writes a valid config", () => {
           action: "start",
           finalize: expect.objectContaining({
             agentConfigs: [
-              { target: "hermes", agentIdentity: "hermes", profileDir: hermesProfile },
+              {
+                target: "hermes",
+                configPath: AGENTS.hermes.config_path(),
+                agentIdentity: "hermes",
+                profileDir: hermesProfile,
+              },
             ],
           }),
         }),
