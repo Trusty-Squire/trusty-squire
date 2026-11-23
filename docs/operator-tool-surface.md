@@ -411,11 +411,17 @@ ordinary admitted votes remain unchanged. Regression coverage lives in
 [`drive-identity-account-choice.test.ts`](../apps/mcp/src/bot/__tests__/drive-identity-account-choice.test.ts).
 
 The drive considers up to 250 candidates and caps each decision batch at 128
-total choice criteria, including operation and goal-value choices. Truncation
-is disclosed in the question instructions; retained dropdown choices with
-omitted siblings carry `options_elided` in planner state. The allocator reserves
-a usable goal-value choice alongside `none` when available. Omitted choices
-cannot be selected in that batch.
+total choice criteria, including operation and goal-value choices. The allocator
+first reserves all operation and email-code choices, plus a minimum share for
+each remaining question (including a usable goal-value choice alongside `none`
+when available). It then prioritizes form-value and goal-value choices and their
+eligible text targets before distributing the remaining budget in question order.
+Long click lists therefore yield space to supplied values and the fields that
+can receive them; value choices can still be truncated if those shares exhaust
+the budget. Truncation is disclosed in the question instructions; retained
+dropdown choices with omitted siblings carry `options_elided` in planner state.
+Omitted choices cannot be selected in that batch. Regression coverage lives in
+[`drive-fact-budget.test.ts`](../apps/mcp/src/bot/__tests__/drive-fact-budget.test.ts).
 
 Covered controls remain eligible for the drive's action menu alongside dialog
 and overlay dismiss controls; the action-time occlusion guard still applies.
