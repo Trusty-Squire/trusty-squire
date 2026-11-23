@@ -122,7 +122,9 @@ describe("a refused act on one page", () => {
             const first = !attemptedRefusal;
             if (first) {
               attemptedRefusal = true;
-              await tab.locator("#google").evaluate((node) => node.replaceWith(node.cloneNode(true)));
+              await tab
+                .locator("#google")
+                .evaluate((node) => node.replaceWith(node.cloneNode(true)));
             }
             const outcome = await dispatchDriveAct(sessionId, action, deadline);
             if (first) {
