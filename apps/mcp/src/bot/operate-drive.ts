@@ -3679,6 +3679,14 @@ function inPageSubmittedFormText(arg: { ref: string | null }): string | null {
       const rect = parent.getBoundingClientRect();
       if (style.display === "none" || style.visibility === "hidden") continue;
       if (rect.width <= 0 || rect.height <= 0) continue;
+      let hidden = false;
+      for (let ancestor: Element | null = parent; ancestor !== null; ancestor = ancestor.parentElement) {
+        if (Number(getComputedStyle(ancestor).opacity) <= 0.01) {
+          hidden = true;
+          break;
+        }
+      }
+      if (hidden) continue;
       lines.push(value);
       length += value.length;
     }

@@ -732,7 +732,12 @@ async function copyButtonBesideRevealedKey(
       // The key is the holder's whole text, give or take a short caption
       // ("Key: …"); a key inside a longer code sample is not a reveal.
       const keyIn = (text: string): string | undefined =>
-        tokens.find((token) => text.includes(token) && text.replace(token, "").trim().length <= 20);
+        tokens.find((token) => {
+          if (text === token) return true;
+          if (!text.endsWith(token)) return false;
+          const caption = text.slice(0, -token.length);
+          return caption.length <= 22 && /^[^=:\n]+:\s+$/.test(caption);
+        });
       const holders: Array<{ element: Element; token: string }> = [];
       for (const field of Array.from(document.querySelectorAll("input, textarea"))) {
         const token = keyIn((field as HTMLInputElement | HTMLTextAreaElement).value.trim());
@@ -749,6 +754,10 @@ async function copyButtonBesideRevealedKey(
         if (token !== undefined && visible(holder) && !holders.some((h) => h.element === holder))
           holders.push({ element: holder, token });
       }
+      const distinctHolders = holders.filter((holder) =>
+        !holders.some((other) => other !== holder && other.token === holder.token &&
+          holder.element.contains(other.element)),
+      );
       const buttons = Array.from(document.querySelectorAll('button, [role="button"]'));
       const clicked =
         clickedRef === undefined
@@ -765,7 +774,7 @@ async function copyButtonBesideRevealedKey(
       // Each holder's nearest Copy control: the smallest ancestor that has one,
       // then the closest on screen.
       const nearest: Array<{ distance: number; button: Element; token: string; holder: Element }> = [];
-      for (const holder of holders) {
+      for (const holder of distinctHolders) {
         const at = holder.element.getBoundingClientRect();
         let scope: Element | null = holder.element;
         for (let level = 0; scope !== null && level <= 6; level++, scope = scope.parentElement) {
@@ -790,7 +799,7 @@ async function copyButtonBesideRevealedKey(
           return level;
         };
         const level = depth(entry.holder);
-        return !holders.some((other) => {
+        return !distinctHolders.some((other) => {
           if (other.token === entry.token) return false;
           const otherLevel = depth(other.element);
           const rect = other.element.getBoundingClientRect();
@@ -798,7 +807,9 @@ async function copyButtonBesideRevealedKey(
           const distance = Math.hypot(buttonRect.left - rect.left, buttonRect.top - rect.top);
           return otherLevel < level || (otherLevel === level && distance <= entry.distance);
         });
-      });
+      }).filter((entry, index, entries) =>
+        entries.findIndex((other) => other.button === entry.button && other.token === entry.token) === index,
+      );
       const result = (entry: (typeof associated)[number]) => ({
         index: buttons.indexOf(entry.button),
         token: entry.token,
@@ -827,8 +838,10 @@ async function copyButtonBesideRevealedKey(
     : { button: page.locator('button, [role="button"]').nth(selected.index), token: selected.token };
 }
 
+type CopyControl = { button: Locator; token?: string };
+
 type CopySourceWindow = Window & {
-  __tsCopySource?: Element;
+  __tsCopySource?: { element: Element; token?: string };
   __tsCopyCandidate?: { element: Element; token: string };
   __tsDriveRegistry?: { nodes: Map<string, Element> };
 };
@@ -836,19 +849,20 @@ type CopySourceWindow = Window & {
 /** The Copy control whose click last wrote the clipboard on this document,
  * while it is still shown. Its label may have changed since ("Copy key" →
  * "Copied"), so a retry must not rediscover it by label. */
-async function rememberedCopySource(page: Page): Promise<Locator | null> {
-  const index: unknown = await page
+async function rememberedCopySource(page: Page): Promise<CopyControl | null> {
+  const source = await page
     .evaluate(() => {
       const source = (window as CopySourceWindow).__tsCopySource;
-      if (source === undefined || !source.isConnected) return -1;
-      const rect = source.getBoundingClientRect();
-      if (rect.width <= 2 || rect.height <= 2) return -1;
-      return Array.from(document.querySelectorAll('button, [role="button"]')).indexOf(source);
+      if (source === undefined || !source.element.isConnected) return null;
+      const rect = source.element.getBoundingClientRect();
+      if (rect.width <= 2 || rect.height <= 2) return null;
+      const index = Array.from(document.querySelectorAll('button, [role="button"]')).indexOf(source.element);
+      return index < 0 ? null : { index, token: source.token };
     })
-    .catch(() => -1);
-  return typeof index === "number" && index >= 0
-    ? page.locator('button, [role="button"]').nth(index)
-    : null;
+    .catch(() => null);
+  return source === null
+    ? null
+    : { button: page.locator('button, [role="button"]').nth(source.index), token: source.token };
 }
 
 /** The one decision on what a click on drive ref `ref` is to capture:
@@ -876,7 +890,7 @@ export async function copySourceClick(
         (element, { ref, slot, token }) => {
           const sourceWindow = window as CopySourceWindow;
           if (sourceWindow.__tsDriveRegistry?.nodes.get(ref) !== element) return false;
-          if (slot === "__tsCopySource") sourceWindow.__tsCopySource = element;
+          if (slot === "__tsCopySource") sourceWindow.__tsCopySource = { element, token };
           else if (token === undefined) return false;
           if (token !== undefined) sourceWindow.__tsCopyCandidate = { element, token };
           return true;
@@ -885,7 +899,8 @@ export async function copySourceClick(
       )
       .catch(() => false)) === true;
   const candidate = await copyButtonBesideRevealedKey(page, ref).catch(() => null);
-  if (await mark(await findCopySource(page, false).catch(() => null), "__tsCopySource", candidate?.token))
+  const source = await findCopySource(page, false).catch(() => null);
+  if (await mark(source?.button ?? null, "__tsCopySource", source?.token ?? candidate?.token))
     return "source";
   if (
     candidate !== null &&
@@ -897,7 +912,7 @@ export async function copySourceClick(
 
 /** The page's Copy control for a revealed key: the remembered source, then one
  * in a modal or covering layer, then one beside a key shown inline. */
-async function findCopySource(page: Page, withSnapshot = true): Promise<Locator | null> {
+async function findCopySource(page: Page, withSnapshot = true): Promise<CopyControl | null> {
   const remembered = await rememberedCopySource(page);
   if (remembered !== null) return remembered;
   const modalSelector = 'dialog[open], [role="dialog"], [role="alertdialog"], [aria-modal="true"]';
@@ -1076,7 +1091,7 @@ async function findCopySource(page: Page, withSnapshot = true): Promise<Locator 
   }
   // Some providers close the creation dialog and show the new key inline on
   // the list page (Kenari); its Copy control then sits beside the key itself.
-  return copyButton ?? (await copyButtonBesideRevealedKey(page))?.button ?? null;
+  return copyButton === null ? await copyButtonBesideRevealedKey(page) : { button: copyButton };
 }
 
 /** A created-key dialog may render its readable value outside DOM text (for
@@ -1113,7 +1128,7 @@ async function copyCredentialFromDialog(
       const sourceWindow = window as CopySourceWindow;
       const candidate = sourceWindow.__tsCopyCandidate;
       if (candidate === undefined || candidate.token !== clipboard) return false;
-      if (candidate.element.isConnected) sourceWindow.__tsCopySource = candidate.element;
+      if (candidate.element.isConnected) sourceWindow.__tsCopySource = candidate;
       delete sourceWindow.__tsCopyCandidate;
       return true;
     }, clipboard)
@@ -1122,8 +1137,9 @@ async function copyCredentialFromDialog(
 }
 
 async function copyFromSource(page: Page, browser: Session["browser"]): Promise<string | null> {
-  const copyButton = await findCopySource(page);
-  if (copyButton === null) return null;
+  const source = await findCopySource(page);
+  if (source === null) return null;
+  const copyButton = source.button;
   // Empty the clipboard first: a value present after the click was written by
   // this click, even when it equals what an earlier Copy click left there.
   const before = await browser.readClipboard(page).catch(() => "");
@@ -1146,16 +1162,17 @@ async function copyFromSource(page: Page, browser: Session["browser"]): Promise<
   } catch {
     // Fall through: nothing was copied.
   }
-  if (copied.length === 0 || (!cleared && copied === before.trim())) {
+  if (copied.length === 0 || (!cleared && copied === before.trim()) ||
+      (source.token !== undefined && copied !== source.token)) {
     // Leave the clipboard as the page found it when this control wrote nothing.
     if (cleared && before.length > 0) await writeClipboard(before);
     return null;
   }
   // This control wrote the clipboard: a retry after a failed store reuses it.
   await copyButton
-    .evaluate((element) => {
-      (window as CopySourceWindow).__tsCopySource = element;
-    })
+    .evaluate((element, token) => {
+      (window as CopySourceWindow).__tsCopySource = { element, token };
+    }, source.token)
     .catch(() => undefined);
   return copied;
 }

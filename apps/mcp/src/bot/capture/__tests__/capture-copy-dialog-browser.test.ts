@@ -298,3 +298,56 @@ it("does not promote an icon candidate from another holder's stale clipboard val
   await page.locator("#new").click();
   expect((await extractCredentials("fixture-session")).credentials).toEqual({});
 });
+
+
+it("copies the bare key instead of a closer setup assignment containing the same token", async () => {
+  const key = "zro_Hk3Lm9Np2Qr8St4Uv7Wx1Yz5Ab6Cd0Ef";
+  const html = `<!doctype html><h1>API keys</h1>
+    <div><code>API_KEY=${key}</code><button id="setup">Copy</button></div>
+    <section><code>${key}</code><div style="margin:200px 0 0 700px"><button id="key">Copy</button></div></section>
+    <script>
+      document.getElementById('setup').onclick = () => navigator.clipboard.writeText('API_KEY=${key}');
+      document.getElementById('key').onclick = () => navigator.clipboard.writeText('${key}');
+    </script>`;
+  await page.route("**/*", (route) => route.fulfill({ contentType: "text/html", body: html }));
+  await page.goto("http://127.0.0.1/api-keys");
+  expect((await extractCredentials("fixture-session")).credentials).toEqual({ api_key: key });
+});
+
+it("requires an inline source and its remembered retry to copy the associated bare token", async () => {
+  const key = "zro_Hk3Lm9Np2Qr8St4Uv7Wx1Yz5Ab6Cd0Ef";
+  const html = `<!doctype html><h1>API keys</h1>
+    <div><code>${key}</code><button>Copy key</button></div>
+    <script>
+      window.copiedValue = 'API_KEY=${key}';
+      document.querySelector('button').onclick = () => navigator.clipboard.writeText(window.copiedValue);
+    </script>`;
+  await page.route("**/*", (route) => route.fulfill({ contentType: "text/html", body: html }));
+  await page.goto("http://127.0.0.1/api-keys");
+  expect((await extractCredentials("fixture-session")).credentials).toEqual({});
+  await page.evaluate((value) => { Reflect.set(window, "copiedValue", value); }, key);
+  expect((await extractCredentials("fixture-session")).credentials).toEqual({ api_key: key });
+  await page.evaluate((value) => { Reflect.set(window, "copiedValue", value); }, `API_KEY=${key}`);
+  expect((await extractCredentials("fixture-session")).credentials).toEqual({});
+});
+
+it.each(["⧉", '<svg width="16" height="16"><rect width="12" height="12" /></svg>'])(
+  "recognizes an icon dispatch beside a nested captioned key: %s",
+  async (icon) => {
+    const key = "zro_Hk3Lm9Np2Qr8St4Uv7Wx1Yz5Ab6Cd0Ef";
+    const html = `<!doctype html><h1>API keys</h1>
+      <div>API key: <span>${key}</span><button id="copy">${icon}</button></div>
+      <script>document.getElementById('copy').onclick = () => navigator.clipboard.writeText('${key}');</script>`;
+    await page.route("**/*", (route) => route.fulfill({ contentType: "text/html", body: html }));
+    await page.goto("http://127.0.0.1/api-keys");
+    expect((await extractCredentials("fixture-session")).credentials).toEqual({});
+    await page.evaluate(() => {
+      (window as Window & { __tsDriveRegistry?: { nodes: Map<string, Element | null> } }).__tsDriveRegistry = {
+        nodes: new Map([["copy", document.getElementById("copy")]]),
+      };
+    });
+    expect(await copySourceClick(page, "copy")).toBe("candidate");
+    await page.locator("#copy").click();
+    expect((await extractCredentials("fixture-session")).credentials).toEqual({ api_key: key });
+  },
+);

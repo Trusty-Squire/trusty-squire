@@ -308,6 +308,8 @@ it.each([
   ["replaces its form", "form"],
   ["removes its anonymous form", "removed"],
   ["replaces a non-unique named form", "ambiguous"],
+  ["reveals transparent error text", "opacity"],
+  ["reveals error text inside a transparent ancestor", "ancestor-opacity"],
 ])(
   "reports a submitted form's inline error text when the form %s",
   async (_name, replace) => {
@@ -322,11 +324,16 @@ it.each([
     <div style="font-size:6px">${filler.map((line) => `<span>${line} </span>`).join("")}</div></main>
     <div ${["form", "removed", "ambiguous"].includes(replace) ? "" : 'role="dialog" aria-label="Create API key"'} style="position:fixed;top:20px;left:20px;background:#fff">
       <form ${replace === "removed" ? "" : replace === "ambiguous" ? 'name="create"' : 'id="create"'}><label>Alias <input name="alias" value="grunt"></label>
-        <button type="submit">Create</button></form><p id="error"></p></div>
+        <button type="submit">Create</button></form>
+      <div id="error-container" style="opacity:${replace === "ancestor-opacity" ? 0 : 1}">
+        <p id="error" style="opacity:${replace === "opacity" ? 0 : 1}">${replace.includes("opacity") ? "An active key already uses the alias grunt." : ""}</p>
+      </div></div>
     ${["removed", "ambiguous"].includes(replace) ? `<form ${replace === "ambiguous" ? 'name="create"' : ""}><p>Unrelated billing form response.</p><input name="billing"></form>` : ""}
     <script>document.forms[0].addEventListener('submit', (event) => {
       event.preventDefault();
       document.getElementById('error').textContent = 'An active key already uses the alias grunt.';
+      document.getElementById('error').style.opacity = '1';
+      document.getElementById('error-container').style.opacity = '1';
       if ('${replace}' === 'button') {
         const button = event.target.querySelector('button');
         button.replaceWith(button.cloneNode(true));
