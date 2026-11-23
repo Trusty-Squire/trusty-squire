@@ -1,0 +1,14 @@
+# The connect sign-in ceremony and its Finish (owner decision, 2026-11-22).
+# Changes here decide whether pressing Finish saves the session and closes the
+# sign-in window.
+
+# Broker daemon ceremony and the connect command
+/apps/mcp/src/bot/broker/ceremony.ts @lunchboxfortwo
+/apps/mcp/src/install/ceremony-finalize.ts @lunchboxfortwo
+/apps/mcp/src/install/cli.ts @lunchboxfortwo
+/apps/mcp/src/bot/google-login.ts @lunchboxfortwo
+/apps/mcp/src/bot/__tests__/connect-finish-real-chrome.test.ts @lunchboxfortwo
+
+# Install finish route and the install wizard page
+/apps/api/src/routes/mcp-install.ts @lunchboxfortwo
+/apps/web/app/install/ @lunchboxfortwo

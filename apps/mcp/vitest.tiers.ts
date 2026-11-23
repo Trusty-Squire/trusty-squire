@@ -27,6 +27,12 @@ export const SLOW_POST_MERGE_FILES = [
 // browser-launching test file must be listed here (grep for
 // `chromium.launch|patchrightChromium.launch|connectOverCDP|launchPersistentContext`
 // plus broker tests driving real Chrome via UNIVERSAL_BOT_CHROME_BINARY).
+//
+// One deliberate exception, owner decision 2026-11-22:
+// `src/bot/__tests__/connect-finish-real-chrome.test.ts` launches real Chrome
+// yet is NOT listed here, so it runs in the required fast tier on every pull
+// request and a PR that breaks the connect sign-in Finish cannot merge. It is
+// kept to a single headless page on the runner's preinstalled Chrome.
 export const REAL_BROWSER_FILES = [
   "src/bot/__tests__/browser-external-protocol.test.ts",
   "scripts/native-dialog-built-demo.test.mjs",
