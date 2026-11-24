@@ -623,6 +623,7 @@ export async function loginWithOAuth(
   let actionStarted = false;
   let productNavigated = false;
   let transientNavigated = false;
+  let popupReachedProvider = false;
   let expectedReturnChain: readonly string[] | null = null;
   let pendingOnProvider = false;
   let lastTransientUrl = productUrl;
@@ -725,8 +726,12 @@ export async function loginWithOAuth(
     if (browser.activeOAuthAttempt?.providerPage === page) {
       browser.activeOAuthAttempt.providerDocumentId = null;
     }
-    if (page === popupCapture.page) transientNavigated = true;
     const url = frame.url();
+    if (page === popupCapture.page) {
+      transientNavigated = true;
+      popupReachedProvider ||=
+        consentProvider !== undefined && oauthProviderForUrl(url) === consentProvider;
+    }
     const priorReturn = observedReturn;
     captureExpectedReturnUrl(url);
     if (matchesExpectedReturn(url)) observedCallbackDenial ??= denialError(url);
@@ -1046,6 +1051,15 @@ export async function loginWithOAuth(
     }
     const hasTerminalCompletion = (): boolean =>
       observedReturn !== null && observedReturn.page.isClosed();
+    // A provider can deliver its result to the opener without navigating to
+    // a callback URL. When that popup closes, read the opener's actual state.
+    const popupReturnedControl = (): boolean =>
+      providerPage !== null &&
+      providerPage.isClosed() &&
+      !product.isClosed() &&
+      popupReachedProvider &&
+      expectedReturnUrls().length === 0;
+    const shouldStopWaiting = (): boolean => hasTerminalCompletion() || popupReturnedControl();
     let settled: Page | null = null;
     if (consentProvider === undefined) {
       settled = await waitForOAuthLifecycle(
@@ -1064,9 +1078,9 @@ export async function loginWithOAuth(
           expectedReturnUrls,
           Math.min(1_000, remaining),
           completionPage,
-          hasTerminalCompletion,
+          shouldStopWaiting,
         );
-        if (settled !== null || hasTerminalCompletion()) break;
+        if (settled !== null || shouldStopWaiting()) break;
         if (Date.now() >= oauthDeadline) break;
         const transientUrl = transient.url();
         if (oauthProviderForUrl(transientUrl) !== consentProvider) {
@@ -1143,6 +1157,7 @@ export async function loginWithOAuth(
     }
     const completion = settled === null ? await completionEvidence() : { page: settled };
     if (completion === null) {
+      if (popupReturnedControl()) return;
       pendingOnProvider = true;
       throw awaitingHumanError();
     }
@@ -1278,11 +1293,11 @@ export async function waitForOAuthLifecycle(
   expectedReturnUrls: () => readonly string[],
   timeoutMs: number,
   completionPage: () => Page | null,
-  terminalCompletion: () => boolean,
+  shouldStopWaiting: () => boolean,
 ): Promise<Page | null> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (terminalCompletion()) return null;
+    if (shouldStopWaiting()) return null;
     const returnedPage = completionPage();
     if (returnedPage !== null) {
       const url = returnedPage.url();

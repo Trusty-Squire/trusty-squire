@@ -1,7 +1,16 @@
-import { afterAll, beforeAll, expect, it } from "vitest";
+import { afterAll, beforeAll, expect, it, vi } from "vitest";
 import { chromium, type Browser } from "playwright";
 import { BrowserController } from "../browser.js";
 import { loginWithOAuth } from "../oauth-login.js";
+import {
+  act,
+  finishProvisionSession,
+  observe,
+  preparePublicOAuthLoginTarget,
+  startHarnessProvisionSession,
+  withPreparedOAuthLoginTarget,
+} from "../provision-session.js";
+import { operateLoginTool } from "../../tools/provision-drive.js";
 
 let browser: Browser;
 beforeAll(async () => {
@@ -54,3 +63,101 @@ it("follows a popup when its opener also navigates during the identity handoff",
     await context.close();
   }
 }, 15_000);
+
+it.each(["popup", "tab"])(
+  "continues on the signed-in opener after a Google %s posts back and closes",
+  async (transport) => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    const productUrl = "https://product.test/login";
+    const chooserUrl = "https://accounts.google.com/v3/signin/accountchooser";
+    const consentUrl = "https://accounts.google.com/signin/oauth/consent";
+    const relayUrl = "https://product.test/popup-relay";
+    const postSignIn =
+      "window.opener.postMessage('fixture-signed-in', 'https://product.test'); window.close()";
+    const messageOrigin =
+      transport === "popup" ? new URL(consentUrl).origin : new URL(relayUrl).origin;
+    let sessionId: string | undefined;
+    vi.stubEnv("TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS", "6000");
+    vi.stubEnv("TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS", "0");
+    try {
+      await context.route("https://myaccount.google.com/**", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: '<button aria-label="Google Account: Operator (operator@example.com)"></button>',
+        }),
+      );
+      await context.route(productUrl, (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: `
+            <main>Signed out</main>
+            <button id="sign-in" onclick="window.open('${chooserUrl}', '_blank', '${transport === "popup" ? "popup" : ""}')">Sign in with Google</button>
+            <script>
+              addEventListener('message', ({origin, data}) => {
+                if (origin !== '${messageOrigin}' || data !== 'fixture-signed-in') return;
+                document.getElementById('sign-in').remove();
+                document.querySelector('main').innerHTML = '<h1>Signed in</h1><button>Account settings</button>';
+                document.querySelector('main button').onclick = () => {
+                  document.querySelector('main h1').textContent = 'Settings opened';
+                };
+              });
+            </script>`,
+        }),
+      );
+      await context.route(chooserUrl, (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: `<h1>Choose an account</h1>
+            <button data-identifier="operator@example.com" onclick="location.href='${consentUrl}'">operator@example.com</button>`,
+        }),
+      );
+      await context.route(consentUrl, (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: `<button onclick="${transport === "popup" ? postSignIn : `location.href='${relayUrl}'`}">Continue</button>`,
+        }),
+      );
+      await context.route(relayUrl, (route) =>
+        route.fulfill({ contentType: "text/html", body: `<script>${postSignIn}</script>` }),
+      );
+
+      const controller = BrowserController.fromHarnessPage(product);
+      const started = await startHarnessProvisionSession({
+        browser: controller,
+        serviceUrl: productUrl,
+        format: "full",
+      });
+      sessionId = started.session_id;
+      const target = started.dom?.match(/@e:[A-Za-z0-9_-]+/)?.[0];
+      expect(target).toBeDefined();
+      const prepared = preparePublicOAuthLoginTarget(sessionId, target!);
+      expect(prepared).toBeDefined();
+      const result = await withPreparedOAuthLoginTarget(prepared!, () =>
+        operateLoginTool.handler(
+          { action: "oauth", session_id: started.session_id, ref: target!, provider: "google" },
+          null,
+        ),
+      );
+      expect(await product.locator("main").innerText()).toContain("Signed in");
+      expect(controller.page).toBe(product);
+      expect(context.pages()).toEqual([product]);
+      expect(result).toMatchObject({
+        url: productUrl,
+        dom: expect.stringContaining("Signed in"),
+      });
+      expect(result).not.toHaveProperty("terminal");
+      const observed = await observe(sessionId, "full");
+      expect(observed.dom).toContain("Account settings");
+      const settings = observed.dom?.match(/@e:[A-Za-z0-9_-]+/)?.[0];
+      expect(settings).toBeDefined();
+      await act(sessionId, { kind: "click", target: settings! });
+      expect(await product.locator("main h1").innerText()).toBe("Settings opened");
+    } finally {
+      if (sessionId !== undefined) await finishProvisionSession(sessionId);
+      await context.close();
+      vi.unstubAllEnvs();
+    }
+  },
+  15_000,
+);
