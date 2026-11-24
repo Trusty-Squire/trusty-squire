@@ -19,30 +19,21 @@ import {
 } from "../provision-session.js";
 import { sessionForCall } from "../session/lifecycle.js";
 
-// Rows recorded by the 1.1.48-rc.1 BeatAPI drive (trace steps 5 and 6): the
-// one-time key was revealed and Copy was clicked, yet the drive kept asking.
 const STORED = { reference: "vault:example:default", service: "example", label: "default" };
-const beatApiRevealedRows: WireRow[] = [
-  ["@e:f0d128", "b", "Copy key"],
-  ["@e:f0d129", "b", "Done"],
-  ["@e:f0d26", "b", "Close"],
-  ["@key-value", "h1", "@key-value|secret=1|len=51"],
-];
-const withoutMarker = beatApiRevealedRows.slice(0, 3);
 
 describe("revealedKeyCaptureDue", () => {
-  it("is due when the page shows a revealed secret row (trace step 5)", () => {
-    expect(revealedKeyCaptureDue(beatApiRevealedRows, false)).toBe(true);
+  const inlineCopy: WireRow = ["@e:copy", "b", "Copy key"];
+
+  it("is due for a key Copy control inside a dialog", () => {
+    expect(revealedKeyCaptureDue([["@e:copy", "b", "Copy key|dialog=@e:dialog"]], false)).toBe(true);
   });
 
-  it("is due after the recorded Copy click (trace step 6)", () => {
-    expect(revealedKeyCaptureDue(beatApiRevealedRows, true)).toBe(true);
-    expect(revealedKeyCaptureDue(withoutMarker, true)).toBe(true);
-    expect(revealedKeyCaptureDue([["@e:f0d128", "b", "Copied!"]], true)).toBe(true);
+  it("is due after a recorded Copy click, regardless of the new label", () => {
+    expect(revealedKeyCaptureDue([["@e:copy", "b", "Copied!"]], true)).toBe(true);
   });
 
-  it("is not due without a revealed key or a clicked Copy control", () => {
-    expect(revealedKeyCaptureDue(withoutMarker, false)).toBe(false);
+  it("leaves inline Copy controls to the drive decision", () => {
+    expect(revealedKeyCaptureDue([inlineCopy], false)).toBe(false);
   });
 });
 

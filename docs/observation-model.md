@@ -426,8 +426,9 @@ PAN and CVV/CVC/CID. `CardValueOutputMask` applies to model-facing text and
 composites covers over injected value-bearing screenshot pixels without
 clearing or otherwise changing merchant controls.
 
-Credential-selection predicates in `credential-shape.ts` remain governed by
-the [credential capture contract](operator-tool-surface.md#credential-capture-and-retrieval),
-not by this narrow card-value boundary. `recordableTokenV2` and its closed
-vocabulary remain for the stderr audit trail and registry-bound action trace;
-browser-originated text is masked before it reaches either output.
+The [credential capture contract](operator-tool-surface.md#credential-capture-and-retrieval)
+governs how Copy controls and explicit sources are selected. Drive traces
+record control roles and labels and omit page body text and notices.
+`recordableTokenV2` and its closed vocabulary remain for the stderr audit trail
+and registry-bound action trace. Browser-originated text passes through the
+released-card value mask before reaching either output.

@@ -5,7 +5,6 @@
 import type { Frame, Page } from "playwright";
 import { frameOriginOf } from "./browser-use-capture.js";
 import { DriveEvaluateTimeout, evaluateBound } from "./drive-evaluate.js";
-import { findCredentialTokens, isMaskedDisplay } from "./credential-shape.js";
 import type { Observation } from "./provision-session.js";
 
 type SnapshotRow = [string, string, string?];
@@ -60,12 +59,10 @@ export interface DriveSnapshotElement {
   invalid?: boolean;
   /** HTML form owner identity, stable for one snapshot walk. */
   formId?: number;
-  entityText?: string;
-  entityDisplayText?: string;
   /** Visible text of the control's own row when another control shares its
    *  role and label: the largest ancestor that holds no such twin. */
   rowContext?: string;
-  entityHasReadonlyInput?: boolean;
+  entityHasValueControl?: boolean;
   dialogRef?: string;
   /** Covering control ref, or a region kind when the cover is not a listed control. */
   occludedBy?: string;
@@ -309,13 +306,7 @@ export function driveRowsFromSnapshot(snapshot: DriveSnapshot): SnapshotRow[] {
     const choice = optionOrdinal.get(element.ref);
     if (choice !== undefined) facts.push(`q=${choice.index}/${choice.total}`);
     if (element.formId !== undefined) facts.push(`fm=${element.formId}`);
-    if (
-      element.entityHasReadonlyInput === true ||
-      (element.entityText !== undefined && findCredentialTokens(element.entityText).length > 0) ||
-      (element.entityDisplayText !== undefined &&
-        (isMaskedDisplay(element.entityDisplayText) ||
-          findCredentialTokens(element.entityDisplayText).length > 0))
-    ) {
+    if (element.entityHasValueControl === true) {
       facts.push("credential=1");
     }
     if (element.dialogRef !== undefined) facts.push(`dialog=${element.dialogRef}`);
@@ -974,23 +965,6 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
             }))
         : undefined;
     const entity = pinned ? null : element.closest('tr,[role="row"],li,[role="listitem"]');
-    const entityWords: string[] = [];
-    if (entity !== null) {
-      const walker = document.createTreeWalker(entity, NodeFilter.SHOW_TEXT);
-      let node = walker.nextNode();
-      while (node !== null && !expired()) {
-        const parent = node.parentElement;
-        if (
-          parent !== null &&
-          visible(parent) &&
-          parent.closest('button,a,input,select,textarea,[role="button"],[role="menuitem"]') ===
-            null
-        ) {
-          entityWords.push(node.textContent ?? "");
-        }
-        node = walker.nextNode();
-      }
-    }
     const dialog = element.closest('dialog,[role="dialog"],[role="alertdialog"]');
     const row: DriveSnapshotElement = {
       ref,
@@ -1001,16 +975,9 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
       ...(entity === null
         ? {}
         : {
-            entityText:
-              entity instanceof HTMLElement ? entity.innerText : (entity.textContent ?? ""),
-            entityDisplayText: entityWords.join(" "),
-          }),
-      ...(entity === null
-        ? {}
-        : {
-            entityHasReadonlyInput: Array.from(entity.querySelectorAll("input[readonly]")).some(
-              (node) => visible(node),
-            ),
+            entityHasValueControl: Array.from(
+              entity.querySelectorAll("input[readonly], textarea[readonly], code"),
+            ).some((node) => visible(node) && node.closest("pre") === null),
           }),
       ...(dialog === null ? {} : { dialogRef: identity(dialog) }),
       selector: selectorFor(element),

@@ -1,5 +1,6 @@
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { afterAll, beforeAll, expect, it, vi } from "vitest";
 import { chromium, type BrowserContext } from "playwright";
 import type { ApiClient } from "../../api-client.js";
@@ -180,8 +181,6 @@ it("sends page content to Jev without pattern masking", async () => {
     );
     expect(payload).toContain(unprefixed);
     expect(payload).toContain(prefixed);
-    // The revealed-key signal stays alongside the unaltered content.
-    expect(payload).toContain("the revealed secret value");
   });
 }, 30_000);
 
@@ -251,8 +250,10 @@ it.each(["Salin", "Tersalin"])(
     const key = "kn-Q7wE3rT9yU2iO5pA8sD1fG4hJ6kL0zX3cV7bN9mQ2wE5rT8y";
     const html = `<!doctype html><h1>API Keys</h1><div><code>${key}</code>
     <button id="copy">${label}</button></div>
-    <script>document.getElementById('copy').addEventListener('click', () =>
-      navigator.clipboard.writeText('${key}'));</script>`;
+    <script>document.getElementById('copy').addEventListener('click', async (event) => {
+      await navigator.clipboard.writeText('${key}');
+      event.target.textContent = '${label === "Salin" ? "Tersalin" : "Salin"}';
+    });</script>`;
     await withPage(html, async (sessionId) => {
       sessionForCall(sessionId)!.drive = emptyDriveState(goal, {});
       const persistCredentials = vi
@@ -400,29 +401,10 @@ it.each([
           );
         }
       });
-      const rows = (await readFile(tracePath, "utf8"))
-        .trim()
-        .split("\n")
-        .map((line) => JSON.parse(line) as Record<string, unknown>);
-      const afterAct = rows.find((row) => row.at === "after_act");
-      const nextStep = rows.filter((row) => row.at === "step")[1];
-      if (["removed", "ambiguous"].includes(replace)) {
-        expect(afterAct?.submit_response ?? "").not.toContain("Unrelated billing form response.");
-        expect(JSON.stringify(nextStep?.notices)).not.toContain("Unrelated billing form response.");
-        if (replace === "ambiguous") {
-          expect(afterAct?.submit_response ?? "").not.toContain(
-            "An active key already uses the alias grunt.",
-          );
-          expect(JSON.stringify(nextStep?.notices)).not.toContain(
-            "An active key already uses the alias grunt.",
-          );
-        }
-      } else {
-        expect(afterAct?.submit_response).toContain("An active key already uses the alias grunt.");
-        expect(JSON.stringify(nextStep?.notices)).toContain(
-          "An active key already uses the alias grunt.",
-        );
-      }
+      const trace = await readFile(tracePath, "utf8");
+      expect(trace).toContain('"at":"after_act"');
+      expect(trace).not.toContain("Unrelated billing form response.");
+      expect(trace).not.toContain("An active key already uses the alias grunt.");
     } finally {
       vi.unstubAllEnvs();
       await rm(traceDir, { recursive: true, force: true });
@@ -431,10 +413,54 @@ it.each([
   30_000,
 );
 
+it("vaults a digitless key from a post-submit Copy click and omits notice text from the trace", async () => {
+  const key = "zro_AbcdefGhijkLmnoPqrstUvwXyz";
+  const notice = "Save this key somewhere safe before leaving.";
+  const html = `<!doctype html><main><h1>API keys</h1>
+    <form onsubmit="event.preventDefault();this.remove();document.querySelector('[role=status]').hidden=false">
+      <button type="submit">Create key</button>
+    </form>
+    <section role="status" hidden><p>${notice}</p>
+      <div><p>API key: ${key}</p>
+        <button type="button" onclick="navigator.clipboard.writeText('${key}').then(() => this.textContent='Copied')">Copy key</button>
+      </div>
+    </section></main>`;
+  const dir = await mkdtemp(join(tmpdir(), "drive-key-notice-"));
+  const tracePath = join(dir, "trace.jsonl");
+  vi.stubEnv("DRIVE_TRACE_PATH", tracePath);
+  try {
+    await withPage(html, async (sessionId) => {
+      const stored = { reference: "vault://digitless", service: "zro", label: undefined };
+      const persistCredentials = vi.fn(async () => stored);
+      const askJev = clickJev((slugs) => slugs.find((slug) => /create|copy/.test(slug)));
+      const result = await runOperateDrive(
+        { session_id: sessionId, goal, max_steps: 5, max_seconds: 10 },
+        api,
+        { persistCredentials },
+        dependencies(askJev),
+      );
+      expect(result).toMatchObject({ status: "complete", stored_credential: stored });
+      expect(persistCredentials).toHaveBeenCalledTimes(1);
+      expect(persistCredentials).toHaveBeenCalledWith(
+        expect.objectContaining({ credentials: { api_key: key } }),
+      );
+      const page = sessionForCall(sessionId)!.browser.page!;
+      expect(await page.getByRole("button", { name: "Copied" }).count()).toBe(1);
+      expect(JSON.stringify(askJev.mock.calls)).toContain(notice);
+    });
+    const trace = await readFile(tracePath, "utf8");
+    expect(trace).toContain("Copy key");
+    expect(trace).not.toContain(notice);
+    expect(trace).not.toContain(key);
+  } finally {
+    vi.unstubAllEnvs();
+    await rm(dir, { recursive: true, force: true });
+  }
+}, 30_000);
+
 it("retries a failed Zro store after the model clicks Copied", async () => {
-  // review-1: the drive's own capture turns "Copy key" into "Copied"; when that
-  // store fails, the model's click on "Copied" must still rearm capture and
-  // reach the same Copy control rather than "Copy setup".
+  // The model's click on "Copied" must rearm capture after a failed store and
+  // reuse the same control even with a separate "Copy setup" button.
   const key = "zro_Hk3Lm9Np2Qr8St4Uv7Wx1Yz5Ab6Cd0Ef";
   const setupToken = "zsetup_Gh2Jk4Lm6Np8Qr0St3Uv5Wx7Yz9Ab1";
   const html = `<!doctype html><main><h1>API keys</h1>
@@ -578,7 +604,7 @@ it("stores a key through an icon-only Copy control once the model clicks it", as
   // R3: no label or metadata says "copy", so capture cannot find the control by
   // itself; the model's click beside the key identifies it, and the retry it
   // arms must click that same control.
-  const key = "kn-Q7wE3rT9yU2iO5pA8sD1fG4hJ6kL0zX3cV7bN9mQ2wE5rT8y";
+  const key = "icon-fixture-value";
   const html = `<!doctype html><h1>API Keys</h1>
     <div><code id="revealed">${key}</code><button type="button" id="icon">⧉</button></div>
     <script>document.getElementById('icon').addEventListener('click', () =>

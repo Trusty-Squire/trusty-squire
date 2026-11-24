@@ -47,11 +47,10 @@ describe("direct-import selection", () => {
   });
 
   it("keeps one hop of non-hub production callers and their own tests", () => {
-    const { tests, notes } = select("src/bot/credential-shape.ts");
-    expect(tests).toContain("src/bot/__tests__/credential-shape.test.ts");
-    expect(tests).toContain("src/bot/__tests__/provision-session.test.ts");
-    expect(tests).toContain("src/bot/capture/__tests__/verification.test.ts");
-    expect(tests).not.toContain("src/bot/capture/__tests__/credential-capture-browser.test.ts");
+    const { tests, notes } = select("src/bot/drive-snapshot.ts");
+    expect(tests).toContain("src/bot/__tests__/drive-snapshot.test.ts");
+    expect(tests).toContain("src/bot/capture/__tests__/capture.test.ts");
+    expect(notes).toContain("skipped-hub-hop:src/bot/operate-drive.ts");
     expect(tests).not.toContain("src/bot/__tests__/oauth-login.test.ts");
   });
 

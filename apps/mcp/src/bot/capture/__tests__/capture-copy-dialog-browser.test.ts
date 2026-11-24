@@ -143,11 +143,11 @@ it("vaults a Kenari key shown inline after its dialog closes, via its Indonesian
   expect(await page.locator("#salin").textContent()).toBe("Tersalin");
 });
 
-it("does not copy from an inline Salin button when no revealed key is on the page", async () => {
+it("does not copy from an inline Salin button outside a key context", async () => {
   await context.clearPermissions();
   await page.evaluate(() => navigator.clipboard.writeText("")).catch(() => undefined);
   const html = `<!doctype html>
-  <h1>API Keys</h1>
+  <h1>Sample identifier</h1>
   <div><code>kn-08d5677c</code><button type="button" id="salin">Salin</button></div>
   <script>document.getElementById('salin').addEventListener('click', () =>
     navigator.clipboard.writeText('kn-08d5677c'));</script>`;
@@ -307,11 +307,11 @@ it("does not promote an icon candidate from another holder's stale clipboard val
   expect((await extractCredentials("fixture-session")).credentials).toEqual({});
 });
 
-it("copies the bare key instead of a closer setup assignment containing the same token", async () => {
+it("prefers the named Copy key control over a generic Copy control", async () => {
   const key = "zro_Hk3Lm9Np2Qr8St4Uv7Wx1Yz5Ab6Cd0Ef";
   const html = `<!doctype html><h1>API keys</h1>
     <div><code>API_KEY=${key}</code><button id="setup">Copy</button></div>
-    <section><code>${key}</code><div style="margin:200px 0 0 700px"><button id="key">Copy</button></div></section>
+    <section><code>${key}</code><div style="margin:200px 0 0 700px"><button id="key">Copy key</button></div></section>
     <script>
       document.getElementById('setup').onclick = () => navigator.clipboard.writeText('API_KEY=${key}');
       document.getElementById('key').onclick = () => navigator.clipboard.writeText('${key}');
@@ -352,7 +352,8 @@ it.each(["⧉", '<svg width="16" height="16"><rect width="12" height="12" /></sv
     await page.route("**/*", (route) => route.fulfill({ contentType: "text/html", body: html }));
     await page.goto("http://127.0.0.1/api-keys");
     expect((await extractCredentials("fixture-session")).credentials).toEqual({});
-    await page.evaluate(() => {
+    await page.evaluate(async () => {
+      await navigator.clipboard.writeText("");
       (
         window as Window & { __tsDriveRegistry?: { nodes: Map<string, Element | null> } }
       ).__tsDriveRegistry = {

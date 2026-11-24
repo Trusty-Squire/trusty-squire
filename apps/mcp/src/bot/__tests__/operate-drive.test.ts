@@ -130,13 +130,6 @@ import {
   isSiblingSectionNavRow,
   isDeeperDestination,
   isRevealOrCopyRow,
-  pageShowsRevealedKey,
-  revealedSecretMarkerRow,
-  attachRevealedSecretMarker,
-  redactSecretShapedTokens,
-  redactSecretShapedValue,
-  looksLikeMaskedSecretDisplay,
-  rowShowsSecretEvidence,
   recordUndeliveredDecision,
   oauthHandoffReturnedToStart,
   oauthReturnedToLoginReason,
@@ -153,7 +146,6 @@ import {
   resetDriveGoalMemory,
   emptyDriveState,
 } from "../operate-drive.js";
-import { findCredentialTokens } from "../credential-shape.js";
 import { operateDriveTool } from "../../tools/provision-drive.js";
 import type { JevAnswer } from "../jev-client.js";
 import { captchaInjectSettled } from "../captcha-solve.js";
@@ -185,26 +177,6 @@ function valid(choice: string, criteria: Record<string, string>, confidence = 0.
     probabilities: peakedProbabilities(Object.keys(criteria), choice, Math.min(confidence, 0.91)),
   };
 }
-
-describe("drive output redaction", () => {
-  it("keeps a credential-shaped session id intact in fields and prose", () => {
-    const sessionId = "545c8a6a-ab12-4abc-8def-123456789abc";
-    expect(findCredentialTokens(sessionId).length).toBeGreaterThan(0);
-
-    const output = redactSecretShapedValue(
-      {
-        session_id: sessionId,
-        reason: `Resume session ${sessionId} after handback; key sk_live_fixturekey01`,
-        observation: { session_id: sessionId },
-      },
-      sessionId,
-    );
-
-    expect(output.session_id).toBe(sessionId);
-    expect(output.reason).toBe(`Resume session ${sessionId} after handback; key @key-value`);
-    expect(output.observation.session_id).toBe(sessionId);
-  });
-});
 
 describe("operate_drive constants", () => {
   it("keeps the coverage-matrix gate and two-head budgets as code constants", () => {
@@ -500,7 +472,6 @@ describe("history threading", () => {
       title: "Create account",
       text: "",
       notices: [],
-      secrets_present: [],
     });
     expect(state.goal).toEqual({
       text: "sign up",
@@ -4001,29 +3972,6 @@ describe("post-confirmation navigation", () => {
     expect(isRevealOrCopyRow(["@e:show", "b", "Reveal"])).toBe(true);
     expect(isRevealOrCopyRow(["@e:copy", "b", "Copy"])).toBe(true);
     expect(isRevealOrCopyRow(["@e:acct", "tb", "Account"])).toBe(false);
-    const marker = revealedSecretMarkerRow(20);
-    expect(pageShowsRevealedKey([marker])).toBe(true);
-    expect(pageShowsRevealedKey([["@e:show", "b", "Reveal"]], "••••••••••••")).toBe(false);
-    expect(looksLikeMaskedSecretDisplay("tvly-dev-****abcd")).toBe(true);
-    expect(rowShowsSecretEvidence(["@e:key", "t", "API key|n=tvly-dev-****abcd"])).toBe(true);
-    expect(pageShowsRevealedKey([["@e:key", "t", "API key|n=tvly-dev-****abcd"]])).toBe(true);
-    expect(redactSecretShapedTokens("prefix sk_live_fixturekey01 suffix").text).toBe(
-      "prefix @key-value suffix",
-    );
-    expect(redactSecretShapedTokens("prefix sk_live_fixturekey01 suffix").lengths).toEqual([20]);
-    const attached = attachRevealedSecretMarker(
-      {
-        session_id: "s",
-        url: "https://app.example.test/apps/one",
-        dom: "API key sk_live_fixturekey01",
-        semantic: { title: "payments-api", headings: ["payments-api"] },
-      },
-      [["@e:show", "b", "Reveal"]],
-    );
-    expect(attached.attached).toBe(true);
-    expect(pageShowsRevealedKey(attached.rows)).toBe(true);
-    expect(JSON.stringify(attached.observation)).toContain("sk_live_fixturekey01");
-    expect(JSON.stringify(attached.rows)).toMatch(/@key-value\|secret=1\|len=20/);
     expect(isEntityNameRow(name)).toBe(true);
     expect(matchingFactKeys({ company: "Acme" }, name)).toContain("company");
     const sets = driveTargetSets(
@@ -4529,16 +4477,6 @@ describe("dialog overlay secret and oauth bounce rules", () => {
       "sk_live_fixturekey01",
     );
     expect(targets.some((entry) => entry.option === "sk_live_fixturekey01")).toBe(true);
-    const attached = attachRevealedSecretMarker(
-      {
-        session_id: "s",
-        url: "https://app.example.test/keys",
-        dom: "choose sk_live_fixturekey01",
-        semantic: { title: "Keys", headings: ["Keys"] },
-      },
-      [select],
-    );
-    expect(JSON.stringify(attached.observation)).toContain("sk_live_fixturekey01");
   });
 
   it("does not treat re-entering a keys page as a cycle while Create key is untried", () => {
