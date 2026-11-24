@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterAll, beforeAll, expect, it, vi } from "vitest";
-import { chromium, type BrowserContext } from "playwright";
+import { chromium, type Browser, type BrowserContext } from "playwright";
 import type { ApiClient } from "../../api-client.js";
 import { BrowserController } from "../browser.js";
 import { extractCredentials } from "../capture/capture.js";
@@ -21,23 +21,18 @@ import {
 } from "../provision-session.js";
 import { sessionForCall } from "../session/lifecycle.js";
 
-let profile: string;
+let browser: Browser;
 let context: BrowserContext;
 
 beforeAll(async () => {
-  // The Copy-click path needs a real clipboard, so this fixture runs in an
-  // isolated persistent Chrome profile.
-  profile = await mkdtemp(join(process.cwd(), ".drive-provenance-profile-"));
-  context = await chromium.launchPersistentContext(profile, {
-    channel: "chrome",
-    headless: true,
-    args: ["--no-sandbox"],
-  });
+  // Use Playwright's pinned full Chromium for real clipboard access. Create the
+  // context ourselves so launch does not wait for a persistent profile's first tab.
+  browser = await chromium.launch({ channel: "chromium", headless: true });
+  context = await browser.newContext();
 });
 
 afterAll(async () => {
-  await context?.close();
-  if (profile !== undefined) await rm(profile, { recursive: true, force: true });
+  await browser?.close();
 });
 
 const api = { useCredential: vi.fn() } as unknown as ApiClient;
@@ -346,7 +341,7 @@ it.each([
         event.target.replaceWith(event.target.cloneNode(true));
       }
     });</script>`;
-    const traceDir = await mkdtemp(join(process.cwd(), ".drive-form-error-trace-"));
+    const traceDir = await mkdtemp(join(tmpdir(), "drive-form-error-trace-"));
     const tracePath = join(traceDir, "trace.jsonl");
     vi.stubEnv("DRIVE_TRACE_PATH", tracePath);
     try {
