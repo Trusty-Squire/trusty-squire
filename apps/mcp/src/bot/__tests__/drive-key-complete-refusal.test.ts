@@ -325,7 +325,6 @@ it("completes a confirmed order with a key-shaped Shopify token only in link des
       );
       expect(askJev).toHaveBeenCalled();
       expect(result.status).toBe("complete");
-      expect(JSON.stringify(result.observation?.safe_table)).not.toContain("@key-value");
     },
     "/thank-you",
   );
@@ -412,26 +411,26 @@ it.each([
   { body: "<ul><li><button>Create key</button></li></ul>", guarded: false },
   { body: "<ul><li><button>Ganti workspace</button></li></ul>", guarded: false },
   { body: "<table><tr><td><button>Create key...</button></td></tr></table>", guarded: false },
-  { body: "<ul><li>sk_live_••••<button>Ganti</button></li></ul>", guarded: true },
+  { body: "<ul><li>sk_live_••••<button>Ganti</button></li></ul>", guarded: false },
   {
     body: '<ul><li><input readonly value="d7bd...4a"><button>Ganti</button></li></ul>',
     guarded: true,
   },
-  { body: "<ul><li>d7bd...4a<button>Ganti</button></li></ul>", guarded: true },
+  { body: "<ul><li><code>d7bd...4a</code><button>Ganti</button></li></ul>", guarded: true },
   {
-    body: "<table><tr><td>d7bd…4a</td><td><button>Cabut key</button></td></tr></table>",
+    body: "<table><tr><td><code>d7bd…4a</code></td><td><button>Cabut key</button></td></tr></table>",
     guarded: true,
   },
-  { body: "<ul><li>••••<button>Ganti</button></li></ul>", guarded: true },
-  { body: "<ul><li><span hidden>••••</span><button>Create key</button></li></ul>", guarded: false },
-  { body: "<ul><li><button>sk_123456789abcdefghijk</button></li></ul>", guarded: true },
+  { body: "<ul><li>••••<button>Ganti</button></li></ul>", guarded: false },
+  { body: "<ul><li><code hidden>••••</code><button>Create key</button></li></ul>", guarded: false },
+  { body: "<ul><li><button>sk_123456789abcdefghijk</button></li></ul>", guarded: false },
   {
     body: '<ul><li><input readonly value="arbitrary"><button>Ganti</button></li></ul>',
     guarded: true,
   },
   {
     body: `<ul><li>${"0123456789abcdef".repeat(4)}<button>Ganti</button></li></ul>`,
-    guarded: true,
+    guarded: false,
   },
   {
     body: '<ul><li><input readonly type="password" value="arbitrary-format"><button>Ganti</button></li></ul>',

@@ -59,9 +59,7 @@ import {
   rememberCompactV2SourcePage,
 } from "./observe/observe.js";
 import {
-  COMPACT_V2_HANDLE_LENGTH,
   controlLabelV2,
-  isCompactV2Handle,
   safePageSemanticsV2,
   safeStageV2,
   wireRoleToSafeRoleV2,
@@ -119,7 +117,6 @@ import {
   isCaptchaFrameUrl,
 } from "./captcha.js";
 import type { CaptchaSolveResult } from "./captcha.js";
-import { findCredentialTokens, isMaskedDisplay } from "./credential-shape.js";
 import {
   extractCredentials,
   copySourceClick,
@@ -477,7 +474,6 @@ export function resetDriveGoalMemory(drive: SessionDriveState): void {
   drive.lastActBinding = null;
   drive.submittedThisDrive = false;
   drive.preexistingRestarted = false;
-  drive.pendingRevealScan = false;
   drive.oauthReturnAttempts = 0;
   drive.checkboxChallengePressedKeys = [];
   drive.outcomeTrail = [];
@@ -520,7 +516,6 @@ export function emptyDriveState(goal: string, facts: Record<string, string>): Se
     lastActBinding: null,
     submittedThisDrive: false,
     preexistingRestarted: false,
-    pendingRevealScan: false,
     pendingAbsentBinding: null,
     oauthReturnAttempts: 0,
     checkboxChallengePressedKeys: [],
@@ -683,44 +678,6 @@ function sleepDrive(ms: number, signal: AbortSignal | undefined): Promise<void> 
   });
 }
 
-function driveTraceEnabled(): boolean {
-  const path = process.env.DRIVE_TRACE_PATH;
-  return path !== undefined && path.length > 0;
-}
-
-const COMPACT_V2_HANDLE_IN_TEXT = new RegExp(
-  `(@e:[A-Za-z0-9_-]{${COMPACT_V2_HANDLE_LENGTH}})(?![A-Za-z0-9_-])`,
-  "g",
-);
-
-export function redactSecretShapedValue<T>(value: T, sessionId: string): T {
-  // Opaque capabilities can look like credential tokens by chance. The card
-  // mask has already run; keep handles and this session's id byte-identical,
-  // including mentions inside row facts or handback prose.
-  if (typeof value === "string") {
-    const redactOtherTokens = (text: string): string =>
-      text
-        .split(COMPACT_V2_HANDLE_IN_TEXT)
-        .map((part) => (isCompactV2Handle(part) ? part : redactSecretShapedTokens(part).text))
-        .join("");
-    return (
-      sessionId.length === 0
-        ? redactOtherTokens(value)
-        : value.split(sessionId).map(redactOtherTokens).join(sessionId)
-    ) as T;
-  }
-  if (Array.isArray(value))
-    return value.map((entry) => redactSecretShapedValue(entry, sessionId)) as T;
-  if (value !== null && typeof value === "object") {
-    const next: Record<string, unknown> = {};
-    for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
-      next[key] = redactSecretShapedValue(entry, sessionId);
-    }
-    return next as T;
-  }
-  return value;
-}
-
 /** Exact-value card mask only. This is all the model (Jev) input carries. */
 function maskCardValues<T>(session: Session, value: T): T {
   return typeof session.browser.maskOperatorOutput === "function"
@@ -728,52 +685,24 @@ function maskCardValues<T>(session: Session, value: T): T {
     : value;
 }
 
-/** Trace files can outlive the session audience, so screen their contents. */
-function maskPersistedDriveTrace<T>(session: Session, value: T): T {
-  return redactSecretShapedValue(maskCardValues(session, value), session.id);
+function traceOrigin(url: string): string {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return "unknown";
+  }
 }
 
 function appendDriveTrace(session: Session, entry: Record<string, unknown>): void {
   const path = process.env.DRIVE_TRACE_PATH;
   if (path === undefined || path.length === 0) return;
-  appendFileSync(path, `${JSON.stringify(maskPersistedDriveTrace(session, entry))}\n`);
+  appendFileSync(path, `${JSON.stringify(maskCardValues(session, entry))}\n`);
 }
 
-async function nativeSelectSnapshot(
-  session: Session,
-): Promise<Array<{ id: string; name: string; value: string; text: string }> | null> {
-  const page = session.browser.page;
-  if (page === null) return null;
-  try {
-    return await evaluateBound(page, () =>
-      Array.from(document.querySelectorAll("select")).map((el) => ({
-        id: el.id,
-        name: el.name,
-        value: el.value,
-        text: (el.selectedOptions[0]?.textContent ?? "").replace(/\s+/g, " ").trim(),
-      })),
-    );
-  } catch {
-    return null;
-  }
-}
-
-function candidateDump(candidates: readonly DriveCandidate[]): Array<{
-  slug: string;
-  ref: string;
-  role: string;
-  description: string;
-  option?: string;
-}> {
-  return candidates.map((candidate) => ({
-    slug: candidate.slug,
-    ref: candidate.ref,
-    role: candidate.role,
-    description: candidate.description,
-    ...(candidate.option === undefined
-      ? {}
-      : { option: candidate.optionLabel ?? candidate.option }),
-  }));
+function traceControls(rows: readonly WireRow[]): WireRow[] {
+  return rows
+    .filter(([, role]) => ["b", "l", "t", "s", "c", "r", "tb", "m"].includes(role))
+    .map((row) => [row[0], row[1], readableLabel(row)]);
 }
 
 export function rowLabel(row: WireRow): string {
@@ -1615,71 +1544,24 @@ export function isRevealOrCopyRow(row: WireRow): boolean {
   );
 }
 
-export const REVEALED_SECRET_REF = "@key-value";
-
-export function revealedSecretMarkerRow(length: number, count = 1): WireRow {
-  return [
-    REVEALED_SECRET_REF,
-    "h1",
-    `@key-value|secret=1|len=${length}${count > 1 ? `|count=${count}` : ""}`,
-  ];
+function isLabeledKeyCopy(row: WireRow): boolean {
+  return row[1] === "b" && /^copy (?:api[- ]?key|key|token|secret)$/i.test(readableLabel(row));
 }
 
-const MASKED_SECRET_DISPLAY = /(?:^|[\s=|"'])[A-Za-z][A-Za-z0-9]{1,12}[_-][A-Za-z0-9_-]*[•●⬤*]{3,}/;
-
-export function looksLikeMaskedSecretDisplay(text: string): boolean {
-  return MASKED_SECRET_DISPLAY.test(text) || (isMaskedDisplay(text) && /[_-]/.test(text));
-}
-
-function visibleCredentialFacts(row: WireRow): string {
-  // Link destinations are navigation metadata, not displayed key values.
-  return (row[2] ?? "")
-    .split("|")
-    .filter((fact) => !fact.startsWith("u="))
-    .join("|");
-}
-
-export function rowShowsSecretEvidence(row: WireRow): boolean {
-  const visibleFacts = visibleCredentialFacts(row);
-  const facts = `${row[1]}\t${visibleFacts}`;
-  if (row[0] === REVEALED_SECRET_REF || /(?:^|\|)secret=1(?:\||$)/.test(visibleFacts)) {
-    return true;
-  }
-  if (findCredentialTokens(facts).length > 0) return true;
-  return looksLikeMaskedSecretDisplay(facts);
-}
-
-export function pageShowsRevealedKey(rows: readonly WireRow[], _pageText: string = ""): boolean {
-  return rows.some((row) => rowShowsSecretEvidence(row));
-}
-
-/**
- * A revealed one-time key (or the Copy control just clicked beside one) is the
- * result a key goal asks for. Capture otherwise runs only on DONE, and a goal
- * that says "finish once the key is in the vault" argues the model out of DONE,
- * so the drive attempts the DONE capture itself when this holds.
- */
 export function revealedKeyCaptureDue(rows: readonly WireRow[], copyDispatched: boolean): boolean {
-  if (
-    rows.some(
-      (row) =>
-        row[0] === REVEALED_SECRET_REF ||
-        /(?:^|\|)secret=1(?:\||$)/.test(visibleCredentialFacts(row)),
-    )
-  ) {
-    return true;
-  }
-  return copyDispatched;
+  return (
+    copyDispatched ||
+    rows.some((row) => isLabeledKeyCopy(row) && /(?:^|\|)dialog=[^|]+/.test(row[2] ?? ""))
+  );
 }
 
 function pageShowsCredentialValue(rows: readonly WireRow[]): boolean {
-  if (pageShowsRevealedKey(rows)) return true;
-  // A labeled value can be a key even when it has no recognizable prefix or
-  // length. Shape is never the criterion for capturing or storing it.
   return rows.some((row) => {
-    if (!/^(?:api[- ]?key|access token|token|secret)$/i.test(readableLabel(row))) return false;
-    const value = /(?:^|\|)n=([^|]+)/.exec(row[2] ?? "")?.[1];
-    return value !== undefined && value.length > 0 && !isMaskedDisplay(value);
+    if (isLabeledKeyCopy(row)) return true;
+    return (
+      /^(?:api[- ]?key|access token|token|secret)$/i.test(readableLabel(row)) &&
+      /(?:^|\|)n=[^|]+/.test(row[2] ?? "")
+    );
   });
 }
 
@@ -1726,23 +1608,6 @@ export function notExecutedDriveReason(actReason: string, occluder?: string): st
   if (actReason === "occluded") return "covered";
   if (actReason === "option_missing" || actReason === "not_select") return "refused";
   return "stale";
-}
-
-/** Where a secret value sits, by control label — never the value itself. */
-export function driveSecretsPresent(rows: readonly WireRow[]): DriveSecretsPresent[] {
-  const out: DriveSecretsPresent[] = [];
-  const seen = new Set<string>();
-  for (const row of rows) {
-    const marker = row[0] === REVEALED_SECRET_REF;
-    const masked = looksLikeMaskedSecretDisplay(visibleCredentialFacts(row));
-    if (!marker && !masked && !rowShowsSecretEvidence(row)) continue;
-    const near = marker ? "the revealed secret value" : readableLabel(row);
-    const key = `${near}\t${masked}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push({ near, masked });
-  }
-  return out;
 }
 
 /** One structured trail entry: what the action did, on which page. */
@@ -1817,60 +1682,6 @@ const EMAIL_VERIFY_COPY =
 
 export function emailVerificationCopy(text: string): boolean {
   return EMAIL_VERIFY_COPY.test(text.toLowerCase());
-}
-
-export function redactSecretShapedTokens(text: string): { text: string; lengths: number[] } {
-  const tokens = findCredentialTokens(text);
-  if (tokens.length === 0) return { text, lengths: [] };
-  let next = text;
-  const lengths: number[] = [];
-  for (const token of tokens) {
-    lengths.push(token.length);
-    next = next.split(token).join(REVEALED_SECRET_REF);
-  }
-  return { text: next, lengths };
-}
-
-export function attachRevealedSecretMarker(
-  observation: Observation,
-  rows: readonly WireRow[],
-): { observation: Observation; rows: WireRow[]; attached: boolean } {
-  const blobs = [
-    observation.dom ?? "",
-    observation.semantic?.title ?? "",
-    ...(observation.semantic?.headings ?? []),
-    ...(observation.semantic?.blockers ?? []).map((blocker) => blocker.text),
-    ...rows.map(visibleCredentialFacts),
-  ];
-  const tokens = new Set<string>();
-  for (const blob of blobs) {
-    for (const token of findCredentialTokens(blob)) tokens.add(token);
-  }
-  const lengths = [...tokens].map((token) => token.length);
-  const maskedEvidence = rows.some((row) => rowShowsSecretEvidence(row));
-  if (lengths.length === 0 && !maskedEvidence) {
-    return { observation, rows: [...rows], attached: false };
-  }
-  const length = lengths.length > 0 ? Math.max(...lengths) : 16;
-  // The marker tells the model a key is on the page; the page content itself
-  // reaches it unaltered.
-  const nextRows = [...rows];
-  if (!nextRows.some((row) => row[0] === REVEALED_SECRET_REF)) {
-    nextRows.push(revealedSecretMarkerRow(length, tokens.size));
-  }
-  const headings = [
-    ...(observation.semantic?.headings ?? []),
-    revealedSecretMarkerRow(length, tokens.size)[2]!,
-  ];
-  return {
-    observation: {
-      ...observation,
-      safe_table: nextRows as unknown as NonNullable<Observation["safe_table"]>,
-      semantic: { ...observation.semantic, headings },
-    },
-    rows: nextRows,
-    attached: true,
-  };
 }
 
 export function isEntityNameRow(row: WireRow): boolean {
@@ -3533,19 +3344,13 @@ export interface DriveStateElement {
   waits_for?: string;
 }
 
-export interface DriveSecretsPresent {
-  /** The control label the masked/secret value appears beside. Never the value. */
-  near: string;
-  masked: boolean;
-}
-
 export interface DriveJevState {
   page: {
     url: string;
     title: string;
     text: string;
     notices: string[];
-    secrets_present: DriveSecretsPresent[];
+
   };
   goal: { text: string; done_when: string };
   elements: DriveStateElement[];
@@ -3561,7 +3366,7 @@ export interface DriveJevState {
 export interface DriveJevFeedback {
   pageUrl?: string;
   notices?: readonly string[];
-  secretsPresent?: readonly DriveSecretsPresent[];
+
   trail?: readonly DriveTrailEntry[];
   triedHere?: readonly string[];
   triedHereLabels?: readonly string[];
@@ -3884,7 +3689,7 @@ export function buildJevState(
       title: title ?? "",
       text: pageText,
       notices: [...(feedback.notices ?? [])],
-      secrets_present: [...(feedback.secretsPresent ?? [])],
+
     },
     goal: { text: goal, ...goalPhaseAndDoneWhen(goal) },
     elements,
@@ -6237,11 +6042,6 @@ async function driveLoop(input: {
   let observation: Observation = firstSnap.observation;
   let rows = firstSnap.rows;
   let pageReadiness = firstSnap.readiness;
-  {
-    const attached = attachRevealedSecretMarker(observation, rows);
-    observation = attached.observation;
-    rows = attached.rows;
-  }
   if (firstSnap.timedOut) {
     return buildHandoff({
       status: "evaluate_timeout",
@@ -6299,7 +6099,7 @@ async function driveLoop(input: {
         at: "unspent_iteration",
         step: steps,
         branch,
-        url: observation.url,
+        url: traceOrigin(observation.url),
       });
       return;
     }
@@ -6480,10 +6280,6 @@ async function driveLoop(input: {
       drive.submitFormResponse = null;
       drive.lastSubmitResponse = null;
     }
-    drive.pendingRevealScan = false;
-    const attached = attachRevealedSecretMarker(observation, rows);
-    observation = attached.observation;
-    rows = attached.rows;
     rememberSubmitResponse();
     if (deliveredOutcome !== undefined) markCaptchaDelivered(deliveredOutcome);
     return snap;
@@ -6709,9 +6505,8 @@ async function driveLoop(input: {
         automaticDecisionRefused = true;
         return "continue";
       }
-      // Try the known Copy source on every DONE, even if the value has no
-      // recognizable shape or label in the observation. Page evidence only
-      // decides whether a failed extraction must hand back for explicit capture.
+      // Try the known Copy source on DONE. If a key control is still visible
+      // after extraction fails, hand back for explicit capture.
       drive.pendingCopyCapture = null;
       const extracted = await extractCredentials(sessionId).catch(() => null);
       const hasCredential = storableCredentials(extracted?.credentials ?? {}) !== null;
@@ -6762,9 +6557,8 @@ async function driveLoop(input: {
       appendDriveTrace(session, {
         at: "after_wait",
         step: drive.trajectory.length + 1,
-        url_after: observation.url,
-        fingerprint_after: driveProgressFingerprint(observation, rows, drive, session),
-        rows,
+        url_after: traceOrigin(observation.url),
+        rows: traceControls(rows),
       });
       drive.trajectory.push({
         action: "wait",
@@ -6932,13 +6726,13 @@ async function driveLoop(input: {
         step: drive.trajectory.length,
         dispatch: "not_attempted",
         reason,
-        url_after: session.browser.currentUrl(),
+        url_after: traceOrigin(session.browser.currentUrl()),
       });
       appendDriveTrace(session, {
         at: "oauth_handoff",
         step: drive.trajectory.length,
-        url_before: observation.url,
-        url_after: session.browser.currentUrl(),
+        url_before: traceOrigin(observation.url),
+        url_after: traceOrigin(session.browser.currentUrl()),
         outcome: "not_attempted",
         reason,
       });
@@ -7013,8 +6807,8 @@ async function driveLoop(input: {
           at: "pre_act_redecide",
           step: steps,
           action_key: decision.actionKey,
-          snapshot_url: observation.url,
-          live_url: session.browser.page.url(),
+          snapshot_url: traceOrigin(observation.url),
+          live_url: traceOrigin(session.browser.page.url()),
           document_changed: documentChanged,
           controls_changed: controlsChanged,
         });
@@ -7324,9 +7118,6 @@ async function driveLoop(input: {
         ? findRow(rows, decision.actionKey, observation.url)
         : undefined;
     const copyDispatched = copyClick !== null && clickedBefore !== undefined;
-    if (clickedBefore !== undefined && (isRevealOrCopyRow(clickedBefore) || copyDispatched)) {
-      drive.pendingRevealScan = true;
-    }
     const formTextBeforeClick =
       shouldInspectSubmitResponse(decision.action, clickedBefore) &&
       !isKeyCreateOpener(clickedBefore)
@@ -7393,13 +7184,13 @@ async function driveLoop(input: {
           at: "oauth_dispatch",
           step: drive.trajectory.length,
           dispatch: "error",
-          url_after: session.browser.currentUrl(),
+          url_after: traceOrigin(session.browser.currentUrl()),
         });
         appendDriveTrace(session, {
           at: "oauth_handoff",
           step: drive.trajectory.length,
-          url_before: urlBeforeClick,
-          url_after: session.browser.currentUrl(),
+          url_before: traceOrigin(urlBeforeClick),
+          url_after: traceOrigin(session.browser.currentUrl()),
           outcome: "error",
         });
         if (!(error instanceof OAuthAwaitingHumanError)) {
@@ -7438,11 +7229,11 @@ async function driveLoop(input: {
         step: drive.trajectory.length,
         dispatch: acted.kind,
         ...(acted.kind === "stale" ? { reason: acted.reason } : {}),
-        ...(acted.kind === "ok" && acted.oauth !== undefined ? { oauth: acted.oauth } : {}),
+        ...(acted.kind === "ok" && acted.oauth !== undefined ? { oauth_state: acted.oauth.state } : {}),
         ...(acted.kind === "ok" && acted.needsUser !== undefined
-          ? { needs_user: acted.needsUser }
+          ? { needs_user: acted.needsUser.wall }
           : {}),
-        url_after: session.browser.currentUrl(),
+        url_after: traceOrigin(session.browser.currentUrl()),
       });
     }
     if (acted.kind === "stale") {
@@ -7451,8 +7242,8 @@ async function driveLoop(input: {
         appendDriveTrace(session, {
           at: "oauth_handoff",
           step: drive.trajectory.length,
-          url_before: urlBeforeClick,
-          url_after: session.browser.currentUrl(),
+          url_before: traceOrigin(urlBeforeClick),
+          url_after: traceOrigin(session.browser.currentUrl()),
           outcome: "refused",
           reason: acted.reason,
         });
@@ -7546,11 +7337,10 @@ async function driveLoop(input: {
         appendDriveTrace(session, {
           at: "oauth_handoff",
           step: drive.trajectory.length,
-          url_before: urlBeforeClick,
-          url_after: observation.url,
-          dispatch_failure: safe.dispatchFailure ?? null,
-          notices: observationNoticeTexts(observation),
-          oauth: observation.oauth ?? null,
+          url_before: traceOrigin(urlBeforeClick),
+          url_after: traceOrigin(observation.url),
+          dispatch_failure: safe.dispatchFailure !== undefined,
+          oauth_state: observation.oauth?.state ?? null,
         });
       }
       if (safe.dispatchFailure !== undefined) {
@@ -7565,10 +7355,6 @@ async function driveLoop(input: {
         drive.lastOauthBounceReason = null;
         if (observation.needs_user !== undefined) return finishOnWall(observation.needs_user);
         rows = mergeCompactTable(rows, observation);
-        drive.pendingRevealScan = false;
-        const attached = attachRevealedSecretMarker(observation, rows);
-        observation = attached.observation;
-        rows = attached.rows;
         actMs = Date.now() - actStarted;
         const bounced = finishIfOauthBounced();
         if (bounced !== undefined) return bounced;
@@ -7584,10 +7370,10 @@ async function driveLoop(input: {
           appendDriveTrace(session, {
             at: "oauth_handoff",
             step: drive.trajectory.length,
-            url_before: urlBeforeClick,
-            url_after: session.browser.currentUrl(),
+            url_before: traceOrigin(urlBeforeClick),
+            url_after: traceOrigin(session.browser.currentUrl()),
             outcome: "needs_user",
-            needs_user: acted.needsUser,
+            needs_user: acted.needsUser.wall,
           });
         }
         return finishOnWall(acted.needsUser);
@@ -7651,8 +7437,8 @@ async function driveLoop(input: {
           appendDriveTrace(session, {
             at: "oauth_handoff",
             step: drive.trajectory.length,
-            url_before: urlBeforeClick,
-            url_after: session.browser.currentUrl(),
+            url_before: traceOrigin(urlBeforeClick),
+            url_after: traceOrigin(session.browser.currentUrl()),
             outcome: "snapshot_timeout",
           });
         }
@@ -7662,11 +7448,10 @@ async function driveLoop(input: {
         appendDriveTrace(session, {
           at: "oauth_handoff",
           step: drive.trajectory.length,
-          url_before: urlBeforeClick,
-          url_after: observation.url,
-          notices: observationNoticeTexts(observation),
-          oauth: observation.oauth ?? null,
-          rows,
+          url_before: traceOrigin(urlBeforeClick),
+          url_after: traceOrigin(observation.url),
+          oauth_state: observation.oauth?.state ?? null,
+          rows: traceControls(rows),
         });
       }
       const bounced = finishIfOauthBounced();
@@ -7855,19 +7640,11 @@ async function driveLoop(input: {
     appendDriveTrace(session, {
       at: "after_act",
       step: drive.trajectory.length,
-      action: decision.action,
+      action: decision.action.kind,
       result: "ok",
-      url_after: observation.url,
-      fingerprint_after: nextFingerprint,
-      submit_response: drive.lastSubmitResponse ?? null,
-      ...(driveTraceEnabled()
-        ? {
-            native_selects_after: await withinOAuthCallerDeadline(
-              () => nativeSelectSnapshot(session),
-              deadline,
-            ),
-          }
-        : {}),
+      url_after: traceOrigin(observation.url),
+      changed: nextFingerprint !== fingerprint,
+      submit_response: drive.lastSubmitResponse != null,
     });
     // A hand-off that came back to its start page owns its own reason, but it
     // still dispatched and changed the page: its bookkeeping (stale counters,
@@ -8103,7 +7880,7 @@ async function driveLoop(input: {
         at: "page_not_ready",
         step: steps,
         reason: pageReadiness.reason ?? "unknown",
-        url: observation.url,
+        url: traceOrigin(observation.url),
       });
       steps += 1;
       continue;
@@ -8698,7 +8475,6 @@ async function driveLoop(input: {
           ...observationNoticeTexts(observation),
           ...driveDownloadNotices(session, downloadMarker),
         ],
-        secretsPresent: driveSecretsPresent(rows),
         trail: (drive.outcomeTrail ?? []).slice(-DRIVE_TRAIL_CAP),
         triedHere: drive.triedHere ?? [],
         triedHereLabels: drive.triedHereLabels ?? [],
@@ -8750,38 +8526,14 @@ async function driveLoop(input: {
     appendDriveTrace(session, {
       at: "step",
       step: steps,
-      url_before: observation.url,
-      fingerprint_before: fingerprint,
-      rows,
-      // Non-interactive page answers (alerts, a submitted form's inline error)
-      // that the rows alone cannot show.
-      notices: observationNoticeTexts(observation),
+      url_before: traceOrigin(observation.url),
+      rows: traceControls(rows),
       question_count: questionCount,
       state_bytes: stateBytes,
-      operation_criteria:
-        questions.operation?.type === "choice" ? questions.operation.criteria : {},
-      CLICK_target:
-        questions.CLICK_target?.type === "choice" ? questions.CLICK_target.criteria : {},
-      SELECT_target:
-        questions.SELECT_target?.type === "choice" ? questions.SELECT_target.criteria : {},
-      TYPE_TEXT_target:
-        questions.TYPE_TEXT_target?.type === "choice" ? questions.TYPE_TEXT_target.criteria : {},
-      email_code_field:
-        questions[DRIVE_EMAIL_CODE_QUESTION]?.type === "choice"
-          ? questions[DRIVE_EMAIL_CODE_QUESTION].criteria
-          : {},
-      answers,
-      decision,
-      candidates: {
-        CLICK: candidateDump(sets.CLICK),
-        SELECT: candidateDump(sets.SELECT),
-        TYPE_TEXT: candidateDump(sets.TYPE_TEXT),
-        SCROLL: candidateDump(sets.SCROLL),
-      },
+      decision: decision.kind,
+      ...("confidence" in decision ? { confidence: decision.confidence } : {}),
+      select_labels: sets.SELECT.map((candidate) => candidate.optionLabel),
       filledRefs: [...drive.filledRefs],
-      ...(driveTraceEnabled()
-        ? { native_selects_before: await nativeSelectSnapshot(session) }
-        : {}),
     });
     const priorProfile: DriveActProfile | null = drive.lastActProfile;
     drive.lastActProfile = {

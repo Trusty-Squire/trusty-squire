@@ -255,7 +255,6 @@ export interface SessionDriveState {
   /** Already tried logout+restart for a pre-existing session. */
   preexistingRestarted?: boolean;
   /** Next snapshot should look for an unmasked secret after reveal/show/copy. */
-  pendingRevealScan?: boolean;
   /** A chosen control left the page at act time while an input the drive
    *  itself typed still narrows the page. The input is cleared once, then the
    *  same control (by snapshot binding) is re-offered. */

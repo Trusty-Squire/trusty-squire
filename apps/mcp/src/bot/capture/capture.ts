@@ -15,7 +15,6 @@ import { audit, sessionForCall } from "../session/lifecycle.js";
 import { invalidateCompactV2Snapshot, operationPageForSession } from "../observe/observe.js";
 import { waitForPageReady } from "../page-ready.js";
 import { captureFrameSnapshot } from "../drive-snapshot.js";
-import { findCredentialTokens } from "../credential-shape.js";
 
 // ── extraction (the `extract` thick tool) ──
 
@@ -670,161 +669,120 @@ const COPY_CUE_SOURCE = String.raw`cop(?:y|ied)|clipboard|(?<!\p{L})(?:salin|ter
 type CopySourceWindow = Window & {
   /** A control whose click wrote `token` (or a cue-matched Copy control). */
   __tsCopySource?: { element: Element; token?: string | undefined };
-  /** The model's latest click on a control beside the shown key `token`. */
-  __tsCopyDispatch?: { element: Element; token: string };
+  /** The next Copy candidate and its pre-click clipboard. */
+  __tsCopyDispatch?: { element: Element; token?: string; before: string };
   __tsDriveRegistry?: { nodes: Map<string, Element> };
 };
 
-/** Copy controls beside a key the page shows inline (Kenari's /keys banner or
- * key row, Zro's panel). Each shown key is paired with the controls in its own
- * smallest surrounding element, whatever their labels, so an icon-only Copy
- * stays with its key and Zro's "Copy setup" stays with its snippet. Without
- * `clickedRef` it picks the Copy-cued control to click: one key's nearest, or,
- * when different keys compete, the only one whose label names a key. With
- * `clickedRef` it reports that control's key, and whether it is Copy-cued. */
+/** Resolve the displayed value beside the exact control, or find an inline
+ * Copy source for extraction. Clipboard equality proves the association. */
 async function inlineKeyCopy(
   page: Page,
   clickedRef?: string,
 ): Promise<{ button: Locator; token: string; cued: boolean } | null> {
-  // One line per text node: innerText would run a "Copy" label into the key.
-  const text: unknown = await page
-    .evaluate(() => {
-      const lines = Array.from(document.querySelectorAll("input, textarea")).map(
-        (field) => (field as HTMLInputElement | HTMLTextAreaElement).value,
-      );
-      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
-      for (let node = walker.nextNode(); node !== null; node = walker.nextNode())
-        lines.push(node.textContent ?? "");
-      return lines.join("\n");
-    })
-    .catch(() => "");
-  const tokens = typeof text === "string" ? findCredentialTokens(text) : [];
-  if (tokens.length === 0) return null;
-  const picked: unknown = await page
+  const picked = await page
     .evaluate(
-      ({ tokens, copyCue, clickedRef }) => {
+      ({ copyCue, clickedRef }) => {
+        const selector = 'button, [role="button"]';
+        const controls = Array.from(document.querySelectorAll(selector));
+        const clicked =
+          clickedRef === undefined
+            ? undefined
+            : (window as CopySourceWindow).__tsDriveRegistry?.nodes.get(clickedRef);
         const cue = new RegExp(copyCue, "iu");
-        const controls = Array.from(document.querySelectorAll('button, [role="button"]'));
+        const keyLabel = /\b(?:api[\s_-]*keys?|keys?|tokens?|secrets?|credentials?)\b/i;
+        const keyPage =
+          keyLabel.test(document.title) ||
+          Array.from(document.querySelectorAll('h1, h2, h3, [role="heading"]')).some((heading) =>
+            keyLabel.test(heading.textContent ?? ""),
+          );
         const shown = (element: Element): boolean => {
           const rect = element.getBoundingClientRect();
           const style = getComputedStyle(element);
           return (
-            rect.width > 2 &&
-            rect.height > 2 &&
-            style.visibility !== "hidden" &&
+            rect.width > 0 &&
+            rect.height > 0 &&
+            style.visibility === "visible" &&
             Number(style.opacity) > 0.01 &&
-            !(element instanceof HTMLButtonElement && element.disabled)
+            !element.matches(":disabled")
           );
         };
-        const cueOf = (control: Element): string =>
-          [control, control.querySelector("svg")]
-            .flatMap((element) =>
-              element === null
-                ? []
-                : [
-                    element.textContent,
-                    element.getAttribute("aria-label"),
-                    element.getAttribute("title"),
-                    element.id,
-                    element.getAttribute("class"),
-                    element.getAttribute("data-testid"),
-                    element.getAttribute("data-icon"),
-                  ],
-            )
-            .join(" ");
-        // Text outside controls, so "KEY<button>Salin</button>" reads as KEY.
-        const ownText = (element: Element): string => {
-          if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement)
-            return element.value.trim();
-          let text = "";
-          const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
-          for (let node = walker.nextNode(); node !== null; node = walker.nextNode())
-            if (node.parentElement?.closest('button, [role="button"]') === null)
-              text += node.textContent ?? "";
-          return text.replace(/\s+/g, " ").trim();
-        };
-        // The key alone or after a short caption ("API key: …"); never a
-        // setup line (API_KEY=…) or a longer code sample.
-        const keyOf = (text: string): string | undefined => {
-          const match = /^(?:[^=:\n]{1,20}:\s+)?(\S{16,})$/.exec(text);
-          return match?.[1] !== undefined && tokens.includes(match[1]) ? match[1] : undefined;
-        };
-        const keys = new Map<Element, string>();
-        const fields = Array.from(document.querySelectorAll("input, textarea"));
-        const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
-        const texts: Element[] = [];
-        for (let node = walker.nextNode(); node !== null; node = walker.nextNode())
-          if (
-            node.parentElement !== null &&
-            node.parentElement.closest(
-              'script, style, noscript, template, button, [role="button"]',
-            ) === null
-          )
-            texts.push(node.parentElement.closest("pre, code") ?? node.parentElement);
-        for (const element of [...fields, ...texts]) {
-          const token = keyOf(ownText(element));
-          if (token !== undefined && shown(element)) keys.set(element, token);
-        }
-        // The innermost element showing a key holds it.
-        for (const [element, token] of keys)
-          for (const [other, otherToken] of keys)
-            if (other !== element && otherToken === token && element.contains(other))
-              keys.delete(element);
-        const pairs: Array<{ control: Element; token: string; distance: number }> = [];
-        for (const [holder, token] of keys) {
-          let scope: Element | null = holder;
-          for (let level = 0; scope !== null && level <= 6; level++, scope = scope.parentElement) {
-            const near = controls.filter((control) => scope!.contains(control) && shown(control));
-            if (near.length === 0) continue;
-            // A scope that also shows another key belongs to neither.
-            if (
-              [...keys].some(
-                ([other, otherToken]) => otherToken !== token && scope!.contains(other),
-              )
-            )
-              break;
-            const at = holder.getBoundingClientRect();
-            for (const control of near) {
-              const rect = control.getBoundingClientRect();
-              pairs.push({
-                control,
-                token,
-                distance: Math.hypot(rect.left - at.left, rect.top - at.top),
-              });
+        const valueOf = (element: Element): string =>
+          (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement
+            ? element.value
+            : element.textContent ?? "").trim();
+        // Plain text can share its node with a display label such as "API key:".
+        const displayText = (text: string): string =>
+          text.trim().replace(/^(?:(?:your|new)\s+)*(?:api[- ]?key|key|token|secret):\s+/i, "");
+        const valueBeside = (control: Element): string | undefined => {
+          let anchor = control;
+          for (let depth = 0; depth < 6; depth++) {
+            const scope = anchor.parentElement;
+            if (scope === null || scope === document.body || scope.matches("main")) break;
+            const sibling = anchor.previousElementSibling;
+            if (sibling?.matches("span, p, output") && shown(sibling)) {
+              const value = displayText(valueOf(sibling));
+              if (value.length > 0) return value;
             }
-            break;
+            const values = Array.from(
+              scope.querySelectorAll("code, input[readonly], textarea[readonly]"),
+            )
+              .filter((node) => shown(node) && node.closest(`pre, ${selector}`) === null)
+              .map(valueOf)
+              .filter(Boolean);
+            if (values.length > 0) return new Set(values).size === 1 ? values[0] : undefined;
+            const text = anchor.previousSibling;
+            if (text?.nodeType === Node.TEXT_NODE && text.textContent?.trim()) {
+              return displayText(text.textContent);
+            }
+            if (scope.querySelectorAll(selector).length > 1) break;
+            anchor = scope;
           }
-        }
-        const answer = (pair: (typeof pairs)[number]) => ({
-          index: controls.indexOf(pair.control),
-          token: pair.token,
-          cued: cue.test(cueOf(pair.control)),
+          return undefined;
+        };
+        const matches = controls.flatMap((control, index) => {
+          if (
+            (clickedRef !== undefined && control !== clicked) ||
+            !shown(control) ||
+            control.closest('dialog, [role="dialog"], [aria-modal="true"]') !== null
+          ) {
+            return [];
+          }
+          const label = [
+            control.getAttribute("aria-label"),
+            control.getAttribute("title"),
+            control.textContent,
+          ].join(" ");
+          const cues = [control, control.querySelector("svg")].flatMap((node) =>
+            ["id", "class", "data-testid", "data-icon"].map((attr) => node?.getAttribute(attr)),
+          );
+          const cued = cue.test([label, ...cues].join(" "));
+          const namedKey = cued && keyLabel.test(label);
+          if (
+            (!namedKey && !keyPage) ||
+            (clickedRef === undefined && !cued) ||
+            /\b(?:setup|snippet|example|command)\b/i.test(label)
+          ) {
+            return [];
+          }
+          const token = valueBeside(control);
+          return token === undefined ? [] : [{ index, token, cued, namedKey }];
         });
-        if (clickedRef !== undefined) {
-          const clicked = (window as CopySourceWindow).__tsDriveRegistry?.nodes.get(clickedRef);
-          const hits = pairs.filter((pair) => pair.control === clicked);
-          return hits.length > 0 && hits.every((hit) => hit.token === hits[0]!.token)
-            ? answer(hits[0]!)
-            : null;
-        }
-        const cued = pairs
-          .filter((pair) => cue.test(cueOf(pair.control)))
-          .sort((a, b) => a.distance - b.distance);
-        if (cued.every((pair) => pair.token === cued[0]?.token))
-          return cued[0] === undefined ? null : answer(cued[0]);
-        const naming = cued.filter((pair) =>
-          /\b(?:api[\s_-]*key|key|token|secret)\b/i.test(
-            `${pair.control.textContent ?? ""} ${pair.control.getAttribute("aria-label") ?? ""}`,
-          ),
-        );
-        return naming.length === 1 ? answer(naming[0]!) : null;
+        const named = matches.filter((match) => match.namedKey);
+        const eligible = named.length === 0 ? matches : named;
+        return eligible.every((match) => match.token === eligible[0]?.token)
+          ? (eligible[0] ?? null)
+          : null;
       },
-      { tokens, copyCue: COPY_CUE_SOURCE, clickedRef },
+      { copyCue: COPY_CUE_SOURCE, clickedRef },
     )
     .catch(() => null);
-  if (typeof picked !== "object" || picked === null) return null;
-  const { index, token, cued } = picked as { index: number; token: string; cued: boolean };
-  return { button: page.locator('button, [role="button"]').nth(index), token, cued };
+  if (picked === null) return null;
+  return {
+    button: page.locator('button, [role="button"]').nth(picked.index),
+    token: picked.token,
+    cued: picked.cued,
+  };
 }
 
 /** The Copy control remembered on this document, while it is still shown. Its
@@ -865,16 +823,28 @@ export async function copySourceClick(
   const inline = await inlineKeyCopy(page, ref);
   const source =
     inline?.cued === true ? inline : inline === null ? await findCopySource(page, false) : null;
-  const marked: unknown = await (source ?? inline)?.button
+  const control = source ?? inline;
+  if (control === null) return null;
+  await ensureCaptureClipboardPermission(page);
+  const marked = await control.button
     .evaluate(
-      (element, { ref, token, asSource }) => {
+      async (element, { ref, token, asSource }) => {
         const sourceWindow = window as CopySourceWindow;
         if (sourceWindow.__tsDriveRegistry?.nodes.get(ref) !== element) return false;
+        const before = await navigator.clipboard.readText().catch(() => undefined);
         if (asSource) sourceWindow.__tsCopySource = { element, token };
-        if (token !== undefined) sourceWindow.__tsCopyDispatch = { element, token };
+        delete sourceWindow.__tsCopyDispatch;
+        if (before !== undefined) {
+          sourceWindow.__tsCopyDispatch = {
+            element,
+            before: before.trim(),
+            ...(token === undefined ? {} : { token }),
+          };
+        }
         return true;
       },
-      { ref, token: (source ?? inline)?.token, asSource: source !== null },
+      { ref, token: control.token, asSource: source !== null },
+      { timeout: 1500 },
     )
     .catch(() => false);
   if (marked !== true) return null;
@@ -1082,8 +1052,14 @@ async function copyCredentialFromDialog(
       const sourceWindow = window as CopySourceWindow;
       const dispatch = sourceWindow.__tsCopyDispatch;
       delete sourceWindow.__tsCopyDispatch;
-      if (dispatch === undefined || clipboard.length === 0 || dispatch.token !== clipboard)
+      if (
+        dispatch === undefined ||
+        clipboard.length === 0 ||
+        clipboard === dispatch.before ||
+        (dispatch.token !== undefined && dispatch.token !== clipboard)
+      ) {
         return false;
+      }
       if (dispatch.element.isConnected) sourceWindow.__tsCopySource = dispatch;
       return true;
     }, clipboard)

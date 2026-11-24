@@ -8,15 +8,7 @@ import {
   googleSessionGate,
   makeTwoCaptchaVaultProxy,
 } from "../provision-session.js";
-import { findCredentialTokens } from "../credential-shape.js";
 import { provisionElementRefs, stableElementId } from "../observe/refs.js";
-
-// Credential-shaped test fixtures are assembled at runtime from harmless
-// fragments so no complete vendor-prefixed token literal appears in this
-// source file (GitHub secret scanning false-positived on test data in
-// commit 0b3b160f). The returned values are byte-identical to the old
-// literals; do NOT inline these back into single string literals.
-const sk = (body: string): string => "sk" + "-" + body;
 
 // Minimal InteractiveElement factory — only the fields targeting reads matter;
 // the rest get inert defaults so the fixtures stay readable.
@@ -214,49 +206,6 @@ describe("generatePassword (PR3c signup password)", () => {
     const a = generatePassword();
     const b = generatePassword();
     expect(a).not.toBe(b);
-  });
-});
-
-describe("findCredentialTokens (multi-credential extraction)", () => {
-  it("finds both VouchFlow keys of the same shape", () => {
-    const page =
-      "Sandbox write key vsk_sandbox_write_20af25f2668a65ae268625ab2235e765 " +
-      "Sandbox read key vsk_sandbox_read_02ae44b1c9d3e6f7a8b9c0d1e2f3a4b5";
-    const toks = findCredentialTokens(page);
-    expect(toks).toContain("vsk_sandbox_write_20af25f2668a65ae268625ab2235e765");
-    expect(toks).toContain("vsk_sandbox_read_02ae44b1c9d3e6f7a8b9c0d1e2f3a4b5");
-  });
-
-  it("does NOT pick up the dotted function-name false positive", () => {
-    expect(findCredentialTokens("loader.tweetUnavailableTombstoneHandler")).toEqual([]);
-  });
-
-  it("recognizes a hyphen-prefixed vendor key whose prefix isn't hardcoded (Tally tly-)", () => {
-    const toks = findCredentialTokens("Your API key: tly-a1b2c3d4e5f6g7h8i9j0k1l2");
-    expect(toks).toContain("tly-a1b2c3d4e5f6g7h8i9j0k1l2");
-  });
-
-  it("still ignores hyphenated English prose (no digit, or whitespace)", () => {
-    expect(findCredentialTokens("this-is-a-well-known-phrase-here")).toEqual([]);
-  });
-
-  it("recognizes a MULTI-segment vendor key via its high-entropy run (Luma luma-api-…)", () => {
-    const toks = findCredentialTokens("Your key: luma-api-4Y7FDyM7kQ2bX9wZ1aL3pR");
-    expect(toks).toContain("luma-api-4Y7FDyM7kQ2bX9wZ1aL3pR");
-  });
-
-  it("still rejects a word-word-word-date slug (no high-entropy segment)", () => {
-    expect(findCredentialTokens("trusty-squire-dogfood-20260625")).toEqual([]);
-  });
-
-  it("ignores prose and short/digitless tokens", () => {
-    expect(findCredentialTokens("Welcome to your dashboard. Get started now.")).toEqual([]);
-    // has a separator but no digit → not a key
-    expect(findCredentialTokens("user_account_settings_panel")).toEqual([]);
-  });
-
-  it("does NOT pick up ordinary slug identifiers with dates", () => {
-    expect(findCredentialTokens("trusty-squire-dogfood-20260625")).toEqual([]);
   });
 });
 

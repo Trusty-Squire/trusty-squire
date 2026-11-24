@@ -4,7 +4,6 @@ import type { Page } from "playwright";
 import type { BrowserController } from "../browser.js";
 import { withOAuthActionLease } from "../oauth-login.js";
 import { waitForCaptchaChallengeToSettle } from "../captcha.js";
-import type { Session } from "../session/model.js";
 import {
   audit,
   googleSessionGateForSession,
@@ -14,7 +13,14 @@ import {
 import { stashSecretSlot, type SlotHandle } from "../session/slots.js";
 import { invalidateCompactV2Snapshot } from "../observe/observe.js";
 import { runSerializedGoogleIdentityOperation } from "../act/act.js";
-import { findOtpCredential } from "../credential-shape.js";
+
+const OTP_KEYWORD_RE =
+  /(?:code|verification|verify|otp|passcode|one[- ]time)\D{0,40}?(\d{4,8})|(\d{4,8})\D{0,8}?(?:code|verification|verify|otp|passcode)/i;
+
+function findOtpCredential(value: string): string | null {
+  const match = OTP_KEYWORD_RE.exec(value);
+  return match?.[1] ?? match?.[2] ?? null;
+}
 
 export interface NeedsUserCode {
   wall: "verification_code";

@@ -2305,7 +2305,6 @@ describe("operate_drive real-browser fixture", () => {
       expect(await sessionForCall(started.session_id)!.browser.readClipboard(page)).toBe(
         DRIVE_FIXTURE_KEY,
       );
-      expect(JSON.stringify(result.observation?.safe_table)).toMatch(/@key-value\|secret=1\|len=/);
     } finally {
       await finishProvisionSession(started.session_id);
       await context.close();
@@ -2399,7 +2398,6 @@ describe("operate_drive real-browser fixture", () => {
       expect(await sessionForCall(started.session_id)!.browser.readClipboard(page)).toBe(
         DRIVE_FIXTURE_KEY,
       );
-      expect(JSON.stringify(result.observation?.safe_table)).toMatch(/@key-value\|secret=1\|len=/);
     } finally {
       await finishProvisionSession(started.session_id);
       await context.close();
@@ -2492,7 +2490,6 @@ describe("operate_drive real-browser fixture", () => {
       expect(await sessionForCall(started.session_id)!.browser.readClipboard(page)).toBe(
         DRIVE_FIXTURE_KEY,
       );
-      expect(JSON.stringify(result.observation?.safe_table)).toMatch(/@key-value\|secret=1\|len=/);
     } finally {
       await finishProvisionSession(started.session_id);
       await context.close();

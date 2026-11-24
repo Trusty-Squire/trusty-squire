@@ -640,30 +640,25 @@ inferred `already_closed`. Clients should feature-detect the output schema in
 Before dispatching a drive click or select, the drive hands back `stuck` for
 controls marked `credential=1`, except Copy/reveal buttons, links, and menu
 items. The marker comes from the nearest table row or list item (including
-ARIA equivalents) containing a credential-shaped token, a visible masked
-display, or a visible readonly input. This structural check does not depend
-on mutation verbs or their language. A DOM dialog control following a recorded
-credential-row mutation click on the same page path is also refused, with the
-same Copy/reveal exception. Native confirmations use that same recorded-click
+ARIA equivalents) with a visible inline code element or readonly field.
+This structural check applies regardless of the mutation control's label. A
+DOM dialog control following a recorded credential-row mutation click on the
+same page path is also refused, with the same Copy/reveal exception. Native confirmations use that same recorded-click
 provenance to offer a human handoff and require confidence of at least 0.6
 for an automatic accept or dismiss; dialog wording alone does not classify
 them as credential mutations. Other rows, including new-key creation controls
 without that evidence, remain eligible. Regression coverage lives in
 [`drive-key-complete-refusal.test.ts`](../apps/mcp/src/bot/__tests__/drive-key-complete-refusal.test.ts).
 
-Credential capture uses the selected source rather than scanning for key-shaped
-tokens. `operate_extract` without
-`capture` clicks the Copy button in an open key dialog and keeps only the value
-that click writes to the clipboard, as `api_key`. When no dialog holds one, it
-clicks the Copy button nearest a key shown inline on the page, as on a list page
-that reveals the new key once its dialog closes. The shown key only locates that
-button and is never stored itself; that click must write exactly that key. When
-controls with Copy cues beside different shown keys compete, only one whose
-label names a key (such as `Copy key`) is clicked, otherwise none. Copy controls
-are recognized by English cues and common localized labels such as Indonesian
-`Salin`. When no Copy click
-yields a value it stores nothing and returns
-an `error` telling the agent to read the page with `operate_observe` and point
+Credential capture uses the selected source. `operate_extract` without
+`capture` clicks the Copy button in an open key dialog and keeps the value
+that click writes to the clipboard as `api_key`. It can also use a Copy
+control beside a displayed value on a key page. For an inline Copy, the
+clipboard must match the adjacent value. A Copy label that explicitly names a
+key takes precedence over a generic Copy label. Ambiguous sources require
+explicit capture. Copy controls support localized labels such as Indonesian
+`Salin`. When no Copy yields a value, extraction returns an `error` asking
+the agent to read the page with `operate_observe` and point
 `capture` at the key. A targeted `capture` (selector, role, or the clipboard
 after an `operate_click`) stores the pointed value as is. The one exception on
 every store path, the drive's included, is a value that is an http(s) URL: a Copy
@@ -677,18 +672,14 @@ redact those surfaces.
 
 `operate_drive` accepts the same `store` destination as `operate_extract`.
 Supply it on each drive call that should vault a key, including resumed calls.
-With a destination and an authenticated vault client, a revealed-secret row
-(`@key-value` or `secret=1`) or a successfully dispatched Copy click triggers
-extraction and storage before the next model decision. The Copy evidence
-survives a button changing its label to “Copied!” on the same document and URL.
-A click counts as a Copy dispatch by what the control is, not its wording: the
-Copy control extraction itself would use (including supported localized labels),
-or a control associated with a shown key. Only the former passes the
-credential-mutation stop. From the latter, extraction takes the clipboard only
-when it holds the shown key.
-Extraction still uses the Copy source described above; a revealed-secret row
-does not itself supply the credential value. Successful storage returns
-`complete` without waiting for the model to choose DONE. Each page state gets
+With a destination and an authenticated vault client, an explicitly labeled
+key Copy control in a dialog or a dispatched Copy click triggers extraction
+and storage before the next model decision. Drive associates an inline
+control with its adjacent display and checks what its click wrote. The
+association survives a label change from “Copy key” to “Copied!” on the same
+document and URL. Recognized Copy controls pass the row mutation stop.
+Successful storage returns `complete` without waiting for the model to choose
+DONE. Each page state gets
 one automatic capture attempt per call; a failed extraction or storage attempt
 returns to ordinary decision-making after a fresh snapshot. A new successfully
 dispatched Copy click rearms capture even when that page state was already
