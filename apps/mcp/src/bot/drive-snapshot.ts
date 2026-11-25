@@ -80,6 +80,7 @@ export interface DriveSnapshot {
   notices?: string[];
   fingerprint: string;
   documentEpoch: string;
+  controlDigest?: string;
   elements: DriveSnapshotElement[];
   omittedValues: number;
   scriptMs: number;
@@ -105,6 +106,7 @@ type DriveInPageSnapshot = {
   notices: string[];
   fingerprint: string;
   documentEpoch: string;
+  controlDigest: string;
   elements: DriveSnapshotElement[];
   omittedValues: number;
   scriptMs: number;
@@ -625,8 +627,8 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
     text.replace(/\s+/g, " ").trim().toLowerCase().replace(/\d+/g, "#");
   cache.rowDigest = (): string => {
     const parts: string[] = [];
-    // The digest is read twice for every act (after the snapshot, then before
-    // dispatch) and the two reads must agree when the page did not change, so
+    // Capture the baseline with the rows and read it again before dispatch.
+    // The two reads must agree when the page did not change, so
     // bound the accessible-name walk by visits, not by a wall clock that would
     // truncate it differently at each read.
     const savedDeadline = nameDeadline;
@@ -1243,6 +1245,7 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
     notices,
     fingerprint,
     documentEpoch: `${performance.timeOrigin}|${location.href}`,
+    controlDigest: cache.rowDigest(),
     elements,
     omittedValues,
     scriptMs: performance.now() - scriptStarted,
