@@ -81,7 +81,7 @@ function vote(questions: Record<string, JevQuestion>, label: string) {
 
 describe("a refused act on one page", () => {
   it.each(["next-page", "same-page-remount"] as const)(
-    "preserves page-bound refusal memory: %s",
+    "offers fresh controls after a refused act: %s",
     async (scenario) => {
       const context = await browser.newContext();
       const tab = await context.newPage();
@@ -173,7 +173,7 @@ describe("a refused act on one page", () => {
             "Signed in as Methoxine (methoxine@example.test)",
           );
         } else {
-          expect(nextTargets.some((text) => text.includes("Continue with Google"))).toBe(false);
+          expect(nextTargets.some((text) => text.includes("Continue with Google"))).toBe(true);
           expect(nextTargets.some((text) => text.includes("Help"))).toBe(true);
           expect(nextTargets.some((text) => text.includes("BeatAPI home"))).toBe(true);
           expect(await tab.locator("#selected").textContent()).toBe("Help clicked");

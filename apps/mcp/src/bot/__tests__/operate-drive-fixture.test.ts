@@ -6086,6 +6086,122 @@ describe("drive review regressions", () => {
 });
 
 describe("operate_drive feedback loop", () => {
+  it.each(["snapshot capture", "the pre-act check"])(
+    "opens a control remounted after %s",
+    async (phase) => {
+      const { context, page, started } = await openFixture(
+        `<main><h1>Search results</h1>
+        <div id="overlay"><button id="dismiss" onclick="document.body.dataset.wrong = 'yes'">Dismiss</button></div>
+      </main>`,
+        "remounted-overlay.test",
+        "drive",
+      );
+      try {
+        const outcomes: string[] = [];
+        let remounted = false;
+        const remount = async () => {
+          remounted = true;
+          await page.locator("#overlay").evaluate((overlay) => {
+            overlay.innerHTML = '<button id="dismiss">Dismiss</button>';
+            overlay.firstElementChild!.addEventListener("click", () => {
+              overlay.outerHTML = '<p id="source">Official gameplay guide</p>';
+            });
+          });
+        };
+        if (phase === "snapshot capture") {
+          const evaluate = page.evaluate.bind(page);
+          vi.spyOn(page, "evaluate").mockImplementation(async (fn, arg) => {
+            const value = await evaluate(fn, arg);
+            if (!remounted && typeof fn === "function" && fn.name === "inPageSnapshot") {
+              await remount();
+            }
+            return value;
+          });
+        }
+        const dependencies = deps(async (_api, _state, questions) => {
+          const criteria = choiceCriteria(questions.CLICK_target);
+          if (await page.locator("#source").count()) return jevChoose(questions, "DONE");
+          return Object.values(criteria).includes("Dismiss")
+            ? jevChoose(questions, "CLICK", /^Dismiss$/)
+            : jevChoose(questions, "BLOCKED");
+        });
+        dependencies.driveAct = async (sessionId, action) => {
+          if (phase === "the pre-act check" && !remounted) {
+            // Replace the overlay after Drive's pre-act check, before the real
+            // dispatcher resolves the selected ref. The URL and label stay put.
+            await remount();
+          }
+          const outcome = await dispatchDriveAct(sessionId, action);
+          outcomes.push(outcome.kind);
+          return outcome;
+        };
+        const handoff = await runOperateDrive(
+          {
+            session_id: started.session_id,
+            goal: "dismiss the overlay and read the gameplay guide",
+          },
+          api(),
+          undefined,
+          dependencies,
+        );
+        expect(handoff.status).toBe("complete");
+        expect(outcomes).toEqual(phase === "snapshot capture" ? ["ok"] : ["stale", "ok"]);
+        expect(await page.locator("#source").textContent()).toBe("Official gameplay guide");
+        expect(await page.locator("body").getAttribute("data-wrong")).toBeNull();
+      } finally {
+        await finishProvisionSession(started.session_id);
+        await context.close();
+      }
+    },
+    30_000,
+  );
+
+  it("gives a public read distinct destinations for unlabeled links", async () => {
+    const { context, page, started } = await openFixture(
+      `<main><h1>Siege Up</h1>
+        <div style="height: 900px"></div>
+        <a href="/news"><img alt="" width="100" height="35"></a>
+        <a href="/gameplay"><img alt="" width="100" height="35"></a>
+        <a href="/community"><img alt="" width="100" height="35"></a>
+      </main>`,
+      "public-gameplay.test",
+      "drive",
+    );
+    try {
+      await page.route("**/gameplay", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: "<main><h1>Gameplay</h1><p>Build a base, gather resources, and fight skirmishes.</p></main>",
+        }),
+      );
+      let decisions = 0;
+      const dependencies = deps(async (_api, state, questions) => {
+        decisions += 1;
+        if (decisions === 1) return jevChoose(questions, "SCROLL", /^scroll down$/);
+        if (JSON.stringify(state).includes("fight skirmishes")) return jevChoose(questions, "DONE");
+        const labels = Object.values(choiceCriteria(questions.CLICK_target));
+        if (labels.some((label) => label.includes("public-gameplay.test/gameplay"))) {
+          return jevChoose(questions, "CLICK", /public-gameplay\.test\/gameplay/);
+        }
+        const result = jevChoose(questions, "BLOCKED");
+        ambiguousOperation(result);
+        return result;
+      });
+      const handoff = await runOperateDrive(
+        { session_id: started.session_id, goal: "read the official description of core gameplay" },
+        api(),
+        undefined,
+        dependencies,
+      );
+      expect(handoff.status).toBe("complete");
+      expect(handoff.trajectory.map((step) => step.action)).toEqual(["scroll", "click"]);
+      expect(page.url()).toBe("https://public-gameplay.test/gameplay");
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
   function setChoice(
     questions: Record<string, JevQuestion>,
     name: string,

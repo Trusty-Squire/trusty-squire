@@ -301,15 +301,15 @@ export async function reenterDriveField(
 
 /** The rowed controls' identity and actionability, read back through the
  *  snapshot's own derivation. */
-export async function driveControlDigest(page: Page): Promise<string> {
+export async function driveControlDigest(page: Page): Promise<string | null> {
   try {
     return await evaluateBound(page, () => {
       type DriveCache = { rowDigest?: () => string };
       const registry = (window as Window & { __tsDriveRegistry?: DriveCache }).__tsDriveRegistry;
-      return registry?.rowDigest?.() ?? "";
+      return registry?.rowDigest?.() ?? null;
     });
   } catch {
-    return "";
+    return null;
   }
 }
 

@@ -733,7 +733,9 @@ export function rowContext(row: WireRow): string | undefined {
 function labelInRow(row: WireRow): string {
   const label = readableLabel(row);
   const context = rowContext(row);
-  return context === undefined ? label : `${label} (row: ${context})`;
+  const href = label === "link" ? rowHref(row) : undefined;
+  const description = href !== undefined && /^https?:\/\//i.test(href) ? `link to ${href}` : label;
+  return context === undefined ? description : `${description} (row: ${context})`;
 }
 
 export function rowField(row: WireRow): string | undefined {
@@ -5452,7 +5454,7 @@ async function captureDriveSession(
   const bridge = driveRefBridge(session);
   bridge.reserve(compactV2EpochDoc(session, page), frameParts);
   rememberDriveIdentities(drive, snapshot.elements, snapshot.url);
-  drive.snapshotControlDigest = await driveControlDigest(page);
+  drive.snapshotControlDigest = main.controlDigest ?? null;
   drivePasswordControls.set(
     session,
     new Map(snapshot.elements.map((element) => [element.ref, element])),
@@ -6789,8 +6791,7 @@ async function driveLoop(input: {
         liveEpoch !== drive.lastDocumentEpoch;
       const controlsChanged =
         typeof drive.snapshotControlDigest === "string" &&
-        drive.snapshotControlDigest.length > 0 &&
-        liveControls.length > 0 &&
+        liveControls !== null &&
         liveControls !== drive.snapshotControlDigest;
       if (documentChanged || controlsChanged) {
         traceUndispatchedOauth("live_controls_changed");
@@ -7257,20 +7258,21 @@ async function driveLoop(input: {
       // drive stopped, and never let the refused key consume the dead-end
       // budget that belongs to controls that were actually dispatched.
       drive.lastDispatchFailure = refusedActReason(acted.reason);
-      // Rule 3: a press refused because the target was covered is not
-      // evidence about the control. It must never be marked spent, and the
-      // covering layer's own dismiss control is offered next before the same
-      // control is re-offered. The call budgets bound a page that never stops
-      // covering it.
-      const occluded = acted.reason === "occluded";
-      if (!occluded) {
-        rememberFailedAction(drive, rows, decision.actionKey, observation.url);
-      }
+      const refusedRef = driveRefBridge(session).publicRef(decision.actionKey);
       const staleSnap = await withinOAuthCallerDeadline(
         () => snapshotOrTimeout(framesIfNeeded()),
         deadline,
       );
       if (staleSnap !== "ok") return staleSnap;
+      // Only keep failure memory for a control still present in the same
+      // document. A remount can reuse its label, and a reload can reuse its ref.
+      const markTried =
+        acted.reason !== "occluded" &&
+        beforeEpoch === drive.lastDocumentEpoch &&
+        refusedRef === driveRefBridge(session).publicRef(decision.actionKey) &&
+        liveRow !== undefined &&
+        rows.some((row) => row[0] === liveRow[0] && row[1] === liveRow[1] && row[2] === liveRow[2]);
+      if (markTried) rememberFailedAction(drive, rows, decision.actionKey, observation.url);
       noteOutcome({
         beforeUrl: urlBeforeClick,
         afterUrl: observation.url,
@@ -7290,7 +7292,7 @@ async function driveLoop(input: {
         ),
         ...(clickedBefore === undefined ? {} : { row: clickedBefore }),
         label: historyLine,
-        ...(occluded ? { markTried: false } : {}),
+        markTried,
       });
       return "continue";
     }
