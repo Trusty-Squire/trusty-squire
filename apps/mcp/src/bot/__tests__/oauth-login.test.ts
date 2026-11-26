@@ -1280,22 +1280,32 @@ describe("BrowserController OAuth popup lifecycle", () => {
     },
   );
 
-  it.each(["same-tab", "popup"] as const)(
-    "captures the redirect target from a fast %s HTTP redirect",
-    async (topology) => {
+  it.each([
+    ["same-tab", "/projects"],
+    ["popup", "/projects"],
+    ["same-tab", "/callback"],
+    ["popup", "/callback"],
+  ] as const)(
+    "captures the dashboard on a fast %s HTTP redirect through %s",
+    async (topology, returnPath) => {
       const context = await signedInGoogleContext();
       const product = await context.newPage();
-      let expectedReturnUrl = "";
-      const returnTarget = createServer((_request, response) => {
+      const returnTarget = createServer((request, response) => {
+        if (request.url === "/callback") {
+          response.writeHead(302, { location: "/projects" });
+          response.end();
+          return;
+        }
         response.writeHead(200, { "content-type": "text/html" });
         response.end("<main>Projects</main>");
       });
       await new Promise<void>((resolve) => returnTarget.listen(0, "127.0.0.1", resolve));
       const { port: returnPort } = returnTarget.address() as AddressInfo;
-      expectedReturnUrl = `http://127.0.0.1:${returnPort}/projects`;
-      const providerUrl = `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(expectedReturnUrl)}`;
+      const returnOrigin = `http://127.0.0.1:${returnPort}`;
+      const returnUrl = new URL(returnPath, returnOrigin).href;
+      const providerUrl = `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(returnUrl)}`;
       await context.route(providerUrl, (route) =>
-        route.fulfill({ status: 302, headers: { location: expectedReturnUrl } }),
+        route.fulfill({ status: 302, headers: { location: returnUrl } }),
       );
       await context.route("https://product.test/**", (route) =>
         route.fulfill({
@@ -1308,8 +1318,8 @@ describe("BrowserController OAuth popup lifecycle", () => {
       await product.goto("https://product.test/login");
       const controller = BrowserController.fromHarnessPage(product);
       try {
-        await expect(loginWithOAuth(controller, "#oauth", 500)).resolves.toBeUndefined();
-        expect(controller.completedOAuthPage()?.url()).toBe(expectedReturnUrl);
+        await expect(loginWithOAuth(controller, "#oauth", 1_500)).resolves.toBeUndefined();
+        expect(controller.completedOAuthPage()?.url()).toBe(`${returnOrigin}/projects`);
       } finally {
         await context.close();
         await new Promise<void>((resolve, reject) =>

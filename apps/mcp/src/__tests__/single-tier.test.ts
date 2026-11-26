@@ -4,8 +4,8 @@ import { operatorHandlerForwarder } from "./operator-handler-forwarder.js";
 // product position was removed in favor of one consistent auth path.)
 //
 // Verified here:
-//   1. A buildServer(null) — i.e. a stale pre-single-tier session — gates
-//      EVERY tool with a re-install message. There is no anonymous mode.
+//   1. A buildServer(null) gates every valid tool call with instructions to
+//      connect the install to an account.
 //   2. The CLI no longer accepts `--pair` as a no-op or anything else;
 //      pairing is automatic and lives inside the `connect` command.
 
@@ -15,8 +15,8 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { buildServer } from "../server.js";
 import type { ApiClient } from "../api-client.js";
 
-describe("single-tier — stale install gate", () => {
-  it("valid calls require reconnect while malformed calls fail validation first", async () => {
+describe("single-tier account gate", () => {
+  it("tells an unbound install to connect after validating arguments", async () => {
     const server = await buildServer(null);
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await server.connect(serverTransport);
@@ -46,7 +46,9 @@ describe("single-tier — stale install gate", () => {
         (unauthenticated.content as Array<{ text: string }>)[0]!.text,
       ).error;
       expect(unauthenticatedError.code).toBe("reconnect_required");
-      expect(unauthenticatedError.message).toMatch(/single-tier auth|install/i);
+      expect(unauthenticatedError.message).toBe(
+        "This install isn't bound to an account. Run `npx @trusty-squire/mcp connect` to connect it.",
+      );
     } finally {
       await client.close();
     }

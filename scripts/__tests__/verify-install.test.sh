@@ -44,7 +44,7 @@ case "${1:-}" in
     fi
 
     version="1.2.2"
-    if [[ "$TEST_MODE" == "stale-then-current" && $count -gt 1 ]]; then
+    if [[ "$TEST_MODE" == "current" || ( "$TEST_MODE" == "stale-then-current" && $count -gt 1 ) ]]; then
       version="1.2.3"
     fi
     mkdir -p "node_modules/@scope/example"
@@ -62,6 +62,8 @@ set -euo pipefail
 
 if [[ "${1:-}" == "-sI" ]]; then
   echo "HTTP/1.1 200 OK"
+elif [[ "${3:-}" == "-o" ]]; then
+  cp "$STATE_DIR/package.tgz" "$4"
 else
   echo '{"dist-tags":{"latest":"1.2.3"}}'
 fi
@@ -78,9 +80,10 @@ chmod +x "$MOCK_BIN/npm" "$MOCK_BIN/curl" "$MOCK_BIN/sleep"
 
 run_verifier() {
   local mode=$1
+  shift
   set +e
   OUTPUT=$(PATH="$MOCK_BIN:$PATH" STATE_DIR="$STATE_DIR" TEST_MODE="$mode" \
-    bash "$ROOT_DIR/scripts/verify-install.sh" "@scope/example" "1.2.3" 2>&1)
+    bash "$ROOT_DIR/scripts/verify-install.sh" "@scope/example" "1.2.3" "$@" 2>&1)
   STATUS=$?
   set -e
 }
@@ -173,4 +176,21 @@ if [[ "$OUTPUT" != *"expected 1.2.3 after 30 attempts"* ]]; then
   exit 1
 fi
 
-echo "verify-install retry handling: OK"
+reset_state
+mkdir -p "$TEST_DIR/archive/package/dist" "$TEST_DIR/sandbox"
+echo 'release-sentinel' >"$TEST_DIR/archive/package/dist/index.js"
+tar -czf "$STATE_DIR/package.tgz" -C "$TEST_DIR/archive" package
+TMPDIR="$TEST_DIR/sandbox" run_verifier current release-sentinel
+
+if [[ $STATUS -ne 0 || "$OUTPUT" != *"STEP 6: Clean tmpdir install (npm install @scope/example@latest) ... OK"* ]]; then
+  echo "Expected fallback sentinel extraction and clean install to succeed with TMPDIR set"
+  printf '%s\n' "$OUTPUT"
+  exit 1
+fi
+
+if [[ ! -d "$TEST_DIR/sandbox" || -n "$(ls -A "$TEST_DIR/sandbox")" ]]; then
+  echo "Expected the caller's TMPDIR to remain and all verifier scratch files to be cleaned up"
+  exit 1
+fi
+
+echo "verify-install retry and sentinel handling: OK"

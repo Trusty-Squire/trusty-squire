@@ -96,13 +96,13 @@ if [[ -n "$SENTINEL" ]]; then
   
   # Fallback: grep all .js files under package/dist/
   if [[ $FOUND -eq 0 ]]; then
-    TMPDIR=$(mktemp -d)
-    trap 'rm -rf "$TMPDIR" "$TMPTAR"' EXIT
-    tar -xzf "$TMPTAR" -C "$TMPDIR" 2>/dev/null
-    if grep -r --include="*.js" -F "$SENTINEL" "$TMPDIR/package/dist/" >/dev/null 2>&1; then
+    EXTRACT_DIR=$(mktemp -d)
+    trap 'rm -rf "$EXTRACT_DIR" "$TMPTAR"' EXIT
+    tar -xzf "$TMPTAR" -C "$EXTRACT_DIR" 2>/dev/null
+    if grep -r --include="*.js" -F "$SENTINEL" "$EXTRACT_DIR/package/dist/" >/dev/null 2>&1; then
       FOUND=1
     fi
-    rm -rf "$TMPDIR"
+    rm -rf "$EXTRACT_DIR"
   fi
   
   if [[ $FOUND -eq 0 ]]; then
