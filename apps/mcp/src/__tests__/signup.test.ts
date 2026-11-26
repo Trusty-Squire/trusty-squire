@@ -1,4 +1,5 @@
-import { mkdtempSync, readFileSync, rmSync, statSync, symlinkSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -77,7 +78,7 @@ afterEach(() => {
   rmSync(tempDir, { recursive: true, force: true });
 });
 
-describe("package subpath export metadata", () => {
+describe("package subpath export metadata and runtime smoke test", () => {
   it("declares ./signup pointing to dist/signup.js and dist/signup.d.ts", () => {
     const pkgPath = resolve(import.meta.dirname, "../../package.json");
     const pkg = JSON.parse(readFileSync(pkgPath, "utf8")) as {
@@ -90,6 +91,51 @@ describe("package subpath export metadata", () => {
     });
     expect(pkg.files).toContain("dist");
   });
+
+  it("compiles dist/signup.js + dist/signup.d.ts and resolves @trusty-squire/mcp/signup via Node exports", () => {
+    const pkgRoot = resolve(import.meta.dirname, "../..");
+    const distJs = join(pkgRoot, "dist", "signup.js");
+    const distDts = join(pkgRoot, "dist", "signup.d.ts");
+    const tscBin = join(
+      pkgRoot,
+      "node_modules",
+      ".bin",
+      process.platform === "win32" ? "tsc.cmd" : "tsc",
+    );
+    if (!existsSync(distJs) || !existsSync(distDts)) {
+      execFileSync(tscBin, ["-p", "tsconfig.build.json"], { cwd: pkgRoot, stdio: "pipe" });
+    }
+    expect(existsSync(distJs)).toBe(true);
+    expect(existsSync(distDts)).toBe(true);
+    expect(existsSync(join(pkgRoot, "dist", "signup", "isolation.d.ts"))).toBe(true);
+    expect(existsSync(join(pkgRoot, "dist", "signup", "session-store.d.ts"))).toBe(true);
+
+    const out = execFileSync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "-e",
+        `import * as mod from "@trusty-squire/mcp/signup";
+         const required = [
+           "connectSignupProfile",
+           "ensureSignupSession",
+           "runSignup",
+           "readSignupSession",
+           "writeSignupSession",
+           "clearSignupSession",
+           "assertIsolatedProfileDir",
+           "assertIsolatedSessionPath",
+           "redactSecrets",
+         ];
+         for (const name of required) {
+           if (typeof mod[name] !== "function") throw new Error("missing export: " + name);
+         }
+         process.stdout.write(JSON.stringify(required));`,
+      ],
+      { cwd: pkgRoot, encoding: "utf8" },
+    );
+    expect(JSON.parse(out)).toContain("runSignup");
+  }, 30_000);
 });
 
 describe("profile and session isolation guards", () => {
@@ -425,6 +471,159 @@ describe("connectSignupProfile and ensureSignupSession", () => {
     expect(result.status).toBe("cancelled");
     expect(browser.close).toHaveBeenCalled();
   });
+
+  it("retries failed session saves on later polls without losing the one-time claimed token", async () => {
+    const appProfileDir = join(tempDir, "retry-save-profile");
+    const browser = makeFakeBrowser();
+    let polls = 0;
+    let saveCalls = 0;
+    const onSessionSaved = vi.fn(async () => {
+      saveCalls += 1;
+      if (saveCalls === 1) throw new Error("transient sqlite busy");
+    });
+
+    const result = await connectSignupProfile(
+      {
+        profileDir: appProfileDir,
+        apiBaseUrl: "https://api.example.test",
+        onSessionSaved,
+        pollIntervalMs: 50,
+      },
+      {
+        detectAsn: async () => null,
+        issueMachineToken: async () => ({ machine_token: "mch_retry_save" }),
+        installInitiate: async () => ({
+          setup_code: "setup-retry-save",
+          confirm_url: "https://trustysquire.ai/confirm?code=setup-retry-save",
+          expires_at: "2026-11-26T21:00:00.000Z",
+        }),
+        createBrowser: () => browser,
+        drawsWindowsNatively: () => true,
+        hasDisplay: () => true,
+        pollInstallStatus: async () => {
+          polls += 1;
+          if (polls === 1) {
+            return {
+              status: "claimed",
+              account_id: "acc_retry",
+              agent_session_token: "agt_one_time_token_retry",
+              finished: false,
+            };
+          }
+          return { status: "delivered", finished: true };
+        },
+        detectProviders: async () => ["google"],
+        sleep: async () => undefined,
+      },
+    );
+
+    expect(result.status).toBe("connected");
+    expect(onSessionSaved).toHaveBeenCalledTimes(2);
+    if (result.status === "connected") {
+      expect(result.session.agentSessionToken).toBe("agt_one_time_token_retry");
+      expect(result.sessionSaveError).toBeUndefined();
+    }
+  });
+
+  it("still returns the claimed session when persistence permanently fails (e.g. empty account_id or throwing callback) and redacts tokens from sessionSaveError", async () => {
+    const appProfileDir = join(tempDir, "perm-fail-save-profile");
+    const appSessionPath = join(tempDir, "perm-fail-session.json");
+    const oneTimeToken = "agt_one_time_secret_do_not_lose";
+    const browser = makeFakeBrowser();
+    const onSessionSaved = vi.fn(async (s: SignupSession) => {
+      throw new Error(`db refused ${s.agentSessionToken}`);
+    });
+
+    const result = await connectSignupProfile(
+      {
+        profileDir: appProfileDir,
+        sessionPath: appSessionPath,
+        apiBaseUrl: "https://api.example.test",
+        onSessionSaved,
+        pollIntervalMs: 50,
+      },
+      {
+        detectAsn: async () => null,
+        issueMachineToken: async () => ({ machine_token: "mch_perm_fail" }),
+        installInitiate: async () => ({
+          setup_code: "setup-perm-fail",
+          confirm_url: "https://trustysquire.ai/confirm?code=setup-perm-fail",
+          expires_at: "2026-11-26T21:00:00.000Z",
+        }),
+        createBrowser: () => browser,
+        drawsWindowsNatively: () => true,
+        hasDisplay: () => true,
+        pollInstallStatus: async () => ({
+          status: "claimed",
+          account_id: "",
+          agent_session_token: oneTimeToken,
+          finished: true,
+        }),
+        detectProviders: async () => ["google"],
+        sleep: async () => undefined,
+      },
+    );
+
+    expect(result.status).toBe("connected");
+    if (result.status === "connected") {
+      expect(result.session.agentSessionToken).toBe(oneTimeToken);
+      expect(result.sessionSaveError).toBeDefined();
+      expect(result.sessionSaveError).toContain("[REDACTED]");
+      expect(result.sessionSaveError).not.toContain(oneTimeToken);
+    }
+  });
+
+  it("reports remote_cdp and skips local display exposure when both profileDir and cdpEndpoint are passed", async () => {
+    const appProfileDir = join(tempDir, "both-profile");
+    const cdpEndpoint = "http://127.0.0.1:9222";
+    const browser = makeFakeBrowser();
+    const exposeDisplay = vi.fn();
+    const detectProviders = vi.fn(async () => ["google" as const]);
+    const onSignInOpen = vi.fn();
+
+    const result = await connectSignupProfile(
+      {
+        profileDir: appProfileDir,
+        cdpEndpoint,
+        apiBaseUrl: "https://api.example.test",
+        onSignInOpen,
+        pollIntervalMs: 50,
+      },
+      {
+        detectAsn: async () => null,
+        issueMachineToken: async () => ({ machine_token: "mch_both" }),
+        installInitiate: async () => ({
+          setup_code: "setup-both",
+          confirm_url: "https://trustysquire.ai/confirm?code=setup-both",
+          expires_at: "2026-11-26T21:00:00.000Z",
+        }),
+        createBrowser: () => browser,
+        drawsWindowsNatively: () => false,
+        hasDisplay: () => false,
+        exposeDisplay,
+        detectProviders,
+        pollInstallStatus: async () => ({
+          status: "claimed",
+          account_id: "acc_both",
+          agent_session_token: "agt_both",
+          finished: true,
+        }),
+        sleep: async () => undefined,
+      },
+    );
+
+    expect(result.status).toBe("connected");
+    expect(exposeDisplay).not.toHaveBeenCalled();
+    expect(detectProviders).not.toHaveBeenCalled();
+    expect(onSignInOpen).toHaveBeenCalledWith(
+      expect.objectContaining({
+        browserLocation: { kind: "remote_cdp", endpoint: cdpEndpoint },
+      }),
+    );
+    if (result.status === "connected") {
+      expect(result.browserLocation).toEqual({ kind: "remote_cdp", endpoint: cdpEndpoint });
+    }
+  });
 });
 
 describe("runSignup credential capture, vault prohibition, redaction, and teardown", () => {
@@ -701,6 +900,70 @@ describe("runSignup credential capture, vault prohibition, redaction, and teardo
     expect(result.status).toBe("failed");
     expect(result.reason).toContain("[REDACTED]");
     expect(JSON.stringify(result)).not.toContain(leakedSecret);
+  });
+
+  it("clears callbackFailure and returns completed when a retried onCredentialCaptured succeeds", async () => {
+    const appProfileDir = join(tempDir, "callback-retry-profile");
+    const secret = "sk_retried_secret_778899";
+    const captured: CapturedCredential[] = [];
+    let attempts = 0;
+
+    const result = await runSignup(
+      {
+        url: "https://app.example.test/keys",
+        goal: "Create key",
+        profileDir: appProfileDir,
+        session: SAMPLE_SESSION,
+        onCredentialCaptured: (cred) => {
+          attempts += 1;
+          if (attempts === 1) throw new Error("transient write error");
+          captured.push(cred);
+        },
+      },
+      {
+        createBrowser: () => makeFakeBrowser() as unknown as BrowserController,
+        startHarnessSession: async (opts) => ({ session_id: "sess-retry", url: opts.serviceUrl }),
+        finishSession: async () => ({
+          session_id: "sess-retry",
+          operation_id: "op-retry",
+          execution: "completed",
+          mutation: "not_dispatched",
+          cleanup: "closed",
+          closed: true,
+          url: "https://app.example.test/keys",
+        }),
+        observedHostsForSession: () => ["app.example.test"],
+        currentProvisionUrl: () => "https://app.example.test/keys",
+        runDrive: async (_args, _api, context, deps) => {
+          await deps!.startSession({ serviceUrl: "https://app.example.test/keys" });
+          const first = await context!.persistCredentials!({
+            session_id: "sess-retry",
+            url: "https://app.example.test/keys",
+            credentials: { api_key: secret },
+          });
+          expect(first).toBeNull();
+          const second = await context!.persistCredentials!({
+            session_id: "sess-retry",
+            url: "https://app.example.test/keys",
+            credentials: { api_key: secret },
+          });
+          expect(second).toEqual({
+            reference: "embedded:callback",
+            service: "example.test",
+            label: undefined,
+          });
+          return makeHandoff({ session_id: "sess-retry" });
+        },
+      },
+    );
+
+    expect(attempts).toBe(2);
+    expect(result.status).toBe("completed");
+    expect(result.captured).toBe(true);
+    expect(result.reason).toBeUndefined();
+    expect(captured).toHaveLength(1);
+    expect(captured[0]?.fields.api_key).toBe(secret);
+    expect(JSON.stringify(result)).not.toContain(secret);
   });
 
   it("maps drive handoff statuses accurately (needs_human, low_confidence, needs_input, budget_exceeded)", async () => {

@@ -166,6 +166,8 @@ export type SignupConnectResult =
       session: SignupSession;
       providers: OAuthProviderId[];
       browserLocation: SignupBrowserLocation;
+      /** Set only if saving the claimed session to sessionPath/onSessionSaved still failed after retries. The claimed session is still returned so the one-time token is never lost. */
+      sessionSaveError?: string;
     }
   | {
       status: "expired" | "timed_out" | "cancelled";
@@ -464,7 +466,7 @@ export async function ensureSignupSession(
         fetchImpl,
       );
       if (tokenValid) {
-        if (target.profileDir !== undefined) {
+        if (target.cdpEndpoint === undefined && target.profileDir !== undefined) {
           const detectProviders = runtime.detectProviders ?? detectProviderSessionsFromProfile;
           const providers = await detectProviders(target.profileDir).catch(
             (): OAuthProviderId[] => [],
@@ -576,7 +578,9 @@ export async function connectSignupProfile(
     await browser.goto(initiate.confirm_url, undefined, "document-ready");
 
     // Determine how the user sees the ceremony browser window.
-    if (target.cdpEndpoint !== undefined && target.profileDir === undefined) {
+    // BrowserProcessOwner attaches over CDP whenever cdpEndpoint is set, so
+    // cdpEndpoint alone decides whether the window runs in a remote browser.
+    if (target.cdpEndpoint !== undefined) {
       browserLocation = { kind: "remote_cdp", endpoint: target.cdpEndpoint };
     } else {
       const nativeWindows = (runtime.drawsWindowsNatively ?? drawsWindowsNatively)();
@@ -626,23 +630,45 @@ export async function connectSignupProfile(
     const deadline = now() + timeoutMs;
     const poll = runtime.pollInstallStatus ?? pollInstallStatus;
     let claimedSession: SignupSession | null = null;
-    let persisted = false;
+    let filePersisted = safeSessionPath === undefined;
+    let callbackPersisted = options.onSessionSaved === undefined;
+    let lastSaveError: string | null = null;
 
+    // The server delivers the agent session token only once. Never let a
+    // persistence error discard a claimed session: retry on every poll and
+    // still return the claimed session to the caller even if saving fails.
     const persistClaim = async (session: SignupSession): Promise<void> => {
-      if (persisted) return;
-      if (safeSessionPath !== undefined) {
-        await writeSignupSession(safeSessionPath, session, {
-          ...(options.allowDefaultSessionStore !== undefined
-            ? { allowDefaultSessionStore: options.allowDefaultSessionStore }
-            : {}),
-        });
+      if (filePersisted && callbackPersisted) return;
+      const secrets = [session.agentSessionToken, session.machineToken];
+      const errors: string[] = [];
+      if (!filePersisted && safeSessionPath !== undefined) {
+        try {
+          await writeSignupSession(safeSessionPath, session, {
+            ...(options.allowDefaultSessionStore !== undefined
+              ? { allowDefaultSessionStore: options.allowDefaultSessionStore }
+              : {}),
+          });
+          filePersisted = true;
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          errors.push(`session file write failed: ${redactSecrets(message, secrets)}`);
+        }
       }
-      await options.onSessionSaved?.(session);
-      persisted = true;
+      if (!callbackPersisted && options.onSessionSaved !== undefined) {
+        try {
+          await options.onSessionSaved(session);
+          callbackPersisted = true;
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          errors.push(`onSessionSaved callback failed: ${redactSecrets(message, secrets)}`);
+        }
+      }
+      lastSaveError = errors.length > 0 ? errors.join("; ") : null;
     };
 
     while (now() < deadline) {
       if (options.signal?.aborted) {
+        if (claimedSession !== null) break;
         return {
           status: "cancelled",
           confirmUrl: initiate.confirm_url,
@@ -672,7 +698,13 @@ export async function connectSignupProfile(
           savedAt: new Date(now()).toISOString(),
           consentOperatorInboxOtp: consentOtp,
         };
+      }
+
+      if (claimedSession !== null && (!filePersisted || !callbackPersisted)) {
         await persistClaim(claimedSession);
+      }
+
+      if (status?.status === "claimed") {
         if (!waitForFinish || status.finished) {
           break;
         }
@@ -696,6 +728,7 @@ export async function connectSignupProfile(
         await sleep(Math.min(pollIntervalMs, remaining), options.signal);
       } catch {
         if (options.signal?.aborted) {
+          if (claimedSession !== null) break;
           return {
             status: "cancelled",
             confirmUrl: initiate.confirm_url,
@@ -716,13 +749,17 @@ export async function connectSignupProfile(
       };
     }
 
+    if (!filePersisted || !callbackPersisted) {
+      await persistClaim(claimedSession);
+    }
+
     // Close the browser before probing disk cookies so Chrome flushes SQLite.
     await stopExposure?.().catch(() => undefined);
     stopExposure = null;
     await browser.close().catch(() => undefined);
 
     const providers =
-      target.profileDir !== undefined
+      target.cdpEndpoint === undefined && target.profileDir !== undefined
         ? await (runtime.detectProviders ?? detectProviderSessionsFromProfile)(
             target.profileDir,
           ).catch((): OAuthProviderId[] => [])
@@ -733,6 +770,7 @@ export async function connectSignupProfile(
       session: claimedSession,
       providers,
       browserLocation,
+      ...(lastSaveError !== null ? { sessionSaveError: lastSaveError } : {}),
     };
   } catch (err) {
     if (options.signal?.aborted) {
@@ -936,6 +974,7 @@ export async function runSignup(
         : options.onCredentialCaptured;
     try {
       await callback(credential);
+      callbackFailure = null;
     } catch (err) {
       const rawMessage = err instanceof Error ? err.message : String(err);
       callbackFailure = redactSecrets(rawMessage, capturedSecrets);
