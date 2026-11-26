@@ -1,5 +1,11 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.2.0-rc0 (2026-11-26)
+
+- Export `@trusty-squire/mcp/signup` so apps like Grunt can embed Trusty Squire's signup flow (#1196).
+- Keep `operate_drive` actions on current page controls and distinguish unlabeled links (#1195).
+- Make browser startup deterministic in Drive provenance tests (#1194).
+
 ## 1.1.61-rc.1 (2026-11-21)
 
 - `operate_drive` uses the session account email as the email fact when the caller supplies none, so an empty email field gets a TYPE choice; explicit caller or retained email facts still take precedence ([PR](https://github.com/Trusty-Squire/trusty-squire/pull/1175)).
