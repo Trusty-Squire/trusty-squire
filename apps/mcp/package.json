@@ -30,6 +30,10 @@
     "./browser": {
       "types": "./dist/browser-busy.d.ts",
       "import": "./dist/browser-busy.js"
+    },
+    "./signup": {
+      "types": "./dist/signup.d.ts",
+      "import": "./dist/signup.js"
     }
   },
   "bin": {

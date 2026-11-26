@@ -144,6 +144,11 @@ export class BrowserProcessOwner {
 
   private readonly profileDir: string;
 
+  // Per-instance CDP endpoint override. When set, takes precedence over
+  // process.env.BOT_CDP_ENDPOINT so concurrent embedded callers never mutate
+  // shared process environment state.
+  private readonly cdpEndpointOverride: string | null;
+
   // Per-launch egress override. null means direct egress. Explicit overrides
   // are never subject to host-network classification.
   private readonly proxyOverride: string | null;
@@ -152,7 +157,7 @@ export class BrowserProcessOwner {
   // remote, and headless launches.
   launchedMode: "headed" | "headless" | "remote" | "unknown" = "unknown";
   constructor(
-    opts: { profileDir?: string; proxyUrl?: string },
+    opts: { profileDir?: string; cdpEndpoint?: string; proxyUrl?: string },
     private readonly pages: PageDriver,
     private readonly initializePages: (
       context: BrowserContext,
@@ -161,8 +166,16 @@ export class BrowserProcessOwner {
     ) => Promise<void>,
   ) {
     this.profileDir = opts.profileDir ?? "";
+    this.cdpEndpointOverride =
+      opts.cdpEndpoint !== undefined && opts.cdpEndpoint.trim().length > 0
+        ? opts.cdpEndpoint.trim()
+        : null;
     this.proxyOverride =
       opts.proxyUrl !== undefined && opts.proxyUrl.trim().length > 0 ? opts.proxyUrl.trim() : null;
+  }
+
+  private resolveRemoteCdpEndpoint(): string {
+    return this.cdpEndpointOverride ?? (process.env.BOT_CDP_ENDPOINT ?? "").trim();
   }
 
   operatorBrowserMarker(): string {
@@ -303,7 +316,7 @@ export class BrowserProcessOwner {
     // is the real-GPU path: software-WebGL output (llvmpipe) is what
     // hCaptcha-Enterprise-class anti-bot scores, and only real hardware fixes
     // the rendered-pixel fingerprint that JS spoofing can't.
-    const remoteEndpoint = (process.env.BOT_CDP_ENDPOINT ?? "").trim();
+    const remoteEndpoint = this.resolveRemoteCdpEndpoint();
     if (remoteEndpoint.length > 0) {
       const launcher = getChromium();
       const browser = await launcher.connectOverCDP(remoteEndpoint);
@@ -311,8 +324,10 @@ export class BrowserProcessOwner {
       this.launchedMode = "remote";
       const ctx = browser.contexts()[0];
       if (ctx === undefined) {
+        const sourceLabel =
+          this.cdpEndpointOverride === null ? "BOT_CDP_ENDPOINT" : "cdpEndpoint";
         throw new Error(
-          `remote Chrome (BOT_CDP_ENDPOINT=${remoteEndpoint}) exposed no default browser context`,
+          `remote Chrome (${sourceLabel}=${remoteEndpoint}) exposed no default browser context`,
         );
       }
       return ctx;
@@ -466,7 +481,7 @@ export class BrowserProcessOwner {
   }
 
   async start(): Promise<void> {
-    if (this.profileDir.length === 0) {
+    if (this.profileDir.length === 0 && this.resolveRemoteCdpEndpoint().length === 0) {
       throw new Error("BrowserController.start requires a per-session profile directory");
     }
     if (this.closePromise !== null) throw new Error("BrowserController is already closing");
@@ -503,7 +518,9 @@ export class BrowserProcessOwner {
 
   private async startBrowser(): Promise<void> {
     this.throwIfStartCancelled();
-    const channel = await detectChromiumChannel();
+    const remoteEndpoint = this.resolveRemoteCdpEndpoint();
+    const remoteMode = remoteEndpoint.length > 0;
+    const channel = remoteMode ? null : await detectChromiumChannel();
     this.throwIfStartCancelled();
     this.launchedChannel = channel;
     const proxy = await this.resolveProxy();
@@ -515,19 +532,15 @@ export class BrowserProcessOwner {
       `[operator] launching browser channel=${channel ?? "bundled-chromium"} ` +
         `proxy=${proxy === null ? "direct" : "configured"}`,
     );
-    // Remote-CDP mode (BOT_CDP_ENDPOINT): the browser runs on a REMOTE host
-    // (e.g. a Mac with a real GPU + residential egress) and we attach over CDP
-    // across Tailscale. The remote machine IS a real device, so we spoof
-    // NOTHING — no WebGL/device fingerprint patch (a fake-Intel string over a
-    // real Apple-GPU output would be its own mismatch tell), no local display, no
-    // egress-geo override (the remote host's real timezone + residential IP are
-    // authentic). software-WebGL output is exactly what the toughest anti-bot
-    // (hCaptcha Enterprise) scores; only real hardware fixes the pixel
-    // fingerprint, which is the whole point of this path.
-    const remoteMode = (process.env.BOT_CDP_ENDPOINT ?? "").trim().length > 0;
+    // Remote-CDP mode (cdpEndpoint or BOT_CDP_ENDPOINT): the browser runs on a
+    // REMOTE host (e.g. a Mac with a real GPU + residential egress) or an
+    // embedding app's Chrome, and we attach over CDP. We do NOT spoof WebGL,
+    // manage a local display, or probe egress-geo — the external browser's own
+    // clock/IP/GPU are authoritative.
     if (remoteMode) {
+      this.launchedMode = "remote";
       console.error(
-        `[operator] REMOTE-CDP mode — attaching to ${(process.env.BOT_CDP_ENDPOINT ?? "").trim()} ` +
+        `[operator] REMOTE-CDP mode — attaching to ${remoteEndpoint} ` +
           `(real-host GPU + egress; local fingerprint spoof + display setup disabled)`,
       );
     }
@@ -554,8 +567,8 @@ export class BrowserProcessOwner {
     }
     // Keep the operator browser headed: the machine screen when one exists,
     // otherwise the operator's Xvfb, preserving the normal Chrome surface
-    // OAuth providers see.
-    this.launchedMode = "headed";
+    // OAuth providers see. Preserve remote mode when attaching over CDP.
+    if (!remoteMode) this.launchedMode = "headed";
 
     // T3: a PERSISTENT context backed by this operator session's unique
     // profile. launchPersistentContext takes launch + context options in one
@@ -602,7 +615,9 @@ export class BrowserProcessOwner {
     // fallbacks are the two the spawn genuinely cannot serve — no on-disk
     // binary for the channel, and a credentialed proxy the spawned Chrome
     // cannot authenticate — never a configuration choice.
-    const selfLaunchBinary = resolveSelfLaunchBinary(channel, () => launcher.executablePath());
+    const selfLaunchBinary = remoteMode
+      ? null
+      : resolveSelfLaunchBinary(channel, () => launcher.executablePath());
     const useSelfLaunch =
       selfLaunchBinary !== null && existsSync(selfLaunchBinary) && canSelfLaunchWithProxy(proxy);
     let context: BrowserContext;
@@ -612,10 +627,12 @@ export class BrowserProcessOwner {
       if (holder !== null && !holder.stale) throw new ProfileBusyError(PROFILE_BUSY_MESSAGE);
       await prepareBrowserProtocolPolicy(this.profileDir);
     }
-    if (useSelfLaunch && selfLaunchBinary !== null) {
-      console.error(
-        `[operator] self-launch + connectOverCDP (Turnstile-safe launch) binary=${selfLaunchBinary}`,
-      );
+    if (remoteMode || (useSelfLaunch && selfLaunchBinary !== null)) {
+      if (!remoteMode) {
+        console.error(
+          `[operator] self-launch + connectOverCDP (Turnstile-safe launch) binary=${selfLaunchBinary}`,
+        );
+      }
       const selfEnv: NodeJS.ProcessEnv = {
         ...browserEnv,
         TZ: geo?.timezoneId ?? "America/New_York",
@@ -624,7 +641,7 @@ export class BrowserProcessOwner {
       const launch = () => {
         this.throwIfStartCancelled();
         return this.launchSelfManagedContext({
-          binary: selfLaunchBinary,
+          binary: selfLaunchBinary ?? "",
           args: launchArgs,
           proxy,
           env: selfEnv,
@@ -1082,6 +1099,21 @@ export class BrowserProcessOwner {
       this.pages.oauthProviderPage = null;
       this.pages.oauthProviderPageClosed = false;
       this.context = null;
+      return "closed";
+    }
+    if (this.launchedMode === "remote" || this.resolveRemoteCdpEndpoint().length > 0) {
+      const page = this.pages.page;
+      const cdp = this.cdpBrowser;
+      this.pages.page = null;
+      this.pages.primaryPage = null;
+      this.pages.oauthProductPage = null;
+      this.pages.oauthProviderPage = null;
+      this.pages.oauthProviderPageClosed = false;
+      this.context = null;
+      this.cdpBrowser = null;
+      this.launchedContext = false;
+      if (page !== null) await closeBrowserContextWithin(page, 1_000);
+      if (cdp !== null) await closeBrowserContextWithin(cdp, 1_000);
       return "closed";
     }
     if (linuxBrowserUsesScope()) {

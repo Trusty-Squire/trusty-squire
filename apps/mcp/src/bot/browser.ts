@@ -201,8 +201,13 @@ export interface BrowserControllerOptions {
   // and should be disabled in unit tests so they run fast and
   // deterministically.
   humanize?: boolean;
-  // Per-session persistent Chrome profile directory. Required by start().
+  // Per-session persistent Chrome profile directory. Required by start()
+  // unless cdpEndpoint (or BOT_CDP_ENDPOINT) is configured.
   profileDir?: string;
+  // Optional per-controller CDP endpoint (alternative to mutating global
+  // process.env.BOT_CDP_ENDPOINT). When set, connects to an existing browser
+  // over CDP without spawning a local Chrome or touching profileDir.
+  cdpEndpoint?: string;
   // Per-launch egress override. A session may supply its own proxy without
   // affecting any other browser session. It is honored regardless of the host
   // ASN; malformed or unreachable values fail startup rather than using direct
