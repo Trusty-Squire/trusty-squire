@@ -28,6 +28,7 @@ const h = vi.hoisted(() => ({
   recaptchaEvidence: undefined as CaptchaModule.RecaptchaDetectEvidence | undefined,
   hcaptchaChallengeVisible: undefined as boolean | undefined,
   hcaptchaInvisible: false,
+  turnstileEvidence: undefined as CaptchaModule.TurnstileDetectEvidence | undefined,
   solverAvailable: true,
   gateFrames: [] as Array<{ url: () => string; evaluate: ReturnType<typeof vi.fn> }>,
 }));
@@ -70,6 +71,7 @@ vi.mock("../captcha.js", async (importOriginal) => ({
     ...(h.hcaptchaChallengeVisible === undefined
       ? {}
       : { hcaptchaChallengeVisible: h.hcaptchaChallengeVisible }),
+    ...(h.turnstileEvidence === undefined ? {} : { turnstile: h.turnstileEvidence }),
   }),
   hasHcaptchaResponseTokenWithCompat: async () => h.variantTokenPresent,
   hasCaptchaResponseTokenForVariant: async () => h.variantTokenPresent,
@@ -172,6 +174,7 @@ beforeEach(() => {
   h.recaptchaEvidence = undefined;
   h.hcaptchaChallengeVisible = undefined;
   h.hcaptchaInvisible = false;
+  h.turnstileEvidence = undefined;
   h.solverAvailable = true;
   auditMock.fn.mockClear();
   vi.useFakeTimers();
@@ -505,6 +508,102 @@ describe("attemptOperateCaptchaAutoSolve — defer unengaged invisible widgets a
     expect(await attemptOperateCaptchaAutoSolve(session, page)).toBe("fetch_started");
     await flushDetached();
     expect(h.solveCalls).toEqual(["hcaptcha"]);
+  });
+
+  it("defers an unengaged Turnstile widget on a Tavily-style login/signup page until the agent engages the form", async () => {
+    const session = fakeSession();
+    const page = fakePage(false);
+    h.variant = "turnstile";
+    h.challengeRendered = false;
+    h.turnstileEvidence = {
+      interstitial: false,
+      widgetVisible: true,
+      embeddedInForm: true,
+      hasPageControls: true,
+    };
+
+    const diag: string[] = [];
+    const errorSpy = vi.spyOn(console, "error").mockImplementation((msg: string) => {
+      diag.push(String(msg));
+    });
+    try {
+      expect(await attemptOperateCaptchaAutoSolve(session, page)).toBe("unengaged_widget");
+      await flushDetached();
+      expect(h.solveCalls).toEqual([]);
+      expect(h.turnstileInjectCalls).toBe(0);
+      expect(outcomes()).toContain("fetch_skipped");
+      expect(diag.some((line) => /outcome=fetch_skipped reason=unengaged_widget/.test(line))).toBe(
+        true,
+      );
+
+      // Engaging the form unlocks purchase and subsequent injection on the same document.
+      markCaptchaDocumentEngaged(session, PAGE_URL);
+      expect(await attemptOperateCaptchaAutoSolve(session, page)).toBe("fetch_started");
+      await flushDetached();
+      expect(h.solveCalls).toEqual(["turnstile"]);
+
+      expect(await attemptOperateCaptchaAutoSolve(session, page)).toBe("injected");
+      await flushDetached();
+      expect(h.turnstileInjectCalls).toBe(1);
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it("defers an invisible/non-interactive Turnstile widget on an untouched non-interstitial page until engaged", async () => {
+    const session = fakeSession();
+    const page = fakePage(false);
+    h.variant = "turnstile";
+    h.challengeRendered = false;
+    h.turnstileEvidence = {
+      interstitial: false,
+      widgetVisible: false,
+      embeddedInForm: false,
+      hasPageControls: false,
+    };
+
+    expect(await attemptOperateCaptchaAutoSolve(session, page)).toBe("unengaged_widget");
+    await flushDetached();
+    expect(h.solveCalls).toEqual([]);
+
+    markCaptchaDocumentEngaged(session, PAGE_URL);
+    expect(await attemptOperateCaptchaAutoSolve(session, page)).toBe("fetch_started");
+    await flushDetached();
+    expect(h.solveCalls).toEqual(["turnstile"]);
+  });
+
+  it("still solves a full-page Cloudflare Turnstile interstitial on an untouched page", async () => {
+    const session = fakeSession();
+    const page = fakePage(false);
+    h.variant = "turnstile";
+    h.challengeRendered = false;
+    h.turnstileEvidence = {
+      interstitial: true,
+      widgetVisible: true,
+      embeddedInForm: false,
+      hasPageControls: false,
+    };
+
+    expect(await attemptOperateCaptchaAutoSolve(session, page)).toBe("fetch_started");
+    await flushDetached();
+    expect(h.solveCalls).toEqual(["turnstile"]);
+  });
+
+  it("still solves a standalone visible blocking Turnstile gate on an untouched page", async () => {
+    const session = fakeSession();
+    const page = fakePage(false);
+    h.variant = "turnstile";
+    h.challengeRendered = false;
+    h.turnstileEvidence = {
+      interstitial: false,
+      widgetVisible: true,
+      embeddedInForm: false,
+      hasPageControls: false,
+    };
+
+    expect(await attemptOperateCaptchaAutoSolve(session, page)).toBe("fetch_started");
+    await flushDetached();
+    expect(h.solveCalls).toEqual(["turnstile"]);
   });
 
   it("never purchases a CAPTCHA token while an OAuth attempt is active", async () => {

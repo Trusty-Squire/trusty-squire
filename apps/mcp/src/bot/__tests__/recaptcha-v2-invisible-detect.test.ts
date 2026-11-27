@@ -17,6 +17,7 @@ import {
   hasCaptchaResponseTokenForVariant,
   injectRecaptchaToken,
   injectRecaptchaTokenDetail,
+  shouldDeferUnengagedTurnstile,
 } from "../captcha.js";
 import { injectCaptchaToken } from "../captcha-solve.js";
 import { BrowserController } from "../browser.js";
@@ -283,6 +284,122 @@ describe.skipIf(!available)("recaptcha v2-invisible image challenge (IPInfo shap
         variant: "hcaptcha",
         challengeRendered: true,
       });
+    } finally {
+      await page.close();
+    }
+  });
+
+  it("classifies embedded Tavily-style Turnstile widgets as deferrable and blocking gates as immediate", async () => {
+    const page = await context.newPage();
+    try {
+      await page.route("**://challenges.cloudflare.com/**", (route) =>
+        route.fulfill({ contentType: "text/html", body: "<div>turnstile widget</div>" }),
+      );
+      const controller = BrowserController.fromHarnessPage(page);
+
+      // 1. Tavily-style login page: Turnstile mounted inside email form alongside Google OAuth.
+      await page.setContent(`<!doctype html><html><head><title>Log in | Tavily</title></head><body>
+        <main>
+          <h1>Welcome</h1>
+          <form action="/u/login" method="POST">
+            <input type="email" name="username" placeholder="Email address" />
+            <div class="cf-turnstile" data-sitekey="0x4AAAAAAAAAAAAAAAAAAAAA">
+              <iframe width="300" height="65"
+                src="https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/b/turnstile/f/av0/widget"></iframe>
+              <input type="hidden" name="cf-turnstile-response" value="" />
+            </div>
+            <button type="submit">Continue</button>
+          </form>
+          <button type="button">Continue with Google</button>
+        </main>
+      </body></html>`);
+      await expect
+        .poll(() => page.frames().some((f) => f.url().includes("challenges.cloudflare.com")))
+        .toBe(true);
+      const tavily = await detectCaptchaVariant(controller, page);
+      expect(tavily).toMatchObject({
+        variant: "turnstile",
+        turnstile: {
+          interstitial: false,
+          widgetVisible: true,
+          embeddedInForm: true,
+          hasPageControls: true,
+        },
+      });
+      expect(shouldDeferUnengagedTurnstile(tavily.turnstile!)).toBe(true);
+
+      // 2. Invisible/interaction-only Turnstile on an untouched non-interstitial page.
+      await page.setContent(`<!doctype html><html><head><title>App</title></head><body>
+        <div class="cf-turnstile" data-sitekey="0x4AAAAAAAAAAAAAAAAAAAAA" data-appearance="interaction-only">
+          <input type="hidden" name="cf-turnstile-response" value="" />
+        </div>
+        <a href="/about">About</a>
+      </body></html>`);
+      const invisible = await detectCaptchaVariant(controller, page);
+      expect(invisible).toMatchObject({
+        variant: "turnstile",
+        turnstile: {
+          interstitial: false,
+          widgetVisible: false,
+          embeddedInForm: false,
+          hasPageControls: false,
+        },
+      });
+      expect(shouldDeferUnengagedTurnstile(invisible.turnstile!)).toBe(true);
+
+      // 3. Full-page Cloudflare interstitial ("Just a moment...").
+      await page.setContent(`<!doctype html><html><head><title>Just a moment...</title></head><body>
+        <h1>example.com</h1>
+        <p>Verifying you are human. This may take a few seconds.</p>
+        <form id="challenge-form" action="/login?__cf_chl_f_tk=abc" method="POST">
+          <div id="challenge-stage">
+            <iframe width="300" height="65"
+              src="https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/b/turnstile/f/av0/interstitial"></iframe>
+            <input type="hidden" name="cf-turnstile-response" value="" />
+          </div>
+        </form>
+      </body></html>`);
+      await expect
+        .poll(() => page.frames().some((f) => f.url().includes("challenges.cloudflare.com")))
+        .toBe(true);
+      const interstitial = await detectCaptchaVariant(controller, page);
+      expect(interstitial).toMatchObject({
+        variant: "turnstile",
+        turnstile: {
+          interstitial: true,
+          widgetVisible: true,
+          embeddedInForm: false,
+          hasPageControls: false,
+        },
+      });
+      expect(shouldDeferUnengagedTurnstile(interstitial.turnstile!)).toBe(false);
+
+      // 4. Standalone visible blocking Turnstile gate (no interstitial copy, no other form/OAuth controls).
+      await page.setContent(`<!doctype html><html><head><title>Security check</title></head><body>
+        <h1>Verify you are human</h1>
+        <form action="/verify" method="POST">
+          <div class="cf-turnstile" data-sitekey="0x4AAAAAAAAAAAAAAAAAAAAA">
+            <iframe width="300" height="65"
+              src="https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/b/turnstile/f/av0/gate"></iframe>
+            <input type="hidden" name="cf-turnstile-response" value="" />
+          </div>
+          <button type="submit">Continue</button>
+        </form>
+      </body></html>`);
+      await expect
+        .poll(() => page.frames().some((f) => f.url().includes("challenges.cloudflare.com")))
+        .toBe(true);
+      const standalone = await detectCaptchaVariant(controller, page);
+      expect(standalone).toMatchObject({
+        variant: "turnstile",
+        turnstile: {
+          interstitial: false,
+          widgetVisible: true,
+          embeddedInForm: false,
+          hasPageControls: false,
+        },
+      });
+      expect(shouldDeferUnengagedTurnstile(standalone.turnstile!)).toBe(false);
     } finally {
       await page.close();
     }

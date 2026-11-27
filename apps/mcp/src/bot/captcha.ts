@@ -166,6 +166,27 @@ export type RecaptchaDetectEvidence = {
   hasBadge: boolean;
 };
 
+export type TurnstileDetectEvidence = {
+  interstitial: boolean;
+  widgetVisible: boolean;
+  embeddedInForm: boolean;
+  hasPageControls: boolean;
+};
+
+export function shouldDeferUnengagedTurnstile(ev: TurnstileDetectEvidence): boolean {
+  if (ev.interstitial) return false;
+  return !ev.widgetVisible || ev.embeddedInForm || ev.hasPageControls;
+}
+
+export function turnstileEvidenceDiag(ev: TurnstileDetectEvidence): string {
+  return [
+    `turnstile_interstitial=${ev.interstitial}`,
+    `turnstile_widget=${ev.widgetVisible ? "visible" : "hidden"}`,
+    `turnstile_in_form=${ev.embeddedInForm}`,
+    `turnstile_page_controls=${ev.hasPageControls}`,
+  ].join(" ");
+}
+
 export function classifyRecaptchaVariant(
   ev: RecaptchaDetectEvidence,
 ): "recaptcha_v2" | "recaptcha_v3" | null {
@@ -636,6 +657,7 @@ export async function detectCaptchaVariant(
   challengeRendered: boolean;
   recaptcha?: RecaptchaDetectEvidence;
   hcaptchaChallengeVisible?: boolean;
+  turnstile?: TurnstileDetectEvidence;
 }> {
   if (!page) throw new Error("Browser not started");
   try {
@@ -654,6 +676,109 @@ export async function detectCaptchaVariant(
           );
         });
       };
+      const isTurnstileOwnedNode = (el: Element): boolean => {
+        if (el.closest(".cf-turnstile, #clerk-captcha") !== null) return true;
+        const name = (el.getAttribute("name") ?? "").toLowerCase();
+        const id = (el.getAttribute("id") ?? "").toLowerCase();
+        return name.startsWith("cf-turnstile") || id.startsWith("cf-chl-");
+      };
+      const isVisibleControl = (el: Element): boolean => {
+        if (typeof el.checkVisibility === "function") {
+          if (!el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })) return false;
+        }
+        const r = el.getBoundingClientRect();
+        return r.width > 0 && r.height > 0;
+      };
+      const isEditableField = (el: Element): boolean => {
+        if (isTurnstileOwnedNode(el) || !isVisibleControl(el)) return false;
+        if (el.closest("nav") !== null) return false;
+        if ((el as HTMLInputElement).disabled) return false;
+        const tag = el.tagName.toLowerCase();
+        if (tag === "textarea" || tag === "select") return true;
+        if (tag === "input") {
+          const type = (el.getAttribute("type") ?? "text").toLowerCase();
+          return !["hidden", "submit", "button", "reset", "image"].includes(type);
+        }
+        return el.getAttribute("contenteditable") === "true";
+      };
+      const hasEditableInput = Array.from(
+        document.querySelectorAll('input, textarea, select, [contenteditable="true"]'),
+      ).some(isEditableField);
+      const AUTH_CONTROL_RE =
+        /\b(?:continue|sign\s*(?:in|up)|log\s*(?:in|on)|register|connect)\s+with\b|\b(?:google|github|gitlab|microsoft|apple|sso|saml|okta|discord|slack|facebook|linkedin|passkey|magic\s*link)\b/i;
+      const AUTH_HREF_RE =
+        /(?:\/oauth|\/authorize|accounts\.google\.com|github\.com\/login\/oauth|login\.microsoftonline\.com)/i;
+      const hasAlternateAuth = Array.from(
+        document.querySelectorAll(
+          'button, a, [role="button"], input[type="submit"], input[type="button"]',
+        ),
+      ).some((el) => {
+        if (isTurnstileOwnedNode(el) || !isVisibleControl(el)) return false;
+        if ((el as HTMLButtonElement).disabled) return false;
+        const text = [
+          el.textContent ?? "",
+          el.getAttribute("aria-label") ?? "",
+          el.getAttribute("title") ?? "",
+          el.getAttribute("value") ?? "",
+        ].join(" ");
+        if (AUTH_CONTROL_RE.test(text)) return true;
+        const href = el.getAttribute("href") ?? "";
+        return href.length > 0 && AUTH_HREF_RE.test(href);
+      });
+      const hasPageControls = hasEditableInput || hasAlternateAuth;
+      const pageText = `${document.title ?? ""} ${document.body?.innerText ?? ""}`;
+      const interstitialUrl =
+        /(?:^|\.)challenges\.cloudflare\.com$/i.test(location.hostname) ||
+        /[?&]__cf_chl_/i.test(location.search);
+      const interstitialDom =
+        document.querySelector(
+          '#challenge-running, #challenge-stage, #cf-challenge-running, form#challenge-form, form[action*="__cf_chl"], .cf-browser-verification',
+        ) !== null;
+      const strongInterstitialText =
+        /just a moment|performing security verification|verifying you are human|checking your browser/i.test(
+          pageText,
+        );
+      const attentionRequired =
+        /attention required/i.test(document.title ?? "") ||
+        (/attention required/i.test(pageText) && !hasPageControls);
+      const turnstileInterstitial =
+        interstitialUrl || interstitialDom || strongInterstitialText || attentionRequired;
+      const isExplicitlyHiddenTurnstileHost = (el: Element): boolean => {
+        const size = (el.getAttribute("data-size") ?? el.getAttribute("size") ?? "").toLowerCase();
+        const appearance = (
+          el.getAttribute("data-appearance") ??
+          el.getAttribute("appearance") ??
+          ""
+        ).toLowerCase();
+        return size === "invisible" || appearance === "interaction-only";
+      };
+      const turnstileHostVisible = Array.from(
+        document.querySelectorAll(".cf-turnstile, #clerk-captcha"),
+      ).some((el) => {
+        if (isExplicitlyHiddenTurnstileHost(el)) return false;
+        if (!el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })) return false;
+        const r = el.getBoundingClientRect();
+        if (r.width <= 30 || r.height <= 30) return false;
+        return (
+          r.bottom > 0 && r.right > 0 && r.top < window.innerHeight && r.left < window.innerWidth
+        );
+      });
+      const domTurnstileWidgetVisible =
+        visible('iframe[src*="challenges.cloudflare.com"]') || turnstileHostVisible;
+      const turnstileNodes = Array.from(
+        document.querySelectorAll(
+          'input[name="cf-turnstile-response"], input[id^="cf-chl-widget"], .cf-turnstile, #clerk-captcha, iframe[src*="challenges.cloudflare.com"]',
+        ),
+      );
+      const turnstileEmbeddedInForm = turnstileNodes.some((node) => {
+        const form = node.closest("form");
+        if (form === null) return false;
+        if (form.matches('#challenge-form, [action*="__cf_chl"]')) return false;
+        const formHasEditable = Array.from(
+          form.querySelectorAll('input, textarea, select, [contenteditable="true"]'),
+        ).some(isEditableField);
+        return formHasEditable || hasAlternateAuth;
+      });
       const challengeFrameVisible = visible('iframe[src*="recaptcha/api2/bframe"]');
       const hcaptchaChallengeVisible = visible('iframe[src*="hcaptcha.com"][src*="challenge"]');
       // The image-grid challenge frame: reCAPTCHA's `bframe`, or
@@ -716,7 +841,18 @@ export async function detectCaptchaVariant(
       } else if (present('iframe[src*="hcaptcha.com"]')) {
         variant = "hcaptcha";
       }
-      return { variant, challengeRendered, hcaptchaChallengeVisible, recaptcha };
+      return {
+        variant,
+        challengeRendered,
+        hcaptchaChallengeVisible,
+        recaptcha,
+        turnstile: {
+          interstitial: turnstileInterstitial,
+          widgetVisible: domTurnstileWidgetVisible,
+          embeddedInForm: turnstileEmbeddedInForm,
+          hasPageControls,
+        },
+      };
     });
     // hCaptcha's checkbox and challenge iframes are CHILDREN of the
     // cross-origin hcaptcha.html frame host, and Bluesky renders that host
@@ -785,7 +921,8 @@ export async function detectCaptchaVariant(
       if (classified !== null) variant = classified;
     }
     let hcaptchaChallengeFrameRendered = false;
-    if (variant === "unknown" || !raw.challengeRendered) {
+    let turnstileFrameVisible = false;
+    if (variant === "unknown" || variant === "turnstile" || !raw.challengeRendered) {
       for (const frame of page.frames()) {
         const url = frame.url();
         if (
@@ -799,18 +936,31 @@ export async function detectCaptchaVariant(
         if (variant === "unknown" && url.includes("hcaptcha.com")) {
           variant = "hcaptcha";
         }
-        if (variant === "unknown" && url.includes("challenges.cloudflare.com")) {
-          variant = "turnstile";
+        if (url.includes("challenges.cloudflare.com")) {
+          if (variant === "unknown") {
+            variant = "turnstile";
+          }
+          if (!turnstileFrameVisible && (await isFrameVisibleInViewport(frame))) {
+            turnstileFrameVisible = true;
+          }
         }
       }
     }
     const hcaptchaChallengeVisible = raw.hcaptchaChallengeVisible || hcaptchaChallengeFrameRendered;
+    const turnstile: TurnstileDetectEvidence | undefined =
+      variant === "turnstile"
+        ? {
+            ...raw.turnstile,
+            widgetVisible: raw.turnstile.widgetVisible || turnstileFrameVisible,
+          }
+        : undefined;
     return {
       variant,
       challengeRendered:
         raw.challengeRendered || recaptcha.challengeFrameVisible || hcaptchaChallengeFrameRendered,
       recaptcha,
       ...(variant === "hcaptcha" || hcaptchaChallengeVisible ? { hcaptchaChallengeVisible } : {}),
+      ...(turnstile === undefined ? {} : { turnstile }),
     };
   } catch {
     return { variant: "unknown", challengeRendered: false };
