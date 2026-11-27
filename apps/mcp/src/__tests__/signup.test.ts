@@ -15,6 +15,7 @@ import {
   assertIsolatedSessionPath,
   clearSignupSession,
   connectSignupProfile,
+  DEFAULT_MAX_SIGNUP_HANDOFFS,
   ensureSignupSession,
   readSignupSession,
   redactSecrets,
@@ -25,6 +26,7 @@ import {
   writeSignupSession,
   type CapturedCredential,
   type EmbeddedBrowserLike,
+  type SignupHandoffEvent,
   type SignupSession,
 } from "../signup.js";
 
@@ -676,9 +678,9 @@ describe("runSignup credential capture, vault prohibition, redaction, and teardo
         currentProvisionUrl: () => "https://resend.com/api-keys",
         runDrive: async (_args, api, context, deps) => {
           // Verify belt-and-suspenders guard on ApiClient: storeCredential MUST reject!
-          await expect(api!.storeCredential({ service: "resend", value: rawSecret })).rejects.toThrow(
-            /forbids writing credentials/i,
-          );
+          await expect(
+            api!.storeCredential({ service: "resend", value: rawSecret }),
+          ).rejects.toThrow(/forbids writing credentials/i);
           expect(storeCredentialSpy).not.toHaveBeenCalled();
 
           await deps!.startSession({ serviceUrl: "https://resend.com/signup" });
@@ -1177,5 +1179,603 @@ describe("redactSecrets", () => {
       "sk_live_abc123456",
     ]);
     expect(out).toBe("token=[REDACTED] and prefix=[REDACTED]");
+  });
+});
+
+describe("runSignup onHandoff pause-and-resume on same live browser session", () => {
+  it("keeps browser and session open on needs_value, resumes on same session_id with answer, captures credential, and tears down once in finally", async () => {
+    const appProfileDir = join(tempDir, "handoff-needs-value-profile");
+    const rawSecret = "sk_live_HANDOFF_RESUMED_KEY_12345";
+    const captured: CapturedCredential[] = [];
+    const seenEvents: SignupHandoffEvent[] = [];
+    const driveCalls: Array<Record<string, unknown>> = [];
+
+    const browser = makeFakeBrowser();
+    const finishSession = vi.fn(async () => ({
+      session_id: "sess-live-dialog",
+      operation_id: "op-1",
+      execution: "completed" as const,
+      mutation: "not_dispatched" as const,
+      cleanup: "closed" as const,
+      closed: true,
+      url: "https://app.example.test/api-keys",
+    }));
+
+    const result = await runSignup(
+      {
+        url: "https://app.example.test/api-keys",
+        goal: "Create an API key",
+        profileDir: appProfileDir,
+        session: SAMPLE_SESSION,
+        facts: { email: "dev@example.test" },
+        onCredentialCaptured: (cred) => {
+          captured.push(cred);
+        },
+        onHandoff: async (event) => {
+          seenEvents.push(event);
+          // Session and browser must STILL be open while handling the pause!
+          expect(finishSession).not.toHaveBeenCalled();
+          expect(browser.close).not.toHaveBeenCalled();
+          return { answer: "Grunt Production Key" };
+        },
+      },
+      {
+        createBrowser: () => browser as unknown as BrowserController,
+        startHarnessSession: async (opts) => ({
+          session_id: "sess-live-dialog",
+          url: opts.serviceUrl,
+        }),
+        finishSession,
+        observedHostsForSession: () => ["app.example.test"],
+        currentProvisionUrl: () => "https://app.example.test/api-keys?modal=new-key",
+        extractCredentials: async (sid) => {
+          expect(sid).toBe("sess-live-dialog");
+          expect(finishSession).not.toHaveBeenCalled();
+          expect(browser.close).not.toHaveBeenCalled();
+          return {
+            session_id: sid,
+            url: "https://app.example.test/api-keys",
+            credentials: { api_key: rawSecret },
+          };
+        },
+        runDrive: async (args, _api, _context, deps) => {
+          driveCalls.push({ ...args });
+          expect(finishSession).not.toHaveBeenCalled();
+          expect(browser.close).not.toHaveBeenCalled();
+          if (driveCalls.length === 1) {
+            await deps!.startSession({ serviceUrl: args.url! });
+            return makeHandoff({
+              status: "needs_value",
+              session_id: "sess-live-dialog",
+              field: "api_key_name",
+              question: "Enter a name for the new API key",
+              remaining: "Submit API key creation dialog",
+              message: "Need key name",
+              steps: 3,
+              seconds: 2.5,
+              jev_calls: 2,
+            });
+          }
+          return makeHandoff({
+            status: "complete",
+            session_id: "sess-live-dialog",
+            done: "Created API key",
+            remaining: "",
+            steps: 2,
+            seconds: 1.5,
+            jev_calls: 3,
+          });
+        },
+      },
+    );
+
+    expect(driveCalls).toHaveLength(2);
+    expect(driveCalls[0]).toMatchObject({
+      url: "https://app.example.test/api-keys",
+      goal: "Create an API key",
+      facts: { email: "dev@example.test" },
+    });
+    expect(driveCalls[0]?.session_id).toBeUndefined();
+    expect(driveCalls[1]).toMatchObject({
+      session_id: "sess-live-dialog",
+      goal: "Create an API key",
+      answer: "Grunt Production Key",
+      facts: { email: "dev@example.test" },
+    });
+    expect(driveCalls[1]?.url).toBeUndefined();
+
+    expect(seenEvents).toEqual([
+      {
+        status: "needs_input",
+        driveStatus: "needs_value",
+        url: "https://app.example.test/api-keys?modal=new-key",
+        attempt: 1,
+        field: "api_key_name",
+        question: "Enter a name for the new API key",
+        remaining: "Submit API key creation dialog",
+        message: "Need key name",
+      },
+    ]);
+
+    expect(result.status).toBe("completed");
+    expect(result.captured).toBe(true);
+    expect(result.steps).toBe(5);
+    expect(result.seconds).toBe(4);
+    expect(result.jevCalls).toBe(3);
+    expect(captured).toHaveLength(1);
+    expect(captured[0]?.fields).toEqual({ api_key: rawSecret });
+    expect(JSON.stringify(result)).not.toContain(rawSecret);
+
+    // Torn down exactly once in finally after credential capture completed.
+    expect(finishSession).toHaveBeenCalledTimes(1);
+    expect(finishSession).toHaveBeenCalledWith("sess-live-dialog");
+    expect(browser.close).toHaveBeenCalledTimes(1);
+    expect(browser.close).toHaveBeenCalledWith({ cancelStart: true });
+  });
+
+  it("resumes on same session_id for low_confidence / OAuth choice and merges facts across multiple pauses without mutating caller facts", async () => {
+    const appProfileDir = join(tempDir, "handoff-oauth-profile");
+    const rawSecret = "sk_live_OAUTH_RESUMED_KEY_67890";
+    const captured: CapturedCredential[] = [];
+    const seenEvents: SignupHandoffEvent[] = [];
+    const driveCalls: Array<Record<string, unknown>> = [];
+    const initialFacts = { email: "dev@example.test", team: "Initial" };
+
+    const browser = makeFakeBrowser();
+    const finishSession = vi.fn(async () => ({
+      session_id: "sess-oauth",
+      operation_id: "op-oauth",
+      execution: "completed" as const,
+      mutation: "not_dispatched" as const,
+      cleanup: "closed" as const,
+      closed: true,
+      url: "https://app.example.test/keys",
+    }));
+
+    const result = await runSignup(
+      {
+        url: "https://app.example.test/login",
+        goal: "Sign up and create an API key",
+        profileDir: appProfileDir,
+        session: SAMPLE_SESSION,
+        facts: initialFacts,
+        onCredentialCaptured: (cred) => {
+          captured.push(cred);
+        },
+        onHandoff: (event) => {
+          seenEvents.push(event);
+          expect(finishSession).not.toHaveBeenCalled();
+          expect(browser.close).not.toHaveBeenCalled();
+          if (event.attempt === 1) {
+            return { answer: "a", facts: { team: "UpdatedTeam" } };
+          }
+          return { resume: true, facts: { workspace: "prod" } };
+        },
+      },
+      {
+        createBrowser: () => browser as unknown as BrowserController,
+        startHarnessSession: async (opts) => ({ session_id: "sess-oauth", url: opts.serviceUrl }),
+        finishSession,
+        observedHostsForSession: () => ["app.example.test"],
+        currentProvisionUrl: () => "https://app.example.test/oauth/choose",
+        runDrive: async (args, _api, context, deps) => {
+          driveCalls.push({ ...args });
+          if (driveCalls.length === 1) {
+            await deps!.startSession({ serviceUrl: args.url! });
+            return makeHandoff({
+              status: "low_confidence",
+              session_id: "sess-oauth",
+              question: "Choose OAuth sign-in provider",
+              options: { a: "Continue with Google", b: "Continue with GitHub" },
+              probabilities: { a: 0.51, b: 0.49 },
+              oauth: {
+                state: "awaiting_human",
+                reason: "Multiple OAuth providers available",
+                next_action: "operate_observe",
+              },
+              remaining: "Pick sign-in provider",
+              steps: 2,
+              seconds: 1,
+              jev_calls: 1,
+            });
+          }
+          if (driveCalls.length === 2) {
+            return makeHandoff({
+              status: "awaiting_human",
+              session_id: "sess-oauth",
+              oauth: {
+                state: "awaiting_human",
+                reason: "Approve 2FA prompt on device",
+                next_action: "operate_observe",
+              },
+              reason: "Approve 2FA prompt on device",
+              remaining: "Finish 2FA verification",
+              steps: 1,
+              seconds: 1,
+              jev_calls: 2,
+            });
+          }
+          await context!.persistCredentials!({
+            session_id: "sess-oauth",
+            url: "https://app.example.test/keys",
+            credentials: { api_key: rawSecret },
+          });
+          return makeHandoff({
+            status: "complete",
+            session_id: "sess-oauth",
+            steps: 2,
+            seconds: 1,
+            jev_calls: 3,
+          });
+        },
+      },
+    );
+
+    expect(driveCalls).toHaveLength(3);
+    expect(driveCalls[1]).toMatchObject({
+      session_id: "sess-oauth",
+      answer: "a",
+      facts: { email: "dev@example.test", team: "UpdatedTeam" },
+    });
+    expect(driveCalls[2]).toMatchObject({
+      session_id: "sess-oauth",
+      facts: { email: "dev@example.test", team: "UpdatedTeam", workspace: "prod" },
+    });
+    // Stale answer from attempt 1 must NOT leak into attempt 2 resume.
+    expect(driveCalls[2]?.answer).toBeUndefined();
+    // Caller's original facts object must not be mutated.
+    expect(initialFacts).toEqual({ email: "dev@example.test", team: "Initial" });
+
+    expect(seenEvents).toHaveLength(2);
+    expect(seenEvents[0]).toMatchObject({
+      status: "low_confidence",
+      driveStatus: "low_confidence",
+      attempt: 1,
+      question: "Choose OAuth sign-in provider",
+      options: { a: "Continue with Google", b: "Continue with GitHub" },
+      probabilities: { a: 0.51, b: 0.49 },
+      oauth: {
+        state: "awaiting_human",
+        reason: "Multiple OAuth providers available",
+        next_action: "operate_observe",
+      },
+    });
+    expect(seenEvents[1]).toMatchObject({
+      status: "needs_human",
+      driveStatus: "awaiting_human",
+      attempt: 2,
+      reason: "Approve 2FA prompt on device",
+    });
+
+    expect(result.status).toBe("completed");
+    expect(result.captured).toBe(true);
+    expect(captured).toHaveLength(1);
+    expect(captured[0]?.fields).toEqual({ api_key: rawSecret });
+    expect(finishSession).toHaveBeenCalledTimes(1);
+    expect(browser.close).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns pause result and tears down browser when onHandoff returns null, undefined, empty object, or resume:false", async () => {
+    const appProfileDir = join(tempDir, "handoff-decline-profile");
+    const responses = [null, undefined, {}, { resume: false, answer: "ignored" }];
+
+    for (const response of responses) {
+      const browser = makeFakeBrowser();
+      const finishSession = vi.fn(async () => ({
+        session_id: "sess-decline",
+        operation_id: "op-decline",
+        execution: "completed" as const,
+        mutation: "not_dispatched" as const,
+        cleanup: "closed" as const,
+        closed: true,
+        url: "https://app.example.test/keys",
+      }));
+      const runDrive = vi.fn(async (_args, _api, _context, deps) => {
+        await deps!.startSession({ serviceUrl: "https://app.example.test/keys" });
+        return makeHandoff({
+          status: "needs_value",
+          session_id: "sess-decline",
+          field: "api_key_name",
+          question: "Key name?",
+        });
+      });
+
+      const result = await runSignup(
+        {
+          url: "https://app.example.test/keys",
+          goal: "Create key",
+          profileDir: appProfileDir,
+          session: SAMPLE_SESSION,
+          onCredentialCaptured: vi.fn(),
+          onHandoff: () => response,
+        },
+        {
+          createBrowser: () => browser as unknown as BrowserController,
+          startHarnessSession: async (opts) => ({
+            session_id: "sess-decline",
+            url: opts.serviceUrl,
+          }),
+          finishSession,
+          runDrive,
+        },
+      );
+
+      expect(runDrive).toHaveBeenCalledTimes(1);
+      expect(result.status).toBe("needs_input");
+      expect(result.driveStatus).toBe("needs_value");
+      expect(result.field).toBe("api_key_name");
+      expect(result.question).toBe("Key name?");
+      expect(finishSession).toHaveBeenCalledTimes(1);
+      expect(browser.close).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it("fails cleanly, redacts already-captured secrets in event and thrown error, and tears down browser when onHandoff throws", async () => {
+    const appProfileDir = join(tempDir, "handoff-throw-profile");
+    const priorPassword = "Prior!Invented#Password99";
+    const captured: CapturedCredential[] = [];
+    let observedEvent: SignupHandoffEvent | undefined;
+    const browser = makeFakeBrowser();
+    const finishSession = vi.fn(async () => ({
+      session_id: "sess-throw",
+      operation_id: "op-throw",
+      execution: "completed" as const,
+      mutation: "not_dispatched" as const,
+      cleanup: "closed" as const,
+      closed: true,
+      url: "https://app.example.test/keys",
+    }));
+
+    const result = await runSignup(
+      {
+        url: "https://app.example.test/signup",
+        goal: "Sign up and create key",
+        profileDir: appProfileDir,
+        session: SAMPLE_SESSION,
+        onCredentialCaptured: (cred) => {
+          captured.push(cred);
+        },
+        onHandoff: async (event) => {
+          observedEvent = event;
+          throw new Error(`UI prompt crashed with ${priorPassword}`);
+        },
+      },
+      {
+        createBrowser: () => browser as unknown as BrowserController,
+        startHarnessSession: async (opts) => ({ session_id: "sess-throw", url: opts.serviceUrl }),
+        finishSession,
+        runDrive: async (_args, _api, context, deps) => {
+          await deps!.startSession({ serviceUrl: "https://app.example.test/signup" });
+          await context!.persistLogin!({
+            sessionId: "sess-throw",
+            url: "https://app.example.test/signup",
+            login: "user@example.test",
+            password: priorPassword,
+          });
+          return makeHandoff({
+            status: "needs_value",
+            session_id: "sess-throw",
+            field: "api_key_name",
+            message: `Context echoed ${priorPassword}`,
+            steps: 2,
+          });
+        },
+      },
+    );
+
+    expect(observedEvent?.message).toContain("[REDACTED]");
+    expect(observedEvent?.message).not.toContain(priorPassword);
+    expect(result.status).toBe("failed");
+    expect(result.reason).toContain("onHandoff callback failed");
+    expect(result.reason).toContain("[REDACTED]");
+    expect(JSON.stringify(result)).not.toContain(priorPassword);
+    expect(result.steps).toBe(2);
+    expect(captured).toHaveLength(1);
+    expect(finishSession).toHaveBeenCalledTimes(1);
+    expect(browser.close).toHaveBeenCalledTimes(1);
+  });
+
+  it("aborts cleanly and tears down browser if AbortSignal fires while awaiting onHandoff", async () => {
+    const appProfileDir = join(tempDir, "handoff-abort-profile");
+    const controller = new AbortController();
+    const browser = makeFakeBrowser();
+    const finishSession = vi.fn(async () => ({
+      session_id: "sess-abort-handoff",
+      operation_id: "op-abort",
+      execution: "completed" as const,
+      mutation: "not_dispatched" as const,
+      cleanup: "closed" as const,
+      closed: true,
+      url: "https://app.example.test/keys",
+    }));
+
+    const resultPromise = runSignup(
+      {
+        url: "https://app.example.test/keys",
+        goal: "Create key",
+        profileDir: appProfileDir,
+        session: SAMPLE_SESSION,
+        signal: controller.signal,
+        onCredentialCaptured: vi.fn(),
+        onHandoff: () =>
+          new Promise(() => {
+            // Simulate caller waiting indefinitely on user input until aborted.
+            queueMicrotask(() => controller.abort(new Error("user cancelled modal")));
+          }),
+      },
+      {
+        createBrowser: () => browser as unknown as BrowserController,
+        startHarnessSession: async (opts) => ({
+          session_id: "sess-abort-handoff",
+          url: opts.serviceUrl,
+        }),
+        finishSession,
+        runDrive: async (_args, _api, _context, deps) => {
+          await deps!.startSession({ serviceUrl: "https://app.example.test/keys" });
+          return makeHandoff({
+            status: "needs_value",
+            session_id: "sess-abort-handoff",
+            field: "api_key_name",
+          });
+        },
+      },
+    );
+
+    const result = await resultPromise;
+    expect(result.status).toBe("cancelled");
+    expect(result.reason).toContain("user cancelled modal");
+    expect(finishSession).toHaveBeenCalledTimes(1);
+    expect(browser.close).toHaveBeenCalled();
+  });
+
+  it("enforces handoff-resume loop cap, maxSteps, and maxSeconds budgets across resumes", async () => {
+    const appProfileDir = join(tempDir, "handoff-budget-profile");
+
+    // 1. Default maxHandoffs loop cap prevents infinite resume loops.
+    const browserCap = makeFakeBrowser();
+    const finishCap = vi.fn(async () => ({
+      session_id: "sess-cap",
+      operation_id: "op-cap",
+      execution: "completed" as const,
+      mutation: "not_dispatched" as const,
+      cleanup: "closed" as const,
+      closed: true,
+      url: "https://app.example.test/keys",
+    }));
+    const onHandoffCap = vi.fn(() => ({ answer: "same-answer" }));
+    const runDriveCap = vi.fn(async (args, _api, _context, deps) => {
+      if (args.session_id === undefined) {
+        await deps!.startSession({ serviceUrl: args.url! });
+      }
+      return makeHandoff({
+        status: "needs_value",
+        session_id: "sess-cap",
+        field: "api_key_name",
+        steps: 1,
+        seconds: 0.1,
+      });
+    });
+
+    const capResult = await runSignup(
+      {
+        url: "https://app.example.test/keys",
+        goal: "Create key",
+        profileDir: appProfileDir,
+        session: SAMPLE_SESSION,
+        onCredentialCaptured: vi.fn(),
+        onHandoff: onHandoffCap,
+      },
+      {
+        createBrowser: () => browserCap as unknown as BrowserController,
+        startHarnessSession: async (opts) => ({ session_id: "sess-cap", url: opts.serviceUrl }),
+        finishSession: finishCap,
+        runDrive: runDriveCap,
+      },
+    );
+
+    expect(capResult.status).toBe("budget_exceeded");
+    expect(capResult.reason).toMatch(/handoff resume limit/i);
+    expect(onHandoffCap).toHaveBeenCalledTimes(DEFAULT_MAX_SIGNUP_HANDOFFS);
+    expect(runDriveCap).toHaveBeenCalledTimes(DEFAULT_MAX_SIGNUP_HANDOFFS + 1);
+    expect(finishCap).toHaveBeenCalledTimes(1);
+    expect(browserCap.close).toHaveBeenCalledTimes(1);
+
+    // 2. maxSteps is decremented across resumed calls and stops cleanly when exhausted.
+    const stepArgs: Array<number | undefined> = [];
+    const runDriveSteps = vi.fn(async (args, _api, _context, deps) => {
+      stepArgs.push(args.max_steps);
+      if (args.session_id === undefined) {
+        await deps!.startSession({ serviceUrl: args.url! });
+      }
+      return makeHandoff({
+        status: "needs_value",
+        session_id: "sess-steps",
+        field: "api_key_name",
+        steps: 3,
+        seconds: 0.5,
+      });
+    });
+
+    const stepResult = await runSignup(
+      {
+        url: "https://app.example.test/keys",
+        goal: "Create key",
+        profileDir: appProfileDir,
+        session: SAMPLE_SESSION,
+        maxSteps: 5,
+        onCredentialCaptured: vi.fn(),
+        onHandoff: () => ({ answer: "my-key" }),
+      },
+      {
+        createBrowser: () => makeFakeBrowser() as unknown as BrowserController,
+        startHarnessSession: async (opts) => ({ session_id: "sess-steps", url: opts.serviceUrl }),
+        finishSession: async () => ({
+          session_id: "sess-steps",
+          operation_id: "op-steps",
+          execution: "completed" as const,
+          mutation: "not_dispatched" as const,
+          cleanup: "closed" as const,
+          closed: true,
+          url: "https://app.example.test/keys",
+        }),
+        runDrive: runDriveSteps,
+      },
+    );
+
+    expect(stepArgs).toEqual([5, 2]);
+    expect(stepResult.status).toBe("budget_exceeded");
+    expect(stepResult.reason).toMatch(/maxSteps/i);
+
+    // 3. maxSeconds is decremented across resumed calls and stops cleanly when exhausted.
+    let fakeNow = 10_000;
+    const secondArgs: Array<number | undefined> = [];
+    const runDriveSeconds = vi.fn(async (args, _api, _context, deps) => {
+      secondArgs.push(args.max_seconds);
+      if (args.session_id === undefined) {
+        await deps!.startSession({ serviceUrl: args.url! });
+      }
+      fakeNow += 4_000;
+      return makeHandoff({
+        status: "needs_value",
+        session_id: "sess-secs",
+        field: "api_key_name",
+        steps: 1,
+        seconds: 4,
+      });
+    });
+
+    const secResult = await runSignup(
+      {
+        url: "https://app.example.test/keys",
+        goal: "Create key",
+        profileDir: appProfileDir,
+        session: SAMPLE_SESSION,
+        maxSeconds: 10,
+        onCredentialCaptured: vi.fn(),
+        onHandoff: () => {
+          fakeNow += 2_000;
+          return { answer: "my-key" };
+        },
+      },
+      {
+        createBrowser: () => makeFakeBrowser() as unknown as BrowserController,
+        startHarnessSession: async (opts) => ({ session_id: "sess-secs", url: opts.serviceUrl }),
+        finishSession: async () => ({
+          session_id: "sess-secs",
+          operation_id: "op-secs",
+          execution: "completed" as const,
+          mutation: "not_dispatched" as const,
+          cleanup: "closed" as const,
+          closed: true,
+          url: "https://app.example.test/keys",
+        }),
+        runDrive: runDriveSeconds,
+        now: () => fakeNow,
+      },
+    );
+
+    expect(secondArgs).toEqual([10, 4]);
+    expect(secResult.status).toBe("budget_exceeded");
+    expect(secResult.reason).toMatch(/maxSeconds/i);
   });
 });

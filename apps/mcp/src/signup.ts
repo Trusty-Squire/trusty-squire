@@ -34,6 +34,7 @@ import {
 import type { OAuthProviderId } from "./bot/oauth-providers.js";
 import {
   runOperateDrive,
+  type DriveArgs,
   type DriveDependencies,
   type DriveHandoff,
   type DriveStatus,
@@ -102,6 +103,7 @@ export type {
 const DEFAULT_AGENT_IDENTITY = "embedded-signup";
 const DEFAULT_POLL_INTERVAL_MS = 1_500;
 const GOOGLE_LOGOUT_URL = "https://accounts.google.com/Logout";
+export const DEFAULT_MAX_SIGNUP_HANDOFFS = 10;
 
 export type SignupBrowserLocation =
   | { kind: "none" }
@@ -190,7 +192,12 @@ export interface EmbeddedBrowserLike {
   start(): Promise<void>;
   goto(url: string, page?: unknown, waitUntil?: "load" | "document-ready"): Promise<void>;
   close(options?: { cancelStart?: boolean }): Promise<unknown>;
-  showPhoneCeremonyWindow?: () => Promise<{ left: number; top: number; width: number; height: number }>;
+  showPhoneCeremonyWindow?: () => Promise<{
+    left: number;
+    top: number;
+    width: number;
+    height: number;
+  }>;
   restoreCeremonyWindow?: () => Promise<void>;
   currentUrl?: () => string;
 }
@@ -242,6 +249,34 @@ export type SignupStatus =
   | "budget_exceeded"
   | "cancelled"
   | "failed";
+
+export type SignupHandoffStatus = "needs_input" | "low_confidence" | "needs_human";
+
+export interface SignupHandoffEvent {
+  status: SignupHandoffStatus;
+  driveStatus: DriveStatus;
+  url: string;
+  attempt: number;
+  question?: string;
+  options?: Record<string, string>;
+  probabilities?: Record<string, number>;
+  field?: string;
+  needsUser?: DriveHandoff["needs_user"];
+  oauth?: DriveHandoff["oauth"];
+  message?: string;
+  remaining?: string;
+  reason?: string;
+}
+
+export interface SignupHandoffResponse {
+  answer?: string | undefined;
+  facts?: Record<string, string> | undefined;
+  resume?: boolean | undefined;
+}
+
+export type SignupHandoffCallback = (
+  handoff: SignupHandoffEvent,
+) => Promise<SignupHandoffResponse | null | undefined> | SignupHandoffResponse | null | undefined;
 
 export interface SignupResult {
   status: SignupStatus;
@@ -295,6 +330,16 @@ export interface RunSignupOptions {
   captureSource?: CaptureSource | readonly CaptureSource[];
   /** Optional progress/notification callback (always redacted of captured secrets). */
   onProgress?: (message: string, data?: Record<string, unknown>) => Promise<void> | void;
+  /**
+   * Optional pause/handoff callback invoked when `runOperateDrive` pauses for
+   * input (`needs_value`), an ambiguous/OAuth choice (`low_confidence`), or a
+   * human action (`needs_human`). Returning `{ answer }`, `{ facts }`, or
+   * `{ resume: true }` keeps the browser session open and resumes
+   * `runOperateDrive` on the same `session_id`.
+   */
+  onHandoff?: SignupHandoffCallback;
+  /** Maximum number of handoff-resume cycles allowed per `runSignup` call. Defaults to 10. */
+  maxHandoffs?: number;
   /** App identity header sent on API requests. Defaults to `"embedded-signup"`. */
   agentIdentity?: string;
   /** Optional per-launch HTTP/HTTPS/SOCKS5 proxy URL. */
@@ -815,6 +860,49 @@ function mapDriveStatus(handoff: DriveHandoff): SignupStatus {
   }
 }
 
+function isResumableHandoffStatus(status: SignupStatus): status is SignupHandoffStatus {
+  return status === "needs_input" || status === "low_confidence" || status === "needs_human";
+}
+
+function hasHandoffContinuation(
+  response: SignupHandoffResponse | null | undefined,
+): response is SignupHandoffResponse {
+  if (response === null || response === undefined) return false;
+  if (response.resume === false) return false;
+  const hasAnswer = typeof response.answer === "string" && response.answer.trim().length > 0;
+  const hasFacts = response.facts !== undefined && Object.keys(response.facts).length > 0;
+  return response.resume === true || hasAnswer || hasFacts;
+}
+
+async function awaitWithSignal<T>(
+  operation: () => Promise<T> | T,
+  signal: AbortSignal | undefined,
+): Promise<T> {
+  if (signal?.aborted) {
+    throw signal.reason ?? new Error("signup_cancelled");
+  }
+  const promise = Promise.resolve().then(operation);
+  if (signal === undefined) {
+    return await promise;
+  }
+  return await new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      reject(signal.reason ?? new Error("signup_cancelled"));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (err) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(err);
+      },
+    );
+  });
+}
+
 function composeRunSignal(
   signal: AbortSignal | undefined,
   timeoutMs: number | undefined,
@@ -823,9 +911,12 @@ function composeRunSignal(
     return { signal, dispose: () => undefined };
   }
   const controller = new AbortController();
-  const timer = setTimeout(() => {
-    controller.abort(new Error(`Embedded signup timed out after ${timeoutMs}ms`));
-  }, Math.max(1, timeoutMs));
+  const timer = setTimeout(
+    () => {
+      controller.abort(new Error(`Embedded signup timed out after ${timeoutMs}ms`));
+    },
+    Math.max(1, timeoutMs),
+  );
   const onParentAbort = () => {
     controller.abort(signal?.reason ?? new Error("signup_cancelled"));
   };
@@ -1011,6 +1102,23 @@ export async function runSignup(
   const runProbeSource = runtime.probeCaptureSource ?? probeCaptureSource;
   const readCurrentUrl = runtime.currentProvisionUrl ?? currentProvisionUrl;
 
+  let totalSteps = 0;
+  let totalDriveSeconds = 0;
+  let lastJevCalls = 0;
+  let lastTrajectory: DriveTrajectoryStep[] = [];
+  let lastKnownUrl = options.url;
+
+  const resolveCurrentUrl = (fallbackUrl: string): string => {
+    if (sessionId !== undefined) {
+      try {
+        return readCurrentUrl(sessionId);
+      } catch {
+        // fall through
+      }
+    }
+    return fallbackUrl;
+  };
+
   try {
     if (effectiveSignal?.aborted) {
       return {
@@ -1065,87 +1173,209 @@ export async function runSignup(
         : options.timeoutMs !== undefined
           ? Math.max(1, Math.ceil(options.timeoutMs / 1000))
           : undefined;
+    const maxHandoffs =
+      options.maxHandoffs !== undefined
+        ? Math.max(0, Math.floor(options.maxHandoffs))
+        : DEFAULT_MAX_SIGNUP_HANDOFFS;
 
-    const handoff = await runDrive(
-      {
-        url: options.url,
-        goal,
-        ...(options.facts !== undefined ? { facts: options.facts } : {}),
-        ...(options.maxSteps !== undefined ? { max_steps: options.maxSteps } : {}),
-        ...(maxSeconds !== undefined ? { max_seconds: maxSeconds } : {}),
+    const driveContext = {
+      ...(effectiveSignal !== undefined ? { signal: effectiveSignal } : {}),
+      consentInboxRead: options.consentInboxRead ?? session.consentOperatorInboxOtp ?? true,
+      ...(options.onProgress !== undefined
+        ? {
+            notifyUser: async (message: string, data?: Record<string, unknown>) => {
+              await options.onProgress!(
+                redactSecrets(message, capturedSecrets),
+                data === undefined ? undefined : redactUnknownSecrets(data, capturedSecrets),
+              );
+            },
+          }
+        : {}),
+      persistCredentials: async (
+        extracted: ExtractResult,
+      ): Promise<DriveStoredCredential | null> => {
+        const storable = storableCredentials(extracted.credentials);
+        if (storable === null) return null;
+        const ok = await deliverCredential({
+          kind: "api_key",
+          url: extracted.url,
+          fields: storable,
+          source: "extract",
+        });
+        if (!ok) return null;
+        return {
+          reference: "embedded:callback",
+          service,
+          label: undefined,
+        };
       },
-      api,
-      {
-        ...(effectiveSignal !== undefined ? { signal: effectiveSignal } : {}),
-        consentInboxRead: options.consentInboxRead ?? session.consentOperatorInboxOtp ?? true,
-        ...(options.onProgress !== undefined
-          ? {
-              notifyUser: async (message: string, data?: Record<string, unknown>) => {
-                await options.onProgress!(
-                  redactSecrets(message, capturedSecrets),
-                  data === undefined ? undefined : redactUnknownSecrets(data, capturedSecrets),
-                );
-              },
-            }
-          : {}),
-        persistCredentials: async (
-          extracted: ExtractResult,
-        ): Promise<DriveStoredCredential | null> => {
-          const storable = storableCredentials(extracted.credentials);
-          if (storable === null) return null;
-          const ok = await deliverCredential({
-            kind: "api_key",
-            url: extracted.url,
-            fields: storable,
-            source: "extract",
-          });
-          if (!ok) return null;
-          return {
-            reference: "embedded:callback",
-            service,
-            label: undefined,
-          };
-        },
-        persistLogin: async (invented: InventedLogin): Promise<boolean> => {
-          return await deliverCredential({
-            kind: "login",
-            url: invented.url,
-            fields: { login: invented.login, password: invented.password },
-            source: "invented_login",
-            useLoginCallback: true,
-          });
-        },
+      persistLogin: async (invented: InventedLogin): Promise<boolean> => {
+        return await deliverCredential({
+          kind: "login",
+          url: invented.url,
+          fields: { login: invented.login, password: invented.password },
+          source: "invented_login",
+          useLoginCallback: true,
+        });
       },
+    };
+
+    const driveDeps = (
       runtime.driveDependencies !== undefined
-        ? ({
+        ? {
             ...runtime.driveDependencies,
             startSession: localStartSession,
-          } as DriveDependencies)
-        : ({
+          }
+        : {
             // Only override startSession while keeping operate-drive's defaults
             // for askJev, act, observe, awaitVerification, and injectCard.
             ...(await defaultDriveDepsWithLocalStart(localStartSession)),
-          } as DriveDependencies),
-    );
+          }
+    ) as DriveDependencies;
 
-    if (sessionId === undefined && handoff.session_id !== undefined) {
-      sessionId = handoff.session_id;
+    let currentFacts: Record<string, string> | undefined =
+      options.facts !== undefined ? { ...options.facts } : undefined;
+    const driveStartedAt = now();
+    let handoffResumes = 0;
+    let budgetExceededReason: string | null = null;
+    let driveArgs: DriveArgs = {
+      url: options.url,
+      goal,
+      ...(currentFacts !== undefined ? { facts: currentFacts } : {}),
+      ...(options.maxSteps !== undefined ? { max_steps: options.maxSteps } : {}),
+      ...(maxSeconds !== undefined ? { max_seconds: maxSeconds } : {}),
+    };
+
+    let handoff: DriveHandoff;
+    while (true) {
+      handoff = await runDrive(driveArgs, api, driveContext, driveDeps);
+
+      if (sessionId === undefined && handoff.session_id !== undefined) {
+        sessionId = handoff.session_id;
+      }
+
+      totalSteps += handoff.steps;
+      totalDriveSeconds += handoff.seconds;
+      lastJevCalls = Math.max(lastJevCalls, handoff.jev_calls);
+      lastTrajectory = handoff.trajectory;
+      lastKnownUrl = resolveCurrentUrl(handoff.observation?.url ?? lastKnownUrl);
+
+      const mappedPauseStatus = mapDriveStatus(handoff);
+      if (
+        options.onHandoff === undefined ||
+        callbackFailure !== null ||
+        !isResumableHandoffStatus(mappedPauseStatus) ||
+        sessionId === undefined
+      ) {
+        break;
+      }
+
+      if (effectiveSignal?.aborted) {
+        throw effectiveSignal.reason ?? new Error("signup_cancelled");
+      }
+
+      if (handoffResumes >= maxHandoffs) {
+        budgetExceededReason = `Exceeded maximum handoff resume limit (${maxHandoffs}) without completing signup.`;
+        break;
+      }
+
+      const remainingSteps =
+        options.maxSteps !== undefined ? options.maxSteps - totalSteps : undefined;
+      if (remainingSteps !== undefined && remainingSteps <= 0) {
+        budgetExceededReason = `Exceeded maxSteps budget (${options.maxSteps}) across signup handoff resumes.`;
+        break;
+      }
+
+      const spentSecondsBeforeHandoff = Math.max(
+        (now() - driveStartedAt) / 1000,
+        totalDriveSeconds,
+      );
+      if (maxSeconds !== undefined && maxSeconds - spentSecondsBeforeHandoff <= 0) {
+        budgetExceededReason = `Exceeded maxSeconds budget (${maxSeconds}s) across signup handoff resumes.`;
+        break;
+      }
+
+      const handoffEvent: SignupHandoffEvent = redactUnknownSecrets(
+        {
+          status: mappedPauseStatus,
+          driveStatus: handoff.status,
+          url: lastKnownUrl,
+          attempt: handoffResumes + 1,
+          ...(handoff.question !== undefined ? { question: handoff.question } : {}),
+          ...(handoff.options !== undefined ? { options: handoff.options } : {}),
+          ...(handoff.probabilities !== undefined ? { probabilities: handoff.probabilities } : {}),
+          ...(handoff.field !== undefined ? { field: handoff.field } : {}),
+          ...(handoff.needs_user !== undefined ? { needsUser: handoff.needs_user } : {}),
+          ...(handoff.oauth !== undefined ? { oauth: handoff.oauth } : {}),
+          ...(handoff.message !== undefined ? { message: handoff.message } : {}),
+          ...(handoff.remaining !== undefined ? { remaining: handoff.remaining } : {}),
+          ...(handoff.reason !== undefined ? { reason: handoff.reason } : {}),
+        },
+        capturedSecrets,
+      );
+
+      let continuation: SignupHandoffResponse | null | undefined;
+      try {
+        continuation = await awaitWithSignal(
+          () => options.onHandoff!(handoffEvent),
+          effectiveSignal,
+        );
+      } catch (err) {
+        if (effectiveSignal?.aborted) {
+          throw err;
+        }
+        const rawMessage = err instanceof Error ? err.message : String(err);
+        throw new Error(`onHandoff callback failed: ${rawMessage}`);
+      }
+
+      if (!hasHandoffContinuation(continuation)) {
+        break;
+      }
+
+      if (effectiveSignal?.aborted) {
+        throw effectiveSignal.reason ?? new Error("signup_cancelled");
+      }
+
+      const spentSecondsAfterHandoff = Math.max((now() - driveStartedAt) / 1000, totalDriveSeconds);
+      const remainingSeconds =
+        maxSeconds !== undefined ? maxSeconds - spentSecondsAfterHandoff : undefined;
+      if (remainingSeconds !== undefined && remainingSeconds <= 0) {
+        budgetExceededReason = `Exceeded maxSeconds budget (${maxSeconds}s) across signup handoff resumes.`;
+        break;
+      }
+
+      handoffResumes += 1;
+      if (continuation.facts !== undefined) {
+        currentFacts =
+          currentFacts === undefined
+            ? { ...continuation.facts }
+            : { ...currentFacts, ...continuation.facts };
+      }
+      const nextAnswer =
+        typeof continuation.answer === "string" && continuation.answer.trim().length > 0
+          ? continuation.answer
+          : undefined;
+
+      driveArgs = {
+        session_id: sessionId,
+        goal,
+        ...(currentFacts !== undefined ? { facts: currentFacts } : {}),
+        ...(nextAnswer !== undefined ? { answer: nextAnswer } : {}),
+        ...(remainingSteps !== undefined ? { max_steps: remainingSteps } : {}),
+        ...(remainingSeconds !== undefined ? { max_seconds: remainingSeconds } : {}),
+      };
     }
 
     const activeSessionId = sessionId;
-    const currentUrl = (() => {
-      if (activeSessionId !== undefined) {
-        try {
-          return readCurrentUrl(activeSessionId);
-        } catch {
-          // fall through
-        }
-      }
-      return handoff.observation?.url ?? options.url;
-    })();
+    const currentUrl = resolveCurrentUrl(handoff.observation?.url ?? options.url);
+    lastKnownUrl = currentUrl;
 
     // Post-drive capture: explicit captureSource(s) or a final extract fallback.
-    if (handoff.status === "complete" && activeSessionId !== undefined) {
+    if (
+      handoff.status === "complete" &&
+      budgetExceededReason === null &&
+      activeSessionId !== undefined
+    ) {
       if (captureSources.length > 0) {
         for (const source of captureSources) {
           const captured = await runCaptureSource(
@@ -1183,7 +1413,11 @@ export async function runSignup(
     }
 
     const mappedStatus: SignupStatus =
-      callbackFailure !== null ? "failed" : mapDriveStatus(handoff);
+      callbackFailure !== null
+        ? "failed"
+        : budgetExceededReason !== null
+          ? "budget_exceeded"
+          : mapDriveStatus(handoff);
 
     const rawResult: SignupResult = {
       status: mappedStatus,
@@ -1191,17 +1425,19 @@ export async function runSignup(
       url: currentUrl,
       captured: capturedMetadata.length > 0,
       credentials: capturedMetadata,
-      steps: handoff.steps,
-      seconds: handoff.seconds,
-      jevCalls: handoff.jev_calls,
+      steps: totalSteps,
+      seconds: totalDriveSeconds,
+      jevCalls: lastJevCalls,
       driveStatus: handoff.status,
       ...(handoff.done !== undefined ? { done: handoff.done } : {}),
       ...(handoff.remaining !== undefined ? { remaining: handoff.remaining } : {}),
       ...(callbackFailure !== null
         ? { reason: `onCredentialCaptured callback failed: ${callbackFailure}` }
-        : handoff.reason !== undefined
-          ? { reason: handoff.reason }
-          : {}),
+        : budgetExceededReason !== null
+          ? { reason: budgetExceededReason }
+          : handoff.reason !== undefined
+            ? { reason: handoff.reason }
+            : {}),
       ...(handoff.message !== undefined ? { message: handoff.message } : {}),
       ...(handoff.question !== undefined ? { question: handoff.question } : {}),
       ...(handoff.options !== undefined ? { options: handoff.options } : {}),
@@ -1209,7 +1445,7 @@ export async function runSignup(
       ...(handoff.field !== undefined ? { field: handoff.field } : {}),
       ...(handoff.needs_user !== undefined ? { needsUser: handoff.needs_user } : {}),
       ...(handoff.oauth !== undefined ? { oauth: handoff.oauth } : {}),
-      trajectory: handoff.trajectory,
+      trajectory: lastTrajectory,
     };
 
     return redactUnknownSecrets(rawResult, capturedSecrets);
@@ -1222,14 +1458,14 @@ export async function runSignup(
       {
         status: aborted ? "cancelled" : "failed",
         service,
-        url: options.url,
+        url: lastKnownUrl,
         captured: capturedMetadata.length > 0,
         credentials: capturedMetadata,
-        steps: 0,
+        steps: totalSteps,
         seconds: elapsedSeconds,
-        jevCalls: 0,
+        jevCalls: lastJevCalls,
         reason,
-        trajectory: [],
+        trajectory: lastTrajectory,
       },
       capturedSecrets,
     );
