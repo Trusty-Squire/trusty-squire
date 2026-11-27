@@ -31,6 +31,11 @@ import {
   exposeSharedBrokerCeremonyDisplay,
   type SharedCeremonyExposure,
 } from "./bot/google-login.js";
+import type {
+  SafeControlV2,
+  SafePageSemanticsV2,
+  SafeStageV2,
+} from "./bot/compact-observation-v2.js";
 import type { OAuthProviderId } from "./bot/oauth-providers.js";
 import {
   runOperateDrive,
@@ -40,13 +45,18 @@ import {
   type DriveStatus,
   type DriveStoredCredential,
   type InventedLogin,
+  type WireRow,
 } from "./bot/operate-drive.js";
 import {
+  act,
   currentProvisionUrl,
   finishProvisionSession,
   forceFinishProvisionSession,
+  observe,
   observedHostsForSession,
   startHarnessProvisionSession,
+  type NeedsUserLogin,
+  type Observation,
 } from "./bot/provision-session.js";
 import { namedTunnelConfig, type NamedLoginTunnel } from "./bot/remote-login-display.js";
 import type { DriveTrajectoryStep } from "./bot/session/model.js";
@@ -95,9 +105,13 @@ export type {
   DriveStatus,
   DriveTrajectoryStep,
   OAuthProviderId,
+  SafeControlV2,
+  SafePageSemanticsV2,
+  SafeStageV2,
   SessionStoreGuardOptions,
   SignupConfigErrorCode,
   SignupSession,
+  WireRow,
 };
 
 const DEFAULT_AGENT_IDENTITY = "embedded-signup";
@@ -252,6 +266,17 @@ export type SignupStatus =
 
 export type SignupHandoffStatus = "needs_input" | "low_confidence" | "needs_human";
 
+export interface SignupObservationSummary {
+  url: string;
+  safe_table?: ReadonlyArray<SafeControlV2 | WireRow>;
+  stage?: SafeStageV2;
+  semantic?: SafePageSemanticsV2;
+  oauth?: Observation["oauth"];
+  needs_user?: NeedsUserLogin;
+  native_dialog_notices?: string[];
+  navigated?: true;
+}
+
 export interface SignupHandoffEvent {
   status: SignupHandoffStatus;
   driveStatus: DriveStatus;
@@ -263,6 +288,7 @@ export interface SignupHandoffEvent {
   field?: string;
   needsUser?: DriveHandoff["needs_user"];
   oauth?: DriveHandoff["oauth"];
+  observation?: SignupObservationSummary;
   message?: string;
   remaining?: string;
   reason?: string;
@@ -298,7 +324,104 @@ export interface SignupResult {
   field?: string;
   needsUser?: DriveHandoff["needs_user"];
   oauth?: DriveHandoff["oauth"];
+  observation?: SignupObservationSummary;
   trajectory: DriveTrajectoryStep[];
+}
+
+export interface CreateSignupSessionOptions {
+  /** Target website signup or dashboard URL. Optional here if supplied on the first `drive()` call. */
+  url?: string;
+  /** Logical service name for metadata (defaults to registrable domain of `url`). */
+  service?: string;
+  /** Initial facts bag supplied to Jev for form filling (merged with per-`drive()` facts). */
+  facts?: Record<string, string>;
+  /** Caller-owned Chrome profile directory. Required unless `cdpEndpoint` is provided. */
+  profileDir?: string;
+  /** Optional external Chrome CDP endpoint (alternative to `profileDir`). */
+  cdpEndpoint?: string;
+  /** Explicit escape hatch to permit Trusty Squire's default personal profile. Defaults to false. */
+  allowDefaultProfile?: boolean;
+  /** Authenticated `SignupSession` (from `connectSignupProfile` / `ensureSignupSession`). */
+  session?: SignupSession;
+  /** Alternative to `session`: explicit app-owned session file path to load from. */
+  sessionPath?: string;
+  /** Explicit escape hatch to permit Squire's default session store path. Defaults to false. */
+  allowDefaultSessionStore?: boolean;
+  /** In-process callback that receives raw captured credentials. Required. */
+  onCredentialCaptured: (credential: CapturedCredential) => Promise<void> | void;
+  /** Optional dedicated callback for invented username/password signups. Defaults to `onCredentialCaptured`. */
+  onLoginCreated?: (credential: CapturedCredential) => Promise<void> | void;
+  /** Optional default explicit DOM/CSS/role/clipboard capture source(s) to read once a drive finishes. */
+  captureSource?: CaptureSource | readonly CaptureSource[];
+  /** Optional progress/notification callback (always redacted of captured secrets). */
+  onProgress?: (message: string, data?: Record<string, unknown>) => Promise<void> | void;
+  /** App identity header sent on API requests. Defaults to `"embedded-signup"`. */
+  agentIdentity?: string;
+  /** Optional per-launch HTTP/HTTPS/SOCKS5 proxy URL. */
+  proxyUrl?: string;
+  /** Whether to humanize browser interactions. Defaults to true. */
+  humanize?: boolean;
+  /** Whether OTP inbox reading is permitted during this session. Defaults to session setting or true. */
+  consentInboxRead?: boolean;
+  /** Optional session-level abort signal; aborting cancels in-flight work and closes the session cleanly. */
+  signal?: AbortSignal;
+}
+
+export interface SignupDriveOptions {
+  /** Natural-language goal for `runOperateDrive` (e.g. "Sign up with Google and create an API key"). */
+  goal: string;
+  /** Target URL for the first `drive()` call when not already set on `createSignupSession`. Ignored once open. */
+  url?: string;
+  /** Additional or updated facts merged into the session's facts bag (caller object is never mutated). */
+  facts?: Record<string, string>;
+  /** Answer to a prior `needs_value` / `low_confidence` pause on the active session. */
+  answer?: string;
+  /** Optional explicit DOM/CSS/role/clipboard capture source(s) for this drive call. */
+  captureSource?: CaptureSource | readonly CaptureSource[];
+  /** Maximum drive steps for this call. */
+  maxSteps?: number;
+  /** Maximum drive duration in seconds for this call. */
+  maxSeconds?: number;
+  /** Optional per-drive wall-clock timeout in milliseconds. */
+  timeoutMs?: number;
+  /** Optional per-drive abort signal. */
+  signal?: AbortSignal;
+}
+
+export interface EmbeddedSignupSession {
+  /** Logical service name inferred from `url` or supplied explicitly. */
+  readonly service: string;
+  /** Active underlying provision session ID once started by the first `drive()`, or `null`. */
+  readonly sessionId: string | null;
+  /** Latest known page URL, or `null` if no URL has been supplied yet. */
+  readonly currentUrl: string | null;
+  /** Whether `close()` has been invoked or the session-level `AbortSignal` has aborted. */
+  readonly closed: boolean;
+  /** Redacted metadata for all credentials captured so far in this session. */
+  readonly credentials: readonly CapturedCredentialMetadata[];
+  /**
+   * Drives the signup flow on the session's live browser tab and provision session.
+   * The first call opens Chrome and starts the harness session at `url`; subsequent
+   * calls pass the live `sessionId`, `answer`, and merged `facts` directly to
+   * `runOperateDrive` on the same open page/dialog without restarting Chrome or
+   * reloading `url`.
+   */
+  drive(options: SignupDriveOptions): Promise<SignupResult>;
+  /**
+   * Clicks a safe control ref/label on the active session via `act(sessionId, { kind: "click", target: ref })`
+   * without tearing down the browser or provision session.
+   */
+  click(ref: string): Promise<SignupObservationSummary>;
+  /**
+   * Captures a redacted safe observation summary of the active page without
+   * tearing down the session.
+   */
+  observe(format?: "compact" | "full"): Promise<SignupObservationSummary>;
+  /**
+   * Idempotently tears down the provision session (`finishSession` /
+   * `forceFinishSession`) and closes the isolated browser (`browser.close({ cancelStart: true })`).
+   */
+  close(): Promise<void>;
 }
 
 export interface RunSignupOptions {
@@ -367,6 +490,8 @@ export interface SignupRunRuntime {
   forceFinishSession?: typeof forceFinishProvisionSession;
   runDrive?: typeof runOperateDrive;
   driveDependencies?: Partial<DriveDependencies>;
+  act?: typeof act;
+  observe?: typeof observe;
   extractCredentials?: typeof extractCredentials;
   captureCredentialSource?: typeof captureCredentialSource;
   probeCaptureSource?: typeof probeCaptureSource;
@@ -903,91 +1028,146 @@ async function awaitWithSignal<T>(
   });
 }
 
-function composeRunSignal(
-  signal: AbortSignal | undefined,
-  timeoutMs: number | undefined,
-): { signal: AbortSignal | undefined; dispose: () => void } {
-  if (timeoutMs === undefined) {
-    return { signal, dispose: () => undefined };
-  }
-  const controller = new AbortController();
-  const timer = setTimeout(
-    () => {
-      controller.abort(new Error(`Embedded signup timed out after ${timeoutMs}ms`));
-    },
-    Math.max(1, timeoutMs),
-  );
-  const onParentAbort = () => {
-    controller.abort(signal?.reason ?? new Error("signup_cancelled"));
-  };
-  if (signal?.aborted) {
-    clearTimeout(timer);
-    controller.abort(signal.reason ?? new Error("signup_cancelled"));
-  } else {
-    signal?.addEventListener("abort", onParentAbort, { once: true });
-  }
-  return {
-    signal: controller.signal,
-    dispose: () => {
-      clearTimeout(timer);
-      signal?.removeEventListener("abort", onParentAbort);
-    },
-  };
-}
-
-/**
- * Runs an automated website signup and API key capture against an app-owned
- * Chrome profile (or explicit `cdpEndpoint`).
- *
- * Captured credentials are delivered strictly in-process to
- * `onCredentialCaptured` (never written to Trusty Squire's hosted vault, never
- * logged, and never included in the returned `SignupResult`).
- */
-export async function runSignup(
-  options: RunSignupOptions,
-  runtime: SignupRunRuntime = {},
-): Promise<SignupResult> {
-  if (typeof options.onCredentialCaptured !== "function") {
-    throw new SignupConfigError(
-      "callback_required",
-      "runSignup requires an onCredentialCaptured callback to receive captured credentials in-process.",
-    );
-  }
-  const goal = options.goal?.trim() ?? "";
-  if (goal.length === 0) {
-    throw new SignupConfigError("goal_required", "runSignup requires a non-empty goal.");
+function validateSignupUrl(rawUrl: string | undefined, caller: string): string {
+  if (typeof rawUrl !== "string" || rawUrl.trim().length === 0) {
+    throw new SignupConfigError("invalid_url", `${caller} requires a valid http(s) url.`);
   }
   let parsedUrl: URL;
   try {
-    parsedUrl = new URL(options.url);
+    parsedUrl = new URL(rawUrl);
   } catch {
-    throw new SignupConfigError("invalid_url", "runSignup requires a valid http(s) url.");
+    throw new SignupConfigError("invalid_url", `${caller} requires a valid http(s) url.`);
   }
   if (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") {
-    throw new SignupConfigError("invalid_url", "runSignup url must use http: or https:.");
+    throw new SignupConfigError("invalid_url", `${caller} url must use http: or https:.`);
+  }
+  return rawUrl;
+}
+
+function normalizeCaptureSources(
+  source: CaptureSource | readonly CaptureSource[] | undefined,
+): readonly CaptureSource[] {
+  if (source === undefined) return [];
+  return Array.isArray(source) ? (source as readonly CaptureSource[]) : [source as CaptureSource];
+}
+
+function toSafeObservationSummary(
+  observation: Observation | undefined,
+  capturedSecrets: Iterable<string>,
+): SignupObservationSummary | undefined {
+  if (observation === undefined) return undefined;
+  const summary: SignupObservationSummary = {
+    url: observation.url,
+    ...(observation.safe_table !== undefined ? { safe_table: observation.safe_table } : {}),
+    ...(observation.stage !== undefined ? { stage: observation.stage } : {}),
+    ...(observation.semantic !== undefined ? { semantic: observation.semantic } : {}),
+    ...(observation.oauth !== undefined ? { oauth: observation.oauth } : {}),
+    ...(observation.needs_user !== undefined ? { needs_user: observation.needs_user } : {}),
+    ...(observation.native_dialog_notices !== undefined
+      ? { native_dialog_notices: observation.native_dialog_notices }
+      : {}),
+    ...(observation.navigated !== undefined ? { navigated: observation.navigated } : {}),
+  };
+  return redactUnknownSecrets(summary, capturedSecrets);
+}
+
+function composeAbortSignals(
+  signals: readonly (AbortSignal | undefined)[],
+  timeoutMs: number | undefined,
+): { signal: AbortSignal | undefined; dispose: () => void } {
+  const active = signals.filter((s): s is AbortSignal => s !== undefined);
+  if (active.length === 0 && timeoutMs === undefined) {
+    return { signal: undefined, dispose: () => undefined };
+  }
+  if (active.length === 1 && timeoutMs === undefined) {
+    return { signal: active[0], dispose: () => undefined };
+  }
+  const controller = new AbortController();
+  const cleanups: Array<() => void> = [];
+  let timer: ReturnType<typeof setTimeout> | undefined;
+
+  const dispose = () => {
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      timer = undefined;
+    }
+    while (cleanups.length > 0) {
+      cleanups.pop()?.();
+    }
+  };
+
+  for (const parent of active) {
+    if (parent.aborted) {
+      controller.abort(parent.reason ?? new Error("signup_cancelled"));
+      return { signal: controller.signal, dispose };
+    }
   }
 
+  if (timeoutMs !== undefined) {
+    timer = setTimeout(
+      () => {
+        dispose();
+        controller.abort(new Error(`Embedded signup timed out after ${timeoutMs}ms`));
+      },
+      Math.max(1, timeoutMs),
+    );
+  }
+
+  for (const parent of active) {
+    const onAbort = () => {
+      dispose();
+      controller.abort(parent.reason ?? new Error("signup_cancelled"));
+    };
+    parent.addEventListener("abort", onAbort, { once: true });
+    cleanups.push(() => parent.removeEventListener("abort", onAbort));
+  }
+
+  return { signal: controller.signal, dispose };
+}
+
+interface InternalSignupSession {
+  handle: EmbeddedSignupSession;
+  redactText: (text: string) => string;
+  redactValue: <T>(value: T) => T;
+}
+
+async function createSignupSessionInternal(
+  options: CreateSignupSessionOptions,
+  runtime: SignupRunRuntime = {},
+  callerName = "createSignupSession",
+): Promise<InternalSignupSession> {
+  if (typeof options.onCredentialCaptured !== "function") {
+    throw new SignupConfigError(
+      "callback_required",
+      `${callerName} requires an onCredentialCaptured callback to receive captured credentials in-process.`,
+    );
+  }
+  const initialUrl =
+    options.url !== undefined ? validateSignupUrl(options.url, callerName) : undefined;
+
   const target = resolveSignupBrowserTarget(options);
-  let session: SignupSession | null = options.session ?? null;
-  if (session === null && options.sessionPath !== undefined) {
-    session = await readSignupSession(options.sessionPath, {
+  let signupSession: SignupSession | null = options.session ?? null;
+  if (signupSession === null && options.sessionPath !== undefined) {
+    signupSession = await readSignupSession(options.sessionPath, {
       ...(options.allowDefaultSessionStore !== undefined
         ? { allowDefaultSessionStore: options.allowDefaultSessionStore }
         : {}),
     });
   }
-  if (!isCompleteSignupSession(session)) {
+  if (!isCompleteSignupSession(signupSession)) {
     throw new SignupConfigError(
       "session_required",
-      "runSignup requires a complete SignupSession (pass `session` or an app-owned `sessionPath` populated by `connectSignupProfile`).",
+      `${callerName} requires a complete SignupSession (pass \`session\` or an app-owned \`sessionPath\` populated by \`connectSignupProfile\`).`,
     );
   }
 
   const now = runtime.now ?? Date.now;
-  const startedAt = now();
-  const service = inferServiceName(options.url, options.service);
+  let service =
+    initialUrl !== undefined
+      ? inferServiceName(initialUrl, options.service)
+      : options.service?.trim() || "unknown";
   const agentIdentity = options.agentIdentity?.trim() || DEFAULT_AGENT_IDENTITY;
-  const api = createNoVaultApiClient(session, agentIdentity, runtime);
+  const api = createNoVaultApiClient(signupSession, agentIdentity, runtime);
   const browser = (runtime.createBrowser ?? ((opts) => new BrowserController(opts)))(
     buildBrowserControllerOptions(target, {
       proxyUrl: options.proxyUrl,
@@ -995,20 +1175,92 @@ export async function runSignup(
     }),
   );
 
+  const startHarness = runtime.startHarnessSession ?? startHarnessProvisionSession;
+  const finishSession = runtime.finishSession ?? finishProvisionSession;
+  const forceFinishSession = runtime.forceFinishSession ?? forceFinishProvisionSession;
+  const runDrive = runtime.runDrive ?? runOperateDrive;
+  const runExtract = runtime.extractCredentials ?? extractCredentials;
+  const runCaptureSource = runtime.captureCredentialSource ?? captureCredentialSource;
+  const runProbeSource = runtime.probeCaptureSource ?? probeCaptureSource;
+  const readCurrentUrl = runtime.currentProvisionUrl ?? currentProvisionUrl;
+
   const capturedSecrets = new Set<string>();
   const deliveredSignatures = new Set<string>();
   const capturedMetadata: CapturedCredentialMetadata[] = [];
+  const tornDownSessionIds = new Set<string>();
+  let currentFacts: Record<string, string> | undefined =
+    options.facts !== undefined ? { ...options.facts } : undefined;
   let callbackFailure: string | null = null;
+  let apiKeyCapturedThisDrive = false;
   let sessionId: string | undefined;
+  let lastKnownUrl: string | null = initialUrl ?? null;
   let preClipboardProbe: CaptureSourceProbe | undefined;
+  let pendingNeedsClipboardPreProbe = false;
+  let browserStarted = false;
+  let inFlight = false;
+  let closed = false;
+  let abortedBySessionSignal = false;
+  let closePromise: Promise<void> | null = null;
 
-  const captureSources: readonly CaptureSource[] =
-    options.captureSource === undefined
-      ? []
-      : Array.isArray(options.captureSource)
-        ? options.captureSource
-        : [options.captureSource];
-  const needsClipboardPreProbe = captureSources.some((src) => "clipboard" in src);
+  const sessionAbortController = new AbortController();
+
+  const resolveCurrentUrl = (fallbackUrl: string): string => {
+    if (sessionId !== undefined) {
+      try {
+        return readCurrentUrl(sessionId);
+      } catch {
+        // fall through
+      }
+    }
+    return fallbackUrl;
+  };
+
+  const teardownProvisionSession = async (targetSessionId: string): Promise<void> => {
+    if (tornDownSessionIds.has(targetSessionId)) return;
+    tornDownSessionIds.add(targetSessionId);
+    const finished = await finishSession(targetSessionId).catch(() => null);
+    if (finished === null || finished.closed !== true) {
+      await forceFinishSession(targetSessionId).catch(() => undefined);
+    }
+  };
+
+  const onSessionAbort = () => {
+    abortedBySessionSignal = true;
+    const reason = options.signal?.reason ?? new Error("signup_cancelled");
+    if (!sessionAbortController.signal.aborted) {
+      sessionAbortController.abort(reason);
+    }
+    void close();
+  };
+
+  const close = (): Promise<void> => {
+    if (closePromise !== null) return closePromise;
+    closed = true;
+    options.signal?.removeEventListener("abort", onSessionAbort);
+    if (!sessionAbortController.signal.aborted) {
+      sessionAbortController.abort(
+        options.signal?.aborted
+          ? (options.signal.reason ?? new Error("signup_cancelled"))
+          : new Error("signup_session_closed"),
+      );
+    }
+    const activeSessionId = sessionId;
+    sessionId = undefined;
+    closePromise = (async () => {
+      if (activeSessionId !== undefined) {
+        await teardownProvisionSession(activeSessionId);
+      }
+      await browser.close({ cancelStart: true }).catch(() => undefined);
+    })();
+    return closePromise;
+  };
+
+  if (options.signal?.aborted) {
+    abortedBySessionSignal = true;
+    sessionAbortController.abort(options.signal.reason ?? new Error("signup_cancelled"));
+  } else {
+    options.signal?.addEventListener("abort", onSessionAbort, { once: true });
+  }
 
   const deliverCredential = async (input: {
     kind: "api_key" | "login";
@@ -1030,7 +1282,10 @@ export async function runSignup(
         .sort()
         .map((key) => [key, input.fields[key]]),
     ]);
-    if (deliveredSignatures.has(signature)) return true;
+    if (deliveredSignatures.has(signature)) {
+      if (input.kind === "api_key") apiKeyCapturedThisDrive = true;
+      return true;
+    }
 
     const observedHosts = (() => {
       const domain = getDomain(input.url, { allowPrivateDomains: true });
@@ -1073,6 +1328,7 @@ export async function runSignup(
     }
 
     deliveredSignatures.add(signature);
+    if (input.kind === "api_key") apiKeyCapturedThisDrive = true;
     capturedMetadata.push({
       kind: input.kind,
       service,
@@ -1086,141 +1342,38 @@ export async function runSignup(
     return true;
   };
 
-  const composed = composeRunSignal(options.signal, options.timeoutMs);
-  const effectiveSignal = composed.signal;
-  const onAbort = () => {
-    void browser.close({ cancelStart: true }).catch(() => undefined);
-  };
-  effectiveSignal?.addEventListener("abort", onAbort, { once: true });
+  let cachedDriveDeps: DriveDependencies | null = null;
 
-  const startHarness = runtime.startHarnessSession ?? startHarnessProvisionSession;
-  const finishSession = runtime.finishSession ?? finishProvisionSession;
-  const forceFinishSession = runtime.forceFinishSession ?? forceFinishProvisionSession;
-  const runDrive = runtime.runDrive ?? runOperateDrive;
-  const runExtract = runtime.extractCredentials ?? extractCredentials;
-  const runCaptureSource = runtime.captureCredentialSource ?? captureCredentialSource;
-  const runProbeSource = runtime.probeCaptureSource ?? probeCaptureSource;
-  const readCurrentUrl = runtime.currentProvisionUrl ?? currentProvisionUrl;
-
-  let totalSteps = 0;
-  let totalDriveSeconds = 0;
-  let lastJevCalls = 0;
-  let lastTrajectory: DriveTrajectoryStep[] = [];
-  let lastKnownUrl = options.url;
-
-  const resolveCurrentUrl = (fallbackUrl: string): string => {
-    if (sessionId !== undefined) {
-      try {
-        return readCurrentUrl(sessionId);
-      } catch {
-        // fall through
-      }
-    }
-    return fallbackUrl;
-  };
-
-  try {
-    if (effectiveSignal?.aborted) {
-      return {
-        status: "cancelled",
-        service,
-        url: options.url,
-        captured: false,
-        credentials: [],
-        steps: 0,
-        seconds: (now() - startedAt) / 1000,
-        jevCalls: 0,
-        reason: redactSecrets(
-          effectiveSignal.reason instanceof Error
-            ? effectiveSignal.reason.message
-            : "Embedded signup cancelled before browser launch.",
-          capturedSecrets,
-        ),
-        trajectory: [],
-      };
-    }
-
-    await browser.start();
-    if (effectiveSignal?.aborted) {
-      throw effectiveSignal.reason ?? new Error("signup_cancelled");
-    }
-
-    const localStartSession: DriveDependencies["startSession"] = async (startOpts) => {
-      const obs = await startHarness({
-        browser,
-        serviceUrl: startOpts.serviceUrl,
-        ...(startOpts.format !== undefined ? { format: startOpts.format } : {}),
-        ...(startOpts.initialObservation !== undefined
-          ? { initialObservation: startOpts.initialObservation }
-          : {}),
-        ...(startOpts.consentInboxRead !== undefined
-          ? { consentInboxRead: startOpts.consentInboxRead }
-          : {}),
-        ...(startOpts.api !== undefined ? { api: startOpts.api } : {}),
-      });
-      sessionId = obs.session_id;
-      if (needsClipboardPreProbe) {
-        preClipboardProbe = await runProbeSource(sessionId, { clipboard: true }).catch(
-          () => undefined,
-        );
-      }
-      return obs;
-    };
-
-    const maxSeconds =
-      options.maxSeconds !== undefined
-        ? options.maxSeconds
-        : options.timeoutMs !== undefined
-          ? Math.max(1, Math.ceil(options.timeoutMs / 1000))
-          : undefined;
-    const maxHandoffs =
-      options.maxHandoffs !== undefined
-        ? Math.max(0, Math.floor(options.maxHandoffs))
-        : DEFAULT_MAX_SIGNUP_HANDOFFS;
-
-    const driveContext = {
-      ...(effectiveSignal !== undefined ? { signal: effectiveSignal } : {}),
-      consentInboxRead: options.consentInboxRead ?? session.consentOperatorInboxOtp ?? true,
-      ...(options.onProgress !== undefined
-        ? {
-            notifyUser: async (message: string, data?: Record<string, unknown>) => {
-              await options.onProgress!(
-                redactSecrets(message, capturedSecrets),
-                data === undefined ? undefined : redactUnknownSecrets(data, capturedSecrets),
-              );
-            },
-          }
+  const localStartSession: DriveDependencies["startSession"] = async (startOpts) => {
+    const obs = await startHarness({
+      browser,
+      serviceUrl: startOpts.serviceUrl,
+      ...(startOpts.format !== undefined ? { format: startOpts.format } : {}),
+      ...(startOpts.initialObservation !== undefined
+        ? { initialObservation: startOpts.initialObservation }
         : {}),
-      persistCredentials: async (
-        extracted: ExtractResult,
-      ): Promise<DriveStoredCredential | null> => {
-        const storable = storableCredentials(extracted.credentials);
-        if (storable === null) return null;
-        const ok = await deliverCredential({
-          kind: "api_key",
-          url: extracted.url,
-          fields: storable,
-          source: "extract",
-        });
-        if (!ok) return null;
-        return {
-          reference: "embedded:callback",
-          service,
-          label: undefined,
-        };
-      },
-      persistLogin: async (invented: InventedLogin): Promise<boolean> => {
-        return await deliverCredential({
-          kind: "login",
-          url: invented.url,
-          fields: { login: invented.login, password: invented.password },
-          source: "invented_login",
-          useLoginCallback: true,
-        });
-      },
-    };
+      ...(startOpts.consentInboxRead !== undefined
+        ? { consentInboxRead: startOpts.consentInboxRead }
+        : {}),
+      ...(startOpts.api !== undefined ? { api: startOpts.api } : {}),
+    });
+    if (closed || sessionAbortController.signal.aborted) {
+      await teardownProvisionSession(obs.session_id);
+      throw sessionAbortController.signal.reason ?? new Error("signup_cancelled");
+    }
+    sessionId = obs.session_id;
+    lastKnownUrl = resolveCurrentUrl(obs.url || startOpts.serviceUrl);
+    if (pendingNeedsClipboardPreProbe) {
+      preClipboardProbe = await runProbeSource(sessionId, { clipboard: true }).catch(
+        () => undefined,
+      );
+    }
+    return obs;
+  };
 
-    const driveDeps = (
+  const getDriveDeps = async (): Promise<DriveDependencies> => {
+    if (cachedDriveDeps !== null) return cachedDriveDeps;
+    cachedDriveDeps = (
       runtime.driveDependencies !== undefined
         ? {
             ...runtime.driveDependencies,
@@ -1232,40 +1385,560 @@ export async function runSignup(
             ...(await defaultDriveDepsWithLocalStart(localStartSession)),
           }
     ) as DriveDependencies;
+    return cachedDriveDeps;
+  };
 
-    let currentFacts: Record<string, string> | undefined =
-      options.facts !== undefined ? { ...options.facts } : undefined;
+  const drive = async (driveOptions: SignupDriveOptions): Promise<SignupResult> => {
+    const goal = driveOptions.goal?.trim() ?? "";
+    if (goal.length === 0) {
+      throw new SignupConfigError("goal_required", `${callerName} requires a non-empty goal.`);
+    }
+    if (closed && !abortedBySessionSignal) {
+      throw new SignupConfigError(
+        "session_closed",
+        "Embedded signup session has already been closed.",
+      );
+    }
+    if (inFlight) {
+      throw new SignupConfigError(
+        "session_busy",
+        "Embedded signup session already has an active operation in flight.",
+      );
+    }
+
+    let startUrl: string | undefined;
+    if (sessionId === undefined) {
+      const candidateUrl = driveOptions.url ?? initialUrl;
+      startUrl = validateSignupUrl(candidateUrl, callerName);
+      if (initialUrl === undefined || driveOptions.url !== undefined) {
+        service = inferServiceName(startUrl, options.service);
+      }
+      lastKnownUrl = startUrl;
+    }
+
+    const driveStartedAt = now();
+    const composed = composeAbortSignals(
+      [sessionAbortController.signal, driveOptions.signal],
+      driveOptions.timeoutMs,
+    );
+    const effectiveSignal = composed.signal;
+
+    const effectiveCaptureSource =
+      driveOptions.captureSource !== undefined ? driveOptions.captureSource : options.captureSource;
+    const captureSources = normalizeCaptureSources(effectiveCaptureSource);
+    pendingNeedsClipboardPreProbe = captureSources.some((src) => "clipboard" in src);
+
+    inFlight = true;
+    callbackFailure = null;
+    apiKeyCapturedThisDrive = false;
+
+    try {
+      if (effectiveSignal?.aborted) {
+        if (abortedBySessionSignal) {
+          await close();
+        }
+        return redactUnknownSecrets(
+          {
+            status: "cancelled",
+            service,
+            url: resolveCurrentUrl(lastKnownUrl ?? startUrl ?? ""),
+            captured: capturedMetadata.length > 0,
+            credentials: [...capturedMetadata],
+            steps: 0,
+            seconds: (now() - driveStartedAt) / 1000,
+            jevCalls: 0,
+            reason: redactSecrets(
+              effectiveSignal.reason instanceof Error
+                ? effectiveSignal.reason.message
+                : "Embedded signup cancelled before browser launch.",
+              capturedSecrets,
+            ),
+            trajectory: [],
+          },
+          capturedSecrets,
+        );
+      }
+
+      if (!browserStarted) {
+        await awaitWithSignal(() => browser.start(), effectiveSignal);
+        browserStarted = true;
+        if (effectiveSignal?.aborted) {
+          throw effectiveSignal.reason ?? new Error("signup_cancelled");
+        }
+      }
+
+      if (
+        sessionId !== undefined &&
+        pendingNeedsClipboardPreProbe &&
+        preClipboardProbe === undefined
+      ) {
+        preClipboardProbe = await runProbeSource(sessionId, { clipboard: true }).catch(
+          () => undefined,
+        );
+      }
+
+      if (driveOptions.facts !== undefined) {
+        currentFacts =
+          currentFacts === undefined
+            ? { ...driveOptions.facts }
+            : { ...currentFacts, ...driveOptions.facts };
+      }
+
+      const maxSeconds =
+        driveOptions.maxSeconds !== undefined
+          ? driveOptions.maxSeconds
+          : driveOptions.timeoutMs !== undefined
+            ? Math.max(1, Math.ceil(driveOptions.timeoutMs / 1000))
+            : undefined;
+      const nextAnswer =
+        typeof driveOptions.answer === "string" && driveOptions.answer.trim().length > 0
+          ? driveOptions.answer
+          : undefined;
+
+      const driveContext = {
+        ...(effectiveSignal !== undefined ? { signal: effectiveSignal } : {}),
+        consentInboxRead: options.consentInboxRead ?? signupSession.consentOperatorInboxOtp ?? true,
+        ...(options.onProgress !== undefined
+          ? {
+              notifyUser: async (message: string, data?: Record<string, unknown>) => {
+                await options.onProgress!(
+                  redactSecrets(message, capturedSecrets),
+                  data === undefined ? undefined : redactUnknownSecrets(data, capturedSecrets),
+                );
+              },
+            }
+          : {}),
+        persistCredentials: async (
+          extracted: ExtractResult,
+        ): Promise<DriveStoredCredential | null> => {
+          const storable = storableCredentials(extracted.credentials);
+          if (storable === null) return null;
+          const ok = await deliverCredential({
+            kind: "api_key",
+            url: extracted.url,
+            fields: storable,
+            source: "extract",
+          });
+          if (!ok) return null;
+          return {
+            reference: "embedded:callback",
+            service,
+            label: undefined,
+          };
+        },
+        persistLogin: async (invented: InventedLogin): Promise<boolean> => {
+          return await deliverCredential({
+            kind: "login",
+            url: invented.url,
+            fields: { login: invented.login, password: invented.password },
+            source: "invented_login",
+            useLoginCallback: true,
+          });
+        },
+      };
+
+      const driveDeps = await getDriveDeps();
+      const driveArgs: DriveArgs =
+        sessionId === undefined
+          ? {
+              url: startUrl!,
+              goal,
+              ...(currentFacts !== undefined ? { facts: { ...currentFacts } } : {}),
+              ...(nextAnswer !== undefined ? { answer: nextAnswer } : {}),
+              ...(driveOptions.maxSteps !== undefined ? { max_steps: driveOptions.maxSteps } : {}),
+              ...(maxSeconds !== undefined ? { max_seconds: maxSeconds } : {}),
+            }
+          : {
+              session_id: sessionId,
+              goal,
+              ...(currentFacts !== undefined ? { facts: { ...currentFacts } } : {}),
+              ...(nextAnswer !== undefined ? { answer: nextAnswer } : {}),
+              ...(driveOptions.maxSteps !== undefined ? { max_steps: driveOptions.maxSteps } : {}),
+              ...(maxSeconds !== undefined ? { max_seconds: maxSeconds } : {}),
+            };
+
+      const handoff = await runDrive(driveArgs, api, driveContext, driveDeps);
+
+      if (sessionId === undefined && handoff.session_id !== undefined) {
+        if (closed || sessionAbortController.signal.aborted) {
+          await teardownProvisionSession(handoff.session_id);
+        } else {
+          sessionId = handoff.session_id;
+        }
+      }
+
+      const cancelledAfterDrive = closed || effectiveSignal?.aborted === true;
+      if (closed || abortedBySessionSignal) {
+        await close();
+      }
+
+      const activeSessionId = sessionId;
+      const currentUrl = resolveCurrentUrl(handoff.observation?.url ?? lastKnownUrl ?? "");
+      lastKnownUrl = currentUrl;
+
+      // Post-drive capture: explicit captureSource(s) or a final extract fallback.
+      if (handoff.status === "complete" && !cancelledAfterDrive && activeSessionId !== undefined) {
+        if (captureSources.length > 0) {
+          for (const source of captureSources) {
+            const captured = await runCaptureSource(
+              activeSessionId,
+              source,
+              "clipboard" in source ? { pre: preClipboardProbe } : undefined,
+            ).catch(() => null);
+            if (
+              captured !== null &&
+              captured.candidate_count === 1 &&
+              captured.value !== undefined
+            ) {
+              const storable = storableCredentials({ api_key: captured.value });
+              if (storable !== null) {
+                await deliverCredential({
+                  kind: "api_key",
+                  url: currentUrl,
+                  fields: storable,
+                  source: "capture_source",
+                  ...(captured.resolved_source !== undefined
+                    ? { resolvedSource: captured.resolved_source }
+                    : {}),
+                });
+              }
+            }
+          }
+        } else if (!apiKeyCapturedThisDrive) {
+          const extracted = await runExtract(activeSessionId).catch(() => null);
+          const storable = extracted !== null ? storableCredentials(extracted.credentials) : null;
+          if (extracted !== null && storable !== null) {
+            await deliverCredential({
+              kind: "api_key",
+              url: extracted.url,
+              fields: storable,
+              source: "extract",
+            });
+          }
+        }
+      }
+
+      const safeObservation = toSafeObservationSummary(handoff.observation, capturedSecrets);
+      const mappedStatus: SignupStatus = cancelledAfterDrive
+        ? "cancelled"
+        : callbackFailure !== null
+          ? "failed"
+          : mapDriveStatus(handoff);
+
+      const rawResult: SignupResult = {
+        status: mappedStatus,
+        service,
+        url: currentUrl,
+        captured: capturedMetadata.length > 0,
+        credentials: [...capturedMetadata],
+        steps: handoff.steps,
+        seconds: handoff.seconds,
+        jevCalls: handoff.jev_calls,
+        driveStatus: handoff.status,
+        ...(handoff.done !== undefined ? { done: handoff.done } : {}),
+        ...(handoff.remaining !== undefined ? { remaining: handoff.remaining } : {}),
+        ...(cancelledAfterDrive
+          ? {
+              reason: redactSecrets(
+                effectiveSignal?.reason instanceof Error &&
+                  effectiveSignal.reason.message.length > 0
+                  ? effectiveSignal.reason.message
+                  : typeof effectiveSignal?.reason === "string" &&
+                      effectiveSignal.reason.trim().length > 0
+                    ? effectiveSignal.reason
+                    : "Embedded signup cancelled.",
+                capturedSecrets,
+              ),
+            }
+          : callbackFailure !== null
+            ? { reason: `onCredentialCaptured callback failed: ${callbackFailure}` }
+            : handoff.reason !== undefined
+              ? { reason: handoff.reason }
+              : {}),
+        ...(handoff.message !== undefined ? { message: handoff.message } : {}),
+        ...(handoff.question !== undefined ? { question: handoff.question } : {}),
+        ...(handoff.options !== undefined ? { options: handoff.options } : {}),
+        ...(handoff.probabilities !== undefined ? { probabilities: handoff.probabilities } : {}),
+        ...(handoff.field !== undefined ? { field: handoff.field } : {}),
+        ...(handoff.needs_user !== undefined ? { needsUser: handoff.needs_user } : {}),
+        ...(handoff.oauth !== undefined ? { oauth: handoff.oauth } : {}),
+        ...(safeObservation !== undefined ? { observation: safeObservation } : {}),
+        trajectory: handoff.trajectory,
+      };
+
+      return redactUnknownSecrets(rawResult, capturedSecrets);
+    } catch (err) {
+      if (abortedBySessionSignal || closed) {
+        await close();
+      }
+      const elapsedSeconds = (now() - driveStartedAt) / 1000;
+      const rawReason = err instanceof Error ? err.message : String(err);
+      const reason = redactSecrets(rawReason, capturedSecrets);
+      const aborted = effectiveSignal?.aborted === true;
+      return redactUnknownSecrets(
+        {
+          status: aborted ? "cancelled" : "failed",
+          service,
+          url: resolveCurrentUrl(lastKnownUrl ?? startUrl ?? ""),
+          captured: capturedMetadata.length > 0,
+          credentials: [...capturedMetadata],
+          steps: 0,
+          seconds: elapsedSeconds,
+          jevCalls: 0,
+          reason,
+          trajectory: [],
+        },
+        capturedSecrets,
+      );
+    } finally {
+      inFlight = false;
+      composed.dispose();
+    }
+  };
+
+  const click = async (ref: string): Promise<SignupObservationSummary> => {
+    if (closed) {
+      throw new SignupConfigError(
+        "session_closed",
+        "Embedded signup session has already been closed.",
+      );
+    }
+    if (sessionId === undefined) {
+      throw new SignupConfigError(
+        "session_not_started",
+        "Cannot click before the embedded signup session has been started with drive().",
+      );
+    }
+    const targetRef = ref?.trim() ?? "";
+    if (targetRef.length === 0) {
+      throw new SignupConfigError("invalid_target", "click requires a non-empty ref.");
+    }
+    if (inFlight) {
+      throw new SignupConfigError(
+        "session_busy",
+        "Embedded signup session already has an active operation in flight.",
+      );
+    }
+    inFlight = true;
+    try {
+      const actFn = runtime.act ?? runtime.driveDependencies?.act ?? act;
+      const obs = await actFn(
+        sessionId,
+        { kind: "click", target: targetRef },
+        "compact",
+        "compact",
+      );
+      const currentUrl = resolveCurrentUrl(obs.url || lastKnownUrl || "");
+      lastKnownUrl = currentUrl;
+      return (
+        toSafeObservationSummary(obs, capturedSecrets) ??
+        redactUnknownSecrets({ url: currentUrl }, capturedSecrets)
+      );
+    } catch (err) {
+      if (err instanceof SignupConfigError) throw err;
+      const rawMessage = err instanceof Error ? err.message : String(err);
+      throw new Error(redactSecrets(rawMessage, capturedSecrets));
+    } finally {
+      inFlight = false;
+    }
+  };
+
+  const observeActive = async (
+    format: "compact" | "full" = "compact",
+  ): Promise<SignupObservationSummary> => {
+    if (closed) {
+      throw new SignupConfigError(
+        "session_closed",
+        "Embedded signup session has already been closed.",
+      );
+    }
+    if (sessionId === undefined) {
+      throw new SignupConfigError(
+        "session_not_started",
+        "Cannot observe before the embedded signup session has been started with drive().",
+      );
+    }
+    if (inFlight) {
+      throw new SignupConfigError(
+        "session_busy",
+        "Embedded signup session already has an active operation in flight.",
+      );
+    }
+    inFlight = true;
+    try {
+      const observeFn = runtime.observe ?? runtime.driveDependencies?.observe ?? observe;
+      const obs = await observeFn(sessionId, format);
+      const currentUrl = resolveCurrentUrl(obs.url || lastKnownUrl || "");
+      lastKnownUrl = currentUrl;
+      return (
+        toSafeObservationSummary(obs, capturedSecrets) ??
+        redactUnknownSecrets({ url: currentUrl }, capturedSecrets)
+      );
+    } catch (err) {
+      if (err instanceof SignupConfigError) throw err;
+      const rawMessage = err instanceof Error ? err.message : String(err);
+      throw new Error(redactSecrets(rawMessage, capturedSecrets));
+    } finally {
+      inFlight = false;
+    }
+  };
+
+  const handle: EmbeddedSignupSession = {
+    get service() {
+      return service;
+    },
+    get sessionId() {
+      return sessionId ?? null;
+    },
+    get currentUrl() {
+      return lastKnownUrl === null ? null : resolveCurrentUrl(lastKnownUrl);
+    },
+    get closed() {
+      return closed;
+    },
+    get credentials() {
+      return [...capturedMetadata];
+    },
+    drive,
+    click,
+    observe: observeActive,
+    close,
+  };
+
+  return {
+    handle,
+    redactText: (text: string) => redactSecrets(text, capturedSecrets),
+    redactValue: <T>(value: T) => redactUnknownSecrets(value, capturedSecrets),
+  };
+}
+
+/**
+ * Opens a stateful embedded signup session against an app-owned Chrome profile
+ * (or explicit `cdpEndpoint`).
+ *
+ * Keeps both the isolated browser and underlying provision session alive across
+ * `drive()` calls (for `needs_value`, `low_confidence`, `budget`, etc.),
+ * supports safe `click(ref)` / `observe()` on the live page, delivers captured
+ * credentials strictly in-process to `onCredentialCaptured` (never the hosted
+ * vault), and tears down idempotently in `close()` or on session `AbortSignal`.
+ */
+export async function createSignupSession(
+  options: CreateSignupSessionOptions,
+  runtime: SignupRunRuntime = {},
+): Promise<EmbeddedSignupSession> {
+  return (await createSignupSessionInternal(options, runtime, "createSignupSession")).handle;
+}
+
+/**
+ * Runs an automated website signup and API key capture against an app-owned
+ * Chrome profile (or explicit `cdpEndpoint`).
+ *
+ * Captured credentials are delivered strictly in-process to
+ * `onCredentialCaptured` (never written to Trusty Squire's hosted vault, never
+ * logged, and never included in the returned `SignupResult`).
+ */
+export async function runSignup(
+  options: RunSignupOptions,
+  runtime: SignupRunRuntime = {},
+): Promise<SignupResult> {
+  if (typeof options.onCredentialCaptured !== "function") {
+    throw new SignupConfigError(
+      "callback_required",
+      "runSignup requires an onCredentialCaptured callback to receive captured credentials in-process.",
+    );
+  }
+  const goal = options.goal?.trim() ?? "";
+  if (goal.length === 0) {
+    throw new SignupConfigError("goal_required", "runSignup requires a non-empty goal.");
+  }
+  validateSignupUrl(options.url, "runSignup");
+
+  const now = runtime.now ?? Date.now;
+  const startedAt = now();
+  const composed = composeAbortSignals([options.signal], options.timeoutMs);
+  const effectiveSignal = composed.signal;
+
+  let internal: InternalSignupSession;
+  try {
+    internal = await createSignupSessionInternal(
+      {
+        url: options.url,
+        ...(options.service !== undefined ? { service: options.service } : {}),
+        ...(options.facts !== undefined ? { facts: options.facts } : {}),
+        ...(options.profileDir !== undefined ? { profileDir: options.profileDir } : {}),
+        ...(options.cdpEndpoint !== undefined ? { cdpEndpoint: options.cdpEndpoint } : {}),
+        ...(options.allowDefaultProfile !== undefined
+          ? { allowDefaultProfile: options.allowDefaultProfile }
+          : {}),
+        ...(options.session !== undefined ? { session: options.session } : {}),
+        ...(options.sessionPath !== undefined ? { sessionPath: options.sessionPath } : {}),
+        ...(options.allowDefaultSessionStore !== undefined
+          ? { allowDefaultSessionStore: options.allowDefaultSessionStore }
+          : {}),
+        onCredentialCaptured: options.onCredentialCaptured,
+        ...(options.onLoginCreated !== undefined ? { onLoginCreated: options.onLoginCreated } : {}),
+        ...(options.captureSource !== undefined ? { captureSource: options.captureSource } : {}),
+        ...(options.onProgress !== undefined ? { onProgress: options.onProgress } : {}),
+        ...(options.agentIdentity !== undefined ? { agentIdentity: options.agentIdentity } : {}),
+        ...(options.proxyUrl !== undefined ? { proxyUrl: options.proxyUrl } : {}),
+        ...(options.humanize !== undefined ? { humanize: options.humanize } : {}),
+        ...(options.consentInboxRead !== undefined
+          ? { consentInboxRead: options.consentInboxRead }
+          : {}),
+        ...(effectiveSignal !== undefined ? { signal: effectiveSignal } : {}),
+      },
+      runtime,
+      "runSignup",
+    );
+  } catch (err) {
+    composed.dispose();
+    throw err;
+  }
+
+  const signupSession = internal.handle;
+  const maxSeconds =
+    options.maxSeconds !== undefined
+      ? options.maxSeconds
+      : options.timeoutMs !== undefined
+        ? Math.max(1, Math.ceil(options.timeoutMs / 1000))
+        : undefined;
+  const maxHandoffs =
+    options.maxHandoffs !== undefined
+      ? Math.max(0, Math.floor(options.maxHandoffs))
+      : DEFAULT_MAX_SIGNUP_HANDOFFS;
+
+  let totalSteps = 0;
+  let totalDriveSeconds = 0;
+  let lastJevCalls = 0;
+  let lastTrajectory: DriveTrajectoryStep[] = [];
+  let lastKnownUrl = options.url;
+
+  try {
     const driveStartedAt = now();
     let handoffResumes = 0;
     let budgetExceededReason: string | null = null;
-    let driveArgs: DriveArgs = {
-      url: options.url,
+    let nextDriveOptions: SignupDriveOptions = {
       goal,
-      ...(currentFacts !== undefined ? { facts: currentFacts } : {}),
-      ...(options.maxSteps !== undefined ? { max_steps: options.maxSteps } : {}),
-      ...(maxSeconds !== undefined ? { max_seconds: maxSeconds } : {}),
+      ...(options.maxSteps !== undefined ? { maxSteps: options.maxSteps } : {}),
+      ...(maxSeconds !== undefined ? { maxSeconds } : {}),
     };
 
-    let handoff: DriveHandoff;
+    let result: SignupResult;
     while (true) {
-      handoff = await runDrive(driveArgs, api, driveContext, driveDeps);
+      result = await signupSession.drive(nextDriveOptions);
 
-      if (sessionId === undefined && handoff.session_id !== undefined) {
-        sessionId = handoff.session_id;
-      }
+      totalSteps += result.steps;
+      totalDriveSeconds += result.seconds;
+      lastJevCalls = Math.max(lastJevCalls, result.jevCalls);
+      lastTrajectory = result.trajectory;
+      lastKnownUrl = result.url;
 
-      totalSteps += handoff.steps;
-      totalDriveSeconds += handoff.seconds;
-      lastJevCalls = Math.max(lastJevCalls, handoff.jev_calls);
-      lastTrajectory = handoff.trajectory;
-      lastKnownUrl = resolveCurrentUrl(handoff.observation?.url ?? lastKnownUrl);
-
-      const mappedPauseStatus = mapDriveStatus(handoff);
       if (
         options.onHandoff === undefined ||
-        callbackFailure !== null ||
-        !isResumableHandoffStatus(mappedPauseStatus) ||
-        sessionId === undefined
+        result.status === "failed" ||
+        result.status === "cancelled" ||
+        !isResumableHandoffStatus(result.status) ||
+        signupSession.sessionId === null
       ) {
         break;
       }
@@ -1295,24 +1968,22 @@ export async function runSignup(
         break;
       }
 
-      const handoffEvent: SignupHandoffEvent = redactUnknownSecrets(
-        {
-          status: mappedPauseStatus,
-          driveStatus: handoff.status,
-          url: lastKnownUrl,
-          attempt: handoffResumes + 1,
-          ...(handoff.question !== undefined ? { question: handoff.question } : {}),
-          ...(handoff.options !== undefined ? { options: handoff.options } : {}),
-          ...(handoff.probabilities !== undefined ? { probabilities: handoff.probabilities } : {}),
-          ...(handoff.field !== undefined ? { field: handoff.field } : {}),
-          ...(handoff.needs_user !== undefined ? { needsUser: handoff.needs_user } : {}),
-          ...(handoff.oauth !== undefined ? { oauth: handoff.oauth } : {}),
-          ...(handoff.message !== undefined ? { message: handoff.message } : {}),
-          ...(handoff.remaining !== undefined ? { remaining: handoff.remaining } : {}),
-          ...(handoff.reason !== undefined ? { reason: handoff.reason } : {}),
-        },
-        capturedSecrets,
-      );
+      const handoffEvent: SignupHandoffEvent = internal.redactValue({
+        status: result.status,
+        driveStatus: result.driveStatus ?? "needs_value",
+        url: lastKnownUrl,
+        attempt: handoffResumes + 1,
+        ...(result.question !== undefined ? { question: result.question } : {}),
+        ...(result.options !== undefined ? { options: result.options } : {}),
+        ...(result.probabilities !== undefined ? { probabilities: result.probabilities } : {}),
+        ...(result.field !== undefined ? { field: result.field } : {}),
+        ...(result.needsUser !== undefined ? { needsUser: result.needsUser } : {}),
+        ...(result.oauth !== undefined ? { oauth: result.oauth } : {}),
+        ...(result.observation !== undefined ? { observation: result.observation } : {}),
+        ...(result.message !== undefined ? { message: result.message } : {}),
+        ...(result.remaining !== undefined ? { remaining: result.remaining } : {}),
+        ...(result.reason !== undefined ? { reason: result.reason } : {}),
+      });
 
       let continuation: SignupHandoffResponse | null | undefined;
       try {
@@ -1345,140 +2016,52 @@ export async function runSignup(
       }
 
       handoffResumes += 1;
-      if (continuation.facts !== undefined) {
-        currentFacts =
-          currentFacts === undefined
-            ? { ...continuation.facts }
-            : { ...currentFacts, ...continuation.facts };
-      }
       const nextAnswer =
         typeof continuation.answer === "string" && continuation.answer.trim().length > 0
           ? continuation.answer
           : undefined;
 
-      driveArgs = {
-        session_id: sessionId,
+      nextDriveOptions = {
         goal,
-        ...(currentFacts !== undefined ? { facts: currentFacts } : {}),
+        ...(continuation.facts !== undefined ? { facts: continuation.facts } : {}),
         ...(nextAnswer !== undefined ? { answer: nextAnswer } : {}),
-        ...(remainingSteps !== undefined ? { max_steps: remainingSteps } : {}),
-        ...(remainingSeconds !== undefined ? { max_seconds: remainingSeconds } : {}),
+        ...(remainingSteps !== undefined ? { maxSteps: remainingSteps } : {}),
+        ...(remainingSeconds !== undefined ? { maxSeconds: remainingSeconds } : {}),
       };
     }
 
-    const activeSessionId = sessionId;
-    const currentUrl = resolveCurrentUrl(handoff.observation?.url ?? options.url);
-    lastKnownUrl = currentUrl;
-
-    // Post-drive capture: explicit captureSource(s) or a final extract fallback.
-    if (
-      handoff.status === "complete" &&
-      budgetExceededReason === null &&
-      activeSessionId !== undefined
-    ) {
-      if (captureSources.length > 0) {
-        for (const source of captureSources) {
-          const captured = await runCaptureSource(
-            activeSessionId,
-            source,
-            "clipboard" in source ? { pre: preClipboardProbe } : undefined,
-          ).catch(() => null);
-          if (captured !== null && captured.candidate_count === 1 && captured.value !== undefined) {
-            const storable = storableCredentials({ api_key: captured.value });
-            if (storable !== null) {
-              await deliverCredential({
-                kind: "api_key",
-                url: currentUrl,
-                fields: storable,
-                source: "capture_source",
-                ...(captured.resolved_source !== undefined
-                  ? { resolvedSource: captured.resolved_source }
-                  : {}),
-              });
-            }
-          }
-        }
-      } else if (!capturedMetadata.some((item) => item.kind === "api_key")) {
-        const extracted = await runExtract(activeSessionId).catch(() => null);
-        const storable = extracted !== null ? storableCredentials(extracted.credentials) : null;
-        if (extracted !== null && storable !== null) {
-          await deliverCredential({
-            kind: "api_key",
-            url: extracted.url,
-            fields: storable,
-            source: "extract",
-          });
-        }
-      }
-    }
-
-    const mappedStatus: SignupStatus =
-      callbackFailure !== null
-        ? "failed"
-        : budgetExceededReason !== null
-          ? "budget_exceeded"
-          : mapDriveStatus(handoff);
-
-    const rawResult: SignupResult = {
-      status: mappedStatus,
-      service,
-      url: currentUrl,
-      captured: capturedMetadata.length > 0,
-      credentials: capturedMetadata,
+    const aggregated: SignupResult = {
+      ...result,
+      status: budgetExceededReason !== null ? "budget_exceeded" : result.status,
       steps: totalSteps,
       seconds: totalDriveSeconds,
       jevCalls: lastJevCalls,
-      driveStatus: handoff.status,
-      ...(handoff.done !== undefined ? { done: handoff.done } : {}),
-      ...(handoff.remaining !== undefined ? { remaining: handoff.remaining } : {}),
-      ...(callbackFailure !== null
-        ? { reason: `onCredentialCaptured callback failed: ${callbackFailure}` }
-        : budgetExceededReason !== null
-          ? { reason: budgetExceededReason }
-          : handoff.reason !== undefined
-            ? { reason: handoff.reason }
-            : {}),
-      ...(handoff.message !== undefined ? { message: handoff.message } : {}),
-      ...(handoff.question !== undefined ? { question: handoff.question } : {}),
-      ...(handoff.options !== undefined ? { options: handoff.options } : {}),
-      ...(handoff.probabilities !== undefined ? { probabilities: handoff.probabilities } : {}),
-      ...(handoff.field !== undefined ? { field: handoff.field } : {}),
-      ...(handoff.needs_user !== undefined ? { needsUser: handoff.needs_user } : {}),
-      ...(handoff.oauth !== undefined ? { oauth: handoff.oauth } : {}),
       trajectory: lastTrajectory,
+      ...(budgetExceededReason !== null ? { reason: budgetExceededReason } : {}),
     };
 
-    return redactUnknownSecrets(rawResult, capturedSecrets);
+    return internal.redactValue(aggregated);
   } catch (err) {
     const elapsedSeconds = (now() - startedAt) / 1000;
     const rawReason = err instanceof Error ? err.message : String(err);
-    const reason = redactSecrets(rawReason, capturedSecrets);
+    const reason = internal.redactText(rawReason);
     const aborted = effectiveSignal?.aborted === true;
-    return redactUnknownSecrets(
-      {
-        status: aborted ? "cancelled" : "failed",
-        service,
-        url: lastKnownUrl,
-        captured: capturedMetadata.length > 0,
-        credentials: capturedMetadata,
-        steps: totalSteps,
-        seconds: elapsedSeconds,
-        jevCalls: lastJevCalls,
-        reason,
-        trajectory: lastTrajectory,
-      },
-      capturedSecrets,
-    );
+    const creds = [...signupSession.credentials];
+    return internal.redactValue({
+      status: aborted ? "cancelled" : "failed",
+      service: signupSession.service,
+      url: lastKnownUrl,
+      captured: creds.length > 0,
+      credentials: creds,
+      steps: totalSteps,
+      seconds: elapsedSeconds,
+      jevCalls: lastJevCalls,
+      reason,
+      trajectory: lastTrajectory,
+    });
   } finally {
-    effectiveSignal?.removeEventListener("abort", onAbort);
+    await signupSession.close();
     composed.dispose();
-    if (sessionId !== undefined) {
-      const finished = await finishSession(sessionId).catch(() => null);
-      if (finished === null || finished.closed !== true) {
-        await forceFinishSession(sessionId).catch(() => undefined);
-      }
-    }
-    await browser.close({ cancelStart: true }).catch(() => undefined);
   }
 }
 
