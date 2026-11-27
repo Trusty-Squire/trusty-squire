@@ -15,6 +15,7 @@ import {
   assertIsolatedSessionPath,
   clearSignupSession,
   connectSignupProfile,
+  createSignupSession,
   DEFAULT_MAX_SIGNUP_HANDOFFS,
   ensureSignupSession,
   readSignupSession,
@@ -26,7 +27,9 @@ import {
   writeSignupSession,
   type CapturedCredential,
   type EmbeddedBrowserLike,
+  type SafeControlV2,
   type SignupHandoffEvent,
+  type SignupRunRuntime,
   type SignupSession,
 } from "../signup.js";
 
@@ -120,6 +123,7 @@ describe("package subpath export metadata and runtime smoke test", () => {
         `import * as mod from "@trusty-squire/mcp/signup";
          const required = [
            "connectSignupProfile",
+           "createSignupSession",
            "ensureSignupSession",
            "runSignup",
            "readSignupSession",
@@ -1777,5 +1781,494 @@ describe("runSignup onHandoff pause-and-resume on same live browser session", ()
     expect(secondArgs).toEqual([10, 4]);
     expect(secResult.status).toBe("budget_exceeded");
     expect(secResult.reason).toMatch(/maxSeconds/i);
+  });
+});
+
+describe("createSignupSession stateful pause/resume handle", () => {
+  it("keeps browser and provision session alive across non-terminal pauses, resumes with same session_id, redacts observation, and closes idempotently once", async () => {
+    const appProfileDir = join(tempDir, "stateful-resume-profile");
+    const rawSecret = "sk_live_STATEFUL_SESSION_KEY_555666";
+    const captured: CapturedCredential[] = [];
+    const progressEvents: Array<{ message: string; data?: Record<string, unknown> }> = [];
+    const driveCalls: Array<Record<string, unknown>> = [];
+    const initialFacts = { email: "dev@example.test" };
+    const turn2Facts = { project: "grunt" };
+
+    const browser = makeFakeBrowser();
+    const createBrowser = vi.fn(() => browser as unknown as BrowserController);
+    const startHarnessSession = vi.fn(async (opts: { serviceUrl: string }) => ({
+      session_id: "sess-stateful-1",
+      url: opts.serviceUrl,
+    }));
+    const finishSession = vi.fn(async () => ({
+      session_id: "sess-stateful-1",
+      operation_id: "op-stateful",
+      execution: "completed" as const,
+      mutation: "not_dispatched" as const,
+      cleanup: "closed" as const,
+      closed: true,
+      url: "https://app.example.test/api-keys",
+    }));
+    const forceFinishSession = vi.fn(async () => true);
+
+    const session = await createSignupSession(
+      {
+        url: "https://app.example.test/api-keys",
+        profileDir: appProfileDir,
+        session: SAMPLE_SESSION,
+        facts: initialFacts,
+        onCredentialCaptured: (cred) => {
+          captured.push(cred);
+        },
+        onProgress: (message, data) => {
+          progressEvents.push({ message, ...(data !== undefined ? { data } : {}) });
+        },
+      },
+      {
+        createBrowser,
+        startHarnessSession,
+        finishSession,
+        forceFinishSession,
+        observedHostsForSession: () => ["app.example.test"],
+        currentProvisionUrl: () => "https://app.example.test/api-keys?modal=open",
+        runDrive: async (args, _api, context, deps) => {
+          driveCalls.push({ ...args });
+          if (driveCalls.length === 1) {
+            await deps!.startSession({ serviceUrl: args.url! });
+            return makeHandoff({
+              status: "needs_value",
+              session_id: "sess-stateful-1",
+              field: "api_key_name",
+              question: "Name your API key",
+              observation: {
+                session_id: "sess-stateful-1",
+                url: "https://app.example.test/api-keys?modal=open",
+                safe_table: [["@key-name", "t", "Key name|s=r"]] as unknown as SafeControlV2[],
+                dom: "raw DOM text that must be stripped from SignupObservationSummary",
+              },
+              steps: 2,
+              seconds: 1.2,
+              jev_calls: 1,
+            });
+          }
+          if (driveCalls.length === 2) {
+            return makeHandoff({
+              status: "low_confidence",
+              session_id: "sess-stateful-1",
+              question: "Pick key scope",
+              options: { full: "Full access", read: "Read only" },
+              probabilities: { full: 0.52, read: 0.48 },
+              observation: {
+                session_id: "sess-stateful-1",
+                url: "https://app.example.test/api-keys?modal=open",
+                safe_table: [
+                  ["@scope-full", "r", "Full access"],
+                  ["@scope-read", "r", "Read only"],
+                ] as unknown as SafeControlV2[],
+              },
+              steps: 1,
+              seconds: 0.8,
+              jev_calls: 2,
+            });
+          }
+          await context!.persistCredentials!({
+            session_id: "sess-stateful-1",
+            url: "https://app.example.test/api-keys",
+            credentials: { api_key: rawSecret },
+          });
+          await context!.notifyUser!(`Captured ${rawSecret}`, { leaked: rawSecret });
+          return makeHandoff({
+            status: "complete",
+            session_id: "sess-stateful-1",
+            done: `Created ${rawSecret}`,
+            observation: {
+              session_id: "sess-stateful-1",
+              url: "https://app.example.test/api-keys",
+              safe_table: [["@copy", "b", `Copy ${rawSecret}`]] as unknown as SafeControlV2[],
+              dom: `Secret dom ${rawSecret}`,
+            },
+            steps: 2,
+            seconds: 1.5,
+            jev_calls: 3,
+          });
+        },
+      },
+    );
+
+    expect(createBrowser).toHaveBeenCalledTimes(1);
+    expect(session.sessionId).toBeNull();
+    expect(session.closed).toBe(false);
+
+    // Turn 1: pauses with needs_value -> browser & provision session stay open!
+    const turn1 = await session.drive({ goal: "Create an API key" });
+    expect(turn1.status).toBe("needs_input");
+    expect(turn1.driveStatus).toBe("needs_value");
+    expect(turn1.field).toBe("api_key_name");
+    expect(turn1.observation).toEqual({
+      url: "https://app.example.test/api-keys?modal=open",
+      safe_table: [["@key-name", "t", "Key name|s=r"]],
+    });
+    expect("dom" in (turn1.observation ?? {})).toBe(false);
+    expect(session.sessionId).toBe("sess-stateful-1");
+    expect(finishSession).not.toHaveBeenCalled();
+    expect(forceFinishSession).not.toHaveBeenCalled();
+    expect(browser.close).not.toHaveBeenCalled();
+
+    // Turn 2: resumes on exact same session_id with answer + facts -> pauses with low_confidence.
+    const turn2 = await session.drive({
+      goal: "Create an API key",
+      answer: "Grunt Key",
+      facts: turn2Facts,
+    });
+    expect(turn2.status).toBe("low_confidence");
+    expect(turn2.options).toEqual({ full: "Full access", read: "Read only" });
+    expect(finishSession).not.toHaveBeenCalled();
+    expect(forceFinishSession).not.toHaveBeenCalled();
+    expect(browser.close).not.toHaveBeenCalled();
+
+    // Turn 3: answers low_confidence choice on exact same session_id -> completes & redacts!
+    const turn3 = await session.drive({
+      goal: "Create an API key",
+      answer: "full",
+    });
+    expect(turn3.status).toBe("completed");
+    expect(turn3.captured).toBe(true);
+    expect(captured).toHaveLength(1);
+    expect(captured[0]?.fields).toEqual({ api_key: rawSecret });
+    expect(JSON.stringify(turn3)).not.toContain(rawSecret);
+    expect(turn3.observation?.safe_table).toEqual([["@copy", "b", "Copy [REDACTED]"]]);
+    expect("dom" in (turn3.observation ?? {})).toBe(false);
+    expect(JSON.stringify(progressEvents)).not.toContain(rawSecret);
+    expect(progressEvents[0]?.message).toContain("[REDACTED]");
+
+    // Browser & harness session started only ONCE across all 3 turns.
+    expect(browser.start).toHaveBeenCalledTimes(1);
+    expect(startHarnessSession).toHaveBeenCalledTimes(1);
+    expect(driveCalls).toHaveLength(3);
+    expect(driveCalls[0]).toMatchObject({
+      url: "https://app.example.test/api-keys",
+      facts: { email: "dev@example.test" },
+    });
+    expect(driveCalls[0]?.session_id).toBeUndefined();
+    expect(driveCalls[1]).toMatchObject({
+      session_id: "sess-stateful-1",
+      answer: "Grunt Key",
+      facts: { email: "dev@example.test", project: "grunt" },
+    });
+    expect(driveCalls[1]?.url).toBeUndefined();
+    expect(driveCalls[2]).toMatchObject({
+      session_id: "sess-stateful-1",
+      answer: "full",
+      facts: { email: "dev@example.test", project: "grunt" },
+    });
+    expect(driveCalls[2]?.url).toBeUndefined();
+
+    // Caller facts objects must never be mutated.
+    expect(initialFacts).toEqual({ email: "dev@example.test" });
+    expect(turn2Facts).toEqual({ project: "grunt" });
+
+    // Even after completion, caller owns close(); concurrent/repeated close() tears down exactly once.
+    expect(finishSession).not.toHaveBeenCalled();
+    expect(browser.close).not.toHaveBeenCalled();
+    await Promise.all([session.close(), session.close()]);
+    await session.close();
+
+    expect(session.closed).toBe(true);
+    expect(session.sessionId).toBeNull();
+    expect(finishSession).toHaveBeenCalledTimes(1);
+    expect(finishSession).toHaveBeenCalledWith("sess-stateful-1");
+    expect(forceFinishSession).not.toHaveBeenCalled();
+    expect(browser.close).toHaveBeenCalledTimes(1);
+    expect(browser.close).toHaveBeenCalledWith({ cancelStart: true });
+
+    // Further calls on a closed session reject cleanly.
+    await expect(session.drive({ goal: "After close" })).rejects.toSatisfy(
+      (err: unknown) => err instanceof SignupConfigError && err.code === "session_closed",
+    );
+    await expect(session.click("@btn")).rejects.toSatisfy(
+      (err: unknown) => err instanceof SignupConfigError && err.code === "session_closed",
+    );
+    await expect(session.observe()).rejects.toSatisfy(
+      (err: unknown) => err instanceof SignupConfigError && err.code === "session_closed",
+    );
+  });
+
+  it("keeps browser and session open on budget, evaluate_timeout, awaiting_human, stuck, and no_progress statuses", async () => {
+    const appProfileDir = join(tempDir, "stateful-nonterminal-profile");
+    const statuses = [
+      "budget",
+      "evaluate_timeout",
+      "awaiting_human",
+      "stuck",
+      "no_progress",
+    ] as const;
+    const browser = makeFakeBrowser();
+    const finishSession = vi.fn(async () => ({
+      session_id: "sess-nonterm",
+      operation_id: "op-nonterm",
+      execution: "completed" as const,
+      mutation: "not_dispatched" as const,
+      cleanup: "closed" as const,
+      closed: true,
+      url: "https://app.example.test/signup",
+    }));
+    const forceFinishSession = vi.fn(async () => true);
+    let callIndex = 0;
+
+    const session = await createSignupSession(
+      {
+        url: "https://app.example.test/signup",
+        profileDir: appProfileDir,
+        session: SAMPLE_SESSION,
+        onCredentialCaptured: vi.fn(),
+      },
+      {
+        createBrowser: () => browser as unknown as BrowserController,
+        startHarnessSession: async (opts) => ({ session_id: "sess-nonterm", url: opts.serviceUrl }),
+        finishSession,
+        forceFinishSession,
+        runDrive: async (args, _api, _ctx, deps) => {
+          const status = statuses[callIndex]!;
+          callIndex += 1;
+          if (args.session_id === undefined) {
+            await deps!.startSession({ serviceUrl: args.url! });
+          }
+          return makeHandoff({ session_id: "sess-nonterm", status });
+        },
+      },
+    );
+
+    for (const status of statuses) {
+      const res = await session.drive({ goal: "Continue signup" });
+      expect(res.driveStatus).toBe(status);
+      expect(finishSession).not.toHaveBeenCalled();
+      expect(forceFinishSession).not.toHaveBeenCalled();
+      expect(browser.close).not.toHaveBeenCalled();
+    }
+
+    await session.close();
+    expect(finishSession).toHaveBeenCalledTimes(1);
+    expect(browser.close).toHaveBeenCalledTimes(1);
+  });
+
+  it("supports safe click(ref) and observe() on the active session without closing, and strips dom / redacts secrets", async () => {
+    const appProfileDir = join(tempDir, "stateful-click-observe-profile");
+    const secret = "sk_live_CLICK_OBSERVE_SECRET_112233";
+    const browser = makeFakeBrowser();
+    const finishSession = vi.fn(async () => ({
+      session_id: "sess-click",
+      operation_id: "op-click",
+      execution: "completed" as const,
+      mutation: "not_dispatched" as const,
+      cleanup: "closed" as const,
+      closed: true,
+      url: "https://app.example.test/oauth/consent",
+    }));
+    const actMock = vi.fn(async (sid, action) => {
+      expect(sid).toBe("sess-click");
+      expect(action).toEqual({ kind: "click", target: "@accept-terms" });
+      return {
+        session_id: sid,
+        url: "https://app.example.test/oauth/approved",
+        safe_table: [["@continue", "b", `Continue ${secret}`]] as unknown as NonNullable<
+          DriveHandoff["observation"]
+        >["safe_table"],
+        navigated: true as const,
+        dom: `Full raw DOM ${secret}`,
+      };
+    });
+    const observeMock = vi.fn(async (sid) => ({
+      session_id: sid,
+      url: "https://app.example.test/oauth/consent",
+      safe_table: [["@accept-terms", "c", `Accept terms ${secret}`]] as unknown as NonNullable<
+        DriveHandoff["observation"]
+      >["safe_table"],
+      dom: `Raw DOM ${secret}`,
+    }));
+
+    const session = await createSignupSession(
+      {
+        url: "https://app.example.test/oauth/consent",
+        profileDir: appProfileDir,
+        session: SAMPLE_SESSION,
+        onCredentialCaptured: vi.fn(),
+      },
+      {
+        createBrowser: () => browser as unknown as BrowserController,
+        startHarnessSession: async (opts) => ({ session_id: "sess-click", url: opts.serviceUrl }),
+        finishSession,
+        act: actMock as unknown as NonNullable<SignupRunRuntime["act"]>,
+        observe: observeMock as unknown as NonNullable<SignupRunRuntime["observe"]>,
+        runDrive: async (args, _api, context, deps) => {
+          await deps!.startSession({ serviceUrl: args.url! });
+          await context!.persistLogin!({
+            sessionId: "sess-click",
+            url: args.url!,
+            login: "dev@example.test",
+            password: secret,
+          });
+          return makeHandoff({ status: "low_confidence", session_id: "sess-click" });
+        },
+      },
+    );
+
+    // Calling click/observe before the first drive() fails clearly.
+    await expect(session.click("@accept-terms")).rejects.toSatisfy(
+      (err: unknown) => err instanceof SignupConfigError && err.code === "session_not_started",
+    );
+    await expect(session.observe()).rejects.toSatisfy(
+      (err: unknown) => err instanceof SignupConfigError && err.code === "session_not_started",
+    );
+
+    await session.drive({ goal: "Sign up" });
+
+    const observed = await session.observe();
+    expect(observeMock).toHaveBeenCalledWith("sess-click", "compact");
+    expect(observed).toEqual({
+      url: "https://app.example.test/oauth/consent",
+      safe_table: [["@accept-terms", "c", "Accept terms [REDACTED]"]],
+    });
+    expect("dom" in observed).toBe(false);
+    expect(JSON.stringify(observed)).not.toContain(secret);
+
+    const clicked = await session.click("@accept-terms");
+    expect(actMock).toHaveBeenCalledTimes(1);
+    expect(clicked).toEqual({
+      url: "https://app.example.test/oauth/approved",
+      safe_table: [["@continue", "b", "Continue [REDACTED]"]],
+      navigated: true,
+    });
+    expect("dom" in clicked).toBe(false);
+    expect(JSON.stringify(clicked)).not.toContain(secret);
+    expect(finishSession).not.toHaveBeenCalled();
+    expect(browser.close).not.toHaveBeenCalled();
+
+    await session.close();
+    expect(finishSession).toHaveBeenCalledTimes(1);
+    expect(browser.close).toHaveBeenCalledTimes(1);
+  });
+
+  it("tears down provision session and browser exactly once when session AbortSignal fires (and when close() is also called)", async () => {
+    const appProfileDir = join(tempDir, "stateful-abort-profile");
+    const controller = new AbortController();
+    const browser = makeFakeBrowser();
+    const finishSession = vi.fn(async () => ({
+      session_id: "sess-abort-once",
+      operation_id: "op-abort-once",
+      execution: "completed" as const,
+      mutation: "not_dispatched" as const,
+      cleanup: "closed" as const,
+      closed: true,
+      url: "https://app.example.test/signup",
+    }));
+    const forceFinishSession = vi.fn(async () => true);
+
+    const session = await createSignupSession(
+      {
+        url: "https://app.example.test/signup",
+        profileDir: appProfileDir,
+        session: SAMPLE_SESSION,
+        signal: controller.signal,
+        onCredentialCaptured: vi.fn(),
+      },
+      {
+        createBrowser: () => browser as unknown as BrowserController,
+        startHarnessSession: async (opts) => ({
+          session_id: "sess-abort-once",
+          url: opts.serviceUrl,
+        }),
+        finishSession,
+        forceFinishSession,
+        runDrive: async (args, _api, context, deps) => {
+          await deps!.startSession({ serviceUrl: args.url! });
+          controller.abort(new Error("session aborted by caller"));
+          if (context?.signal?.aborted) throw context.signal.reason;
+          return makeHandoff({ session_id: "sess-abort-once" });
+        },
+      },
+    );
+
+    const result = await session.drive({ goal: "Sign up" });
+    expect(result.status).toBe("cancelled");
+    expect(result.reason).toContain("session aborted by caller");
+    expect(session.closed).toBe(true);
+
+    // Calling close() again in a finally block must remain strictly idempotent.
+    await session.close();
+    expect(finishSession).toHaveBeenCalledTimes(1);
+    expect(finishSession).toHaveBeenCalledWith("sess-abort-once");
+    expect(forceFinishSession).not.toHaveBeenCalled();
+    expect(browser.close).toHaveBeenCalledTimes(1);
+    expect(browser.close).toHaveBeenCalledWith({ cancelStart: true });
+  });
+
+  it("falls back to forceFinishSession when finishSession fails, and enforces vault & profile/session isolation", async () => {
+    const xdgDir = join(tempDir, "xdg-config");
+    vi.stubEnv("XDG_CONFIG_HOME", xdgDir);
+
+    // Personal profile and personal session store remain forbidden on createSignupSession.
+    await expect(
+      createSignupSession({
+        url: "https://app.example.test/signup",
+        profileDir: CHROME_PROFILE_DIR,
+        session: SAMPLE_SESSION,
+        onCredentialCaptured: vi.fn(),
+      }),
+    ).rejects.toThrow(SignupProfileIsolationError);
+
+    await expect(
+      createSignupSession({
+        url: "https://app.example.test/signup",
+        profileDir: join(tempDir, "isolated-profile"),
+        sessionPath: join(xdgDir, "trusty-squire", "session.json"),
+        onCredentialCaptured: vi.fn(),
+      }),
+    ).rejects.toThrow(SignupSessionIsolationError);
+
+    // Hosted vault writes remain forbidden and forceFinishSession runs if finishSession fails.
+    const browser = makeFakeBrowser();
+    const storeCredentialSpy = vi.fn();
+    const finishSession = vi.fn(async () => {
+      throw new Error("finish hung");
+    });
+    const forceFinishSession = vi.fn(async () => true);
+
+    const session = await createSignupSession(
+      {
+        url: "https://app.example.test/signup",
+        profileDir: join(tempDir, "isolated-profile"),
+        session: SAMPLE_SESSION,
+        onCredentialCaptured: vi.fn(),
+      },
+      {
+        createBrowser: () => browser as unknown as BrowserController,
+        createApiClient: () =>
+          ({
+            setRequestingAgent: vi.fn(),
+            storeCredential: storeCredentialSpy,
+          }) as unknown as ApiClient,
+        startHarnessSession: async (opts) => ({
+          session_id: "sess-force-close",
+          url: opts.serviceUrl,
+        }),
+        finishSession,
+        forceFinishSession,
+        runDrive: async (args, api, _ctx, deps) => {
+          await expect(
+            api!.storeCredential({ service: "example", value: "sk_live_forbidden" }),
+          ).rejects.toThrow(/forbids writing credentials/i);
+          expect(storeCredentialSpy).not.toHaveBeenCalled();
+          await deps!.startSession({ serviceUrl: args.url! });
+          return makeHandoff({ status: "needs_value", session_id: "sess-force-close" });
+        },
+      },
+    );
+
+    await session.drive({ goal: "Sign up" });
+    await session.close();
+    expect(finishSession).toHaveBeenCalledTimes(1);
+    expect(forceFinishSession).toHaveBeenCalledTimes(1);
+    expect(forceFinishSession).toHaveBeenCalledWith("sess-force-close");
+    expect(browser.close).toHaveBeenCalledTimes(1);
   });
 });

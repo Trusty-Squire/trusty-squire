@@ -1,5 +1,11 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.2.0-rc1 (2026-11-26)
+
+- Export stateful `createSignupSession` (`EmbeddedSignupSession`) from `@trusty-squire/mcp/signup` with multi-turn `drive()`, safe `click(ref)` / `observe()`, redacted `observation` summaries on `SignupResult`, and idempotent `close()` / `AbortSignal` teardown while keeping Chrome and open dialogs alive across pauses.
+- Keep embedded signup browser sessions open across `onHandoff` resumes in `runSignup` (#1199).
+- Fix signup enrollment guidance, OAuth returns, and verifier `TMPDIR` (#1198).
+
 ## 1.2.0-rc0 (2026-11-26)
 
 - Export `@trusty-squire/mcp/signup` so apps like Grunt can embed Trusty Squire's signup flow (#1196).

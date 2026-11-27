@@ -20,7 +20,11 @@ export type SignupConfigErrorCode =
   | "session_required"
   | "callback_required"
   | "invalid_url"
-  | "goal_required";
+  | "goal_required"
+  | "session_closed"
+  | "session_not_started"
+  | "session_busy"
+  | "invalid_target";
 
 export class SignupConfigError extends Error {
   constructor(
