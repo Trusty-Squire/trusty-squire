@@ -638,7 +638,6 @@ export async function loginWithOAuth(
     );
   };
   let observedReturn: { page: Page; url: string } | null = null;
-  let observedProductContinuation: { page: Page; url: string } | null = null;
   let onTransientNavigation: ((frame: Frame) => void) | null = null;
   let humanHandoffStarted = false;
   const startHumanHandoff = (): void => {
@@ -670,7 +669,31 @@ export async function loginWithOAuth(
       ? []
       : [expectedReturnChain[expectedReturnChain.length - 1]!];
   const matchesExpectedReturn = (url: string): boolean =>
-    expectedReturnUrls().some((expected) => isOAuthReturnUrl(browser, url, expected));
+    expectedReturnUrls().some((expected) => oauthRedirectTargetMatches(url, expected));
+  const redirectedReturns = new WeakMap<Page, string>();
+  const matchesReturn = (page: Page, url: string): boolean =>
+    matchesExpectedReturn(url) || redirectedReturns.get(page) === url;
+  const recordNavigationRequest = (page: Page, request: Request): void => {
+    const url = request.url();
+    captureExpectedReturnUrl(url);
+    redirectedReturns.delete(page);
+    if (matchesExpectedReturn(url)) observedCallbackDenial ??= denialError(url);
+    // A single declared callback may issue an HTTP redirect before it ever
+    // commits. Use the browser's request chain to prove that relationship.
+    // If OAuth declared a nested destination, only that destination qualifies.
+    if (expectedReturnChain?.length !== 1) return;
+    const origin = safeOrigin(url);
+    let denial = denialError(url);
+    for (let prior = request.redirectedFrom(); prior !== null; prior = prior.redirectedFrom()) {
+      const priorUrl = prior.url();
+      if (safeOrigin(priorUrl) !== origin) break;
+      denial ??= denialError(priorUrl);
+      if (!matchesExpectedReturn(priorUrl)) continue;
+      if (denial === null) redirectedReturns.set(page, url);
+      else observedCallbackDenial ??= denial;
+      break;
+    }
+  };
   const attemptPage = (page: Page): boolean => page === product || page === popupCapture.page;
   // Playwright reports a popup's initial navigation before it can associate
   // the request with a frame. Keep that request inert until the opener's
@@ -687,7 +710,7 @@ export async function loginWithOAuth(
           attemptPage(page) &&
           browser.ownedPages.has(page)
         ) {
-          captureExpectedReturnUrl(request.url());
+          recordNavigationRequest(page, request);
           framelessNavigationRequests.delete(request);
         }
       } catch {
@@ -698,8 +721,9 @@ export async function loginWithOAuth(
   };
   const onContextRequest = (request: Request): void => {
     if (!actionStarted || !request.isNavigationRequest()) return;
+    let frame: Frame;
     try {
-      const frame = request.frame();
+      frame = request.frame();
       if (
         frame.parentFrame() !== null ||
         !attemptPage(frame.page()) ||
@@ -715,7 +739,7 @@ export async function loginWithOAuth(
       framelessNavigationRequests.add(request);
       return;
     }
-    captureExpectedReturnUrl(request.url());
+    recordNavigationRequest(frame.page(), request);
   };
   let resolveProductNavigation: () => void = () => undefined;
   const productNavigationPromise = new Promise<void>((resolve) => {
@@ -732,28 +756,13 @@ export async function loginWithOAuth(
       popupReachedProvider ||=
         consentProvider !== undefined && oauthProviderForUrl(url) === consentProvider;
     }
-    const priorReturn = observedReturn;
     captureExpectedReturnUrl(url);
-    if (matchesExpectedReturn(url)) observedCallbackDenial ??= denialError(url);
-    if (matchesExpectedReturn(url) && oauthErrorFromReturnUrl(url) === null) {
+    if (matchesReturn(page, url)) observedCallbackDenial ??= denialError(url);
+    if (matchesReturn(page, url) && observedCallbackDenial === null) {
       observedReturn = { page, url };
       return;
     }
-    // An exact, attempt-owned callback may immediately redirect onward to
-    // the product. Preserve that causal edge instead of demanding that the
-    // callback pathname remain the final visible URL.
-    if (
-      priorReturn?.page === page &&
-      safeOrigin(url) === productOrigin &&
-      oauthErrorFromReturnUrl(url) === null
-    ) {
-      observedProductContinuation = { page, url };
-      return;
-    }
-    if (priorReturn?.page === page) {
-      observedReturn = null;
-      observedProductContinuation = null;
-    }
+    if (observedReturn?.page === page) observedReturn = null;
   };
   const onProductNavigation = (frame: Frame): void => {
     if (!actionStarted || frame !== product.mainFrame()) return;
@@ -761,15 +770,14 @@ export async function loginWithOAuth(
     if (
       observedReturn?.page !== product &&
       frame.url() !== productUrl &&
-      !matchesExpectedReturn(frame.url())
+      !matchesReturn(product, frame.url())
     ) {
       observedReturn = null;
-      observedProductContinuation = null;
     }
     productNavigated = true;
     // A reload or route change on the relying party can precede the popup.
     // Only a provider/return navigation proves the opener owns this flow.
-    if (safeOrigin(frame.url()) !== productOrigin || matchesExpectedReturn(frame.url())) {
+    if (safeOrigin(frame.url()) !== productOrigin || matchesReturn(product, frame.url())) {
       resolveProductNavigation();
     }
   };
@@ -777,19 +785,13 @@ export async function loginWithOAuth(
     // The creation-attributed popup can finish a reused-session redirect
     // before the initiating click resolves and assigns providerPage. The
     // outer deadline must inspect that same owned source in the meantime.
-    if (
-      observedProductContinuation !== null &&
-      !observedProductContinuation.page.isClosed() &&
-      observedProductContinuation.page.url() === observedProductContinuation.url
-    ) {
-      return observedProductContinuation.page;
-    }
+    if (observedCallbackDenial !== null) return null;
     for (const page of [product, providerPage ?? popupCapture.page]) {
       if (
         page === null ||
         page.isClosed() ||
         (page === product ? !productNavigated : !transientNavigated) ||
-        !matchesExpectedReturn(page.url()) ||
+        !matchesReturn(page, page.url()) ||
         oauthErrorFromReturnUrl(page.url()) !== null
       ) {
         continue;
@@ -832,12 +834,7 @@ export async function loginWithOAuth(
   const completionEvidence = async (): Promise<OAuthCompletionEvidence | null> => {
     if (!actionStarted) return null;
     const returnedPage = completionPage();
-    if (returnedPage !== null) {
-      const url = returnedPage.url();
-      if (!returnedPage.isClosed() && returnedPage.url() === url && matchesExpectedReturn(url)) {
-        return { page: returnedPage };
-      }
-    }
+    if (returnedPage !== null) return { page: returnedPage };
     if (observedReturn !== null && observedReturn.page.isClosed()) {
       return { page: observedReturn.page, terminal: true, url: observedReturn.url };
     }
@@ -1064,7 +1061,6 @@ export async function loginWithOAuth(
     if (consentProvider === undefined) {
       settled = await waitForOAuthLifecycle(
         browser,
-        expectedReturnUrls,
         Math.min(remainingBudgetMs(), 12_000),
         completionPage,
         hasTerminalCompletion,
@@ -1075,7 +1071,6 @@ export async function loginWithOAuth(
         const remaining = oauthDeadline - Date.now();
         settled = await waitForOAuthLifecycle(
           browser,
-          expectedReturnUrls,
           Math.min(1_000, remaining),
           completionPage,
           shouldStopWaiting,
@@ -1280,17 +1275,8 @@ function restoreProductPageWhenOAuthPageCloses(
   });
 }
 
-function isOAuthReturnUrl(
-  browser: BrowserController,
-  candidateUrl: string,
-  expectedReturnUrl: string | null,
-): boolean {
-  return expectedReturnUrl !== null && oauthRedirectTargetMatches(candidateUrl, expectedReturnUrl);
-}
-
 export async function waitForOAuthLifecycle(
   browser: BrowserController,
-  expectedReturnUrls: () => readonly string[],
   timeoutMs: number,
   completionPage: () => Page | null,
   shouldStopWaiting: () => boolean,
@@ -1304,30 +1290,19 @@ export async function waitForOAuthLifecycle(
       // A return to the relying party is the OAuth completion signal. A
       // dashboard can keep polling or streaming forever, so networkidle is
       // not a valid requirement for a completed OAuth redirect.
-      const returnedUrl = url;
       const ready = (
         await waitForPageReady(returnedPage, {
           kind: "document",
           capMs: Math.max(1, deadline - Date.now()),
         })
       ).ready;
-      if (
-        !ready ||
-        returnedPage.isClosed() ||
-        !expectedReturnUrls().some((expected) =>
-          isOAuthReturnUrl(browser, returnedPage.url(), expected),
-        )
-      ) {
+      if (!ready || completionPage() !== returnedPage) {
         return null;
       }
       // Require the return URL to survive one event-loop turn so a transient
       // callback hop is never reported as the final product page.
       await browser.sleep(Math.min(50, Math.max(1, deadline - Date.now())));
-      return !returnedPage.isClosed() &&
-        returnedPage.url() === returnedUrl &&
-        expectedReturnUrls().some((expected) =>
-          isOAuthReturnUrl(browser, returnedPage.url(), expected),
-        )
+      return completionPage() === returnedPage && returnedPage.url() === url
         ? returnedPage
         : null;
     }
