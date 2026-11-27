@@ -416,10 +416,23 @@ export function isCaptchaDocumentEngaged(session: Session, url: string): boolean
 }
 
 function hasPendingOAuthAttempt(browser: BrowserController): boolean {
-  if (browser.activeOAuthAttempt != null) return true;
-  const product = browser.oauthProductPage;
-  const provider = browser.oauthProviderPage;
-  return product != null && !product.isClosed() && provider != null && !provider.isClosed();
+  // Only a live activeOAuthAttempt means OAuth is still running. A completed
+  // popup sign-in clears activeOAuthAttempt while intentionally keeping
+  // oauthProductPage and oauthProviderPage open for the returned tab, so those
+  // fields alone must not suppress CAPTCHA auto-solve for the rest of the session.
+  const attempt = browser.activeOAuthAttempt;
+  if (attempt == null) return false;
+  if (typeof attempt.productPage?.isClosed === "function" && attempt.productPage.isClosed()) {
+    return false;
+  }
+  if (
+    attempt.providerPage != null &&
+    typeof attempt.providerPage.isClosed === "function" &&
+    attempt.providerPage.isClosed()
+  ) {
+    return false;
+  }
+  return true;
 }
 
 /**
@@ -680,16 +693,20 @@ async function runDetachedTokenFetch(session: Session, page?: Page): Promise<str
       return challengePresent ? "unsupported_variant" : "no_challenge";
     }
     // Defer paid purchases for invisible background widgets on documents the
-    // agent has not engaged yet (for example, a signup page's invisible anchor
-    // before a form submit when the agent leaves through OAuth).
+    // agent has not engaged yet when no challenge frame is visibly rendered.
+    // A genuinely visible blocking challenge grid still auto-solves even on an
+    // untouched page.
     const currentUrl = safeDocumentUrl(session, page) ?? "";
     const documentEngaged = isCaptchaDocumentEngaged(session, currentUrl);
     if (!documentEngaged) {
       const unengagedInvisibleRecaptcha =
         (det.recaptcha?.hasInvisibleAnchor === true || det.recaptcha?.anchorSize === "invisible") &&
-        det.recaptcha?.hasVisibleCheckboxAnchor !== true;
+        det.recaptcha?.hasVisibleCheckboxAnchor !== true &&
+        det.recaptcha?.challengeFrameVisible !== true;
+      const hcaptchaChallengeVisible = det.hcaptchaChallengeVisible ?? det.challengeRendered;
       const unengagedInvisibleHcaptcha =
         det.variant === "hcaptcha" &&
+        hcaptchaChallengeVisible !== true &&
         (await getHcaptchaSolveContext(session.browser, page).catch(() => ({ invisible: false })))
           .invisible === true;
       if (unengagedInvisibleRecaptcha || unengagedInvisibleHcaptcha) {

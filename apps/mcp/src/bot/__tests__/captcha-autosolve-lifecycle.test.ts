@@ -26,6 +26,7 @@ const h = vi.hoisted(() => ({
   variantTokenPresent: false,
   challengeRendered: true,
   recaptchaEvidence: undefined as CaptchaModule.RecaptchaDetectEvidence | undefined,
+  hcaptchaChallengeVisible: undefined as boolean | undefined,
   hcaptchaInvisible: false,
   solverAvailable: true,
   gateFrames: [] as Array<{ url: () => string; evaluate: ReturnType<typeof vi.fn> }>,
@@ -66,6 +67,9 @@ vi.mock("../captcha.js", async (importOriginal) => ({
     variant: h.variant,
     challengeRendered: h.challengeRendered,
     ...(h.recaptchaEvidence === undefined ? {} : { recaptcha: h.recaptchaEvidence }),
+    ...(h.hcaptchaChallengeVisible === undefined
+      ? {}
+      : { hcaptchaChallengeVisible: h.hcaptchaChallengeVisible }),
   }),
   hasHcaptchaResponseTokenWithCompat: async () => h.variantTokenPresent,
   hasCaptchaResponseTokenForVariant: async () => h.variantTokenPresent,
@@ -166,6 +170,7 @@ beforeEach(() => {
   h.variantTokenPresent = false;
   h.challengeRendered = true;
   h.recaptchaEvidence = undefined;
+  h.hcaptchaChallengeVisible = undefined;
   h.hcaptchaInvisible = false;
   h.solverAvailable = true;
   auditMock.fn.mockClear();
@@ -424,13 +429,13 @@ describe("attemptOperateCaptchaAutoSolve — Cloudflare Turnstile", () => {
 });
 
 describe("attemptOperateCaptchaAutoSolve — defer unengaged invisible widgets and active OAuth", () => {
-  it("defers invisible reCAPTCHA v2 until the agent engages the document", async () => {
+  it("defers invisible reCAPTCHA v2 without a visible challenge frame until the agent engages the document", async () => {
     const session = fakeSession();
     const page = fakePage(false);
     h.variant = "recaptcha_v2";
     h.challengeRendered = true;
     h.recaptchaEvidence = {
-      challengeFrameVisible: true,
+      challengeFrameVisible: false,
       anchorType: "image",
       anchorSize: "invisible",
       apiRender: "explicit",
@@ -450,11 +455,33 @@ describe("attemptOperateCaptchaAutoSolve — defer unengaged invisible widgets a
     expect(h.solveCalls).toEqual(["recaptcha_v2"]);
   });
 
-  it("defers invisible hCaptcha until the agent engages the document", async () => {
+  it("still solves a visible blocking reCAPTCHA image challenge on an untouched page", async () => {
+    const session = fakeSession();
+    const page = fakePage(false);
+    h.variant = "recaptcha_v2";
+    h.challengeRendered = true;
+    h.recaptchaEvidence = {
+      challengeFrameVisible: true,
+      anchorType: "image",
+      anchorSize: "invisible",
+      apiRender: "explicit",
+      sitekey: "6LftmFkUAAAAADydGEH99T-xmZoK69ErtRCzfVFf",
+      hasVisibleCheckboxAnchor: false,
+      hasInvisibleAnchor: true,
+      hasBadge: true,
+    };
+
+    expect(await attemptOperateCaptchaAutoSolve(session, page)).toBe("fetch_started");
+    await flushDetached();
+    expect(h.solveCalls).toEqual(["recaptcha_v2"]);
+  });
+
+  it("defers invisible hCaptcha without a visible challenge frame until the agent engages the document", async () => {
     const session = fakeSession();
     const page = fakePage(false);
     h.variant = "hcaptcha";
     h.challengeRendered = true;
+    h.hcaptchaChallengeVisible = false;
     h.hcaptchaInvisible = true;
 
     expect(await attemptOperateCaptchaAutoSolve(session, page)).toBe("unengaged_widget");
@@ -462,6 +489,19 @@ describe("attemptOperateCaptchaAutoSolve — defer unengaged invisible widgets a
     expect(h.solveCalls).toEqual([]);
 
     markCaptchaDocumentEngaged(session, PAGE_URL);
+    expect(await attemptOperateCaptchaAutoSolve(session, page)).toBe("fetch_started");
+    await flushDetached();
+    expect(h.solveCalls).toEqual(["hcaptcha"]);
+  });
+
+  it("still solves a visible hCaptcha challenge on an untouched page even when invisible metadata is set", async () => {
+    const session = fakeSession();
+    const page = fakePage(false);
+    h.variant = "hcaptcha";
+    h.challengeRendered = true;
+    h.hcaptchaChallengeVisible = true;
+    h.hcaptchaInvisible = true;
+
     expect(await attemptOperateCaptchaAutoSolve(session, page)).toBe("fetch_started");
     await flushDetached();
     expect(h.solveCalls).toEqual(["hcaptcha"]);
@@ -479,5 +519,22 @@ describe("attemptOperateCaptchaAutoSolve — defer unengaged invisible widgets a
     expect(await attemptOperateCaptchaAutoSolve(session, page)).toBe("oauth_in_progress");
     await flushDetached();
     expect(h.solveCalls).toEqual([]);
+  });
+
+  it("does not block CAPTCHA auto-solve when completed popup OAuth pages remain open", async () => {
+    const session = fakeSession();
+    const openPage = { isClosed: () => false, url: () => PAGE_URL };
+    Object.assign(session.browser, {
+      activeOAuthAttempt: null,
+      oauthProductPage: openPage,
+      oauthProviderPage: openPage,
+    });
+    const page = fakePage(false);
+    h.variant = "hcaptcha";
+    h.challengeRendered = true;
+
+    expect(await attemptOperateCaptchaAutoSolve(session, page)).toBe("fetch_started");
+    await flushDetached();
+    expect(h.solveCalls).toEqual(["hcaptcha"]);
   });
 });

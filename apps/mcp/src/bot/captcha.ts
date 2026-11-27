@@ -635,6 +635,7 @@ export async function detectCaptchaVariant(
   variant: CaptchaVariant;
   challengeRendered: boolean;
   recaptcha?: RecaptchaDetectEvidence;
+  hcaptchaChallengeVisible?: boolean;
 }> {
   if (!page) throw new Error("Browser not started");
   try {
@@ -654,11 +655,11 @@ export async function detectCaptchaVariant(
         });
       };
       const challengeFrameVisible = visible('iframe[src*="recaptcha/api2/bframe"]');
+      const hcaptchaChallengeVisible = visible('iframe[src*="hcaptcha.com"][src*="challenge"]');
       // The image-grid challenge frame: reCAPTCHA's `bframe`, or
       // hCaptcha's challenge frame. Turnstile and score-mode
       // reCAPTCHA never render a grid.
-      const challengeRendered =
-        challengeFrameVisible || visible('iframe[src*="hcaptcha.com"][src*="challenge"]');
+      const challengeRendered = challengeFrameVisible || hcaptchaChallengeVisible;
       let anchorType: string | null = null;
       let anchorSize: string | null = null;
       let sitekey: string | null = null;
@@ -715,7 +716,7 @@ export async function detectCaptchaVariant(
       } else if (present('iframe[src*="hcaptcha.com"]')) {
         variant = "hcaptcha";
       }
-      return { variant, challengeRendered, recaptcha };
+      return { variant, challengeRendered, hcaptchaChallengeVisible, recaptcha };
     });
     // hCaptcha's checkbox and challenge iframes are CHILDREN of the
     // cross-origin hcaptcha.html frame host, and Bluesky renders that host
@@ -803,11 +804,13 @@ export async function detectCaptchaVariant(
         }
       }
     }
+    const hcaptchaChallengeVisible = raw.hcaptchaChallengeVisible || hcaptchaChallengeFrameRendered;
     return {
       variant,
       challengeRendered:
         raw.challengeRendered || recaptcha.challengeFrameVisible || hcaptchaChallengeFrameRendered,
       recaptcha,
+      ...(variant === "hcaptcha" || hcaptchaChallengeVisible ? { hcaptchaChallengeVisible } : {}),
     };
   } catch {
     return { variant: "unknown", challengeRendered: false };
