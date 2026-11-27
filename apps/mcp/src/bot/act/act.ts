@@ -1636,7 +1636,10 @@ async function executeAct(
     action.kind === "select" ||
     action.kind === "press"
   ) {
-    markCaptchaDocumentEngaged(session, actionPageAfter?.url() ?? browser.currentUrl());
+    markCaptchaDocumentEngaged(
+      session,
+      typeof actionPageAfter?.url === "function" ? actionPageAfter.url() : undefined,
+    );
   }
   // `detail:"none"` returns a minimal ack (the action ran; no perception emitted)
   // so multi-field fills don't each echo the page. The host must call

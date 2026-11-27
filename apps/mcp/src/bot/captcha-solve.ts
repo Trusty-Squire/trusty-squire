@@ -55,7 +55,7 @@ export async function runOperateCaptchaSolve(
   } = {},
 ): Promise<{ outcome: string; checkbox?: CaptchaSolveResult }> {
   const page = options.page ?? session.browser.page ?? undefined;
-  markCaptchaDocumentEngaged(session, page?.url() ?? session.browser.currentUrl());
+  markCaptchaDocumentEngaged(session, safeDocumentUrl(session, page));
   const checkbox = options.pressCheckbox
     ? await (
         options.pressCheckboxChallenge ??
@@ -397,8 +397,16 @@ function autoSolveState(session: Session): AutoSolveState {
   return fresh;
 }
 
+function safeDocumentUrl(session: Session, page?: Page): string | undefined {
+  const pageUrl = typeof page?.url === "function" ? page.url() : undefined;
+  if (pageUrl) return pageUrl;
+  return typeof session.browser?.currentUrl === "function"
+    ? session.browser.currentUrl()
+    : undefined;
+}
+
 export function markCaptchaDocumentEngaged(session: Session, url?: string): void {
-  const current = url ?? session.browser.currentUrl();
+  const current = url ?? safeDocumentUrl(session);
   if (current) autoSolveState(session).engagedDocumentUrl = current;
 }
 
@@ -674,7 +682,7 @@ async function runDetachedTokenFetch(session: Session, page?: Page): Promise<str
     // Defer paid purchases for invisible background widgets on documents the
     // agent has not engaged yet (for example, a signup page's invisible anchor
     // before a form submit when the agent leaves through OAuth).
-    const currentUrl = page?.url() ?? session.browser.currentUrl();
+    const currentUrl = safeDocumentUrl(session, page) ?? "";
     const documentEngaged = isCaptchaDocumentEngaged(session, currentUrl);
     if (!documentEngaged) {
       const unengagedInvisibleRecaptcha =
