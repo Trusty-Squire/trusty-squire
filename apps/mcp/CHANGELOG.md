@@ -1,5 +1,9 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.2.1-rc.1 (2026-11-27)
+
+- Defer unengaged Cloudflare Turnstile token purchases so tokens are only bought for challenges that will be submitted (#1203).
+
 ## 1.2.0-rc2 (2026-11-27)
 
 - Settle stale OAuth attempts, defer unengaged CAPTCHA purchases, and report Google account chooser (#1201).
