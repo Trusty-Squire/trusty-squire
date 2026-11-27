@@ -1187,6 +1187,7 @@ async function createSignupSessionInternal(
   const capturedSecrets = new Set<string>();
   const deliveredSignatures = new Set<string>();
   const capturedMetadata: CapturedCredentialMetadata[] = [];
+  const tornDownSessionIds = new Set<string>();
   let currentFacts: Record<string, string> | undefined =
     options.facts !== undefined ? { ...options.facts } : undefined;
   let callbackFailure: string | null = null;
@@ -1215,6 +1216,8 @@ async function createSignupSessionInternal(
   };
 
   const teardownProvisionSession = async (targetSessionId: string): Promise<void> => {
+    if (tornDownSessionIds.has(targetSessionId)) return;
+    tornDownSessionIds.add(targetSessionId);
     const finished = await finishSession(targetSessionId).catch(() => null);
     if (finished === null || finished.closed !== true) {
       await forceFinishSession(targetSessionId).catch(() => undefined);
@@ -1564,12 +1567,17 @@ async function createSignupSessionInternal(
         }
       }
 
+      const cancelledAfterDrive = closed || effectiveSignal?.aborted === true;
+      if (closed || abortedBySessionSignal) {
+        await close();
+      }
+
       const activeSessionId = sessionId;
       const currentUrl = resolveCurrentUrl(handoff.observation?.url ?? lastKnownUrl ?? "");
       lastKnownUrl = currentUrl;
 
       // Post-drive capture: explicit captureSource(s) or a final extract fallback.
-      if (handoff.status === "complete" && !closed && activeSessionId !== undefined) {
+      if (handoff.status === "complete" && !cancelledAfterDrive && activeSessionId !== undefined) {
         if (captureSources.length > 0) {
           for (const source of captureSources) {
             const captured = await runCaptureSource(
@@ -1611,8 +1619,11 @@ async function createSignupSessionInternal(
       }
 
       const safeObservation = toSafeObservationSummary(handoff.observation, capturedSecrets);
-      const mappedStatus: SignupStatus =
-        callbackFailure !== null ? "failed" : mapDriveStatus(handoff);
+      const mappedStatus: SignupStatus = cancelledAfterDrive
+        ? "cancelled"
+        : callbackFailure !== null
+          ? "failed"
+          : mapDriveStatus(handoff);
 
       const rawResult: SignupResult = {
         status: mappedStatus,
@@ -1626,11 +1637,24 @@ async function createSignupSessionInternal(
         driveStatus: handoff.status,
         ...(handoff.done !== undefined ? { done: handoff.done } : {}),
         ...(handoff.remaining !== undefined ? { remaining: handoff.remaining } : {}),
-        ...(callbackFailure !== null
-          ? { reason: `onCredentialCaptured callback failed: ${callbackFailure}` }
-          : handoff.reason !== undefined
-            ? { reason: handoff.reason }
-            : {}),
+        ...(cancelledAfterDrive
+          ? {
+              reason: redactSecrets(
+                effectiveSignal?.reason instanceof Error &&
+                  effectiveSignal.reason.message.length > 0
+                  ? effectiveSignal.reason.message
+                  : typeof effectiveSignal?.reason === "string" &&
+                      effectiveSignal.reason.trim().length > 0
+                    ? effectiveSignal.reason
+                    : "Embedded signup cancelled.",
+                capturedSecrets,
+              ),
+            }
+          : callbackFailure !== null
+            ? { reason: `onCredentialCaptured callback failed: ${callbackFailure}` }
+            : handoff.reason !== undefined
+              ? { reason: handoff.reason }
+              : {}),
         ...(handoff.message !== undefined ? { message: handoff.message } : {}),
         ...(handoff.question !== undefined ? { question: handoff.question } : {}),
         ...(handoff.options !== undefined ? { options: handoff.options } : {}),
@@ -1644,7 +1668,7 @@ async function createSignupSessionInternal(
 
       return redactUnknownSecrets(rawResult, capturedSecrets);
     } catch (err) {
-      if (abortedBySessionSignal) {
+      if (abortedBySessionSignal || closed) {
         await close();
       }
       const elapsedSeconds = (now() - driveStartedAt) / 1000;

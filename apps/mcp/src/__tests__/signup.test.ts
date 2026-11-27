@@ -2202,6 +2202,66 @@ describe("createSignupSession stateful pause/resume handle", () => {
     expect(browser.close).toHaveBeenCalledWith({ cancelStart: true });
   });
 
+  it("returns cancelled and tears down provision session and browser exactly once when AbortSignal fires mid-drive and runDrive returns normally", async () => {
+    const appProfileDir = join(tempDir, "stateful-abort-return-profile");
+    const controller = new AbortController();
+    const browser = makeFakeBrowser();
+    const finishSession = vi.fn(async () => ({
+      session_id: "sess-abort-return",
+      operation_id: "op-abort-return",
+      execution: "completed" as const,
+      mutation: "not_dispatched" as const,
+      cleanup: "closed" as const,
+      closed: true,
+      url: "https://app.example.test/signup",
+    }));
+    const forceFinishSession = vi.fn(async () => true);
+
+    const session = await createSignupSession(
+      {
+        url: "https://app.example.test/signup",
+        profileDir: appProfileDir,
+        session: SAMPLE_SESSION,
+        signal: controller.signal,
+        onCredentialCaptured: vi.fn(),
+      },
+      {
+        createBrowser: () => browser as unknown as BrowserController,
+        startHarnessSession: async (opts) => ({
+          session_id: "sess-abort-return",
+          url: opts.serviceUrl,
+        }),
+        finishSession,
+        forceFinishSession,
+        runDrive: async (args, _api, _context, deps) => {
+          await deps!.startSession({ serviceUrl: args.url! });
+          controller.abort(new Error("aborted while drive returned normally"));
+          return makeHandoff({
+            status: "stuck",
+            session_id: "sess-abort-return",
+            reason: "drive saw closed page",
+          });
+        },
+      },
+    );
+
+    const result = await session.drive({ goal: "Sign up" });
+    expect(result.status).toBe("cancelled");
+    expect(result.reason).toContain("aborted while drive returned normally");
+    expect(session.closed).toBe(true);
+    expect(session.sessionId).toBeNull();
+    expect(finishSession).toHaveBeenCalledTimes(1);
+    expect(finishSession).toHaveBeenCalledWith("sess-abort-return");
+    expect(forceFinishSession).not.toHaveBeenCalled();
+    expect(browser.close).toHaveBeenCalledTimes(1);
+    expect(browser.close).toHaveBeenCalledWith({ cancelStart: true });
+
+    await session.close();
+    expect(finishSession).toHaveBeenCalledTimes(1);
+    expect(forceFinishSession).not.toHaveBeenCalled();
+    expect(browser.close).toHaveBeenCalledTimes(1);
+  });
+
   it("falls back to forceFinishSession when finishSession fails, and enforces vault & profile/session isolation", async () => {
     const xdgDir = join(tempDir, "xdg-config");
     vi.stubEnv("XDG_CONFIG_HOME", xdgDir);
