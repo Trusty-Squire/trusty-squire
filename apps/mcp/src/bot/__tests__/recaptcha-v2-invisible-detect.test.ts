@@ -256,4 +256,35 @@ describe.skipIf(!available)("recaptcha v2-invisible image challenge (IPInfo shap
       await page.close();
     }
   });
+
+  it("treats a hidden hCaptcha challenge iframe as not rendered until visible", async () => {
+    const page = await context.newPage();
+    try {
+      await page.route("**://newassets.hcaptcha.com/**", (route) =>
+        route.fulfill({ contentType: "text/html", body: "<div>hcaptcha challenge</div>" }),
+      );
+      await page.setContent(`<!doctype html><html><body>
+        <iframe id="hc" width="400" height="580" style="visibility:hidden;position:fixed;top:20px;left:20px"
+          src="https://newassets.hcaptcha.com/captcha/v1/test/static/hcaptcha-challenge.html"></iframe>
+      </body></html>`);
+      await expect
+        .poll(() => page.frames().some((f) => f.url().includes("hcaptcha-challenge.html")))
+        .toBe(true);
+      const controller = BrowserController.fromHarnessPage(page);
+      expect(await detectCaptchaVariant(controller, page)).toMatchObject({
+        variant: "hcaptcha",
+        challengeRendered: false,
+      });
+
+      await page.locator("#hc").evaluate((el) => {
+        (el as HTMLElement).style.visibility = "visible";
+      });
+      expect(await detectCaptchaVariant(controller, page)).toMatchObject({
+        variant: "hcaptcha",
+        challengeRendered: true,
+      });
+    } finally {
+      await page.close();
+    }
+  });
 });

@@ -4063,6 +4063,320 @@ describe("BrowserController OAuth popup lifecycle", () => {
       await context.close().catch(() => undefined);
     }
   });
+
+  it("clears a stale OAuth attempt via operate_navigate or settle_oauth and never names uncallable oauth_settle", async () => {
+    const context = await signedInGoogleContext();
+    const product = await context.newPage();
+    const signInUrl = "https://clerk.example.test/sign-in";
+    const githubDoneUrl = "https://clerk.example.test/dashboard";
+    const googlePendingUrl =
+      "https://accounts.google.com/pending?redirect_uri=https%3A%2F%2Fclerk.example.test%2Fsso-callback";
+    const githubAuthUrl = `https://github.com/login/oauth/authorize?redirect_uri=${encodeURIComponent(githubDoneUrl)}`;
+    await context.route("https://clerk.example.test/**", (route) => {
+      const url = route.request().url();
+      const body = url.endsWith("/dashboard")
+        ? "<main>Signed in with GitHub</main>"
+        : `<main>Sign in</main>
+           <button id="google" onclick="window.open('${googlePendingUrl}')">Continue with Google</button>
+           <button id="github" onclick="location.href='${githubAuthUrl}'">Continue with GitHub</button>`;
+      return route.fulfill({ contentType: "text/html", body });
+    });
+    await context.route("https://accounts.google.com/**", (route) =>
+      route.fulfill({ contentType: "text/html", body: "<main>Sign in to Google</main>" }),
+    );
+    await context.route("https://github.com/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: `<script>location.href=${JSON.stringify(githubDoneUrl)}</script>`,
+      }),
+    );
+    await product.goto(signInUrl);
+    const controller = BrowserController.fromHarnessPage(product);
+    const previousTimeout = process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS;
+    const previousCooldown = process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS;
+    process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "1500";
+    process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS = "0";
+    let sessionId: string | undefined;
+    try {
+      const started = await startHarnessProvisionSession({
+        browser: controller,
+        serviceUrl: signInUrl,
+        format: "compact",
+      });
+      sessionId = started.session_id;
+      const googleRef = refByLabel(started, "Continue with Google")!;
+      expect(googleRef).toBeDefined();
+
+      // First attempt leaves a live Google popup pending.
+      const pending = await operateLoginTool.handler(
+        { action: "oauth", session_id: sessionId, provider: "google", ref: googleRef },
+        null,
+      );
+      expect(pending).toMatchObject({ oauth: { state: "awaiting_human" } });
+
+      // While the provider popup is still open on Google, a second login refuses
+      // and names only callable MCP tools (never uncallable `oauth_settle`).
+      await expect(loginWithOAuth(controller, "#github", 500, "github")).rejects.toSatisfy(
+        (err: unknown) => {
+          const msg = err instanceof Error ? err.message : String(err);
+          return (
+            msg.includes("operate_login") &&
+            msg.includes("settle_oauth") &&
+            !msg.includes("oauth_settle")
+          );
+        },
+      );
+
+      // Calling operate_login { action: "settle_oauth" } clears the pending attempt
+      // and restores the product sign-in page so GitHub OAuth succeeds on the same session.
+      const settled = await operateLoginTool.handler(
+        { action: "settle_oauth", session_id: sessionId },
+        null,
+      );
+      expect(settled).toMatchObject({ url: signInUrl });
+
+      const refreshed = await observe(sessionId, "compact");
+      const githubRef = refByLabel(refreshed, "Continue with Git")!;
+      expect(githubRef).toBeDefined();
+      const retried = await operateLoginTool.handler(
+        { action: "oauth", session_id: sessionId, provider: "github", ref: githubRef },
+        null,
+      );
+      expect(retried).toMatchObject({ url: githubDoneUrl });
+      expect(controller.currentUrl()).toBe(githubDoneUrl);
+    } finally {
+      if (previousTimeout === undefined) delete process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS;
+      else process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = previousTimeout;
+      if (previousCooldown === undefined) delete process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS;
+      else process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS = previousCooldown;
+      if (sessionId !== undefined) await finishProvisionSession(sessionId);
+      await context.close().catch(() => undefined);
+    }
+  }, 20_000);
+
+  it("auto-clears a stale same-tab OAuth attempt after returning to the product sign-in page via goto", async () => {
+    const context = await signedInGoogleContext();
+    const product = await context.newPage();
+    const signInUrl = "https://clerk-nav.example.test/sign-in";
+    const refusalUrl = "https://clerk-nav.example.test/sso-refused";
+    const githubDoneUrl = "https://clerk-nav.example.test/dashboard";
+    const githubAuthUrl = `https://github.com/login/oauth/authorize?redirect_uri=${encodeURIComponent(githubDoneUrl)}`;
+    await context.route("https://clerk-nav.example.test/**", (route) => {
+      const url = route.request().url();
+      const body = url.endsWith("/dashboard")
+        ? "<main>Signed in with GitHub</main>"
+        : url.endsWith("/sso-refused")
+          ? "<main>Network refusal</main>"
+          : `<main>Sign in</main>
+             <button id="google" onclick="location.href='https://accounts.google.com/start'">Continue with Google</button>
+             <button id="github" onclick="location.href='${githubAuthUrl}'">Continue with GitHub</button>`;
+      return route.fulfill({ contentType: "text/html", body });
+    });
+    await context.route("https://accounts.google.com/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: `<script>location.href=${JSON.stringify(refusalUrl)}</script>`,
+      }),
+    );
+    await context.route("https://github.com/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: `<script>location.href=${JSON.stringify(githubDoneUrl)}</script>`,
+      }),
+    );
+    await product.goto(signInUrl);
+    const controller = BrowserController.fromHarnessPage(product);
+    const previousTimeout = process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS;
+    const previousCooldown = process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS;
+    process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "1500";
+    process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS = "0";
+    let sessionId: string | undefined;
+    try {
+      const started = await startHarnessProvisionSession({
+        browser: controller,
+        serviceUrl: signInUrl,
+        format: "compact",
+      });
+      sessionId = started.session_id;
+      const googleRef = refByLabel(started, "Continue with Google")!;
+      await operateLoginTool.handler(
+        { action: "oauth", session_id: sessionId, provider: "google", ref: googleRef },
+        null,
+      );
+      expect(controller.currentUrl()).toBe(refusalUrl);
+
+      // Navigating back to /sign-in clears the stale attempt so GitHub OAuth proceeds.
+      await act(sessionId, { kind: "goto", url: signInUrl });
+      const back = await observe(sessionId, "compact");
+      const githubRef = refByLabel(back, "Continue with Git")!;
+      expect(githubRef).toBeDefined();
+      const retried = await operateLoginTool.handler(
+        { action: "oauth", session_id: sessionId, provider: "github", ref: githubRef },
+        null,
+      );
+      expect(retried).toMatchObject({ url: githubDoneUrl });
+    } finally {
+      if (previousTimeout === undefined) delete process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS;
+      else process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = previousTimeout;
+      if (previousCooldown === undefined) delete process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS;
+      else process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS = previousCooldown;
+      if (sessionId !== undefined) await finishProvisionSession(sessionId);
+      await context.close().catch(() => undefined);
+    }
+  }, 20_000);
+
+  it("reports awaiting_account_choice instead of an interrupted error on Google's multi-account chooser", async () => {
+    const context = await signedInGoogleContext();
+    const product = await context.newPage();
+    const signInUrl = "https://chooser-ui.example.test/sign-in";
+    const chooserUrl =
+      "https://accounts.google.com/v3/signin/accountchooser?redirect_uri=https%3A%2F%2Fchooser-ui.example.test%2Fcallback";
+    await context.route("https://myaccount.google.com/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: '<button aria-label="Google Account: Unlisted (unlisted@example.com)"></button>',
+      }),
+    );
+    await context.route("https://chooser-ui.example.test/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: `<a id="google" href="${chooserUrl}">Continue with Google</a>`,
+      }),
+    );
+    await context.route("https://accounts.google.com/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: `<main><h1>Choose an account</h1>
+          <div role="link" data-identifier="methoxine@example.com">methoxine@example.com</div>
+          <div role="link" data-identifier="lunchboxfortwo@example.com">lunchboxfortwo@example.com</div>
+        </main>`,
+      }),
+    );
+    await product.goto(signInUrl);
+    const controller = BrowserController.fromHarnessPage(product);
+    const diagSpy = vi.spyOn(controller, "logOperatorDiagnostic");
+    const previousTimeout = process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS;
+    const previousCooldown = process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS;
+    process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "5000";
+    process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS = "0";
+    let sessionId: string | undefined;
+    try {
+      const started = await startHarnessProvisionSession({
+        browser: controller,
+        serviceUrl: signInUrl,
+        format: "compact",
+      });
+      sessionId = started.session_id;
+      const googleRef = refByLabel(started, "Continue with Google")!;
+      const prepared = preparePublicOAuthLoginTarget(sessionId, googleRef);
+      expect(prepared).toBeDefined();
+      const result = await withOperatorRequestContext(new AbortController().signal, () =>
+        withPreparedOAuthLoginTarget(prepared!, () =>
+          operateLoginTool.handler(
+            { action: "oauth", session_id: sessionId!, provider: "google", ref: googleRef },
+            null,
+          ),
+        ),
+      );
+      expect(result).toMatchObject({
+        url: chooserUrl,
+        oauth: {
+          state: "awaiting_account_choice",
+          next_action: "operate_observe",
+        },
+      });
+      expect((result as { guidance?: string }).guidance).not.toMatch(/error interrupted/i);
+      expect(result).not.toHaveProperty("oauth.completion", "unknown");
+      expect(
+        diagSpy.mock.calls.some((call) => String(call[0]).includes("advanceOAuthConsent failed")),
+      ).toBe(false);
+    } finally {
+      diagSpy.mockRestore();
+      if (previousTimeout === undefined) delete process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS;
+      else process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = previousTimeout;
+      if (previousCooldown === undefined) delete process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS;
+      else process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS = previousCooldown;
+      if (sessionId !== undefined) await finishProvisionSession(sessionId);
+      await context.close().catch(() => undefined);
+    }
+  }, 20_000);
+
+  it("auto-selects the session user_email after prepared same-tab navigation to Google's account chooser", async () => {
+    const context = await signedInGoogleContext();
+    const product = await context.newPage();
+    const signInUrl = "https://chooser-auto.example.test/sign-in";
+    const callbackUrl = "https://chooser-auto.example.test/callback";
+    const chooserUrl = `https://accounts.google.com/v3/signin/accountchooser?redirect_uri=${encodeURIComponent(callbackUrl)}`;
+    let chosen: string | null = null;
+    await context.route("https://myaccount.google.com/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: '<button aria-label="Google Account: Bento (lunchboxfortwo@example.com)"></button>',
+      }),
+    );
+    await context.route("https://chooser-auto.example.test/**", (route) => {
+      const callback = route.request().url().endsWith("/callback");
+      return route.fulfill({
+        contentType: "text/html",
+        body: callback
+          ? "<main>Signed in cleanly</main>"
+          : `<a id="google" href="${chooserUrl}">Continue with Google</a>`,
+      });
+    });
+    await context.route("https://accounts.google.com/**", (route) => {
+      const reqUrl = route.request().url();
+      if (reqUrl.includes("/consent?")) {
+        chosen = new URL(reqUrl).searchParams.get("account");
+        return route.fulfill({
+          contentType: "text/html",
+          body: `<button onclick="location.href='${callbackUrl}'">Continue</button>`,
+        });
+      }
+      return route.fulfill({
+        contentType: "text/html",
+        body: `<main><h1>Choose an account</h1>
+          <div role="link" data-email="methoxine@example.com" onclick="location.href='https://accounts.google.com/consent?account=methoxine@example.com'">methoxine@example.com</div>
+          <div role="link" data-email="lunchboxfortwo@example.com" onclick="location.href='https://accounts.google.com/consent?account=lunchboxfortwo@example.com'">lunchboxfortwo@example.com</div>
+        </main>`,
+      });
+    });
+    await product.goto(signInUrl);
+    const controller = BrowserController.fromHarnessPage(product);
+    const previousTimeout = process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS;
+    const previousCooldown = process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS;
+    process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "5000";
+    process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS = "0";
+    let sessionId: string | undefined;
+    try {
+      const started = await startHarnessProvisionSession({
+        browser: controller,
+        serviceUrl: signInUrl,
+        format: "compact",
+      });
+      sessionId = started.session_id;
+      const googleRef = refByLabel(started, "Continue with Google")!;
+      const prepared = preparePublicOAuthLoginTarget(sessionId, googleRef);
+      expect(prepared).toBeDefined();
+      const result = await withOperatorRequestContext(new AbortController().signal, () =>
+        withPreparedOAuthLoginTarget(prepared!, () =>
+          operateLoginTool.handler(
+            { action: "oauth", session_id: sessionId!, provider: "google", ref: googleRef },
+            null,
+          ),
+        ),
+      );
+      expect(chosen).toBe("lunchboxfortwo@example.com");
+      expect(result).toMatchObject({ url: callbackUrl });
+      expect(result).not.toHaveProperty("oauth.completion", "unknown");
+    } finally {
+      if (previousTimeout === undefined) delete process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS;
+      else process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = previousTimeout;
+      if (previousCooldown === undefined) delete process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS;
+      else process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS = previousCooldown;
+      if (sessionId !== undefined) await finishProvisionSession(sessionId);
+      await context.close().catch(() => undefined);
+    }
+  }, 20_000);
 });
 
 describe("oauthErrorFromReturnUrl (observed OAuth denial)", () => {

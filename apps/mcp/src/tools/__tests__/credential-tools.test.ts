@@ -390,6 +390,7 @@ describe("flat operation grammar", () => {
     const input = schema("operate_login");
     for (const args of [
       { action: "oauth", provider: "google", ref: "e1" },
+      { action: "settle_oauth" },
       { action: "prepare_signup" },
       { action: "store_signup", service: "amazon", login_hosts: ["amazon.com"] },
       { action: "load_saved", reference },

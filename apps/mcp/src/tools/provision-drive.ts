@@ -861,9 +861,14 @@ const loginOAuthSchema = z.object({
   provider: z.enum(["google", "github"]),
   ref: z.string().min(1).max(200),
 });
+const loginSettleOAuthSchema = z.object({
+  session_id: z.string().min(1),
+  action: z.literal("settle_oauth"),
+});
 const loginSchema = flatVariants(
   {
     oauth: loginOAuthSchema,
+    settle_oauth: loginSettleOAuthSchema,
     prepare_signup: loginPrepareSignupSchema,
     store_signup: loginStoreSignupSchema,
     load_saved: loginLoadSavedSchema,
@@ -875,6 +880,7 @@ export const operateLoginTool: Tool<z.infer<typeof loginSchema>> = {
   name: "operate_login",
   description:
     "Choose an explicit action. action=oauth logs in with provider + ref using the atomic OAuth flow; awaiting-human state is returned in this call. After a dispatched timeout or error, completion may be unknown: retain session_id and call operate_observe before another action; do not repeat OAuth blindly. " +
+    "action='settle_oauth' clears or settles a pending OAuth attempt and returns to the product page. " +
     "Drive the sealed username/password login lifecycle without exposing raw values. " +
     "action='prepare_signup' seals the user's captured email and a generated password; " +
     "'store_signup' vaults those prepared slots with the same login-host safeguards; " +
@@ -890,6 +896,8 @@ export const operateLoginTool: Tool<z.infer<typeof loginSchema>> = {
       });
     }
     switch (args.action) {
+      case "settle_oauth":
+        return await runAction(args.session_id, { kind: "oauth_abort" });
       case "prepare_signup":
         return await handlePrepareLogin(args);
       case "store_signup":

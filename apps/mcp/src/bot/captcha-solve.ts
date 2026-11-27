@@ -55,6 +55,7 @@ export async function runOperateCaptchaSolve(
   } = {},
 ): Promise<{ outcome: string; checkbox?: CaptchaSolveResult }> {
   const page = options.page ?? session.browser.page ?? undefined;
+  markCaptchaDocumentEngaged(session, safeDocumentUrl(session, page));
   const checkbox = options.pressCheckbox
     ? await (
         options.pressCheckboxChallenge ??
@@ -351,6 +352,8 @@ interface AutoSolveState {
   // Geometric backoff after a token died unconsumed (see expiryBackoffMs).
   consecutiveExpiries: number;
   expiryBackoffUntil: number;
+  // Document URL where the agent explicitly engaged a form or captcha control.
+  engagedDocumentUrl: string | null;
   // A bought token waiting for a lease-holding caller to inject it, with the
   // document it was bought for and when it was minted.
   pending: {
@@ -387,10 +390,49 @@ function autoSolveState(session: Session): AutoSolveState {
     lastFinishedAt: 0,
     consecutiveExpiries: 0,
     expiryBackoffUntil: 0,
+    engagedDocumentUrl: null,
     pending: null,
   };
   attemptState.set(session, fresh);
   return fresh;
+}
+
+function safeDocumentUrl(session: Session, page?: Page): string | undefined {
+  const pageUrl = typeof page?.url === "function" ? page.url() : undefined;
+  if (pageUrl) return pageUrl;
+  return typeof session.browser?.currentUrl === "function"
+    ? session.browser.currentUrl()
+    : undefined;
+}
+
+export function markCaptchaDocumentEngaged(session: Session, url?: string): void {
+  const current = url ?? safeDocumentUrl(session);
+  if (current) autoSolveState(session).engagedDocumentUrl = current;
+}
+
+export function isCaptchaDocumentEngaged(session: Session, url: string): boolean {
+  const engaged = attemptState.get(session)?.engagedDocumentUrl;
+  return engaged !== null && engaged !== undefined && sameDocument(engaged, url);
+}
+
+function hasPendingOAuthAttempt(browser: BrowserController): boolean {
+  // Only a live activeOAuthAttempt means OAuth is still running. A completed
+  // popup sign-in clears activeOAuthAttempt while intentionally keeping
+  // oauthProductPage and oauthProviderPage open for the returned tab, so those
+  // fields alone must not suppress CAPTCHA auto-solve for the rest of the session.
+  const attempt = browser.activeOAuthAttempt;
+  if (attempt == null) return false;
+  if (typeof attempt.productPage?.isClosed === "function" && attempt.productPage.isClosed()) {
+    return false;
+  }
+  if (
+    attempt.providerPage != null &&
+    typeof attempt.providerPage.isClosed === "function" &&
+    attempt.providerPage.isClosed()
+  ) {
+    return false;
+  }
+  return true;
 }
 
 /**
@@ -579,6 +621,16 @@ async function deliverGateHandoff(page: Page, variant: string): Promise<void> {
 
 async function startDetachedTokenFetch(session: Session, page?: Page): Promise<string> {
   const state = autoSolveState(session);
+  if (hasPendingOAuthAttempt(session.browser)) {
+    audit(session.id, "captcha_autosolve", {
+      outcome: "fetch_skipped",
+      reason: "oauth_in_progress",
+    });
+    console.error(
+      `[captcha-autosolve-diag] session=${session.id} outcome=fetch_skipped reason=oauth_in_progress`,
+    );
+    return "oauth_in_progress";
+  }
   if (state.inFlight) {
     audit(session.id, "captcha_autosolve", { outcome: "fetch_skipped", reason: "in_flight" });
     console.error(
@@ -639,6 +691,36 @@ async function runDetachedTokenFetch(session: Session, page?: Page): Promise<str
     if (!challengePresent || !AUTOSOLVE_VARIANTS.has(det.variant)) {
       state.inFlight = false;
       return challengePresent ? "unsupported_variant" : "no_challenge";
+    }
+    // Defer paid purchases for invisible background widgets on documents the
+    // agent has not engaged yet when no challenge frame is visibly rendered.
+    // A genuinely visible blocking challenge grid still auto-solves even on an
+    // untouched page.
+    const currentUrl = safeDocumentUrl(session, page) ?? "";
+    const documentEngaged = isCaptchaDocumentEngaged(session, currentUrl);
+    if (!documentEngaged) {
+      const unengagedInvisibleRecaptcha =
+        (det.recaptcha?.hasInvisibleAnchor === true || det.recaptcha?.anchorSize === "invisible") &&
+        det.recaptcha?.hasVisibleCheckboxAnchor !== true &&
+        det.recaptcha?.challengeFrameVisible !== true;
+      const hcaptchaChallengeVisible = det.hcaptchaChallengeVisible ?? det.challengeRendered;
+      const unengagedInvisibleHcaptcha =
+        det.variant === "hcaptcha" &&
+        hcaptchaChallengeVisible !== true &&
+        (await getHcaptchaSolveContext(session.browser, page).catch(() => ({ invisible: false })))
+          .invisible === true;
+      if (unengagedInvisibleRecaptcha || unengagedInvisibleHcaptcha) {
+        audit(session.id, "captcha_autosolve", {
+          variant: det.variant,
+          outcome: "fetch_skipped",
+          reason: "unengaged_widget",
+        });
+        console.error(
+          `[captcha-autosolve-diag] session=${session.id} variant=${det.variant} outcome=fetch_skipped reason=unengaged_widget`,
+        );
+        state.inFlight = false;
+        return "unengaged_widget";
+      }
     }
     // Scoped to the DETECTED provider: a co-resident reCAPTCHA v3 badge token
     // must not read as "the rendered hCaptcha is already solved".
@@ -745,6 +827,17 @@ async function purchaseCaptchaToken(
       } catch {
         // diagnostic only
       }
+    }
+    if (hasPendingOAuthAttempt(session.browser)) {
+      audit(session.id, "captcha_autosolve", {
+        variant,
+        outcome: "fetch_skipped",
+        reason: "oauth_in_progress",
+      });
+      console.error(
+        `[captcha-autosolve-diag] session=${session.id} variant=${variant} outcome=fetch_skipped reason=oauth_in_progress`,
+      );
+      return;
     }
     const solvedUrl = page?.url() ?? session.browser.currentUrl();
     const fetched = await fetchCaptchaToken(solver, session.browser, variant, page);
