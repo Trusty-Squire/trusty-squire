@@ -1,5 +1,9 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.2.0-rc2 (2026-11-27)
+
+- Settle stale OAuth attempts, defer unengaged CAPTCHA purchases, and report Google account chooser (#1201).
+
 ## 1.2.0-rc1 (2026-11-26)
 
 - Export stateful `createSignupSession` (`EmbeddedSignupSession`) from `@trusty-squire/mcp/signup` with multi-turn `drive()`, safe `click(ref)` / `observe()`, redacted `observation` summaries on `SignupResult`, and idempotent `close()` / `AbortSignal` teardown while keeping Chrome and open dialogs alive across pauses.
