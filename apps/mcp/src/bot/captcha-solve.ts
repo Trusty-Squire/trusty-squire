@@ -19,6 +19,8 @@ import {
   type TwoCaptchaVaultProxy,
   detectCaptchaVariant,
   recaptchaEvidenceDiag,
+  shouldDeferUnengagedTurnstile,
+  turnstileEvidenceDiag,
   recaptchaPageReacted,
   injectRecaptchaTokenDetail,
   extractHcaptchaSitekey,
@@ -680,9 +682,14 @@ async function runDetachedTokenFetch(session: Session, page?: Page): Promise<str
     // sealed value, so without this there is NO readable record of whether
     // detection saw a rendered challenge — making a silent early return
     // indistinguishable from the auto-solve never running at all.
-    const evidence = det.recaptcha === undefined ? "" : ` ${recaptchaEvidenceDiag(det.recaptcha)}`;
+    const evidence = [
+      det.recaptcha === undefined ? "" : recaptchaEvidenceDiag(det.recaptcha),
+      det.turnstile === undefined ? "" : turnstileEvidenceDiag(det.turnstile),
+    ]
+      .filter((part) => part.length > 0)
+      .join(" ");
     console.error(
-      `[captcha-autosolve-diag] session=${session.id} variant=${det.variant} outcome=detect challenge_rendered=${det.challengeRendered}${evidence}`,
+      `[captcha-autosolve-diag] session=${session.id} variant=${det.variant} outcome=detect challenge_rendered=${det.challengeRendered}${evidence.length > 0 ? ` ${evidence}` : ""}`,
     );
     // Only a RENDERED challenge escalates to the solver; a no-challenge page
     // must never spend the funded key. A Turnstile widget is its own challenge,
@@ -692,10 +699,10 @@ async function runDetachedTokenFetch(session: Session, page?: Page): Promise<str
       state.inFlight = false;
       return challengePresent ? "unsupported_variant" : "no_challenge";
     }
-    // Defer paid purchases for invisible background widgets on documents the
-    // agent has not engaged yet when no challenge frame is visibly rendered.
-    // A genuinely visible blocking challenge grid still auto-solves even on an
-    // untouched page.
+    // Defer paid purchases for unengaged background/embedded widgets on
+    // documents the agent has not engaged yet. Genuinely blocking challenges
+    // (visible reCAPTCHA/hCaptcha image grids, Cloudflare interstitials, or
+    // standalone visible Turnstile gates) still auto-solve on untouched pages.
     const currentUrl = safeDocumentUrl(session, page) ?? "";
     const documentEngaged = isCaptchaDocumentEngaged(session, currentUrl);
     if (!documentEngaged) {
@@ -709,7 +716,11 @@ async function runDetachedTokenFetch(session: Session, page?: Page): Promise<str
         hcaptchaChallengeVisible !== true &&
         (await getHcaptchaSolveContext(session.browser, page).catch(() => ({ invisible: false })))
           .invisible === true;
-      if (unengagedInvisibleRecaptcha || unengagedInvisibleHcaptcha) {
+      const unengagedTurnstile =
+        det.variant === "turnstile" &&
+        det.turnstile !== undefined &&
+        shouldDeferUnengagedTurnstile(det.turnstile);
+      if (unengagedInvisibleRecaptcha || unengagedInvisibleHcaptcha || unengagedTurnstile) {
         audit(session.id, "captcha_autosolve", {
           variant: det.variant,
           outcome: "fetch_skipped",
