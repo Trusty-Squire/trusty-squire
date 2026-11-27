@@ -14,7 +14,7 @@
 // solve lives in captcha-solve.ts: the vault-backed transport both callers
 // share, plus the operate-path auto-solve.
 
-import type { CDPSession, Page } from "playwright";
+import type { CDPSession, Frame, Page } from "playwright";
 
 import type { BrowserController } from "./browser.js";
 
@@ -728,36 +728,52 @@ export async function detectCaptchaVariant(
     // the solver only escalates once the image grid exists.
     let variant = isCaptchaVariant(raw.variant) ? raw.variant : "unknown";
     const recaptcha = raw.recaptcha;
-    // A challenge iframe can also sit inside another frame or an open shadow
-    // root, beyond the main document's querySelectorAll. Playwright's frame
-    // element box is in main-viewport coordinates and respects collapsed
-    // ancestors, so this is the same rendered-grid test for those embeds.
-    if (!recaptcha.challengeFrameVisible) {
-      const viewport =
+    let cachedViewport: { width: number; height: number } | null = null;
+    const readViewport = async (): Promise<{ width: number; height: number }> => {
+      if (cachedViewport !== null) return cachedViewport;
+      cachedViewport =
         page.viewportSize() ??
         (await page.evaluate(() => ({
           width: window.innerWidth,
           height: window.innerHeight,
         })));
-      for (const frame of page.frames()) {
-        if (
-          frame.isDetached() ||
-          !/\/recaptcha\/(?:api2|enterprise)\/bframe(?:[?#]|$)/.test(frame.url())
-        )
-          continue;
-        const element = await frame.frameElement().catch(() => null);
-        if (element === null) continue;
+      return cachedViewport;
+    };
+    const isFrameVisibleInViewport = async (frame: Frame): Promise<boolean> => {
+      if (frame.isDetached()) return false;
+      const element = await frame.frameElement().catch(() => null);
+      if (element === null) return false;
+      try {
+        const cssVisible = await element
+          .evaluate((node) => {
+            const el = node as Element;
+            return typeof el.checkVisibility === "function"
+              ? el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })
+              : true;
+          })
+          .catch(() => true);
+        if (!cssVisible) return false;
         const box = await element.boundingBox().catch(() => null);
-        await element.dispose().catch(() => undefined);
-        if (
-          box !== null &&
-          box.width > 30 &&
-          box.height > 30 &&
+        if (box === null || box.width <= 30 || box.height <= 30) return false;
+        const viewport = await readViewport();
+        return (
           box.x + box.width > 0 &&
           box.y + box.height > 0 &&
           box.x < viewport.width &&
           box.y < viewport.height
-        ) {
+        );
+      } finally {
+        await element.dispose().catch(() => undefined);
+      }
+    };
+    // A challenge iframe can also sit inside another frame or an open shadow
+    // root, beyond the main document's querySelectorAll. Playwright's frame
+    // element box is in main-viewport coordinates and respects collapsed
+    // ancestors, so this is the same rendered-grid test for those embeds.
+    if (!recaptcha.challengeFrameVisible) {
+      for (const frame of page.frames()) {
+        if (!/\/recaptcha\/(?:api2|enterprise)\/bframe(?:[?#]|$)/.test(frame.url())) continue;
+        if (await isFrameVisibleInViewport(frame)) {
           recaptcha.challengeFrameVisible = true;
           break;
         }
@@ -772,8 +788,10 @@ export async function detectCaptchaVariant(
       for (const frame of page.frames()) {
         const url = frame.url();
         if (
+          !hcaptchaChallengeFrameRendered &&
           url.includes("hcaptcha.com") &&
-          /(?:hcaptcha-challenge\.html|frame=challenge)/i.test(url)
+          /(?:hcaptcha-challenge\.html|frame=challenge)/i.test(url) &&
+          (await isFrameVisibleInViewport(frame))
         ) {
           hcaptchaChallengeFrameRendered = true;
         }

@@ -19,6 +19,7 @@ import {
   type InteractiveElement,
 } from "../browser.js";
 import {
+  abortPendingOAuthAttempt,
   loginWithOAuth,
   oauthActionDeadline,
   oauthActionRemainingMs,
@@ -31,10 +32,12 @@ import {
   withinOAuthActionDeadline,
   withinOAuthCallerDeadline,
   type OAuthActionDeadline,
+  OAuthAccountChoiceRequiredError,
   OAuthAwaitingHumanError,
   OAuthFailedError,
   OAuthOnboardingRequiredError,
 } from "../oauth-login.js";
+import { markCaptchaDocumentEngaged } from "../captcha-solve.js";
 import type { ClickMethod, DriverTarget } from "../driver/types.js";
 import { compactV2AuditUrl, safeStageV2 } from "../compact-observation-v2.js";
 import { ProvenPreDispatchMutationError } from "../mutation-dispatch-evidence.js";
@@ -505,7 +508,8 @@ function oauthErrorAfterDispatchAttempt(session: Session, error: unknown): Obser
     clickDispatchStatusForError(error) === "not_dispatched" ||
     error instanceof OAuthFailedError ||
     error instanceof OAuthAwaitingHumanError ||
-    error instanceof OAuthOnboardingRequiredError
+    error instanceof OAuthOnboardingRequiredError ||
+    error instanceof OAuthAccountChoiceRequiredError
   ) {
     return null;
   }
@@ -536,6 +540,22 @@ function oauthOnboardingRequiredObservation(
     next_action: "operate_observe",
   };
   return compactV2PublicObservation(session, { stage: "form", guidance, oauth, url });
+}
+
+function oauthAccountChoiceRequiredObservation(
+  session: Session,
+  error: OAuthAccountChoiceRequiredError,
+): Observation {
+  invalidateCompactV2Snapshot(session);
+  const url = session.browser.currentUrl();
+  const guidance =
+    "Google is asking which account to use. Call operate_observe to inspect the listed accounts and click the intended account; do not repeat operate_login.";
+  const oauth: NonNullable<Observation["oauth"]> = {
+    state: "awaiting_account_choice",
+    reason: error.message,
+    next_action: "operate_observe",
+  };
+  return compactV2PublicObservation(session, { stage: "auth", guidance, oauth, url });
 }
 
 export async function actInternally(
@@ -609,6 +629,9 @@ export async function actInternally(
     }
     if (error instanceof OAuthOnboardingRequiredError && session !== undefined) {
       return { observation: oauthOnboardingRequiredObservation(session, error), outcome: {} };
+    }
+    if (error instanceof OAuthAccountChoiceRequiredError && session !== undefined) {
+      return { observation: oauthAccountChoiceRequiredObservation(session, error), outcome: {} };
     }
     if (session?.compactV2Active === true && !(error instanceof ProvisionTargetMissingError)) {
       throw new CompactV2ActionFailureError(
@@ -740,6 +763,9 @@ export async function act(
     }
     if (error instanceof OAuthOnboardingRequiredError && session !== undefined) {
       return oauthOnboardingRequiredObservation(session, error);
+    }
+    if (error instanceof OAuthAccountChoiceRequiredError && session !== undefined) {
+      return oauthAccountChoiceRequiredObservation(session, error);
     }
     if (
       ["oauth_login", "click", "js_click", "type", "type_secret", "select"].includes(action.kind) &&
@@ -1083,6 +1109,18 @@ async function executeAct(
     switch (action.kind) {
       case "goto": {
         await browser.navigate(action.url, compactV2ActionPage);
+        if (
+          browser.oauthProductPage !== null ||
+          browser.oauthProviderPage !== null ||
+          browser.activeOAuthAttempt !== null
+        ) {
+          const retained = await abortPendingOAuthAttempt(
+            browser,
+            compactV2ActionPage ?? browser.page,
+          );
+          if (retained !== null) actionPageAfter = retained;
+          rememberOAuthCompletionSourcePage(session, actionPageAfter);
+        }
         break;
       }
       case "press": {
@@ -1091,6 +1129,12 @@ async function executeAct(
       }
       case "oauth_settle": {
         actionPageAfter = await settleAfterOAuth(browser, compactV2ActionPage);
+        rememberOAuthCompletionSourcePage(session, actionPageAfter);
+        break;
+      }
+      case "oauth_abort": {
+        const retained = await abortPendingOAuthAttempt(browser);
+        if (retained !== null) actionPageAfter = retained;
         rememberOAuthCompletionSourcePage(session, actionPageAfter);
         break;
       }
@@ -1584,6 +1628,16 @@ async function executeAct(
   if (action.kind === "click" || action.kind === "js_click") {
     actionPageAfter = returnFromClosedPicker(session, actionPageAfter);
   }
+  if (
+    action.kind === "click" ||
+    action.kind === "js_click" ||
+    action.kind === "type" ||
+    action.kind === "type_secret" ||
+    action.kind === "select" ||
+    action.kind === "press"
+  ) {
+    markCaptchaDocumentEngaged(session, actionPageAfter?.url() ?? browser.currentUrl());
+  }
   // `detail:"none"` returns a minimal ack (the action ran; no perception emitted)
   // so multi-field fills don't each echo the page. The host must call
   // operate_observe before its next ref-targeted act (refs aren't refreshed here).
@@ -1756,6 +1810,13 @@ export async function dispatchDriveAct(
         oauth: oauthAwaitingHumanObservation(session, error).oauth,
       };
     }
+    if (error instanceof OAuthAccountChoiceRequiredError && session !== undefined) {
+      return {
+        kind: "ok",
+        combobox: false,
+        oauth: oauthAccountChoiceRequiredObservation(session, error).oauth,
+      };
+    }
     if (error instanceof CompactV2StaleRefError) return { kind: "stale", reason: "stale_ref" };
     if (error instanceof TargetStaleError) return { kind: "stale", reason: "stale" };
     const message = error instanceof Error ? error.message : String(error);
@@ -1795,6 +1856,7 @@ function compactV2ActionFailureReason(error: unknown, kind: ProvisionAction["kin
   // (see act()/actInternally() below); this branch is a defensive fallback
   // for any caller of this reason-mapper that doesn't go through that path.
   if (error instanceof OAuthAwaitingHumanError) return "awaiting_human";
+  if (error instanceof OAuthAccountChoiceRequiredError) return "awaiting_account_choice";
   if (error instanceof OAuthFailedError) return error.message;
   if (error instanceof CompactV2UnresolvedLabelError) return "target_unresolved";
   if (error instanceof ScreenshotClickError) return error.code;

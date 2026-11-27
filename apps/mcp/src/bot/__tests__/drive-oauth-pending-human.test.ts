@@ -49,7 +49,7 @@ describe("drive pending OAuth handoff", () => {
       safe_table: [["@github", "b", label]],
     } as unknown as Observation;
     const reason =
-      "An owned OAuth attempt is still pending. Call operate_observe or oauth_settle; a second authorization attempt was not started.";
+      "An owned OAuth attempt is still pending. Call operate_observe or operate_login with action='settle_oauth'; a second authorization attempt was not started.";
     const driveAct = vi.fn<NonNullable<DriveDependencies["driveAct"]>>(
       async (_id, _action, deadline) => {
         if (phase === "action_before") {

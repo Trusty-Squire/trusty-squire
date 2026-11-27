@@ -25,6 +25,8 @@ const h = vi.hoisted(() => ({
   failSolve: false,
   variantTokenPresent: false,
   challengeRendered: true,
+  recaptchaEvidence: undefined as CaptchaModule.RecaptchaDetectEvidence | undefined,
+  hcaptchaInvisible: false,
   solverAvailable: true,
   gateFrames: [] as Array<{ url: () => string; evaluate: ReturnType<typeof vi.fn> }>,
 }));
@@ -63,13 +65,15 @@ vi.mock("../captcha.js", async (importOriginal) => ({
   detectCaptchaVariant: async () => ({
     variant: h.variant,
     challengeRendered: h.challengeRendered,
+    ...(h.recaptchaEvidence === undefined ? {} : { recaptcha: h.recaptchaEvidence }),
   }),
   hasHcaptchaResponseTokenWithCompat: async () => h.variantTokenPresent,
   hasCaptchaResponseTokenForVariant: async () => h.variantTokenPresent,
   waitForCaptchaResponseToken: async () => h.variantTokenPresent,
   extractHcaptchaSitekey: async () => "00000000-0000-0000-0000-000000000000",
+  extractRecaptchaSitekey: async () => "6LftmFkUAAAAADydGEH99T-xmZoK69ErtRCzfVFf",
   getHcaptchaSolveContext: async () => ({
-    invisible: false,
+    invisible: h.hcaptchaInvisible,
     userAgent: "test-agent",
     rqdata: null,
   }),
@@ -93,7 +97,7 @@ vi.mock("../session/lifecycle.js", async (importOriginal) => ({
   audit: auditMock.fn,
 }));
 
-import { attemptOperateCaptchaAutoSolve } from "../captcha-solve.js";
+import { attemptOperateCaptchaAutoSolve, markCaptchaDocumentEngaged } from "../captcha-solve.js";
 import type { Page } from "playwright";
 import type { Session } from "../session/model.js";
 import type * as CaptchaModule from "../captcha.js";
@@ -161,6 +165,8 @@ beforeEach(() => {
   h.failSolve = false;
   h.variantTokenPresent = false;
   h.challengeRendered = true;
+  h.recaptchaEvidence = undefined;
+  h.hcaptchaInvisible = false;
   h.solverAvailable = true;
   auditMock.fn.mockClear();
   vi.useFakeTimers();
@@ -414,5 +420,64 @@ describe("attemptOperateCaptchaAutoSolve — Cloudflare Turnstile", () => {
     } finally {
       errorSpy.mockRestore();
     }
+  });
+});
+
+describe("attemptOperateCaptchaAutoSolve — defer unengaged invisible widgets and active OAuth", () => {
+  it("defers invisible reCAPTCHA v2 until the agent engages the document", async () => {
+    const session = fakeSession();
+    const page = fakePage(false);
+    h.variant = "recaptcha_v2";
+    h.challengeRendered = true;
+    h.recaptchaEvidence = {
+      challengeFrameVisible: true,
+      anchorType: "image",
+      anchorSize: "invisible",
+      apiRender: "explicit",
+      sitekey: "6LftmFkUAAAAADydGEH99T-xmZoK69ErtRCzfVFf",
+      hasVisibleCheckboxAnchor: false,
+      hasInvisibleAnchor: true,
+      hasBadge: true,
+    };
+
+    expect(await attemptOperateCaptchaAutoSolve(session, page)).toBe("unengaged_widget");
+    await flushDetached();
+    expect(h.solveCalls).toEqual([]);
+
+    markCaptchaDocumentEngaged(session, PAGE_URL);
+    expect(await attemptOperateCaptchaAutoSolve(session, page)).toBe("fetch_started");
+    await flushDetached();
+    expect(h.solveCalls).toEqual(["recaptcha_v2"]);
+  });
+
+  it("defers invisible hCaptcha until the agent engages the document", async () => {
+    const session = fakeSession();
+    const page = fakePage(false);
+    h.variant = "hcaptcha";
+    h.challengeRendered = true;
+    h.hcaptchaInvisible = true;
+
+    expect(await attemptOperateCaptchaAutoSolve(session, page)).toBe("unengaged_widget");
+    await flushDetached();
+    expect(h.solveCalls).toEqual([]);
+
+    markCaptchaDocumentEngaged(session, PAGE_URL);
+    expect(await attemptOperateCaptchaAutoSolve(session, page)).toBe("fetch_started");
+    await flushDetached();
+    expect(h.solveCalls).toEqual(["hcaptcha"]);
+  });
+
+  it("never purchases a CAPTCHA token while an OAuth attempt is active", async () => {
+    const session = fakeSession();
+    (session.browser as unknown as { activeOAuthAttempt: object }).activeOAuthAttempt = {
+      id: "oauth-1",
+    };
+    const page = fakePage(false);
+    h.variant = "hcaptcha";
+    h.challengeRendered = true;
+
+    expect(await attemptOperateCaptchaAutoSolve(session, page)).toBe("oauth_in_progress");
+    await flushDetached();
+    expect(h.solveCalls).toEqual([]);
   });
 });

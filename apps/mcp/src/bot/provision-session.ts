@@ -155,6 +155,11 @@ export interface Observation {
         state: "onboarding_required";
         reason: string;
         next_action: "operate_observe";
+      }
+    | {
+        state: "awaiting_account_choice";
+        reason: string;
+        next_action: "operate_observe";
       };
   // Fail-closed identity hand-back: set only when a Google-dependent operation
   // requires a live Google session that is absent. The session stays live, but
@@ -222,6 +227,8 @@ export type ProvisionAction =
   | { kind: "oauth_click"; target: string; provider?: OAuthProviderId }
   // Return to the product page after the OAuth handshake completes.
   | { kind: "oauth_settle" }
+  // Clear a pending or stale OAuth attempt immediately and return to the product page.
+  | { kind: "oauth_abort" }
   // Atomic operator OAuth action. A recovery product tab and explicit provider
   // lifecycle tracking prevent a normal provider close from leaving the model
   // on a detached Playwright handle.

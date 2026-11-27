@@ -18,6 +18,7 @@ import {
   classifyGoogleAuthState,
   extractGoogleHumanChallenge,
   extractGoogleNumberMatch,
+  type GoogleAuthState,
   type GoogleHumanChallenge,
 } from "./google-auth-state.js";
 import type { HeightenedAuthNotificationResult } from "../api-client.js";
@@ -93,6 +94,15 @@ export class OAuthOnboardingRequiredError extends Error {
   constructor(readonly origin: string) {
     super(`OAuth returned to a relying-party required-information form on ${origin}`);
     this.name = "OAuthOnboardingRequiredError";
+  }
+}
+
+export class OAuthAccountChoiceRequiredError extends Error {
+  constructor(
+    message = "Google is showing the account chooser; select an account to continue OAuth.",
+  ) {
+    super(message);
+    this.name = "OAuthAccountChoiceRequiredError";
   }
 }
 
@@ -579,9 +589,18 @@ export async function loginWithOAuth(
     browser.oauthProviderPage !== null &&
     !browser.oauthProviderPage.isClosed()
   ) {
-    throw new OAuthAwaitingHumanError(
-      "An owned OAuth attempt is still pending. Call operate_observe or oauth_settle; a second authorization attempt was not started.",
-    );
+    const providerUrl = browser.oauthProviderPage.url();
+    const productOriginNow = safeOAuthOrigin(browser.oauthProductPage.url());
+    const providerReturnedToProduct =
+      oauthProviderForUrl(providerUrl) === null &&
+      safeOAuthOrigin(providerUrl) === productOriginNow;
+    if (providerReturnedToProduct) {
+      await abortPendingOAuthAttempt(browser, product);
+    } else {
+      throw new OAuthAwaitingHumanError(
+        "An owned OAuth attempt is still pending. Call operate_observe or operate_login with action='settle_oauth'; a second authorization attempt was not started.",
+      );
+    }
   }
 
   browser.oauthProductPage = product;
@@ -590,7 +609,7 @@ export async function loginWithOAuth(
   browser.oauthProviderPageClosed = false;
   browser.oauthCompletionPage = null;
   browser.oauthTerminalCompletionUrl = null;
-  browser.activeOAuthAttempt = {
+  const attempt: ActiveOAuthAttempt = {
     id: randomUUID(),
     provider: consentProvider,
     productPage: product,
@@ -599,6 +618,8 @@ export async function loginWithOAuth(
     providerDocumentId: null,
     reporter: reportHumanChallenge,
   };
+  browser.activeOAuthAttempt = attempt;
+  const attemptStillOwned = (): boolean => browser.activeOAuthAttempt === attempt;
   const oauthBudgetMs = Math.max(1, settleTimeoutMs);
   const productUrl = product.url();
   let oauthDeadline = Date.now() + oauthBudgetMs;
@@ -970,11 +991,13 @@ export async function loginWithOAuth(
                       timeout: Math.min(8000, remainingBudgetMs()),
                       noWaitAfter: true,
                     });
-                    const blocked = await handle.evaluate((element, key) => {
-                      const target = element as HTMLElement &
-                        Record<string, { blocked?: boolean } | undefined>;
-                      return target[key]?.blocked === true;
-                    }, guardKey);
+                    const blocked = await handle
+                      .evaluate((element, key) => {
+                        const target = element as HTMLElement &
+                          Record<string, { blocked?: boolean } | undefined>;
+                        return target[key]?.blocked === true;
+                      }, guardKey)
+                      .catch(() => false);
                     if (blocked) {
                       throw new BrowserClickDispatchError(
                         "not_dispatched",
@@ -1037,15 +1060,14 @@ export async function loginWithOAuth(
       transientNavigated = true;
       recordTopLevelNavigation(transient, transient.mainFrame());
     }
+    if (!attemptStillOwned()) return;
     const durableProduct = providerPage === null ? recovery : product;
     browser.oauthProductPage = durableProduct;
     browser.oauthProviderPage = transient;
     browser.oauthProviderPageClosed = transient.isClosed();
     restoreProductPageWhenOAuthPageCloses(browser, transient, durableProduct);
     browser.page = transient;
-    if (browser.activeOAuthAttempt !== null) {
-      browser.activeOAuthAttempt.providerPage = transient;
-    }
+    attempt.providerPage = transient;
     const hasTerminalCompletion = (): boolean =>
       observedReturn !== null && observedReturn.page.isClosed();
     // A provider can deliver its result to the opener without navigating to
@@ -1056,17 +1078,18 @@ export async function loginWithOAuth(
       !product.isClosed() &&
       popupReachedProvider &&
       expectedReturnUrls().length === 0;
-    const shouldStopWaiting = (): boolean => hasTerminalCompletion() || popupReturnedControl();
+    const shouldStopWaiting = (): boolean =>
+      !attemptStillOwned() || hasTerminalCompletion() || popupReturnedControl();
     let settled: Page | null = null;
     if (consentProvider === undefined) {
       settled = await waitForOAuthLifecycle(
         browser,
         Math.min(remainingBudgetMs(), 12_000),
         completionPage,
-        hasTerminalCompletion,
+        () => !attemptStillOwned() || hasTerminalCompletion(),
       );
     } else {
-      while (settled === null && Date.now() < oauthDeadline) {
+      while (settled === null && Date.now() < oauthDeadline && attemptStillOwned()) {
         throwIfOperatorRequestCancelled();
         const remaining = oauthDeadline - Date.now();
         settled = await waitForOAuthLifecycle(
@@ -1092,12 +1115,13 @@ export async function loginWithOAuth(
           browser.activeOAuthAttempt.providerDocumentId = providerDocumentId;
           browser.activeOAuthAttempt.provider = consentProvider;
         }
+        let googleState: GoogleAuthState | undefined;
         if (consentProvider === "google") {
           const bodyText = await transient
             .locator("body")
             .innerText({ timeout: Math.min(1_000, Math.max(1, remaining)) })
             .catch(() => "");
-          const googleState = classifyGoogleAuthState(transientUrl, bodyText);
+          googleState = classifyGoogleAuthState(transientUrl, bodyText);
           if (googleState === "challenge") {
             const number = extractGoogleNumberMatch(bodyText);
             const revision = createHash("sha256")
@@ -1134,8 +1158,19 @@ export async function loginWithOAuth(
           consentProvider,
           consentBudgetMs,
           expectedGoogleAccountEmail,
+          googleState,
         ).catch(() => false);
-        if (!advanced) await browser.sleep(Math.min(250, remainingBudgetMs()));
+        if (!advanced) {
+          if (
+            consentProvider === "google" &&
+            googleState === "chooser" &&
+            (await hasVisibleGoogleChooserOptions(transient))
+          ) {
+            pendingOnProvider = true;
+            throw new OAuthAccountChoiceRequiredError();
+          }
+          await browser.sleep(Math.min(250, remainingBudgetMs()));
+        }
       }
     }
     const observedUrls = [
@@ -1192,6 +1227,19 @@ export async function loginWithOAuth(
     }
     if (popupCapture.page !== null && popupCapture.onNavigation !== null) {
       popupCapture.page.off("framenavigated", popupCapture.onNavigation);
+    }
+    if (!attemptStillOwned()) {
+      if (
+        recovery !== null &&
+        !recovery.isClosed() &&
+        recovery !== browser.page &&
+        recovery !== browser.primaryPage &&
+        recovery !== browser.oauthProductPage &&
+        recovery !== browser.oauthProviderPage
+      ) {
+        await recovery.close().catch(() => undefined);
+      }
+      return;
     }
     const retainedProvider = providerPage ?? product;
     const providerStillShowing = pendingOnProvider && !retainedProvider.isClosed();
@@ -1302,9 +1350,7 @@ export async function waitForOAuthLifecycle(
       // Require the return URL to survive one event-loop turn so a transient
       // callback hop is never reported as the final product page.
       await browser.sleep(Math.min(50, Math.max(1, deadline - Date.now())));
-      return completionPage() === returnedPage && returnedPage.url() === url
-        ? returnedPage
-        : null;
+      return completionPage() === returnedPage && returnedPage.url() === url ? returnedPage : null;
     }
     await browser.sleep(50);
   }
@@ -1567,6 +1613,51 @@ async function oauthHumanChallengeError(
   );
 }
 
+function safeOAuthOrigin(url: string): string {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return url;
+  }
+}
+
+async function hasVisibleGoogleChooserOptions(page: Page): Promise<boolean> {
+  if (page.isClosed()) return false;
+  return await page
+    .evaluate(() => {
+      const visible = (element: Element): boolean => {
+        const html = element as HTMLElement;
+        const rect = html.getBoundingClientRect();
+        const style = window.getComputedStyle(html);
+        return (
+          rect.width >= 2 &&
+          rect.height >= 2 &&
+          style.display !== "none" &&
+          style.visibility !== "hidden"
+        );
+      };
+      const tilePresent = Array.from(
+        document.querySelectorAll("[data-identifier], [data-email]"),
+      ).some((element) => {
+        const identifier =
+          element.getAttribute("data-identifier")?.trim() ||
+          element.getAttribute("data-email")?.trim();
+        return identifier !== undefined && identifier.length > 0 && visible(element);
+      });
+      if (tilePresent) return true;
+      const emailRe = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
+      const excluded = /(?:\buse another account|\bremove an account|\bmanage accounts?\b)/i;
+      return Array.from(
+        document.querySelectorAll('button, [role="button"], [role="link"], a[href]'),
+      ).some((element) => {
+        if (!visible(element)) return false;
+        const text = (element.textContent ?? "").replace(/\s+/g, " ").trim();
+        return text.length > 0 && !excluded.test(text) && emailRe.test(text);
+      });
+    })
+    .catch(() => false);
+}
+
 // Advance a provider's consent / account-chooser screen by one click.
 // Returns false when no authorized control can be advanced; the caller retries
 // within the OAuth deadline, then hands off an unresolved attempt as pending.
@@ -1576,6 +1667,7 @@ export async function advanceOAuthConsent(
   provider: OAuthProviderId,
   timeoutMs = 8_000,
   expectedGoogleAccountEmail?: string | null,
+  googleState?: GoogleAuthState,
 ): Promise<boolean> {
   if (!browser.page) throw new Error("Browser not started");
   const authorityPage = browser.page;
@@ -1779,25 +1871,37 @@ export async function advanceOAuthConsent(
     return false;
   }
   // Google. Account chooser: Google renders each account with a
-  // stable data-identifier attribute (the account email).
-  const tiles = browser.page.locator("[data-identifier]");
+  // stable data-identifier or data-email attribute (the account email).
+  const tiles = browser.page.locator("[data-identifier], [data-email]");
   const expectedEmail = expectedGoogleAccountEmail?.trim().toLowerCase() ?? null;
   const matchingTileIndexes = await tiles
     .evaluateAll((elements, expected) => {
-      return elements.flatMap((element, index) => {
+      const matched = elements.flatMap((element, index) => {
         const html = element as HTMLElement;
         const rect = html.getBoundingClientRect();
         const style = window.getComputedStyle(html);
-        const identifier = element.getAttribute("data-identifier")?.trim().toLowerCase();
+        const identifier = (
+          element.getAttribute("data-identifier") ??
+          element.getAttribute("data-email") ??
+          ""
+        )
+          .trim()
+          .toLowerCase();
         return rect.width >= 2 &&
           rect.height >= 2 &&
           style.display !== "none" &&
           style.visibility !== "hidden" &&
-          identifier !== undefined &&
+          identifier.length > 0 &&
           (expected === null || identifier === expected)
-          ? [index]
+          ? [{ element, index }]
           : [];
       });
+      return matched
+        .filter(
+          (entry) =>
+            !matched.some((other) => other !== entry && entry.element.contains(other.element)),
+        )
+        .map((entry) => entry.index);
     }, expectedEmail)
     .catch(() => [] as number[]);
   // Without account metadata, a sole visible chooser tile is still
@@ -1820,10 +1924,14 @@ export async function advanceOAuthConsent(
   // from provider-page content; completion remains the OAuth lifecycle signal.
   // The identity text stays inside the provider page and is never returned.
   const accountRows = browser.page.locator('button, [role="button"], [role="link"], a[href]');
-  const accountRowLabels = await accountRows
-    .evaluateAll((elements) => {
+  const accountRowIndex = await accountRows
+    .evaluateAll((elements, expected) => {
+      if (expected === null) return -1;
       const EXCLUDED = /(?:\buse another account|\bremove an account|\bmanage accounts?\b)/i;
-      return elements.map((element, index) => {
+      const EMAIL_RE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
+      const matched: Array<{ element: Element; index: number }> = [];
+      for (let index = 0; index < elements.length; index++) {
+        const element = elements[index]!;
         const html = element as HTMLElement;
         const rect = html.getBoundingClientRect();
         const style = window.getComputedStyle(html);
@@ -1833,7 +1941,7 @@ export async function advanceOAuthConsent(
           style.display === "none" ||
           style.visibility === "hidden"
         ) {
-          return null;
+          continue;
         }
         const labels = [
           element.getAttribute("aria-label") ?? "",
@@ -1847,21 +1955,20 @@ export async function advanceOAuthConsent(
         ]
           .map((label) => label.replace(/\s+/g, " ").trim())
           .filter((label) => label.length > 0);
-        return labels.some((label) => EXCLUDED.test(label)) ? null : { index, labels };
-      });
-    })
-    .catch(() => [] as Array<{ index: number; labels: string[] } | null>);
-  const matchingAccountRows =
-    expectedEmail === null
-      ? []
-      : accountRowLabels.filter((candidate) => {
-          if (candidate === null) return false;
-          return candidate.labels.some((label) => {
-            const emails = label.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) ?? [];
-            return emails.some((email) => email.toLowerCase() === expectedEmail);
-          });
+        if (labels.some((label) => EXCLUDED.test(label))) continue;
+        const matchesExpected = labels.some((label) => {
+          const emails = label.match(EMAIL_RE) ?? [];
+          return emails.some((email) => email.toLowerCase() === expected);
         });
-  const accountRowIndex = matchingAccountRows.length === 1 ? matchingAccountRows[0]!.index : -1;
+        if (matchesExpected) matched.push({ element, index });
+      }
+      const leafMatches = matched.filter(
+        (entry) =>
+          !matched.some((other) => other !== entry && entry.element.contains(other.element)),
+      );
+      return leafMatches.length === 1 ? leafMatches[0]!.index : -1;
+    }, expectedEmail)
+    .catch(() => -1);
   if (accountRowIndex >= 0) {
     if (!hasBudget()) return false;
     try {
@@ -1873,6 +1980,10 @@ export async function advanceOAuthConsent(
       // fall through to the approve-button path
     }
   }
+  // On Google's account chooser, multiple accounts without an exact match must
+  // surface cleanly as awaiting account choice instead of falling through to
+  // the consent-button scan and logging a false consent failure.
+  if (googleState === "chooser") return false;
   // Consent screen: the approve control's name varies by Google's
   // consent layout — "Continue", "Allow", "Allow access" (the
   // /signin/oauth/consent?part=… variant meilisearch hits). Match on a
@@ -2015,4 +2126,61 @@ export async function settleAfterOAuth(
       browser.oauthProviderPageClosed = false;
     }
   }
+}
+
+// Clear a pending or stale OAuth attempt immediately so the session can retry
+// with another provider or continue on the product page without wedging.
+export async function abortPendingOAuthAttempt(
+  browser: BrowserController,
+  keepPage?: Page | null,
+): Promise<Page | null> {
+  const product = browser.oauthProductPage;
+  const provider = browser.oauthProviderPage;
+  const active = browser.page;
+
+  let retained: Page | null = null;
+  if (keepPage !== undefined && keepPage !== null && !keepPage.isClosed()) {
+    retained = keepPage;
+  } else if (
+    provider !== null &&
+    !provider.isClosed() &&
+    provider === active &&
+    oauthProviderForUrl(provider.url()) === null
+  ) {
+    // Same-tab flow that already returned to the relying party or navigated
+    // away from the provider: keep the active tab and drop any spare recovery tab.
+    retained = provider;
+  } else if (product !== null && !product.isClosed()) {
+    retained = product;
+  } else if (active !== null && !active.isClosed()) {
+    retained = active;
+  }
+
+  browser.oauthProductPage = null;
+  browser.oauthProviderPage = null;
+  browser.oauthProviderPageClosed = false;
+  browser.oauthCompletionPage = null;
+  browser.activeOAuthAttempt = null;
+  browser.oauthConsentAttemptedPhases.clear();
+
+  if (retained !== null && !retained.isClosed()) {
+    browser.page = retained;
+  }
+
+  for (const candidate of [provider, product]) {
+    if (candidate !== null && candidate !== retained && !candidate.isClosed()) {
+      if (candidate === browser.primaryPage && retained !== null && !retained.isClosed()) {
+        browser.primaryPage = retained;
+      }
+      await candidate.close().catch(() => undefined);
+    }
+  }
+
+  if (retained !== null && !retained.isClosed()) {
+    browser.page = retained;
+    await retained.bringToFront().catch(() => undefined);
+    return retained;
+  }
+  browser.adoptLivePage();
+  return browser.page;
 }
