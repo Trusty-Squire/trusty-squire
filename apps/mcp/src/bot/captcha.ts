@@ -705,7 +705,9 @@ export async function detectCaptchaVariant(
         document.querySelectorAll('input, textarea, select, [contenteditable="true"]'),
       ).some(isEditableField);
       const AUTH_CONTROL_RE =
-        /\b(?:continue|sign\s*(?:in|up)|log\s*(?:in|on)|register|connect)\s+with\b|\b(?:google|github|gitlab|microsoft|apple|sso|saml|okta|discord|slack|facebook|linkedin|passkey|magic\s*link)\b/i;
+        /\b(?:continue|sign\s*(?:in|up)|log\s*(?:in|on)|register|connect)\s+with\b|\b(?:single\s+sign[- ]?on|passkey|magic\s*link)\b/i;
+      const BARE_PROVIDER_BUTTON_RE =
+        /^(?:google|github|gitlab|microsoft|apple|sso|saml|okta|discord|slack|facebook|linkedin)$/i;
       const AUTH_HREF_RE =
         /(?:\/oauth|\/authorize|accounts\.google\.com|github\.com\/login\/oauth|login\.microsoftonline\.com)/i;
       const hasAlternateAuth = Array.from(
@@ -714,14 +716,19 @@ export async function detectCaptchaVariant(
         ),
       ).some((el) => {
         if (isTurnstileOwnedNode(el) || !isVisibleControl(el)) return false;
+        if (el.closest("footer, nav, header") !== null) return false;
         if ((el as HTMLButtonElement).disabled) return false;
         const text = [
           el.textContent ?? "",
           el.getAttribute("aria-label") ?? "",
           el.getAttribute("title") ?? "",
           el.getAttribute("value") ?? "",
-        ].join(" ");
+        ]
+          .join(" ")
+          .replace(/\s+/g, " ")
+          .trim();
         if (AUTH_CONTROL_RE.test(text)) return true;
+        if (el.tagName.toLowerCase() !== "a" && BARE_PROVIDER_BUTTON_RE.test(text)) return true;
         const href = el.getAttribute("href") ?? "";
         return href.length > 0 && AUTH_HREF_RE.test(href);
       });

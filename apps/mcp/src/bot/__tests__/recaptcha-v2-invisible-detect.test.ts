@@ -374,7 +374,8 @@ describe.skipIf(!available)("recaptcha v2-invisible image challenge (IPInfo shap
       });
       expect(shouldDeferUnengagedTurnstile(interstitial.turnstile!)).toBe(false);
 
-      // 4. Standalone visible blocking Turnstile gate (no interstitial copy, no other form/OAuth controls).
+      // 4. Standalone visible blocking Turnstile gate (no interstitial copy, no other form/OAuth controls),
+      // including footer/social links naming providers like GitHub or Discord.
       await page.setContent(`<!doctype html><html><head><title>Security check</title></head><body>
         <h1>Verify you are human</h1>
         <form action="/verify" method="POST">
@@ -385,6 +386,11 @@ describe.skipIf(!available)("recaptcha v2-invisible image challenge (IPInfo shap
           </div>
           <button type="submit">Continue</button>
         </form>
+        <footer>
+          <a href="https://github.com/example/app">Star us on GitHub</a>
+          <a href="https://discord.gg/example">Join our Discord</a>
+        </footer>
+        <div><a href="https://github.com/example/app">GitHub</a></div>
       </body></html>`);
       await expect
         .poll(() => page.frames().some((f) => f.url().includes("challenges.cloudflare.com")))
