@@ -133,19 +133,19 @@ it.each(["missing", "rejected", "failed"])(
   15_000,
 );
 
-it("stores an opaque key after Copy relabels itself without another model decision", async () => {
+async function expectDriveToCaptureRelabeledCopy(display: string) {
   const context = await browser.newContext();
   const page = await context.newPage();
   const url = "https://app.example.test/keys";
   const opaqueKey = "Ab3kZ9";
-  await page.route("**/*", (route) =>
-    route.fulfill({
-      contentType: "text/html",
-      body: `<main><dialog open aria-label="API key created"><p>${opaqueKey}</p>
-      <button onclick="navigator.clipboard.writeText('${opaqueKey}');this.textContent='Copied!'">Copy</button>
-      </dialog></main>`,
-    }),
-  );
+  const copy = `<button onclick="navigator.clipboard.writeText('${opaqueKey}');this.textContent='Copied!'">`;
+  const body =
+    display === "dialog"
+      ? `<main><dialog open aria-label="API key created"><p>${opaqueKey}</p>
+       ${copy}Copy</button></dialog></main>`
+      : `<main><h1>API key created</h1><div><pre><code>${opaqueKey}</code></pre>
+       ${copy}Copy key</button></div></main>`;
+  await page.route("**/*", (route) => route.fulfill({ contentType: "text/html", body }));
   await page.goto(url);
   const started = await startHarnessProvisionSession({
     browser: BrowserController.fromHarnessPage(page),
@@ -221,4 +221,10 @@ it("stores an opaque key after Copy relabels itself without another model decisi
     await finishProvisionSession(started.session_id);
     await context.close();
   }
-}, 15_000);
+}
+
+it.each(["dialog", "pre"])(
+  "stores an opaque key from %s after Copy relabels itself without another model decision",
+  expectDriveToCaptureRelabeledCopy,
+  15_000,
+);

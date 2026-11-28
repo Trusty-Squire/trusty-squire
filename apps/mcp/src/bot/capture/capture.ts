@@ -21,16 +21,15 @@ import { captureFrameSnapshot } from "../drive-snapshot.js";
 export interface ExtractResult {
   session_id: string;
   url: string;
-  // Only a value with a known source: what this extraction's own Copy click
-  // in a credential dialog wrote to the clipboard. Page text is never scanned.
+  // A value from a credential Copy control or a single labeled display.
   credentials: Record<string, string>;
   // Set when no key had a known source; nothing is stored.
   error?: string;
 }
 
 export const EXTRACT_NO_SOURCE_ERROR =
-  "no_key_source: nothing stored. operate_extract without capture stores only the value " +
-  "a Copy button in a key dialog writes to the clipboard, and none did. Read the page " +
+  "no_key_source: nothing stored. No credential Copy control or unambiguous labeled key display " +
+  "yielded a value. Read the page " +
   "with operate_observe, then point capture at the key: operate_extract with " +
   "capture:{source:{selector}|{role,name?},store}, or operate_click on its Copy button " +
   "with capture:{source:{clipboard:true},store}.";
@@ -714,15 +713,18 @@ async function inlineKeyCopy(
         // Plain text can share its node with a display label such as "API key:".
         const displayText = (text: string): string =>
           text.trim().replace(/^(?:(?:your|new)\s+)*(?:api[- ]?key|key|token|secret):\s+/i, "");
-        const valueBeside = (control: Element): string | undefined => {
+        const valueBeside = (control: Element, namedKey: boolean): string | undefined => {
           let anchor = control;
           for (let depth = 0; depth < 6; depth++) {
             const scope = anchor.parentElement;
             if (scope === null || scope === document.body || scope.matches("main")) break;
             const sibling = anchor.previousElementSibling;
-            if (sibling?.matches("span, p, output") && shown(sibling)) {
+            if (
+              sibling?.matches(namedKey ? "span, p, output, pre" : "span, p, output") &&
+              shown(sibling)
+            ) {
               const value = displayText(valueOf(sibling));
-              if (value.length > 0) return value;
+              if (value.length > 0 && (!sibling.matches("pre") || !/\s/.test(value))) return value;
             }
             const values = Array.from(
               scope.querySelectorAll("code, input[readonly], textarea[readonly]"),
@@ -765,8 +767,10 @@ async function inlineKeyCopy(
           ) {
             return [];
           }
-          const token = valueBeside(control);
-          return token === undefined ? [] : [{ index, token, cued, namedKey }];
+          const token = valueBeside(control, namedKey);
+          return token === undefined || /^https?:\/\/\S+$/i.test(token)
+            ? []
+            : [{ index, token, cued, namedKey }];
         });
         const named = matches.filter((match) => match.namedKey);
         const eligible = named.length === 0 ? matches : named;
@@ -1119,15 +1123,64 @@ export async function extractCredentials(sessionId: string): Promise<ExtractResu
   const page = operationPageForSession(session);
   invalidateCompactV2Snapshot(session);
 
-  // The Copy click establishes provenance; storage eligibility is checked
-  // separately by storableCredentials.
+  // Prefer Copy when available. It may hold a full value behind a masked display.
   await ensureCaptureClipboardPermission(page);
   const copied = await copyCredentialFromDialog(page, browser);
-  audit(sessionId, "extract", { found: copied !== null });
+  const key =
+    copied === null || isWebUrl(copied) ? ((await readLabeledKeyDisplay(page)) ?? copied) : copied;
+  audit(sessionId, "extract", { found: key !== null });
   return {
     session_id: sessionId,
     url: page?.url() ?? browser.currentUrl(),
-    credentials: copied === null ? {} : { api_key: copied },
-    ...(copied === null ? { error: EXTRACT_NO_SOURCE_ERROR } : {}),
+    credentials: key === null ? {} : { api_key: key },
+    ...(key === null ? { error: EXTRACT_NO_SOURCE_ERROR } : {}),
   };
+}
+
+/** A one-time key can appear as ordinary text with no Copy control. Require a
+ * label attached to the display itself or directly before it. */
+async function readLabeledKeyDisplay(page: Page | undefined): Promise<string | null> {
+  if (page === undefined) return null;
+  return await page
+    .evaluate(() => {
+      const keyLabel =
+        /^(?:(?:your|new|generated|created)\s+)*api[- ]+(?:key|token|secret)(?:\s+(?:created|generated))?\s*:?$/i;
+      const visible = (element: HTMLElement): boolean =>
+        element.checkVisibility({ opacityProperty: true, visibilityProperty: true });
+      const values = new Set<string>();
+      const displays = document.querySelectorAll<HTMLElement>("pre, code, div, p, span, output, dd");
+      for (const display of Array.from(displays)) {
+        if (!display.matches("pre, code") && display.childElementCount > 0) continue;
+        const labelIds = display.getAttribute("aria-labelledby")?.trim().split(/\s+/) ?? [];
+        const label = labelIds
+          .map((id) => document.getElementById(id)?.textContent ?? "")
+          .join(" ")
+          .trim();
+        const previous = display.previousElementSibling;
+        if (
+          !keyLabel.test(label || display.getAttribute("aria-label")?.trim() || "") &&
+          !(
+            previous instanceof HTMLElement &&
+            previous.matches(
+              "h1, h2, h3, h4, h5, h6, [role=heading], label, dt, p, span, strong",
+            ) &&
+            visible(previous) &&
+            keyLabel.test(previous.innerText.trim())
+          )
+        ) {
+          continue;
+        }
+        if (!visible(display)) continue;
+        const value = display.innerText.trim();
+        if (
+          value.length > 0 &&
+          value.length <= 8192 &&
+          !/\s|\*{2,}|[•●…]|\.{3}|^https?:\/\//i.test(value)
+        ) {
+          values.add(value);
+        }
+      }
+      return values.size === 1 ? values.values().next().value! : null;
+    })
+    .catch(() => null);
 }
