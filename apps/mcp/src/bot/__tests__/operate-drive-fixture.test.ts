@@ -658,6 +658,39 @@ function deviceCodeBoxes(start: number, end: number): string {
   ).join("");
 }
 
+const GITHUB_DEVICE_CODE_HTML = `<style>
+  .d-flex { display: flex; }
+  .d-none { display: none; }
+  .js-user-code-field { width: 2rem; }
+</style><main><h1>Device activation</h1>
+  <form>
+    <label for="user_code">Enter the code displayed in the app or on the device you're signing in to...</label>
+    <div class="d-flex">
+      <input id="user-code-0" name="user-code-0" maxlength="1" class="form-control js-user-code-field" data-next="user-code-1">
+      <input id="user-code-1" name="user-code-1" maxlength="1" class="form-control js-user-code-field" data-previous="user-code-0" data-next="user-code-2">
+      <input id="user-code-2" name="user-code-2" maxlength="1" class="form-control js-user-code-field" data-previous="user-code-1" data-next="user-code-3">
+      <input id="user-code-3" name="user-code-3" maxlength="1" class="form-control js-user-code-field" data-previous="user-code-2" data-next="user-code-5">
+      <span class="text-normal"> - </span>
+      <input id="user-code-4" name="user-code-4" class="d-none" value="-" readonly>
+      <input id="user-code-5" name="user-code-5" maxlength="1" class="form-control js-user-code-field" data-previous="user-code-3" data-next="user-code-6">
+      <input id="user-code-6" name="user-code-6" maxlength="1" class="form-control js-user-code-field" data-previous="user-code-5" data-next="user-code-7">
+      <input id="user-code-7" name="user-code-7" maxlength="1" class="form-control js-user-code-field" data-previous="user-code-6" data-next="user-code-8">
+      <input id="user-code-8" name="user-code-8" maxlength="1" class="form-control js-user-code-field" data-previous="user-code-7">
+    </div>
+    <button type="submit">Continue</button>
+  </form><output></output>
+</main><script>
+  for (const field of document.querySelectorAll('.js-user-code-field[data-next]')) {
+    field.addEventListener('input', () => {
+      if (field.value.length === 1) document.getElementById(field.dataset.next).focus();
+    });
+  }
+  document.querySelector('form').onsubmit = (event) => {
+    event.preventDefault();
+    document.querySelector('output').textContent = [...new FormData(event.target).values()].join('');
+  };
+</script>`;
+
 describe("operate_drive real-browser fixture", () => {
   it.each([
     { layout: "one group", code: "AB12-CD34", separator: null, suppliedAsFact: false },
@@ -669,7 +702,6 @@ describe("operate_drive real-browser fixture", () => {
     separator,
     suppliedAsFact,
   }) => {
-    // GitHub's device page separates two groups of four one-character inputs.
     const codeEntry =
       separator === null
         ? deviceCodeBoxes(0, 8)
@@ -735,6 +767,51 @@ describe("operate_drive real-browser fixture", () => {
     }
   }, 30_000);
 
+  it.each(["AB12-CD34", "AB12CD34"])("fills GitHub's device form for %s", async (code) => {
+    const { context, page, started } = await openFixture(
+      GITHUB_DEVICE_CODE_HTML,
+      "github.com",
+      "drive",
+      "/login/device",
+    );
+    try {
+      const snapshot = await captureFrameSnapshot(page, [], 0);
+      expect(snapshot).not.toBeNull();
+      const { codes, rows } = groupDriveCodeRows(snapshot!, driveRowsFromSnapshot(snapshot!));
+      const deviceRows = rows.filter((row) => row[2]?.includes("f=device_code"));
+      expect(deviceRows).toHaveLength(1);
+      expect(deviceRows[0]?.[2]).toContain("code=8");
+      expect([...codes.values()].map((refs) => refs.length)).toEqual([8]);
+
+      const result = await runOperateDrive(
+        {
+          session_id: started.session_id,
+          goal: "Enter the device code, press Continue, and finish when the code is accepted.",
+          facts: { user_code: code },
+          max_steps: 4,
+        },
+        api(),
+        undefined,
+        deps(async (_api, _state, questions) => {
+          expect(Object.keys(questions).length).toBeLessThanOrEqual(12);
+          if ((await page.locator("output").textContent()) === "AB12-CD34") {
+            return jevChoose(questions, "DONE");
+          }
+          if (Object.keys(choiceCriteria(questions.TYPE_TEXT_target)).length === 0) {
+            return jevChoose(questions, "CLICK", /^Continue$/);
+          }
+          return jevChoose(questions, "TYPE_TEXT");
+        }),
+      );
+      expect(result.status).toBe("complete");
+      expect(await page.locator("output").textContent()).toBe("AB12-CD34");
+      expect(result.trajectory.filter((step) => step.action === "type")).toHaveLength(1);
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
   it("keeps code groups separate across text, other controls, and form boundaries", async () => {
     const group = `<fieldset>${deviceCodeBoxes(0, 4)}</fieldset>`;
     const page = await browser.newPage();
@@ -743,11 +820,14 @@ describe("operate_drive real-browser fixture", () => {
         <form>${group}<p>Enter the next code.</p>${group}</form>
         <form>${group}<input aria-label="Account">${group}</form>
         <form>${group}</form><span>-</span><form>${group}</form>
+        <form>${deviceCodeBoxes(0, 4)}<input type="hidden" value="next">${deviceCodeBoxes(4, 8)}</form>
+        <form>${deviceCodeBoxes(0, 4)}<input readonly value="-">${deviceCodeBoxes(4, 8)}</form>
+        <form>${deviceCodeBoxes(0, 4)}<span role="button" aria-label="Cancel"></span>${deviceCodeBoxes(4, 8)}</form>
       `);
       const snapshot = await captureFrameSnapshot(page, [], 0);
       expect(snapshot).not.toBeNull();
       const { codes } = groupDriveCodeRows(snapshot!, driveRowsFromSnapshot(snapshot!));
-      expect([...codes.values()].map((refs) => refs.length)).toEqual([4, 4, 4, 4, 4, 4]);
+      expect([...codes.values()].map((refs) => refs.length)).toEqual(Array(12).fill(4));
     } finally {
       await page.close();
     }

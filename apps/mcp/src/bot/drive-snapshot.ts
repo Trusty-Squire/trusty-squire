@@ -52,7 +52,7 @@ export interface DriveSnapshotElement {
     order: number;
     oneTimeCode: boolean;
     group: string | undefined;
-    continuesPreviousGroup?: boolean;
+    previousPartOrder?: number;
   };
   /** Live CSS/Playwright selector for the node, used to re-resolve identity. */
   selector?: string;
@@ -380,9 +380,9 @@ export function groupDriveCodeRows(
       parts[end]!.frameOrdinal === first.frameOrdinal &&
       parts[end]!.formId === first.formId &&
       parts[end]!.dialogRef === first.dialogRef &&
-      parts[end]!.order === parts[end - 1]!.order + 1 &&
-      (parts[end]!.group === parts[end - 1]!.group ||
-        parts[end]!.continuesPreviousGroup === true)
+      ((parts[end]!.order === parts[end - 1]!.order + 1 &&
+        parts[end]!.group === parts[end - 1]!.group) ||
+        parts[end]!.previousPartOrder === parts[end - 1]!.order)
     )
       end += 1;
     const run = parts.slice(start, end);
@@ -851,7 +851,15 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
     for (let node = walker.nextNode(); node !== null && !expired(); node = walker.nextNode()) {
       if (node === next) return true;
       if (node instanceof Element) {
-        if (!node.contains(next) && !node.matches("span,div,br")) return false;
+        // A device-code form can submit the visual dash as a separate input.
+        if (
+          node instanceof HTMLInputElement &&
+          /^[\u2010-\u2015-]$/.test(node.value) &&
+          (node.type === "hidden" || (node.readOnly && !visible(node)))
+        )
+          continue;
+        if (node.matches(selector) || (!node.contains(next) && !node.matches("span,div,br")))
+          return false;
       } else if (!/^[\s\u2010-\u2015-]*$/.test(node.nodeValue ?? "")) {
         return false;
       }
@@ -861,7 +869,7 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
   const inView: DriveSnapshotElement[] = [];
   const offscreenControls: DriveSnapshotElement[] = [];
   let previousCodePart:
-    | { element: Element; order: number; group: Element; formId: number }
+    | { element: Element; order: number; group: Element | null; formId: number | undefined }
     | undefined;
   let omittedValues = 0;
   for (const [order, element] of queryAll(selector).entries()) {
@@ -1084,22 +1092,19 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
       editable && !picker && width === 1 && ["text", "tel"].includes(inputType)
         ? element.closest('fieldset,[role="group"]')
         : undefined;
-    let continuesPreviousGroup = false;
-    if (codeGroup != null && formId !== undefined) {
+    let previousPartOrder: number | undefined;
+    if (codeGroup !== undefined) {
       if (
         previousCodePart !== undefined &&
-        previousCodePart.order === order - 1 &&
         previousCodePart.formId === formId &&
-        previousCodePart.group !== codeGroup &&
-        previousCodePart.element.getRootNode() === ownerRoot
+        previousCodePart.element.getRootNode() === ownerRoot &&
+        (previousCodePart.group === codeGroup ||
+          (previousCodePart.group !== null && codeGroup !== null && formId !== undefined)) &&
+        (previousCodePart.order !== order - 1 || previousCodePart.group !== codeGroup) &&
+        onlyCodeSeparatorBetween(previousCodePart.element, element, ownerRoot)
       ) {
-        // Control order excludes presentation-only separators. Check the DOM
-        // gap before joining groups so intervening labels still split codes.
-        continuesPreviousGroup = onlyCodeSeparatorBetween(
-          previousCodePart.element,
-          element,
-          ownerRoot,
-        );
+        // Tie this gap to the actual predecessor in case its row is dropped.
+        previousPartOrder = previousCodePart.order;
       }
       previousCodePart = { element, order, group: codeGroup, formId };
     }
@@ -1145,7 +1150,7 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
               order,
               oneTimeCode: element.getAttribute("autocomplete") === "one-time-code",
               group: codeGroup === null ? undefined : identity(codeGroup),
-              ...(continuesPreviousGroup ? { continuesPreviousGroup } : {}),
+              ...(previousPartOrder === undefined ? {} : { previousPartOrder }),
             },
           }
         : {}),
