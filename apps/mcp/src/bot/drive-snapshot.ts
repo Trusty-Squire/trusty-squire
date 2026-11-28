@@ -48,7 +48,12 @@ export interface DriveSnapshotElement {
   /** The input `type` (`email`, `text`, …), when the node is an input. */
   inputType?: string;
   /** Position among DOM controls before viewport and submit ordering. */
-  codePart?: { order: number; oneTimeCode: boolean; group: string | undefined };
+  codePart?: {
+    order: number;
+    oneTimeCode: boolean;
+    group: string | undefined;
+    continuesPreviousGroup?: boolean;
+  };
   /** Live CSS/Playwright selector for the node, used to re-resolve identity. */
   selector?: string;
   frameUrl?: string;
@@ -375,8 +380,9 @@ export function groupDriveCodeRows(
       parts[end]!.frameOrdinal === first.frameOrdinal &&
       parts[end]!.formId === first.formId &&
       parts[end]!.dialogRef === first.dialogRef &&
-      parts[end]!.group === first.group &&
-      parts[end]!.order === parts[end - 1]!.order + 1
+      parts[end]!.order === parts[end - 1]!.order + 1 &&
+      (parts[end]!.group === parts[end - 1]!.group ||
+        parts[end]!.continuesPreviousGroup === true)
     )
       end += 1;
     const run = parts.slice(start, end);
@@ -836,8 +842,27 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
     }
     return id;
   };
+  const onlyCodeSeparatorBetween = (previous: Element, next: Element, ownerRoot: Node): boolean => {
+    const walker = document.createTreeWalker(
+      ownerRoot,
+      NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT,
+    );
+    walker.currentNode = previous;
+    for (let node = walker.nextNode(); node !== null && !expired(); node = walker.nextNode()) {
+      if (node === next) return true;
+      if (node instanceof Element) {
+        if (!node.contains(next) && !node.matches("span,div,br")) return false;
+      } else if (!/^[\s\u2010-\u2015-]*$/.test(node.nodeValue ?? "")) {
+        return false;
+      }
+    }
+    return false;
+  };
   const inView: DriveSnapshotElement[] = [];
   const offscreenControls: DriveSnapshotElement[] = [];
+  let previousCodePart:
+    | { element: Element; order: number; group: Element; formId: number }
+    | undefined;
   let omittedValues = 0;
   for (const [order, element] of queryAll(selector).entries()) {
     if (expired()) break;
@@ -1059,6 +1084,25 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
       editable && !picker && width === 1 && ["text", "tel"].includes(inputType)
         ? element.closest('fieldset,[role="group"]')
         : undefined;
+    let continuesPreviousGroup = false;
+    if (codeGroup != null && formId !== undefined) {
+      if (
+        previousCodePart !== undefined &&
+        previousCodePart.order === order - 1 &&
+        previousCodePart.formId === formId &&
+        previousCodePart.group !== codeGroup &&
+        previousCodePart.element.getRootNode() === ownerRoot
+      ) {
+        // Control order excludes presentation-only separators. Check the DOM
+        // gap before joining groups so intervening labels still split codes.
+        continuesPreviousGroup = onlyCodeSeparatorBetween(
+          previousCodePart.element,
+          element,
+          ownerRoot,
+        );
+      }
+      previousCodePart = { element, order, group: codeGroup, formId };
+    }
     const row: DriveSnapshotElement = {
       ref,
       role,
@@ -1101,6 +1145,7 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
               order,
               oneTimeCode: element.getAttribute("autocomplete") === "one-time-code",
               group: codeGroup === null ? undefined : identity(codeGroup),
+              ...(continuesPreviousGroup ? { continuesPreviousGroup } : {}),
             },
           }
         : {}),

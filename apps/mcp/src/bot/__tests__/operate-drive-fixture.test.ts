@@ -44,6 +44,7 @@ import {
   captureFrameSnapshot,
   driveRowsFromSnapshot,
   frameDynamicsSignature,
+  groupDriveCodeRows,
 } from "../drive-snapshot.js";
 import { dispatchDriveAct } from "../act/act.js";
 import { rememberDriveIdentities } from "../act/identity.js";
@@ -649,16 +650,35 @@ function refFor(started: { safe_table?: unknown }, label: string): string {
   throw new Error(`missing ${label}`);
 }
 
+function deviceCodeBoxes(start: number, end: number): string {
+  return Array.from(
+    { length: end - start },
+    (_, i) => `<input size="1" maxlength="1" required name="user-code[]"
+      aria-label="Character ${start + i + 1}" oninput="this.nextElementSibling?.focus()">`,
+  ).join("");
+}
+
 describe("operate_drive real-browser fixture", () => {
-  it("asks for one value and fills all eight device-code boxes in order", async () => {
-    const code = "AB12-CD34";
+  it.each([
+    { layout: "one group", code: "AB12-CD34", separator: null, suppliedAsFact: false },
+    { layout: "GitHub groups", code: "AB12-CD34", separator: "-", suppliedAsFact: true },
+    { layout: "GitHub groups", code: "AB12CD34", separator: "-", suppliedAsFact: true },
+    { layout: "groups with a spacer", code: "AB12CD34", separator: "", suppliedAsFact: true },
+  ])("fills all eight device-code boxes in $layout for $code", async ({
+    code,
+    separator,
+    suppliedAsFact,
+  }) => {
+    // GitHub's device page separates two groups of four one-character inputs.
+    const codeEntry =
+      separator === null
+        ? deviceCodeBoxes(0, 8)
+        : `<div role="group">${deviceCodeBoxes(0, 4)}</div>
+           <span aria-hidden="true">${separator}</span>
+           <div role="group">${deviceCodeBoxes(4, 8)}</div>`;
     const html = `<main><h1>Device activation</h1>
       <form><p>Enter the user code displayed on your device.</p>
-        ${Array.from(
-          { length: 8 },
-          (_, i) => `<input size="1" maxlength="1" required name="user-code[]"
-            aria-label="Character ${i + 1}" oninput="this.nextElementSibling?.focus()">`,
-        ).join("")}
+        ${codeEntry}
         <button type="submit">Continue</button>
       </form><output></output></main>
       <script>document.querySelector('form').onsubmit = (event) => {
@@ -678,12 +698,16 @@ describe("operate_drive real-browser fixture", () => {
         }
         expect(Object.values(choiceCriteria(questions.TYPE_TEXT_target))).toHaveLength(1);
         const values = Object.entries(questions).filter(([name]) => name.startsWith("form_value_"));
+        const result = jevChoose(questions, "TYPE_TEXT");
+        if (suppliedAsFact) {
+          expect(values).toHaveLength(0);
+          return result;
+        }
         expect(values).toHaveLength(1);
         const [name, question] = values[0]!;
         const criteria = choiceCriteria(question);
         const key = Object.keys(criteria).find((candidate) => criteria[candidate] === code)!;
         expect(key).toBeDefined();
-        const result = jevChoose(questions, "TYPE_TEXT");
         result.result.answers[name] = {
           choice: key,
           confidence: 0.93,
@@ -694,7 +718,8 @@ describe("operate_drive real-browser fixture", () => {
       const result = await runOperateDrive(
         {
           session_id: started.session_id,
-          goal: `Enter the device code ${code}, press Continue, and finish when the code is accepted.`,
+          goal: `Enter the device code${suppliedAsFact ? "" : ` ${code}`}, press Continue, and finish when the code is accepted.`,
+          ...(suppliedAsFact ? { facts: { user_code: code } } : {}),
           max_steps: 4,
         },
         api(),
@@ -709,6 +734,24 @@ describe("operate_drive real-browser fixture", () => {
       await context.close();
     }
   }, 30_000);
+
+  it("keeps code groups separate across text, other controls, and form boundaries", async () => {
+    const group = `<fieldset>${deviceCodeBoxes(0, 4)}</fieldset>`;
+    const page = await browser.newPage();
+    try {
+      await page.setContent(`
+        <form>${group}<p>Enter the next code.</p>${group}</form>
+        <form>${group}<input aria-label="Account">${group}</form>
+        <form>${group}</form><span>-</span><form>${group}</form>
+      `);
+      const snapshot = await captureFrameSnapshot(page, [], 0);
+      expect(snapshot).not.toBeNull();
+      const { codes } = groupDriveCodeRows(snapshot!, driveRowsFromSnapshot(snapshot!));
+      expect([...codes.values()].map((refs) => refs.length)).toEqual([4, 4, 4, 4, 4, 4]);
+    } finally {
+      await page.close();
+    }
+  });
 
   it("toggles a covered native checkbox using its associated text label", async () => {
     const html = `<style>
