@@ -9,7 +9,7 @@
 // runtime-import provision-session; `ProvisionAction`/`Observation` come back
 // as type-only imports (the tool layer keeps importing `act` from
 // provision-session, which re-exports it).
-import type { Frame, Page } from "playwright";
+import type { ElementHandle, Frame, Page } from "playwright";
 import { randomUUID } from "node:crypto";
 import {
   BrowserClickDispatchError,
@@ -902,6 +902,66 @@ async function clickTargetOccluded(scope: Page | Frame, selector: string): Promi
   ).catch(() => false);
 }
 
+async function clickDriveCheckbox(
+  scope: Page | Frame,
+  ref: string,
+  click: (handle: ElementHandle<Element>) => Promise<void>,
+): Promise<void> {
+  const inputHandle = await scope.evaluateHandle((key) => {
+    const registry = (window as Window & { __tsDriveRegistry?: { nodes: Map<string, Element> } })
+      .__tsDriveRegistry;
+    const node = registry?.nodes.get(key);
+    return node instanceof HTMLInputElement &&
+      node.isConnected &&
+      node.type === "checkbox" &&
+      !node.matches(":disabled") &&
+      node.closest('[aria-disabled="true"]') === null
+      ? node
+      : null;
+  }, ref);
+  const input = inputHandle.asElement();
+  try {
+    if (input === null) throw new CompactV2StaleRefError("stale_ref");
+    const before = await input.evaluate((node) => node.checked);
+    const targetHandle = await input.evaluateHandle((node) => {
+      const canClick = (element: HTMLElement): boolean => {
+        const style = getComputedStyle(element);
+        const box = element.getBoundingClientRect();
+        if (
+          box.width <= 0 ||
+          box.height <= 0 ||
+          style.visibility !== "visible" ||
+          style.pointerEvents === "none" ||
+          style.opacity === "0"
+        )
+          return false;
+        const x = box.x + box.width / 2;
+        const y = box.y + box.height / 2;
+        if (x < 0 || x >= innerWidth || y < 0 || y >= innerHeight) return true;
+        const root = element.getRootNode() as Document | ShadowRoot;
+        return element.contains(root.elementFromPoint(x, y));
+      };
+      if (canClick(node)) return node;
+      const labels = Array.from(node.labels ?? []).filter(canClick);
+      return labels.find((label) => label.htmlFor !== "") ?? labels[0] ?? node;
+    });
+    try {
+      // When a custom skin intercepts the input, native label activation still
+      // delivers one trusted click and the normal input/change events.
+      await click(targetHandle);
+    } catch (error) {
+      if (clickDispatchStatusForError(error) !== "dispatched") throw error;
+    } finally {
+      await targetHandle.dispose().catch(() => undefined);
+    }
+    if (!(await input.evaluate((node) => node.isConnected && node.checked !== before))) {
+      throw new CompactV2ActionFailureError("checkbox_unchanged");
+    }
+  } finally {
+    await inputHandle.dispose().catch(() => undefined);
+  }
+}
+
 // Re-resolve against FRESH elements — never trust a stale index. Shared by the
 // type_secret / select / click-group ref paths; `internalLabel`/`noMatchPrefix`
 // keep each caller's error wording, `withVisibleCandidates` its candidate list.
@@ -1393,9 +1453,12 @@ async function executeAct(
             options?.drive !== true || clickPage === null || clickPage === undefined
               ? undefined
               : scopeForElement(clickPage, el);
+          const checkbox =
+            action.kind === "click" && clickScope !== undefined && el.type === "checkbox";
           if (
             action.kind === "click" &&
             clickScope !== undefined &&
+            !checkbox &&
             (await clickTargetOccluded(clickScope, el.selector))
           ) {
             throw new BrowserClickDispatchError(
@@ -1418,6 +1481,12 @@ async function executeAct(
               : undefined;
           actionPageAfter =
             (await adoptTabOpenedByClick(session, browser, async () => {
+              if (checkbox) {
+                await clickDriveCheckbox(clickScope, resolutionTarget!, (handle) =>
+                  actClick({ kind: "handle", handle, method: "click" }),
+                );
+                return;
+              }
               if (
                 commitsListOption &&
                 clickPage !== null &&
