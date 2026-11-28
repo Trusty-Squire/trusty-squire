@@ -655,9 +655,11 @@ Credential capture uses the selected source. `operate_extract` without
 that click writes to the clipboard as `api_key`. It can also use a Copy
 control beside a displayed value on a key page. For an inline Copy, the
 clipboard must match the adjacent value. A Copy label that explicitly names a
-key takes precedence over a generic Copy label. Ambiguous sources require
-explicit capture. Copy controls support localized labels such as Indonesian
-`Salin`. When no Copy yields a value, extraction returns an `error` asking
+key takes precedence over a generic Copy label. Copy controls support
+localized labels such as Indonesian `Salin`. If Copy yields no usable key,
+extraction accepts a single distinct visible value directly associated with an
+API key label, including values shown in `<pre>`, `<code>`, or plain text.
+When no such source yields a value, extraction returns an `error` asking
 the agent to read the page with `operate_observe` and point
 `capture` at the key. A targeted `capture` (selector, role, or the clipboard
 after an `operate_click`) stores the pointed value as is. The one exception on

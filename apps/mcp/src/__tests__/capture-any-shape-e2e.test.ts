@@ -177,7 +177,49 @@ it("stores nothing when the Copy click writes a web URL", async () => {
   expect(storeCredential).not.toHaveBeenCalled();
 }, 30_000);
 
-it("stores nothing for a plain-text key with no target and no Copy click", async () => {
+it.each([
+  ["pre", "<pre>$key</pre>"],
+  ["pre containing code", "<pre><code>$key</code></pre>"],
+  ["code", "<code>$key</code>"],
+  ["plain text", '<div aria-label="API key">$key</div>'],
+])(
+  "vaults a newly revealed key from %s without a key Copy button",
+  async (_name, display) => {
+    const key = "Ab3kZ9";
+    const html = `<!doctype html><main><h1>Dashboard</h1>
+    <button id="create">Create my key</button>
+    <section id="created" hidden><h2>Your API key</h2>${display.replace("$key", key)}</section>
+    <section><h2>Your invite link</h2><code>https://shape-fixture.test/?ref=example</code>
+      <button id="invite">Copy</button></section></main>
+    <script>
+      document.querySelector('#create').onclick = () => { document.querySelector('#created').hidden = false; };
+      document.querySelector('#invite').onclick = () => {
+        document.querySelector('#invite').textContent = 'Copied';
+        return navigator.clipboard.writeText('https://shape-fixture.test/?ref=example');
+      };
+    </script>`;
+    await page.unrouteAll();
+    await page.route("**/*", (route) => route.fulfill({ contentType: "text/html", body: html }));
+    await page.goto("http://127.0.0.1/");
+    storeCredential.mockClear();
+    const args = { store: { service: "Shape fixture" } };
+    await call("operate_extract", args);
+    expect(storeCredential).not.toHaveBeenCalled();
+
+    await page.getByRole("button", { name: "Create my key" }).click();
+    const result = await call("operate_extract", args);
+    expect(result.structuredContent).toMatchObject({
+      stored_credential: { reference: "vault://fixture/shape" },
+    });
+    expect(storeCredential).toHaveBeenCalledTimes(1);
+    expect(storedValue()).toBe(key);
+    expect(JSON.stringify(result)).not.toContain(key);
+    expect(await page.locator("#invite").textContent()).toBe("Copy");
+  },
+  30_000,
+);
+
+it("stores nothing for an unlabeled code value with no target and no Copy click", async () => {
   // Assembled at runtime so secret scanning does not flag fixture data.
   const key = "sk" + "_live_fixturekey0123456789abcdef";
   const html = `<!doctype html><main><h1>API keys</h1>
@@ -196,3 +238,26 @@ it("stores nothing for a plain-text key with no target and no Copy click", async
   expect(Object.keys(content).sort()).toEqual(["credentials", "error", "session_id", "url"]);
   expect(JSON.stringify(result)).not.toContain(key.slice(8, 24));
 }, 30_000);
+
+it.each([
+  ["a masked key", "<h2>Your API key</h2><pre>abc...xyz</pre>"],
+  ["a shell command", "<h2>Your API key</h2><pre>export API_KEY=Ab3kZ9</pre>"],
+  ["different key values", "<h2>API key</h2><pre>Ab3kZ9</pre><h2>API key</h2><code>Cd6pX1</code>"],
+])(
+  "requires an explicit source for %s",
+  async (_name, display) => {
+    await page.unrouteAll();
+    await page.route("**/*", (route) =>
+      route.fulfill({ contentType: "text/html", body: `<!doctype html><main>${display}</main>` }),
+    );
+    await page.goto("http://127.0.0.1/");
+    storeCredential.mockClear();
+    const result = await call("operate_extract", { store: { service: "Shape fixture" } });
+    expect(result.structuredContent).toMatchObject({
+      credentials: {},
+      error: expect.stringContaining("no_key_source"),
+    });
+    expect(storeCredential).not.toHaveBeenCalled();
+  },
+  30_000,
+);

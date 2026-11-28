@@ -559,14 +559,13 @@ const extractSchema = z.object({
 export const provisionExtractTool: Tool<z.infer<typeof extractSchema>> = {
   name: "operate_extract",
   description:
-    "Store a key by its source, never by its shape. Without capture, clicks the Copy " +
-    "button in an open key dialog and returns what it writes to the clipboard as " +
-    "{credentials: {api_key}}; page text is never scanned. When no Copy click yields a " +
-    "value, nothing is stored and `error` says to read the page with operate_observe " +
+    "Store a key by its source. Without capture, uses a credential Copy control or " +
+    "a single visibly displayed value with an API key label. When neither source yields " +
+    "a value, nothing is stored and `error` says to read the page with operate_observe " +
     "and point capture at the key. Pass `store` to immediately save the value into the " +
     "Trusty Squire vault with the session's observed hosts as allowed_hosts seed; when " +
     "`store` is used, the response omits credential values and returns only vault " +
-    "metadata. With `into_slot`, the copied value goes into a session slot instead.",
+    "metadata. With `into_slot`, the value goes into a session slot instead.",
   inputSchema: extractSchema,
   handler: handleExtract,
 };
