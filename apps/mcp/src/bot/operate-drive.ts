@@ -7,7 +7,7 @@
 // from browser-use/jev-ultrafast (MIT). The per-step snapshot evaluate is
 // modeled on jev-ultrafast snapshot.js (MIT). Identifying values stay in the
 // facts bag. A search or query field may receive a phrase Jev assigns from the
-// goal's own words or the facts; nothing is composed.
+// goal's own words or the facts, as can a split verification code.
 //
 // Confidence admission and its session-identity exception are documented in
 // docs/operator-tool-surface.md. Safety net is validate_choice, fingerprint-bound consume-once,
@@ -78,6 +78,7 @@ import {
   captureFrameSnapshot,
   driveRowsFromSnapshot,
   frameDynamicsSignature,
+  groupDriveCodeRows,
   isFrameRendered,
   mergeSnapshots,
   snapshotSelectOptions,
@@ -2224,6 +2225,7 @@ export function allowsGoalValueAssignment(row: WireRow): boolean {
 
 /** A field in a submitted form may need a fact whose key does not resemble its label. */
 function isFormValueField(row: WireRow, rows: readonly WireRow[], _goal = ""): boolean {
+  if (splitCodeLength(row) !== undefined) return true;
   const formId = rowFormId(row);
   const submitRows = rows.filter(
     (other) => (other[1] === "b" || other[1] === "button") && isSubmitLikeRow(other),
@@ -2342,6 +2344,18 @@ export function rowLooksLikeEmail(row: WireRow): boolean {
 export function matchingFactKeys(facts: Record<string, string>, row: WireRow): string[] {
   const keys = Object.keys(facts);
   if (keys.length === 0) return [];
+  const codeLength = splitCodeLength(row);
+  if (codeLength !== undefined) {
+    const aliases =
+      rowField(row) === "device_code"
+        ? ["device_code", "user_code", "activation_code", "code"]
+        : ["otp", "totp", "verification_code", "confirmation_code", "code", "pin"];
+    return aliases.flatMap((alias) =>
+      keys.filter(
+        (key) => normalizeKey(key) === alias && splitCode(facts[key]!, codeLength) !== undefined,
+      ),
+    );
+  }
   if (rowLooksLikeEmail(row)) {
     const emailKeys = new Set(aliasKeysFor("email").map((key) => normalizeKey(key)));
     return keys.filter((key) => emailKeys.has(normalizeKey(key)));
@@ -2667,6 +2681,9 @@ export function actionDescription(
   const label = readableLabel(row);
   const role = ROLE_WORDS[row[1]] ?? "control";
   if (operation === "CLICK" && isPickerRow(row)) return `Open ${label}`;
+  const codeLength = splitCodeLength(row);
+  if (codeLength !== undefined)
+    return `enter the full ${label.toLowerCase()} across ${codeLength} boxes`;
   if (isFillableRow(row)) {
     if (row[1] === "s" || row[1] === "select") return `choose an option in the ${label} field`;
     return `type into the ${label} field`;
@@ -2730,6 +2747,7 @@ export function goalValuePhrases(goal: string): string[] {
 export function goalValueCriteria(
   goal: string,
   facts: Record<string, string>,
+  accepts: (text: string, factKey?: string) => boolean = () => true,
 ): Record<string, string> {
   const criteria: Record<string, string> = {};
   const used = new Set<string>();
@@ -2743,11 +2761,13 @@ export function goalValueCriteria(
     used.add(slug);
     criteria[slug] = value;
   };
-  for (const phrase of goalValuePhrases(goal)) add(phrase);
+  for (const phrase of goalValuePhrases(goal)) {
+    if (accepts(phrase)) add(phrase);
+  }
   for (const [key, value] of Object.entries(facts)) {
     // A released card value is never a goal phrase. Left in, the drive can be
     // told to type the expiry or the cardholder name into a site-search box.
-    if (CARD_DERIVED_FACTS.has(key)) continue;
+    if (CARD_DERIVED_FACTS.has(key) || !accepts(value, key)) continue;
     add(value, key);
   }
   criteria[DRIVE_FIXED_NONE] = "none of the listed phrases belong in this field; skip it";
@@ -3113,6 +3133,18 @@ function rowWidth(row: WireRow): number | undefined {
   return Number.isFinite(width) && width > 0 ? width : undefined;
 }
 
+function splitCodeLength(row: WireRow): number | undefined {
+  const match = /(?:^|\|)code=(\d+)(?:\||$)/.exec(row[2] ?? "");
+  return match === null ? undefined : Number(match[1]);
+}
+
+function splitCode(text: string, length: number): string | undefined {
+  const trimmed = text.trim();
+  if (!/^[a-z0-9]+(?:[-\s]+[a-z0-9]+)*$/i.test(trimmed)) return undefined;
+  const code = trimmed.replace(/[-\s]/g, "");
+  return code.length === length ? code : undefined;
+}
+
 function rowCurrentValue(row: WireRow): string | undefined {
   const match = /(?:^|\|)n=([^|]+)/.exec(row[2] ?? "");
   return match?.[1];
@@ -3172,6 +3204,10 @@ function rowAlreadyShowsFact(
 ): boolean {
   const fact = firstFactValue(facts, matchedKeys);
   const current = rowCurrentValue(row);
+  const length = splitCodeLength(row);
+  if (length !== undefined) {
+    return fact !== undefined && current !== undefined && splitCode(fact, length) === current;
+  }
   return fact !== undefined && current !== undefined && factValuesMatch(current, fact);
 }
 
@@ -3916,7 +3952,8 @@ export function emailCodeCandidates(
         !isPaymentRow(row) &&
         !isCvvRow(row) &&
         !isPasswordRow(row) &&
-        !isSearchRow(row),
+        !isSearchRow(row) &&
+        !(splitCodeLength(row) !== undefined && rowField(row) === "device_code"),
     )
     .slice(0, 12)
     .map((row, index) => {
@@ -4007,6 +4044,25 @@ export function buildDriveQuestions(
     if (matchingFactKeys(facts, candidate.row).length > 0) continue;
     const name = formValueQuestionName(candidate, sets, rows, goal);
     if (name === undefined) continue;
+    const codeLength = splitCodeLength(candidate.row);
+    if (codeLength !== undefined) {
+      const criteria = goalValueCriteria(
+        goal,
+        facts,
+        (text, key) =>
+          key !== "card_ref" &&
+          splitCode(text, codeLength) !== undefined &&
+          (key !== undefined || /[0-9-]/.test(text) || /^[A-Z ]+$/.test(text)),
+      );
+      if (Object.keys(criteria).length === 1) continue;
+      criteria[DRIVE_FIXED_NONE] = "no supplied value is the requested code";
+      questions[name] = {
+        type: "choice",
+        instructions: `Which supplied value is the complete ${codeLength}-character code for these boxes? Choose none if it was not provided.`,
+        criteria,
+      };
+      continue;
+    }
     questions[name] = {
       type: "choice",
       instructions: `Which supplied value belongs in the ${candidate.description} field of this form for the goal? Judge the field in the context of the whole form. Choose none when no supplied value belongs there.`,
@@ -4676,7 +4732,10 @@ export function decideAfterJev(input: {
         return filled ?? { kind: "needs_value", field: fieldLabelForRow(row) };
       }
       const formQuestionName = formValueQuestionName(candidate, sets, input.rows, input.goal);
-      if (formQuestionName !== undefined) {
+      if (
+        formQuestionName !== undefined &&
+        (splitCodeLength(row) === undefined || questions[formQuestionName] !== undefined)
+      ) {
         const question = questions[formQuestionName];
         const criteria = question?.type === "choice" ? question.criteria : {};
         const answer = input.answers[formQuestionName];
@@ -4691,7 +4750,7 @@ export function decideAfterJev(input: {
         }
         const chosen = answer?.choice;
         if (chosen === undefined || chosen === DRIVE_FIXED_NONE) {
-          return isRequiredRow(row)
+          return isRequiredRow(row) || splitCodeLength(row) !== undefined
             ? { kind: "needs_value", field: fieldLabelForRow(row) }
             : { kind: "replan", confidence, reason: "no supplied value belongs in this field" };
         }
@@ -5168,6 +5227,7 @@ const driveFrameCache = new WeakMap<
   Map<string, { frame: Frame; signature: string; snapshot: DriveSnapshot }>
 >();
 const drivePasswordControls = new WeakMap<Session, Map<string, DriveSnapshotElement>>();
+const driveCodeGroups = new WeakMap<Session, Map<string, string[]>>();
 const driveFrameListeners = new WeakSet<Page>();
 const driveRefBridges = new WeakMap<Session, DriveRefBridge>();
 
@@ -5290,6 +5350,7 @@ async function captureDriveSession(
   // on every fallback return, so a fallback cannot abandon the next decision.
   drive.snapshotControlDigest = null;
   drivePasswordControls.delete(session);
+  driveCodeGroups.delete(session);
   const timed = (
     observation: Observation,
     rows: WireRow[],
@@ -5499,9 +5560,11 @@ async function captureDriveSession(
       : { safe_table: publicObservation.safe_table }),
     ...(publicObservation.semantic === undefined ? {} : { semantic: publicObservation.semantic }),
   };
+  const { rows, codes } = groupDriveCodeRows(snapshot, rawRows);
+  if (codes.size > 0) driveCodeGroups.set(session, codes);
   return timed(
     publicObservation,
-    finalized.rows,
+    codes.size === 0 ? finalized.rows : maskSnapshotOutputs(session, publicObservation, rows).rows,
     snapshot.scriptMs,
     snapshot.wallMs,
     snapshot.timedOut === true,
@@ -5577,9 +5640,55 @@ async function actDriveSafely(
   deps: DriveDependencies,
   deadline?: OAuthActionDeadline,
 ): Promise<DriveActResult> {
-  if (deps.driveAct !== undefined) return await deps.driveAct(sessionId, action, deadline);
-  if (session.browser.page === null) return { kind: "unsupported" };
-  return await dispatchDriveAct(sessionId, action, deadline);
+  const dispatch = deps.driveAct ?? dispatchDriveAct;
+  const page = session.browser.page;
+  const group =
+    action.kind === "type" ? driveCodeGroups.get(session)?.get(action.target) : undefined;
+  if (group === undefined || action.kind !== "type") {
+    return deps.driveAct === undefined && page === null
+      ? { kind: "unsupported" }
+      : await dispatch(sessionId, action, deadline);
+  }
+  const refused = { kind: "stale", reason: "stale_ref" } as const;
+  const code = splitCode(action.text, group.length);
+  const anchor = session.drive?.identities?.get(action.target);
+  if (page === null || anchor === undefined || code === undefined) return refused;
+  const scope = await resolveIdentityScope(page, action.target, anchor);
+  if (scope === null) return refused;
+  const read = () =>
+    evaluateBound(
+      scope,
+      (refs: string[]) => {
+        const registry = (
+          window as Window & { __tsDriveRegistry?: { nodes: Map<string, Element> } }
+        ).__tsDriveRegistry;
+        return refs.map((ref) => {
+          const node = registry?.nodes.get(ref);
+          return node instanceof HTMLInputElement &&
+            node.isConnected &&
+            node.maxLength === 1 &&
+            !node.matches(":disabled") &&
+            !node.readOnly
+            ? node.value
+            : null;
+        });
+      },
+      group,
+    ).catch(() => null);
+  const before = await read();
+  if (before === null || before.includes(null)) return refused;
+  for (const [index, target] of group.entries()) {
+    const result = await dispatch(
+      sessionId,
+      { kind: "type", target, text: code[index]! },
+      deadline,
+    );
+    if (result.kind !== "ok") return result.kind === "stale" ? result : refused;
+  }
+  const after = await read();
+  return after?.every((value, index) => value === code[index]) === true
+    ? { kind: "ok", combobox: false }
+    : refused;
 }
 
 /** The loop's own, page-independent account of a refused/undispatched act. */
@@ -7035,6 +7144,9 @@ async function driveLoop(input: {
         };
         const acted = await actDriveSafely(session, sessionId, typed, dependencies);
         if (acted.kind !== "ok") {
+          if (driveCodeGroups.get(session)?.has(typed.target)) {
+            return finish("needs_value", { field: "verification_code" });
+          }
           const safe = await actSafely(dependencies, sessionId, typed);
           if (safe.dispatchFailure === undefined) dispatchedActs += 1;
           drive.lastDispatchFailure = safe.dispatchFailure ?? null;
@@ -7545,6 +7657,7 @@ async function driveLoop(input: {
       if (
         intended.length > 0 &&
         typedRow !== undefined &&
+        splitCodeLength(typedRow) === undefined &&
         !isPasswordRow(typedRow) &&
         shown !== undefined &&
         !typedValueEquals(shown, intended, typedRow)

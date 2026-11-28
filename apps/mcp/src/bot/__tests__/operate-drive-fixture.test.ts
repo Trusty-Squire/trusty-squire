@@ -650,6 +650,103 @@ function refFor(started: { safe_table?: unknown }, label: string): string {
 }
 
 describe("operate_drive real-browser fixture", () => {
+  it("asks for one value and fills all eight device-code boxes in order", async () => {
+    const code = "AB12-CD34";
+    const html = `<main><h1>Device activation</h1>
+      <form><p>Enter the user code displayed on your device.</p>
+        ${Array.from(
+          { length: 8 },
+          (_, i) => `<input size="1" maxlength="1" required name="user-code[]"
+            aria-label="Character ${i + 1}" oninput="this.nextElementSibling?.focus()">`,
+        ).join("")}
+        <button type="submit">Continue</button>
+      </form><output></output></main>
+      <script>document.querySelector('form').onsubmit = (event) => {
+        event.preventDefault();
+        document.querySelector('output').textContent =
+          new FormData(event.target).getAll('user-code[]').join('');
+      };</script>`;
+    const { context, page, started } = await openFixture(html, "device-code.test", "drive");
+    try {
+      const ask = vi.fn<DriveDependencies["askJev"]>(async (_api, _state, questions) => {
+        expect(Object.keys(questions).length).toBeLessThanOrEqual(12);
+        if ((await page.locator("output").textContent()) === "AB12CD34") {
+          return jevChoose(questions, "DONE");
+        }
+        if (Object.keys(choiceCriteria(questions.TYPE_TEXT_target)).length === 0) {
+          return jevChoose(questions, "CLICK", /^Continue$/);
+        }
+        expect(Object.values(choiceCriteria(questions.TYPE_TEXT_target))).toHaveLength(1);
+        const values = Object.entries(questions).filter(([name]) => name.startsWith("form_value_"));
+        expect(values).toHaveLength(1);
+        const [name, question] = values[0]!;
+        const criteria = choiceCriteria(question);
+        const key = Object.keys(criteria).find((candidate) => criteria[candidate] === code)!;
+        expect(key).toBeDefined();
+        const result = jevChoose(questions, "TYPE_TEXT");
+        result.result.answers[name] = {
+          choice: key,
+          confidence: 0.93,
+          probabilities: peaked(Object.keys(criteria), key),
+        };
+        return result;
+      });
+      const result = await runOperateDrive(
+        {
+          session_id: started.session_id,
+          goal: `Enter the device code ${code}, press Continue, and finish when the code is accepted.`,
+          max_steps: 4,
+        },
+        api(),
+        undefined,
+        deps(ask),
+      );
+      expect(result.status).toBe("complete");
+      expect(await page.locator("output").textContent()).toBe("AB12CD34");
+      expect(result.trajectory.filter((step) => step.action === "type")).toHaveLength(1);
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
+  it("toggles a covered native checkbox using its associated text label", async () => {
+    const html = `<style>
+      .box { position: relative; display: inline-block; width: 24px; height: 24px; }
+      .box input, .box span { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; }
+      .box input { opacity: 0; pointer-events: none; }
+      .box span { background: lightgray; }
+      </style><main><h1>Key settings</h1><div>
+      <label class="box"><input id="quest" type="checkbox"><span aria-hidden="true"></span></label>
+      <label for="quest">Quest balance only</label>
+      <output id="changes">0</output>
+      </div></main><script>
+      document.querySelector('input').addEventListener('change', () => {
+        const count = document.querySelector('#changes');
+        count.value = Number(count.value) + 1;
+      });</script>`;
+    const { context, page, started } = await openFixture(html, "quest-checkbox.test", "drive");
+    try {
+      const input = page.locator("#quest");
+      const result = await runOperateDrive(
+        { session_id: started.session_id, goal: "Check Quest balance only", max_steps: 3 },
+        api(),
+        undefined,
+        deps(async (_api, _state, questions) =>
+          (await input.isChecked())
+            ? jevChoose(questions, "DONE")
+            : jevChoose(questions, "CLICK", /Quest balance only/),
+        ),
+      );
+      expect(await input.isChecked()).toBe(true);
+      expect(await page.locator("#changes").textContent()).toBe("1");
+      expect(result.status).toBe("complete");
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
   it("reads Shopify's total after its shipping rate finishes loading", async () => {
     const html = `<!doctype html><meta charset="utf-8"><title>Checkout</title>
       <main><h1>Checkout</h1><p>Subtotal $68.00</p>

@@ -47,6 +47,8 @@ export interface DriveSnapshotElement {
   labelComparable?: boolean;
   /** The input `type` (`email`, `text`, …), when the node is an input. */
   inputType?: string;
+  /** Position among DOM controls before viewport and submit ordering. */
+  codePart?: { order: number; oneTimeCode: boolean; group: string | undefined };
   /** Live CSS/Playwright selector for the node, used to re-resolve identity. */
   selector?: string;
   frameUrl?: string;
@@ -344,6 +346,86 @@ export function driveRowsFromSnapshot(snapshot: DriveSnapshot): SnapshotRow[] {
     );
   }
   return rows;
+}
+
+/** Keep the physical refs in the action index and offer a single logical code to the drive. */
+export function groupDriveCodeRows(
+  snapshot: DriveSnapshot,
+  rows: SnapshotRow[],
+): { rows: SnapshotRow[]; codes: Map<string, string[]> } {
+  const codes = new Map<string, string[]>();
+  const parts = snapshot.elements
+    .flatMap((element) =>
+      element.codePart === undefined || element.disabled === true
+        ? []
+        : [{ ...element, ...element.codePart }],
+    )
+    .sort((a, b) => a.frameOrdinal - b.frameOrdinal || a.order - b.order);
+  if (parts.length < 2) return { rows, codes };
+  const replacements = new Map<string, SnapshotRow | null>();
+  const byRef = new Map(rows.map((row) => [row[0], row]));
+  const codeName =
+    /\b(?:(device|user|activation|verification|confirmation|login|one[ -]time)\s+code|otp)\b/i;
+  const codeText = `${snapshot.headings.join(" ")} ${snapshot.text}`;
+  for (let start = 0; start < parts.length; ) {
+    const first = parts[start]!;
+    let end = start + 1;
+    while (
+      end < parts.length &&
+      parts[end]!.frameOrdinal === first.frameOrdinal &&
+      parts[end]!.formId === first.formId &&
+      parts[end]!.dialogRef === first.dialogRef &&
+      parts[end]!.group === first.group &&
+      parts[end]!.order === parts[end - 1]!.order + 1
+    )
+      end += 1;
+    const run = parts.slice(start, end);
+    start = end;
+    if (run.length < 2) continue;
+    const names = run.map((part) => `${part.label} ${part.name ?? ""}`.replace(/[_-]/g, " "));
+    const named = names.map((name) => codeName.exec(name)).find((name) => name !== null);
+    const pageCode = run.every((part) => /^(?:character|digit)\s+\d+\b/i.test(part.label))
+      ? codeName.exec(codeText)
+      : null;
+    const match = named ?? pageCode;
+    if (
+      match === null &&
+      !run.some((part) => part.oneTimeCode) &&
+      !run.every((part) => /^code(?:\s+(?:character|digit))?(?:\s*\d+)?$/i.test(part.label))
+    )
+      continue;
+    const isDevice = /^(?:device|user|activation)$/i.test(match?.[1] ?? "");
+    const label = isDevice ? "Device code" : "Verification code";
+    const field = isDevice ? "device_code" : "otp";
+    const row = byRef.get(first.ref);
+    if (row === undefined) continue;
+    const refs = run.map((part) => part.ref);
+    const value = run.map((part) => part.value ?? "").join("");
+    const facts = (row[2] ?? "")
+      .split("|")
+      .slice(1)
+      .filter((fact) => !/^(?:f|n|w|ph|s)=/.test(fact));
+    const state = `${run.some((part) => part.required) ? "r" : ""}${run.some((part) => part.invalid) ? "i" : ""}`;
+    if (state.length > 0) facts.push(`s=${state}`);
+    if (value.length === refs.length) facts.push(`n=${value.replace(/\|/g, " ")}`);
+    replacements.set(first.ref, [
+      first.ref,
+      row[1],
+      [label, `f=${field}`, `code=${refs.length}`, ...facts].join("|"),
+    ]);
+    codes.set(first.ref, refs);
+    for (const ref of refs.slice(1)) replacements.set(ref, null);
+  }
+  return {
+    rows:
+      codes.size === 0
+        ? rows
+        : rows.flatMap((row) => {
+            const replacement = replacements.get(row[0]);
+            return replacement === null ? [] : [replacement ?? row];
+          }),
+    codes,
+  };
 }
 
 export function snapshotSelectOptions(snapshot: DriveSnapshot): Map<string, string[]> {
@@ -757,9 +839,12 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
   const inView: DriveSnapshotElement[] = [];
   const offscreenControls: DriveSnapshotElement[] = [];
   let omittedValues = 0;
-  for (const element of queryAll(selector)) {
+  for (const [order, element] of queryAll(selector).entries()) {
     if (expired()) break;
-    if (!safe(element) || !visible(element)) continue;
+    if (!safe(element)) continue;
+    const checkbox = element instanceof HTMLInputElement && element.type === "checkbox";
+    const isVisible = visible(element);
+    if (!isVisible && !checkbox) continue;
     const role = roleOf(element);
     if (role === null) continue;
     if (role === "gridcell" && element.querySelector("button,[role='button']") !== null) continue;
@@ -775,7 +860,9 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
           })
         : undefined;
     const targetRect =
-      rect.width > 0 && rect.height > 0 ? rect : labeledChoice?.getBoundingClientRect();
+      isVisible && rect.width > 0 && rect.height > 0
+        ? rect
+        : labeledChoice?.getBoundingClientRect();
     if (targetRect === undefined) continue;
     const inViewport =
       targetRect.bottom > 0 &&
@@ -968,6 +1055,10 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
         : undefined;
     const entity = pinned ? null : element.closest('tr,[role="row"],li,[role="listitem"]');
     const dialog = element.closest('dialog,[role="dialog"],[role="alertdialog"]');
+    const codeGroup =
+      editable && !picker && width === 1 && ["text", "tel"].includes(inputType)
+        ? element.closest('fieldset,[role="group"]')
+        : undefined;
     const row: DriveSnapshotElement = {
       ref,
       role,
@@ -1004,6 +1095,15 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
       ...(href.length > 0 ? { href } : {}),
       ...(inputName.length > 0 ? { name: inputName } : {}),
       ...(inputType.length > 0 ? { inputType } : {}),
+      ...(codeGroup !== undefined
+        ? {
+            codePart: {
+              order,
+              oneTimeCode: element.getAttribute("autocomplete") === "one-time-code",
+              group: codeGroup === null ? undefined : identity(codeGroup),
+            },
+          }
+        : {}),
       ...(pattern.length > 0 ? { pattern } : {}),
       ...(inputMode.length > 0 ? { inputMode } : {}),
       ...(invalid ? { invalid: true } : {}),
@@ -1024,6 +1124,13 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
     const y = Math.min(innerHeight - 1, Math.max(0, rect.y + rect.height / 2));
     const hit = document.elementFromPoint(x, y);
     if (hit === null || composedContains(element, hit) || composedContains(hit, element)) {
+      return undefined;
+    }
+    if (
+      element instanceof HTMLInputElement &&
+      element.type === "checkbox" &&
+      Array.from(element.labels ?? []).some((label) => composedContains(label, hit))
+    ) {
       return undefined;
     }
     let cur: Element | null = hit;
